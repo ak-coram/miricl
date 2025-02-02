@@ -1,0 +1,15 @@
+* miricl (미리CL)
+
+#+begin_html
+<div align="center">
+  <a href="https://upload.wikimedia.org/wikipedia/commons/c/cd/Gustave_Le_Gray_-_Brig_upon_the_Water_-_Google_Art_Project.jpg" target="_blank">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/Gustave_Le_Gray_-_Brig_upon_the_Water_-_Google_Art_Project.jpg/306px-Gustave_Le_Gray_-_Brig_upon_the_Water_-_Google_Art_Project.jpg" width="306" height="240">
+  </a>
+</div>
+#+end_html
+
+** Legal
+
+- Released under the GNU Lesser General Public License
+- [[https://developercertificate.org/][Developer Certificate of Origin]]
+- [[https://en.wikipedia.org/wiki/File:Gustave_Le_Gray_-_Brig_upon_the_Water_-_Google_Art_Project.jpg][Source]] for README photo
