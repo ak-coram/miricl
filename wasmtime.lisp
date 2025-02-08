@@ -5,7 +5,7 @@
 (define-foreign-library libwasmtime
   (:darwin "libwasmtime.dylib")
   (:unix "libwasmtime.so")
-  (:windows "libwasmtime.dll")
+  (:windows "wasmtime.dll")
   (t (:default "libwasmtime")))
 
 (use-foreign-library libwasmtime)
@@ -169,6 +169,7 @@
             (,module-var (compile-module ,engine ,wasm-sym)))
        (unwind-protect (progn ,@body)
          (wasmtime-module-delete module)))))
+
 
 #+nil
 (let* ((hello-wat "(module

@@ -12,4 +12,15 @@
                          #:cffi-libffi))
   :components ((:file "package")
                (:file "wasmtime")
-               (:file "miricl")))
+               (:file "miricl"))
+  :in-order-to ((test-op (test-op "miricl/test"))))
+
+(asdf:defsystem #:miricl/test
+  :depends-on (#:miricl
+               #:fiveam)
+  :components ((:file "miricl-test"))
+  :perform (test-op (o c) (symbol-call :fiveam '#:run! :miricl)))
+
+(asdf:defsystem #:miricl/*
+  :depends-on (#:miricl
+               #:miricl/test))

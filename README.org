@@ -6,6 +6,11 @@
     <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/Gustave_Le_Gray_-_Brig_upon_the_Water_-_Google_Art_Project.jpg/306px-Gustave_Le_Gray_-_Brig_upon_the_Water_-_Google_Art_Project.jpg" width="306" height="240">
   </a>
 </div>
+<p align="center">
+  <a href="https://github.com/ak-coram/miricl/actions">
+    <img alt="Build Status" src="https://github.com/ak-coram/miricl/workflows/CI/badge.svg" />
+  </a>
+</p>
 #+end_html
 
 ** Legal
