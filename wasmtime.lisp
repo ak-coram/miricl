@@ -34,6 +34,11 @@
 (defcfun wasm-engine-new-with-config p-wasm-engine
   (own p-wasm-config))
 
+(defmacro with-engine ((engine-var) &body body)
+  `(let ((,engine-var (wasm-engine-new)))
+     (unwind-protect (progn ,@body)
+       (wasm-engine-delete ,engine-var))))
+
 (defcstruct wasmtime-store)
 (defctype p-wasmtime-store (:pointer (:struct wasmtime-store)))
 (defcfun wasmtime-store-new p-wasmtime-store
@@ -41,12 +46,21 @@
   (data p-void)
   (finalizer :pointer))
 
-(defcstruct wasmtime-store-context)
-(defctype p-wasmtime-store-context (:pointer (:struct wasmtime-store-context)))
-(defcfun wasmtime-store-context p-wasmtime-store-context
+(defcstruct wasmtime-context)
+(defctype p-wasmtime-context (:pointer (:struct wasmtime-context)))
+(defcfun wasmtime-store-context p-wasmtime-context
   (store p-wasmtime-store))
+
 (defcfun wasmtime-store-delete :void
   (store p-wasmtime-store))
+
+(defmacro with-store (((store-var context-var) engine) &body body)
+  `(let* ((,store-var (wasmtime-store-new ,engine
+                                          (null-pointer)
+                                          (null-pointer)))
+          (,context-var (wasmtime-store-context ,store-var)))
+     (unwind-protect (progn ,@body)
+       (wasmtime-store-delete ,store-var))))
 
 (defmacro wasm-declare-vec (name &key is-struct)
   (let ((type-sym (make-sym 'wasm name 'vec))
@@ -101,13 +115,6 @@
   (ret (:pointer p-wasmtime-module))) ; why a pointer to a pointer?
 (defcfun wasmtime-module-delete :void
   (module p-wasmtime-module))
-
-(wasm-declare-own functype) (wasm-declare-vec functype :is-struct t)
-(wasm-declare-own valtype) (wasm-declare-vec valtype :is-struct t)
-
-(defcfun wasm-functype-new p-wasm-functype
-  (params p-wasm-valtype-vec)
-  (results p-wasm-valtype-vec))
 
 (defun byte-vec-to-string (byte-vec)
   (with-foreign-slots ((data size) byte-vec (:struct wasm-byte-vec))
@@ -170,14 +177,150 @@
        (unwind-protect (progn ,@body)
          (wasmtime-module-delete module)))))
 
+(wasm-declare-own functype) (wasm-declare-vec functype :is-struct t)
+(wasm-declare-own valtype) (wasm-declare-vec valtype :is-struct t)
+
+(defcfun wasm-functype-new p-wasm-functype
+  (params p-wasm-valtype-vec)
+  (results p-wasm-valtype-vec))
+
+(defcstruct wasmtime-func
+  (store-id :uint64)
+  (size size))
+(defctype p-wasmtime-func (:pointer (:struct wasmtime-func)))
+
+(defcfun wasmtime-func-new :void
+  (store p-wasmtime-context)
+  (type p-wasm-functype)
+  (callback :pointer)
+  (env p-void)
+  (finalizer :pointer)
+  (ret p-wasmtime-func))
+
+(wasm-declare-own trap)
+
+(defcstruct wasmtime-caller)
+(defctype p-wasmtime-caller (:pointer (:struct wasmtime-caller)))
+
+(defctype wasmtime-valkind :uint8)
+(defctype wasmtime-valunion :uint64) ; TODO: add proper definition
+
+(defcstruct wasmtime-val
+  (kind wasmtime-valkind)
+  (of wasmtime-valunion))
+(defctype p-wasmtime-val (:pointer (:struct wasmtime-val)))
+
+(defcstruct wasmtime-instance
+  (store-id :uint64)
+  (size size))
+(defctype p-wasmtime-instance (:pointer (:struct wasmtime-instance)))
+
+(defctype wasmtime-extern-kind :uint8)
+(defctype wasmtime-extern-union (:struct wasmtime-func)) ; TODO: add proper definition
+
+(defcstruct wasmtime-extern
+  (kind wasmtime-extern-kind)
+  (of wasmtime-extern-union))
+(defctype p-wasmtime-extern (:pointer (:struct wasmtime-extern)))
+
+(defcfun wasmtime-instance-new p-wasmtime-error
+  (context p-wasmtime-context)
+  (module p-wasmtime-module)
+  (imports p-wasmtime-extern)
+  (nimports size)
+  (instance p-wasmtime-instance)
+  (trap (:pointer p-wasm-trap)))
+
+(defcfun wasmtime-instance-export-get :boolean
+  (context p-wasmtime-context)
+  (instance p-wasmtime-instance)
+  (name :string)
+  (name-len size)
+  (item p-wasmtime-extern))
+
+(defcfun wasmtime-func-call p-wasmtime-error
+  (context p-wasmtime-context)
+  (func p-wasmtime-func)
+  (args p-wasmtime-val)
+  (nargs size)
+  (results p-wasmtime-val)
+  (nresults size)
+  (trap (:pointer p-wasm-trap)))
+
+(defun copy-struct (to from type)
+  (cffi:foreign-funcall "memcpy"
+                        :pointer to
+                        :pointer from
+                        size (cffi:foreign-type-size type)
+                        :void))
 
 #+nil
-(let* ((hello-wat "(module
-                      (func $hello (import \"\" \"hello\"))
-                      (func (export \"run\") (call $hello)))")
-       (engine (wasm-engine-new))
-       (store (wasmtime-store-new engine (null-pointer) (null-pointer))))
-  (unwind-protect (with-module (module engine hello-wat)
-                    (format t "~A~%" module))
-    (wasmtime-store-delete store)
-    (wasm-engine-delete engine)))
+(progn
+  (defcallback hello-callback p-wasm-trap ((env p-void)
+                                           (caller p-wasmtime-caller)
+                                           (args p-wasmtime-val)
+                                           (nargs size)
+                                           (results p-wasmtime-val)
+                                           (nresults size))
+    (declare (ignore env caller args nargs results nresults))
+    (format t "Hello, World!~%")
+    (null-pointer))
+  (dotimes (_ 1000)
+    (labels ((hello-func-new (context)
+               (with-foreign-objects ((params 'p-wasm-valtype-vec)
+                                      (results 'p-wasm-valtype-vec)
+                                      (func '(:struct wasmtime-func)))
+                 (wasm-valtype-vec-new-empty params)
+                 (wasm-valtype-vec-new-empty results)
+                 (wasmtime-func-new context
+                                    (wasm-functype-new params results)
+                                    (callback hello-callback)
+                                    (null-pointer)
+                                    (null-pointer)
+                                    func)
+                 func))
+             (hello-instance-new (context module)
+               (with-foreign-objects ((trap '(:pointer p-wasm-trap))
+                                      (instance '(:struct wasmtime-instance))
+                                      (import '(:struct wasmtime-extern)))
+                 (with-foreign-slots ((kind of) import (:struct wasmtime-extern))
+                   (setf kind 0)
+                   (copy-struct of (hello-func-new context)
+                                '(:struct wasmtime-func)))
+                 (let ((error (wasmtime-instance-new context
+                                                     module
+                                                     import
+                                                     1
+                                                     instance
+                                                     trap)))
+                   (if (null-pointer-p error)
+                       instance
+                       (unwind-protect (error "Error instantiating module: ~A"
+                                              (get-error-message error))
+                         (wasmtime-error-delete error))))))
+             (hello-call-run (context instance)
+               (with-foreign-objects ((trap '(:pointer p-wasm-trap))
+                                      (run '(:struct wasmtime-extern)))
+                 (with-foreign-string ((name name-length) "run")
+                   (unless (wasmtime-instance-export-get context
+                                                         instance
+                                                         name
+                                                         (1- name-length)
+                                                         run)
+                     (error "Failed to get instance export."))
+                   (with-foreign-slots ((of) run (:struct wasmtime-extern))
+                     (wasmtime-func-call context
+                                         of
+                                         (null-pointer)
+                                         0
+                                         (null-pointer)
+                                         0
+                                         trap))))))
+      (let* ((hello-wat "(module
+                           (func $hello (import \"\" \"hello\"))
+                           (func (export \"run\") (call $hello)))"))
+        (with-engine (engine)
+          (with-store ((store context) engine)
+            (with-module (module engine hello-wat)
+              (let* ((instance (hello-instance-new context module)))
+                (hello-call-run context instance)))))))))
