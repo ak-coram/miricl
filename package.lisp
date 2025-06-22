@@ -1,8 +1,5 @@
 ;;;; package.lisp
 
-(defpackage #:miricl
-  (:use #:cl))
-
 (defpackage #:wasmtime
   (:use #:cl #:cffi)
   (:export #:with-engine
@@ -14,3 +11,7 @@
            #:callback-func
            #:func-instance
            #:instance-call))
+
+(defpackage #:miricl
+  (:use #:cl)
+  (:local-nicknames (#:wt #:wasmtime)))

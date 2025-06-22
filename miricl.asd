@@ -9,9 +9,11 @@
                #:cffi
                ;; Don't load libffi on ECL without DFFI
                (:feature (:or (:not :ecl) :dffi)
-                         #:cffi-libffi))
+                         #:cffi-libffi)
+               #:named-readtables)
   :components ((:file "package")
                (:file "wasmtime")
+               (:file "miricl-readtables")
                (:file "miricl"))
   :in-order-to ((test-op (test-op "miricl/test"))))
 
