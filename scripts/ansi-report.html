@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Detailed results of miricl's full ANSI Common Lisp test run.">
+  <link rel="icon" href="data:,">
+  <title>miricl — ANSI test results</title>
+  <style>
+    /* Acme / Plan 9: yellow paper, cyan tags, purple window borders. */
+    :root { color-scheme: light; --paper: #ffffea; --tag: #eaffff; --select: #eeee9e;
+      --border: #8888cc; --ink: #000; --muted: #454557; --error: #8b2020; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; padding: 20px; background: var(--border); color: var(--ink);
+      font: 14px/1.55 "Lucida Console", "DejaVu Sans Mono", monospace; }
+    ::selection { background: var(--select); color: var(--ink); }
+    main { background: var(--paper); border: 1px solid black; min-height: calc(100dvh - 40px); }
+    header, footer, .toolbar { background: var(--tag); padding: 10px 16px; }
+    header { border-bottom: 1px solid black; display: flex; flex-wrap: wrap; gap: 6px 24px; align-items: baseline; }
+    h1, h2, h3, h4 { font: inherit; font-weight: bold; }
+    h1, header p { margin: 0; }
+    header nav { margin-left: auto; }
+    a { color: #000099; }
+    .overview { padding: 6px 16px 12px; }
+    .totals { display: flex; flex-wrap: wrap; gap: 12px 36px; padding: 10px 0; }
+    .totals strong { display: block; font-size: 24px; }
+    .totals span, .muted, .counts { color: var(--muted); }
+    .pass { color: #225522; } .fail { color: var(--error); }
+    .blocked { color: #735000; } .timeout { color: #663388; }
+    details { border-top: 1px solid var(--select); }
+    summary { padding: 7px 12px; cursor: pointer; overflow-wrap: anywhere; }
+    summary:hover { background: var(--select); }
+    summary::marker { color: #000099; }
+    .group { border-top: 3px solid var(--border); }
+    .group > summary, .diagnostics > summary, .run-info > summary { background: var(--tag); }
+    .counts { font-size: 12px; margin-left: 16px; }
+    .matching { font-size: 12px; }
+    .file { margin-left: 16px; border-left: 1px solid var(--border); }
+    .test { margin-left: 16px; }
+    .badge { display: inline-block; min-width: 76px; font-weight: bold; }
+    .test-body { padding: 0 16px 12px; }
+    .test-body h4 { margin-bottom: 4px; }
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+    .run-info dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 20px; margin: 12px 16px; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .run-info p { margin: 12px 16px; }
+    .run-error { border-left: 3px solid var(--error); padding-left: 12px; }
+    .diagnostics { border-top: 3px solid var(--border); }
+    .diagnostic { margin-left: 16px; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+      border-top: 3px solid var(--border); border-bottom: 1px solid black; }
+    label { display: flex; align-items: center; gap: 8px; }
+    input, select, button { font: inherit; color: inherit; border-radius: 0;
+      border: 1px solid var(--border); background: var(--paper); padding: 3px 6px; }
+    input { width: min(300px, 50vw); }
+    button { cursor: pointer; background: var(--tag); }
+    button:hover { background: var(--select); }
+    :focus-visible { outline: 2px solid #000099; outline-offset: 2px; }
+    #visible-count, #empty, noscript p { margin: 10px 16px; }
+    footer { border-top: 1px solid black; font-size: 12px; color: var(--muted); }
+    @media (max-width: 720px) {
+      body { padding: 6px; font-size: 13px; }
+      main { min-height: calc(100dvh - 12px); }
+      header nav { margin-left: 0; }
+      .totals { gap: 12px 24px; }
+      .counts { display: block; margin-left: 16px; }
+      .file, .test { margin-left: 8px; }
+      .run-info dl { grid-template-columns: 1fr; gap: 2px; }
+      .run-info dd { margin-bottom: 8px; }
+      .toolbar label { flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>miricl</h1><p>Full ANSI Common Lisp test results</p>
+    <nav aria-label="Related pages"><a href="index.html">Browser REPL</a></nav>
+  </header>
+  <section class="overview" aria-label="Run summary">
+    @@SUMMARY@@
+    <p class="muted">Test bodies run in WebAssembly. Blocked tests could not register; timed out tests exceeded their deadline.
+      Expand a category, source file, or test to inspect its recorded details.</p>
+  </section>
+  <details class="run-info"><summary>Run information</summary>@@METADATA@@</details>
+  @@DIAGNOSTICS@@
+  <div class="toolbar" id="controls" hidden>
+    <label>Search <input id="search" type="search" placeholder="Test name or source file" autocomplete="off"></label>
+    <label>Status <select id="status">
+      <option value="all">All tests</option>
+      <option value="not-passed">Not passed</option>
+      <option value="pass">Passed</option>
+      <option value="fail">Failed</option>
+      <option value="blocked">Blocked</option>
+      <option value="timeout">Timed out</option>
+    </select></label>
+    <button id="expand" type="button">Expand groups</button>
+    <button id="collapse" type="button">Collapse all</button>
+  </div>
+  <noscript><p>All results are available below. Enable JavaScript to search or filter them.</p></noscript>
+  <p id="visible-count" role="status" aria-live="polite">@@TOTAL@@ tests recorded</p>
+  <p id="empty" hidden>No tests match these filters.</p>
+  <section id="tests" aria-label="Test results">@@TESTS@@</section>
+  <footer>Standalone report. All styles and results are included in this file; no network access is needed.
+    Output and source excerpts are preserved as recorded by the test runner.</footer>
+</main>
+<script>
+'use strict';
+const search = document.getElementById('search');
+const status = document.getElementById('status');
+const groups = Array.from(document.querySelectorAll('.group'), group => ({
+  element: group,
+  counter: group.querySelector(':scope > summary .matching'),
+  files: Array.from(group.querySelectorAll('.file'), file => ({
+    element: file,
+    counter: file.querySelector(':scope > summary .matching'),
+    tests: Array.from(file.querySelectorAll('.test'), test => ({
+      element: test,
+      status: test.dataset.status,
+      name: (test.querySelector('.test-name').textContent + ' ' + file.dataset.file).toLowerCase(),
+    })),
+  })),
+}));
+function filter() {
+  const query = search.value.trim().toLowerCase();
+  const selected = status.value;
+  const filtering = query !== '' || selected !== 'all';
+  let visible = 0;
+  for (const group of groups) {
+    let groupCount = 0;
+    for (const file of group.files) {
+      let fileCount = 0;
+      for (const test of file.tests) {
+        const match = test.name.includes(query) && (selected === 'all'
+          || (selected === 'not-passed' ? test.status !== 'pass' : test.status === selected));
+        test.element.hidden = !match;
+        if (match) fileCount++;
+      }
+      file.element.hidden = fileCount === 0;
+      file.counter.textContent = filtering ? `(${fileCount.toLocaleString('en-US')} matching)` : '';
+      if (filtering && fileCount) file.element.open = true;
+      groupCount += fileCount;
+    }
+    group.element.hidden = groupCount === 0;
+    group.counter.textContent = filtering ? `(${groupCount.toLocaleString('en-US')} matching)` : '';
+    if (filtering && groupCount) group.element.open = true;
+    visible += groupCount;
+  }
+  document.getElementById('visible-count').textContent = `${visible.toLocaleString('en-US')} tests shown`;
+  document.getElementById('empty').hidden = visible !== 0;
+}
+search.addEventListener('input', filter);
+status.addEventListener('change', filter);
+document.getElementById('expand').addEventListener('click', () => {
+  for (const element of document.querySelectorAll('.group, .file')) {
+    if (!element.hidden) element.open = true;
+  }
+});
+document.getElementById('collapse').addEventListener('click', () => {
+  for (const element of document.querySelectorAll('details')) element.open = false;
+});
+document.getElementById('controls').hidden = false;
+</script>
+</body>
+</html>

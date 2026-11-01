@@ -1,2 +1,7 @@
 *.fasl
 *.fas
+*.wasm
+miricl.html
+ansi-results.json
+ansi-full-results.json
+ansi-results.html

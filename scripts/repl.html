@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A self-contained Common Lisp REPL, running locally in WebAssembly.">
+  <link rel="icon" href="data:,">
+  <title>miricl — Common Lisp REPL</title>
+  <style>
+    /* Acme / Plan 9: pale yellow text, cyan tags, purple window borders.
+       https://github.com/9fans/plan9port/blob/master/src/cmd/acme/acme.c */
+    :root { color-scheme: light; --paper: #ffffea; --tag: #eaffff; --select: #eeee9e;
+      --border: #8888cc; --ink: #000; --muted: #454557; --error: #8b2020; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; background: var(--border); color: var(--ink);
+      font: 15px/1.5 "Lucida Console", "DejaVu Sans Mono", monospace; }
+    ::selection { background: var(--select); color: var(--ink); }
+    button, select, textarea { font: inherit; color: inherit; border-radius: 0; }
+    button { padding: 2px 8px; border: 1px solid transparent; background: transparent; cursor: pointer; }
+    button:hover:enabled, select:hover { background: var(--paper); border-color: var(--border); }
+    button:disabled { opacity: .45; cursor: default; }
+    :focus-visible { outline: 2px solid #000099; outline-offset: 2px; }
+    main { background: var(--paper); border: 1px solid black; min-height: calc(100dvh - 40px);
+      display: flex; flex-direction: column; }
+    header, .tag, footer { background: var(--tag); }
+    header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px;
+      border-bottom: 1px solid black; padding: 8px 14px; }
+    h1 { font: inherit; font-weight: bold; margin: 0; }
+    header p { margin: 0; color: var(--muted); }
+    #status { margin-left: auto; }
+    .workspace { display: grid; grid-template-columns: 1fr 1fr; flex: 1; min-height: 0; }
+    .pane { display: flex; flex-direction: column; min-width: 0; }
+    .pane + .pane { border-left: 3px solid var(--border); }
+    .tag { border-bottom: 1px solid black; display: flex; flex-wrap: wrap;
+      align-items: center; gap: 4px; padding: 5px 8px; }
+    .handle { width: 12px; height: 18px; background: var(--border); border: 1px solid black; margin-right: 4px; }
+    .filename { margin-right: auto; }
+    select { background: var(--tag); border: 1px solid var(--border); padding: 2px; max-width: 100%; }
+    textarea { display: block; background: var(--paper); border: 0; padding: 18px;
+      width: 100%; flex: 1; min-height: 300px; resize: none; line-height: 1.65; tab-size: 2; }
+    textarea:focus-visible { outline-offset: -3px; }
+    .hint { margin: 0; padding: 8px 14px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--select); }
+    #transcript { padding: 18px; height: calc(100dvh - 210px); min-height: 300px;
+      overflow: auto; overflow-wrap: anywhere; }
+    pre { font: inherit; white-space: pre-wrap; margin: 0 0 12px; }
+    .input { color: #000099; }
+    .error { color: var(--error); }
+    .notice { color: var(--muted); }
+    footer { padding: 8px 14px; border-top: 1px solid black; color: var(--muted); font-size: 12px; }
+    kbd { font: inherit; color: var(--ink); }
+    noscript p { margin: 16px; }
+    @media (max-width: 720px) {
+      body { padding: 6px; font-size: 14px; }
+      main { min-height: calc(100dvh - 12px); }
+      .workspace { grid-template-columns: 1fr; }
+      .pane + .pane { border-left: 0; border-top: 3px solid var(--border); }
+      textarea { min-height: 240px; }
+      #transcript { height: 360px; min-height: 180px; }
+      #status { margin-left: 0; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>miricl</h1>
+    <p>Common Lisp / WebAssembly</p>
+    <span id="status" role="status">Loading interpreter…</span>
+  </header>
+  <noscript><p>Enable JavaScript to run this Common Lisp REPL.</p></noscript>
+  <div class="workspace">
+    <section class="pane" aria-label="Lisp editor">
+      <div class="tag">
+        <span class="handle" aria-hidden="true"></span><label class="filename" for="source">scratch.lisp</label>
+        <select id="examples" aria-label="Load an example">
+          <option value="">Examples</option>
+          <option value="arithmetic">Arithmetic</option>
+          <option value="function">Functions</option>
+          <option value="loop">Loops &amp; output</option>
+        </select>
+        <button id="run" disabled title="Run selection or the whole editor (Ctrl/Cmd+Enter)">Run</button>
+        <button id="stop" disabled title="Stop evaluation and reset the Lisp session">Stop</button>
+      </div>
+      <textarea id="source" aria-label="Common Lisp source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off">;; Welcome to miricl. Edit a form, then press Run.
+(+ 1 2)
+
+(loop for n from 1 to 8 collect (* n n))</textarea>
+      <p class="hint"><kbd>Ctrl/Cmd+Enter</kbd> Run selection or editor · <kbd>Alt+↑/↓</kbd> History<br>Enter inserts a new line. Definitions persist in this session.</p>
+    </section>
+    <section class="pane" aria-label="REPL output">
+      <div class="tag">
+        <span class="handle" aria-hidden="true"></span><span class="filename">+repl</span>
+        <button id="clear" title="Clear the transcript; keep Lisp definitions">Clear</button>
+        <button id="reset" title="Start a fresh Lisp session; discard definitions">Reset</button>
+      </div>
+      <div id="transcript" role="log" aria-label="REPL transcript" aria-live="polite" tabindex="0"></div>
+    </section>
+  </div>
+  <footer>Runs entirely in your browser. No server or network needed. Stop and Reset discard Lisp definitions. Reloading starts a fresh session.
+    <a href="ansi-results.html">Full ANSI test results</a></footer>
+</main>
+<script id="miricl-wasm" type="application/octet-stream">@@MIRICL_WASM@@</script>
+<script id="miricl-worker" type="text/plain">
+@@MIRICL_ADAPTER@@
+
+let interpreter;
+self.onmessage = async ({data}) => {
+  try {
+    if (data.type === 'initialize') {
+      interpreter = await Miricl.instantiate(data.bytes);
+      self.postMessage({type: 'ready'});
+    } else if (data.type === 'evaluate') {
+      const start = performance.now();
+      const result = interpreter.evaluate(data.source);
+      self.postMessage({type: 'result', ...result, elapsed: performance.now() - start});
+    }
+  } catch (error) {
+    self.postMessage({type: data.type === 'initialize' ? 'fatal' : 'error',
+      message: error.message, output: error.output ?? ''});
+  }
+};
+</script>
+<script>
+'use strict';
+const source = document.getElementById('source');
+const transcript = document.getElementById('transcript');
+const status = document.getElementById('status');
+const run = document.getElementById('run');
+const stop = document.getElementById('stop');
+const reset = document.getElementById('reset');
+const examples = document.getElementById('examples');
+const history = [];
+let historyIndex = 0;
+let draft = '';
+let worker;
+let workerURL;
+let busy = false;
+const exampleSources = {
+  arithmetic: '(+ 1/3 2/3)\n(expt 2 100)\n(values "hello λ 🙂" #c(1 2))',
+  function: '(defun factorial (n)\n  (if (zerop n)\n      1\n      (* n (factorial (1- n)))))\n\n(factorial 30)',
+  loop: '(loop for n from 1 to 5\n      do (format t "~D squared is ~D~%" n (* n n))\n      collect (* n n))'
+};
+
+function append(text, kind = '') {
+  if (!text) return;
+  const entry = document.createElement('pre');
+  entry.className = kind;
+  entry.textContent = text;
+  transcript.append(entry);
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
+function setState(message, ready = false, running = false) {
+  status.textContent = message;
+  run.disabled = !ready;
+  stop.disabled = !running;
+  busy = running;
+  transcript.setAttribute('aria-busy', String(running));
+}
+
+function disposeWorker() {
+  if (worker) worker.terminate();
+  worker = undefined;
+  if (workerURL) URL.revokeObjectURL(workerURL);
+  workerURL = undefined;
+}
+
+function fail(message) {
+  disposeWorker();
+  setState('Interpreter unavailable');
+  append(message, 'error');
+}
+
+function startSession(message) {
+  disposeWorker();
+  setState('Loading interpreter…');
+  if (message) append(message, 'notice');
+  try {
+    const encoded = document.getElementById('miricl-wasm').textContent.trim();
+    const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
+    workerURL = URL.createObjectURL(new Blob(
+      [document.getElementById('miricl-worker').textContent], {type: 'text/javascript'}));
+    const activeWorker = new Worker(workerURL);
+    worker = activeWorker;
+    activeWorker.onerror = event => {
+      event.preventDefault();
+      if (worker === activeWorker) fail(`Could not start the interpreter: ${event.message || 'Worker failed.'} This browser must support WebAssembly GC and exception handling.`);
+    };
+    activeWorker.onmessage = ({data}) => {
+      if (worker !== activeWorker) return;
+      if (data.type === 'ready') {
+        URL.revokeObjectURL(workerURL);
+        workerURL = undefined;
+        setState('Ready', true);
+      } else if (data.type === 'fatal') {
+        fail(`Could not load the interpreter: ${data.message}\nUse a browser with WebAssembly GC and exception handling support.`);
+      } else if (data.type === 'error') {
+        append(data.output);
+        append(`Error: ${data.message}`, 'error');
+        setState('Ready · evaluation failed', true);
+      } else if (data.type === 'result') {
+        append(data.output);
+        if (data.incomplete) {
+          append('Incomplete input. Finish the form in the editor and run it again.', 'notice');
+          setState('Waiting for complete input', true);
+        } else if (data.quit) {
+          append('Session ended. Press Reset to start again.', 'notice');
+          disposeWorker();
+          setState('Session ended');
+        } else {
+          setState(`Ready · ${data.elapsed.toFixed(1)} ms`, true);
+        }
+      }
+    };
+    activeWorker.postMessage({type: 'initialize', bytes: bytes.buffer}, [bytes.buffer]);
+  } catch (error) {
+    fail(`Could not start the interpreter: ${error.message}\nUse a browser with WebAssembly GC, exception handling, and Web Workers.`);
+  }
+}
+
+function evaluate() {
+  if (run.disabled || busy) return;
+  const selection = source.value.slice(source.selectionStart, source.selectionEnd);
+  const input = selection || source.value;
+  if (!input.trim()) return;
+  if (history.at(-1) !== input) history.push(input);
+  historyIndex = history.length;
+  draft = source.value;
+  append(`miricl> ${input}`, 'input');
+  setState('Evaluating…', false, true);
+  worker.postMessage({type: 'evaluate', source: input});
+}
+
+run.addEventListener('click', evaluate);
+stop.addEventListener('click', () => startSession('Evaluation stopped. Started a fresh Lisp session.'));
+reset.addEventListener('click', () => startSession('Started a fresh Lisp session.'));
+document.getElementById('clear').addEventListener('click', () => transcript.replaceChildren());
+examples.addEventListener('change', () => {
+  if (!examples.value) return;
+  source.value = exampleSources[examples.value];
+  examples.value = '';
+  source.focus();
+});
+source.addEventListener('keydown', event => {
+  if (event.isComposing) return;
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+    event.preventDefault();
+    evaluate();
+  } else if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+    event.preventDefault();
+    if (!history.length) return;
+    if (historyIndex === history.length) draft = source.value;
+    historyIndex = Math.max(0, Math.min(history.length,
+      historyIndex + (event.key === 'ArrowUp' ? -1 : 1)));
+    source.value = historyIndex === history.length ? draft : history[historyIndex];
+    source.setSelectionRange(source.value.length, source.value.length);
+  }
+});
+window.addEventListener('pagehide', disposeWorker);
+window.addEventListener('pageshow', event => {
+  if (event.persisted) startSession('Started a fresh Lisp session.');
+});
+append('miricl — Common Lisp in WebAssembly\nRun the scratch buffer, or choose an example. Results appear here.', 'notice');
+startSession();
+</script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+(defun %binary-file-stream-p (object)
+  (and (typep object 'file-stream) (subtypep (stream-element-type object) 'integer)))
+(defun %character-file-stream-p (object)
+  (and (typep object 'file-stream) (subtypep (stream-element-type object) 'character)))
+
+;;;; Common file policy; storage and transfer loops live in the native runtime.
+(defun %file-element-type (type)
+  (cond ((or (eq type :default) (subtypep type 'character))
+         (values (if (eq type 'base-char) 'base-char 'character) 0 nil))
+        ((or (eq type 'signed-byte) (eq type 'unsigned-byte))
+         (values (list type 8) 1 (eq type 'signed-byte)))
+        ((subtypep type 'integer)
+         (let* ((signed (not (subtypep type 'unsigned-byte)))
+                (kind (if signed 'signed-byte 'unsigned-byte)) (bits 8))
+           (loop until (subtypep type (list kind bits))
+             do (when (>= bits 268435456) (error 'type-error :datum type :expected-type 'type-specifier))
+                (setq bits (* 2 bits)))
+           (values (list kind bits) (/ bits 8) signed)))
+        (t (error 'type-error :datum type :expected-type 'type-specifier))))
+
+(defun %file-backup-name (path)
+  (let ((number 0) (name (concatenate 'string path ".bak")))
+    (loop while (%%filesystem 0 name nil)
+      do (incf number) (setq name (format nil "~A.bak~D" path number)))
+    name))
+
+(defun open (filespec &key (direction :input) (element-type 'character)
+                          (if-exists (if (eq (pathname-version filespec) :newest) :new-version :error)) (if-does-not-exist nil missingp)
+                          (external-format :default))
+  (let* ((path (merge-pathnames filespec)) (name (%source-path filespec))
+         (flags (case direction (:input 1) (:output 2) (:io 3) (:probe 0)
+                  (otherwise (error 'type-error :datum direction :expected-type '(member :input :output :io :probe)))))
+         (exists (case if-exists ((nil) 0) (:error 1) (:overwrite 2) (:append 3)
+                   ((:new-version :supersede :rename-and-delete) 4) (:rename 5)
+                   (otherwise (error 'type-error :datum if-exists
+                     :expected-type '(member nil :error :overwrite :append :new-version :supersede :rename :rename-and-delete))))))
+    (when (wild-pathname-p path) (error 'file-error :pathname path))
+    (unless missingp
+      (setq if-does-not-exist
+        (cond ((eq direction :probe) nil)
+              ((or (eq direction :input) (member if-exists '(:overwrite :append))) :error)
+              (t :create))))
+    (multiple-value-bind (actual width signed) (%file-element-type element-type)
+      (when (and (zerop width) (not (member external-format '(:default :utf-8 :utf8))))
+        (error 'error))
+      (%%open-file name path flags exists
+        (case if-does-not-exist ((nil) 0) (:error 1) (:create 2)
+          (otherwise (error 'type-error :datum if-does-not-exist :expected-type '(member nil :error :create))))
+        actual width signed))))
+
+(defmacro with-open-file ((stream filespec &rest options) &body body)
+  (let ((abort (gensym)) (declarations nil))
+    (loop while (and (consp (car body)) (eq (caar body) 'declare)) do (push (pop body) declarations))
+    (append (list 'let (list (list stream (list* 'open filespec options)) (list abort t)))
+      (nreverse declarations)
+      (list (list 'unwind-protect
+        (list 'multiple-value-prog1 (cons 'progn body) (list 'setq abort nil))
+        (list 'when stream (list 'close stream :abort abort)))))))
+
+(defun close (stream &key abort) (%%string-stream 2 stream abort))
+
+(defun pathname (object)
+  (cond ((pathnamep object) object)
+        ((stringp object) (if (%logical-string-host object) (%parse-logical object nil) (%%make-source-path object)))
+        ((typep object 'file-stream) (%%filesystem 3 object nil))
+        ((typep object 'synonym-stream) (pathname (symbol-value (synonym-stream-symbol object))))
+        (t (error 'type-error :datum object :expected-type '(or pathname string file-stream)))))
+
+(defun delete-file (filespec)
+  (%%filesystem 1 (%source-path filespec) nil))
+
+(defun rename-file (filespec new-name)
+  (let* ((old (truename filespec))
+         (new (merge-pathnames new-name old)))
+    (%%filesystem 2 (%source-path filespec) (%canonical-path new))
+    (values new old (truename new))))
+
+(defun ensure-directories-exist (pathspec &key verbose)
+  (declare (ignore verbose))
+  (let* ((path (translate-logical-pathname (merge-pathnames pathspec))) (created nil)
+         (directory (directory-namestring path)))
+    (when (or (wild-pathname-p path :host) (wild-pathname-p path :device) (wild-pathname-p path :directory))
+      (error 'file-error :pathname path))
+    (loop for i below (length directory) when (char= (char directory i) #\/) do
+      (when (%%filesystem 5 (%canonical-path (subseq directory 0 i)) nil) (setq created t)))
+    (values pathspec created)))
+
+(defun file-author (pathspec) (truename pathspec) nil)
+(defun file-write-date (pathspec)
+  (let ((date (%%filesystem 6 (%source-path (truename pathspec)) nil)))
+    (and date (values (floor date)))))
+(defun user-homedir-pathname (&optional host)
+  (if (member host '(nil :unspecific)) (pathname "/") nil))

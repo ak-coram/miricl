@@ -1,252 +1,333 @@
-;;;; wasmtime.lisp
-
+;;;; Wasmtime 50 C API. Keep store-owned handles within their originating store.
 (in-package #:wasmtime)
 
 (define-foreign-library libwasmtime
-  (:darwin "libwasmtime.dylib")
-  (:unix "libwasmtime.so")
-  (:windows "wasmtime.dll")
-  (t (:default "libwasmtime")))
-
+  (:darwin "libwasmtime.dylib") (:unix "libwasmtime.so")
+  (:windows "wasmtime.dll") (t (:default "libwasmtime")))
 (use-foreign-library libwasmtime)
-(eval-when (:compile-toplevel)
-  (defun make-sym (&rest args)
-    (intern (format nil "~:@(~{~A~^-~}~)" args))))
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun make-sym (&rest parts)
+    (intern (format nil "~:@(~{~A~^-~}~)" parts) :wasmtime)))
+
+(defctype size :size)
+(defctype p-void :pointer)
 (defmacro wasm-declare-own (name)
-  (let ((type-sym (make-sym 'wasm name))
-        (pointer-sym (make-sym 'p-wasm name))
-        (delete-sym (make-sym 'wasm name 'delete)))
+  (let ((type (make-sym 'wasm name)) (pointer (make-sym 'p-wasm name)))
     `(progn
-       (defcstruct ,type-sym)
-       (defctype ,pointer-sym (:pointer (:struct ,type-sym)))
-       (defcfun ,delete-sym :void
-         (own (:pointer (:struct ,type-sym)))))))
-
-(defctype size :unsigned-int)
-(defctype p-void (:pointer :void))
+       (defcstruct ,type)
+       (defctype ,pointer (:pointer (:struct ,type)))
+       (defcfun ,(make-sym 'wasm name 'delete) :void (object ,pointer)))))
+(defmacro wasm-declare-vec (name)
+  (let ((type (make-sym 'wasm name 'vec))
+        (pointer (make-sym 'p-wasm name 'vec)))
+    `(progn
+       (defcstruct ,type (size size) (data :pointer))
+       (defctype ,pointer (:pointer (:struct ,type)))
+       (defcfun ,(make-sym 'wasm name 'vec-new-empty) :void (out ,pointer))
+       (defcfun ,(make-sym 'wasm name 'vec-new-uninitialized) :void
+         (out ,pointer) (size size))
+       (defcfun ,(make-sym 'wasm name 'vec-new) :void
+         (out ,pointer) (size size) (data :pointer))
+       (defcfun ,(make-sym 'wasm name 'vec-copy) :void
+         (out ,pointer) (source ,pointer))
+       (defcfun ,(make-sym 'wasm name 'vec-delete) :void (object ,pointer)))))
 
 (wasm-declare-own config)
-(defcfun wasm-config-new p-wasm-config)
-
 (wasm-declare-own engine)
-(defcfun wasm-engine-new p-wasm-engine)
-(defcfun wasm-engine-new-with-config p-wasm-engine
-  (own p-wasm-config))
-
-(defmacro with-engine ((engine-var) &body body)
-  `(let ((,engine-var (wasm-engine-new)))
-     (unwind-protect (progn ,@body)
-       (wasm-engine-delete ,engine-var))))
-
-(defcstruct wasmtime-store)
-(defctype p-wasmtime-store (:pointer (:struct wasmtime-store)))
-(defcfun wasmtime-store-new p-wasmtime-store
-  (engine p-wasm-engine)
-  (data p-void)
-  (finalizer :pointer))
-
-(defcstruct wasmtime-context)
-(defctype p-wasmtime-context (:pointer (:struct wasmtime-context)))
-(defcfun wasmtime-store-context p-wasmtime-context
-  (store p-wasmtime-store))
-
-(defcfun wasmtime-store-delete :void
-  (store p-wasmtime-store))
-
-(defmacro with-store (((store-var context-var) engine) &body body)
-  `(let* ((,store-var (wasmtime-store-new ,engine
-                                          (null-pointer)
-                                          (null-pointer)))
-          (,context-var (wasmtime-store-context ,store-var)))
-     (unwind-protect (progn ,@body)
-       (wasmtime-store-delete ,store-var))))
-
-(defmacro wasm-declare-vec (name &key is-struct)
-  (let ((type-sym (make-sym 'wasm name 'vec))
-        (pointer-sym (make-sym 'p-wasm name 'vec))
-        (value-type (if is-struct
-                        `(:struct ,(make-sym 'wasm name))
-                        (make-sym 'wasm name))))
-    `(progn
-       (defcstruct ,type-sym
-         (size size)
-         (data (:pointer ,value-type)))
-       (defctype ,pointer-sym (:pointer (:struct ,type-sym)))
-       (defcfun ,(make-sym 'wasm name 'vec-new-empty) :void
-         (out (:pointer (:struct ,type-sym))))
-       (defcfun ,(make-sym 'wasm name 'vec-new-uninitialized) :void
-         (out ,pointer-sym)
-         (size size))
-       (defcfun ,(make-sym 'wasm name 'vec-new) :void
-         (out ,pointer-sym)
-         (size size)
-         (own ,value-type))
-       (defcfun ,(make-sym 'wasm name 'vec-copy) :void
-         (out ,pointer-sym)
-         (own ,pointer-sym))
-       (defcfun ,(make-sym 'wasm name 'vec-delete) :void
-         (own ,pointer-sym)))))
-
-(defctype wasm-byte :char)
+(wasm-declare-own trap)
+(wasm-declare-own valtype)
+(wasm-declare-own functype)
+(wasm-declare-own memorytype)
+(wasm-declare-own globaltype)
+(wasm-declare-own tabletype)
+(defctype wasm-byte :uint8)
 (wasm-declare-vec byte)
+(wasm-declare-vec valtype)
 
-(defcstruct wasmtime-error)
-(defctype p-wasmtime-error (:pointer (:struct wasmtime-error)))
-(defcfun wasmtime-error-new p-wasmtime-error
-  (message :string))
-(defcfun wasmtime-error-delete :void
-  (error p-wasmtime-error))
-(defcfun wasmtime-error-message :void
-  (error p-wasmtime-error)
-  (message p-wasm-byte-vec))
+(defcfun wasm-config-new p-wasm-config)
+(defcfun wasm-engine-new p-wasm-engine)
+(defcfun wasm-engine-new-with-config p-wasm-engine (config p-wasm-config))
+(defcfun wasmtime-config-wasm-gc-set :void (config p-wasm-config) (enabled :boolean))
+(defcfun wasmtime-config-wasm-exceptions-set :void (config p-wasm-config) (enabled :boolean))
+(defcfun wasmtime-config-signals-based-traps-set :void (config p-wasm-config) (enabled :boolean))
+(defcfun wasmtime-config-parallel-compilation-set :void (config p-wasm-config) (enabled :boolean))
+(defcfun wasmtime-config-consume-fuel-set :void (config p-wasm-config) (enabled :boolean))
+(defcfun wasmtime-store-new :pointer (engine p-wasm-engine) (data :pointer) (finalizer :pointer))
+(defcfun wasmtime-store-context :pointer (store :pointer))
+(defcfun wasmtime-store-delete :void (store :pointer))
+(defctype p-wasmtime-context :pointer)
+(defctype p-wasmtime-caller :pointer)
+(defcfun wasmtime-caller-context :pointer (caller :pointer))
+(defcfun wasmtime-context-set-fuel :pointer (context :pointer) (fuel :uint64))
+(defcfun wasmtime-context-get-fuel :pointer (context :pointer) (fuel (:pointer :uint64)))
+(defcfun wasmtime-context-gc :pointer (context :pointer))
 
-(defcfun wasmtime-wat2wasm p-wasmtime-error
-  (wat :string)
-  (wat-length size)
-  (ret p-wasm-byte-vec))
+(defmacro with-engine ((engine &key fuel parallel-compilation) &body body)
+  (alexandria:with-gensyms (config)
+    `(let* ((,config (wasm-config-new))
+            (,engine (progn
+                       (wasmtime-config-wasm-gc-set ,config t)
+                       (wasmtime-config-wasm-exceptions-set ,config t)
+                       ;; Lisp implementations use these signals for their own GC/traps.
+                       (wasmtime-config-signals-based-traps-set ,config nil)
+                       (wasmtime-config-consume-fuel-set ,config ,fuel)
+                       (wasmtime-config-parallel-compilation-set ,config ,parallel-compilation)
+                       (wasm-engine-new-with-config ,config))))
+       (when (null-pointer-p ,engine) (error "Cannot create Wasmtime engine."))
+       (unwind-protect (progn ,@body) (wasm-engine-delete ,engine)))))
+(defmacro with-store (((store context) engine) &body body)
+  `(let* ((,store (wasmtime-store-new ,engine (null-pointer) (null-pointer)))
+          (,context (wasmtime-store-context ,store)))
+     (unwind-protect (progn ,@body) (wasmtime-store-delete ,store))))
 
-(defcstruct wasmtime-module)
-(defctype p-wasmtime-module (:pointer (:struct wasmtime-module)))
-(defcfun wasmtime-module-new p-wasmtime-error
-  (engine p-wasm-engine)
-  (wasm (:pointer :uint8))
-  (size size)
-  (ret (:pointer p-wasmtime-module))) ; why a pointer to a pointer?
-(defcfun wasmtime-module-delete :void
-  (module p-wasmtime-module))
+(defcfun wasmtime-error-delete :void (error :pointer))
+(defcfun wasmtime-error-message :void (error :pointer) (out :pointer))
+(defcfun wasm-trap-message :void (trap p-wasm-trap) (out :pointer))
+(defcfun wasmtime-trap-new p-wasm-trap (message :pointer) (length size))
+(defcfun wasmtime-wat2wasm :pointer (wat :pointer) (length size) (out :pointer))
+(defcfun wasmtime-module-new :pointer
+  (engine p-wasm-engine) (bytes :pointer) (length size) (out :pointer))
+(defcfun wasmtime-module-delete :void (module :pointer))
+(defctype p-wasmtime-module :pointer)
 
-(defun byte-vec-to-string (byte-vec)
-  (with-foreign-slots ((data size) byte-vec (:struct wasm-byte-vec))
-    (foreign-string-to-lisp data :count size)))
-
+(define-condition wasmtime-error (error)
+  ((message :initarg :message :reader wasmtime-error-message-text))
+  (:report (lambda (condition stream)
+             (write-string (wasmtime-error-message-text condition) stream))))
+(define-condition wasm-trap (wasmtime-error) ())
+(defun byte-vec-to-string (vector)
+  (with-foreign-slots ((size data) vector (:struct wasm-byte-vec))
+    (foreign-string-to-lisp data :count size :encoding :utf-8)))
 (defun get-error-message (error)
-  (with-foreign-object (error-message '(:struct wasm-byte-vec))
-    (wasmtime-error-message error error-message)
-    (byte-vec-to-string error-message)))
-
-(defun byte-vec-to-octets (byte-vec)
-  (with-foreign-slots ((data size) byte-vec (:struct wasm-byte-vec))
-    (let ((out (make-array (list size) :element-type '(unsigned-byte 8))))
-      (loop :for i :below size
-            :do (setf (aref out i) (mem-ref data 'wasm-byte i))
-            :finally (return out)))))
-
+  (with-foreign-object (message '(:struct wasm-byte-vec))
+    (wasmtime-error-message error message)
+    (unwind-protect (byte-vec-to-string message) (wasm-byte-vec-delete message))))
+(defun check-error (error)
+  (unless (null-pointer-p error)
+    (unwind-protect (error 'wasmtime-error :message (get-error-message error))
+      (wasmtime-error-delete error))))
+(defun check-trap (trap)
+  (unless (null-pointer-p trap)
+    (unwind-protect
+         (with-foreign-object (message '(:struct wasm-byte-vec))
+           (wasm-trap-message trap message)
+           (unwind-protect (error 'wasm-trap :message (string-right-trim '(#\Null) (byte-vec-to-string message)))
+             (wasm-byte-vec-delete message)))
+      (wasm-trap-delete trap))))
+(defun byte-vec-to-octets (vector)
+  (with-foreign-slots ((size data) vector (:struct wasm-byte-vec))
+    (let ((out (make-array size :element-type '(unsigned-byte 8))))
+      (dotimes (i size out) (setf (aref out i) (mem-aref data :uint8 i))))))
 (defun wat-to-wasm (input)
-  (with-foreign-string ((wat wat-size) input)
-    (with-foreign-object (wasm '(:struct wasm-byte-vec))
-      ;; wat2wasm doesn't expect null-terminator, reduce size by 1:
-      (let ((error (wasmtime-wat2wasm wat (1- wat-size) wasm)))
-        (if (null-pointer-p error)
-            (unwind-protect (byte-vec-to-octets wasm)
-              (wasm-byte-vec-delete wasm))
-            (unwind-protect (error "Error parsing module: ~A"
-                                   (get-error-message error))
-              (wasmtime-error-delete error)))))))
-
-(defun compile-module (engine wasm)
-  (let ((size (length wasm)))
-    (with-foreign-objects ((module 'p-wasmtime-module))
-      (with-foreign-array (raw-wasm wasm (list :array :uint8 size))
-        (let ((error (wasmtime-module-new engine raw-wasm size module)))
-          (if (null-pointer-p error)
-              (mem-ref module 'p-wasmtime-module)
-              (unwind-protect (error "Error loading module: ~A"
-                                     (get-error-message error))
-                (wasmtime-error-delete error))))))))
-
-(defmacro with-byte-vec ((byte-vec-var octets) &body body)
-  (alexandria:with-gensyms (octets-sym octet-sym i-sym)
-    `(let ((,octets-sym ,octets))
-       (with-foreign-object (,byte-vec-var '(:struct wasm-byte-vec))
-         (wasm-byte-vec-new-uninitialized ,byte-vec-var (length ,octets-sym))
+  (with-foreign-string ((wat length) input :encoding :utf-8)
+    (with-foreign-object (out '(:struct wasm-byte-vec))
+      (check-error (wasmtime-wat2wasm wat (1- length) out))
+      (unwind-protect (byte-vec-to-octets out) (wasm-byte-vec-delete out)))))
+(defun compile-module (engine bytes)
+  (with-foreign-object (out :pointer)
+    (with-pointer-to-vector-data (data bytes)
+      (check-error (wasmtime-module-new engine data (length bytes) out)))
+    (mem-ref out :pointer)))
+(defmacro with-module ((module engine wat) &body body)
+  `(let ((,module (compile-module ,engine (wat-to-wasm ,wat))))
+     (unwind-protect (progn ,@body) (wasmtime-module-delete ,module))))
+(defmacro with-byte-vec ((vector octets) &body body)
+  (alexandria:with-gensyms (bytes)
+    `(let ((,bytes ,octets))
+       (with-foreign-object (,vector '(:struct wasm-byte-vec))
+         (wasm-byte-vec-new-uninitialized ,vector (length ,bytes))
          (unwind-protect
               (progn
-                (with-foreign-slots ((data) ,byte-vec-var (:struct wasm-byte-vec))
-                  (loop :for ,octet-sym :across ,octets-sym
-                        :for ,i-sym :from 0
-                        :do (setf (mem-ref data 'wasm-byte ,i-sym)
-                                  ,octet-sym)))
+                (dotimes (i (length ,bytes))
+                  (setf (mem-aref (foreign-slot-value ,vector '(:struct wasm-byte-vec) 'data)
+                                  :uint8 i) (aref ,bytes i)))
                 ,@body)
-           (wasm-byte-vec-delete ,byte-vec-var))))))
+           (wasm-byte-vec-delete ,vector))))))
 
-(defmacro with-module ((module-var engine wat) &body body)
-  (alexandria:with-gensyms (wasm-sym)
-    `(let* ((,wasm-sym (wat-to-wasm ,wat))
-            (,module-var (compile-module ,engine ,wasm-sym)))
-       (unwind-protect (progn ,@body)
-         (wasmtime-module-delete ,module-var)))))
-
-(wasm-declare-own functype) (wasm-declare-vec functype :is-struct t)
-(wasm-declare-own valtype) (wasm-declare-vec valtype :is-struct t)
-
-(defcfun wasm-functype-new p-wasm-functype
-  (params p-wasm-valtype-vec)
-  (results p-wasm-valtype-vec))
-
-(defcstruct wasmtime-func
-  (store-id :uint64)
-  (size size))
+;;; These layouts match the Wasmtime 50 headers (including GC root metadata).
+(defcstruct wasmtime-func (store-id :uint64) (private :pointer))
 (defctype p-wasmtime-func (:pointer (:struct wasmtime-func)))
-
-(defcfun wasmtime-func-new :void
-  (store p-wasmtime-context)
-  (type p-wasm-functype)
-  (callback :pointer)
-  (env p-void)
-  (finalizer :pointer)
-  (ret p-wasmtime-func))
-
-(wasm-declare-own trap)
-
-(defcstruct wasmtime-caller)
-(defctype p-wasmtime-caller (:pointer (:struct wasmtime-caller)))
-
+(defmacro define-index-handle (name &optional extra)
+  `(defcstruct ,name (store-id :uint64) (private1 :uint32) (private2 :uint32)
+     ,@(when extra '((private3 :uint32)))))
+(define-index-handle wasmtime-memory)
+(define-index-handle wasmtime-table)
+(define-index-handle wasmtime-tag)
+(define-index-handle wasmtime-global t)
+(defcstruct wasmtime-ref (store-id :uint64) (private1 :uint32) (private2 :uint32) (private3 :pointer))
+(defcunion wasmtime-valunion
+  (i32 :int32) (i64 :int64) (f32 :float) (f64 :double)
+  (v128 :uint8 :count 16) (funcref (:struct wasmtime-func))
+  (externref (:struct wasmtime-ref)) (anyref (:struct wasmtime-ref))
+  (exnref (:struct wasmtime-ref)))
 (defctype wasmtime-valkind :uint8)
-(defctype wasmtime-valunion :uint64) ; TODO: add proper definition
-
-(defcstruct wasmtime-val
-  (kind wasmtime-valkind)
-  (of wasmtime-valunion))
+(defcstruct wasmtime-val (kind wasmtime-valkind) (of (:union wasmtime-valunion)))
 (defctype p-wasmtime-val (:pointer (:struct wasmtime-val)))
-
-(defcstruct wasmtime-instance
-  (store-id :uint64)
-  (size size))
-(defctype p-wasmtime-instance (:pointer (:struct wasmtime-instance)))
-
+(defcunion wasmtime-extern-union
+  (func (:struct wasmtime-func)) (global (:struct wasmtime-global))
+  (table (:struct wasmtime-table)) (memory (:struct wasmtime-memory))
+  (sharedmemory :pointer) (tag (:struct wasmtime-tag)))
 (defctype wasmtime-extern-kind :uint8)
-(defctype wasmtime-extern-union (:struct wasmtime-func)) ; TODO: add proper definition
-
-(defcstruct wasmtime-extern
-  (kind wasmtime-extern-kind)
-  (of wasmtime-extern-union))
+(defcstruct wasmtime-extern (kind wasmtime-extern-kind) (of (:union wasmtime-extern-union)))
 (defctype p-wasmtime-extern (:pointer (:struct wasmtime-extern)))
-
-(defcfun wasmtime-instance-new p-wasmtime-error
-  (context p-wasmtime-context)
-  (module p-wasmtime-module)
-  (imports p-wasmtime-extern)
-  (nimports size)
-  (instance p-wasmtime-instance)
-  (trap (:pointer p-wasm-trap)))
-
+(defcstruct wasmtime-instance (store-id :uint64) (private size))
+(defctype p-wasmtime-instance (:pointer (:struct wasmtime-instance)))
+(defcfun wasmtime-extern-delete :void (value p-wasmtime-extern))
+(defcfun wasmtime-val-unroot :void (value p-wasmtime-val))
+(defcfun wasm-valtype-new p-wasm-valtype (kind :uint8))
+(defcfun wasm-valtype-kind :uint8 (type p-wasm-valtype))
+(defcfun wasm-functype-new p-wasm-functype (params :pointer) (results :pointer))
+(defcfun wasm-functype-params :pointer (type p-wasm-functype))
+(defcfun wasm-functype-results :pointer (type p-wasm-functype))
+(defcfun wasmtime-func-type p-wasm-functype (context :pointer) (func p-wasmtime-func))
+(defcfun wasmtime-func-new :void
+  (context :pointer) (type p-wasm-functype) (callback :pointer)
+  (env :pointer) (finalizer :pointer) (out p-wasmtime-func))
+(defcfun wasmtime-instance-new :pointer
+  (context :pointer) (module :pointer) (imports :pointer) (nimports size)
+  (instance p-wasmtime-instance) (trap :pointer))
 (defcfun wasmtime-instance-export-get :boolean
-  (context p-wasmtime-context)
-  (instance p-wasmtime-instance)
-  (name :string)
-  (name-len size)
-  (item p-wasmtime-extern))
-
-(defcfun wasmtime-func-call p-wasmtime-error
-  (context p-wasmtime-context)
-  (func p-wasmtime-func)
-  (args p-wasmtime-val)
-  (nargs size)
-  (results p-wasmtime-val)
-  (nresults size)
-  (trap (:pointer p-wasm-trap)))
+  (context :pointer) (instance p-wasmtime-instance) (name :pointer) (length size)
+  (out p-wasmtime-extern))
+(defcfun wasmtime-func-call :pointer
+  (context :pointer) (func p-wasmtime-func) (args :pointer) (nargs size)
+  (results :pointer) (nresults size) (trap :pointer))
+(defcfun wasmtime-memory-data :pointer (context :pointer) (memory :pointer))
+(defcfun wasmtime-memory-data-size size (context :pointer) (memory :pointer))
+(defcfun wasmtime-memory-size :uint64 (context :pointer) (memory :pointer))
+(defcfun wasmtime-memory-grow :pointer
+  (context :pointer) (memory :pointer) (delta :uint64) (previous :pointer))
+(defcfun wasmtime-global-new :pointer (context :pointer) (type :pointer) (value :pointer) (out :pointer))
+(defcfun wasmtime-global-type :pointer (context :pointer) (global :pointer))
+(defcfun wasmtime-memory-new :pointer (context :pointer) (type :pointer) (out :pointer))
+(defcfun wasmtime-memory-type :pointer (context :pointer) (memory :pointer))
+(defcfun wasmtime-table-new :pointer (context :pointer) (type :pointer) (value :pointer) (out :pointer))
+(defcfun wasmtime-table-type :pointer (context :pointer) (table :pointer))
+(defcfun wasmtime-table-size :uint64 (context :pointer) (table :pointer))
+(defcfun wasmtime-table-grow :pointer
+  (context :pointer) (table :pointer) (delta :uint64) (value :pointer) (previous :pointer))
+(defcfun wasm-globaltype-new p-wasm-globaltype (type p-wasm-valtype) (mutability :uint8))
+(defcfun wasmtime-memorytype-new :pointer
+  (minimum :uint64) (has-maximum :boolean) (maximum :uint64)
+  (is64 :boolean) (shared :boolean) (page-log2 :uint8) (out :pointer))
+;; Rooted reference values must be unrooted before their storage is released.
+(defcfun wasmtime-externref-new :boolean
+  (context :pointer) (data :pointer) (finalizer :pointer) (out :pointer))
+(defcfun wasmtime-externref-data :pointer (context :pointer) (ref :pointer))
+(defcfun wasmtime-externref-clone :void (ref :pointer) (out :pointer))
+(defcfun wasmtime-externref-unroot :void (ref :pointer))
+(defcfun wasmtime-anyref-clone :void (ref :pointer) (out :pointer))
+(defcfun wasmtime-anyref-unroot :void (ref :pointer))
+(defcfun wasmtime-anyref-from-i31 :void (context :pointer) (value :uint32) (out :pointer))
+(defcfun wasmtime-anyref-i31-get-s :boolean (context :pointer) (ref :pointer) (out :pointer))
+(defcfun wasmtime-anyref-i31-get-u :boolean (context :pointer) (ref :pointer) (out :pointer))
+(defcfun wasmtime-global-get :void (context :pointer) (global :pointer) (out :pointer))
+(defcfun wasmtime-global-set :pointer (context :pointer) (global :pointer) (value :pointer))
+(defcfun wasmtime-table-get :boolean (context :pointer) (table :pointer) (index :uint64) (out :pointer))
+(defcfun wasmtime-table-set :pointer (context :pointer) (table :pointer) (index :uint64) (value :pointer))
 
 (defun copy-struct (to from type)
-  (loop :for i :below (cffi:foreign-type-size type)
-        :do (setf (mem-ref to :uint8 i) (mem-ref from :uint8 i))))
+  (dotimes (i (foreign-type-size type)) (setf (mem-aref to :uint8 i) (mem-aref from :uint8 i))))
+(defun extern-payload (extern slot)
+  (foreign-slot-pointer (foreign-slot-pointer extern '(:struct wasmtime-extern) 'of)
+                        '(:union wasmtime-extern-union) slot))
+(defun instantiate (context module out &optional imports)
+  (with-foreign-object (trap :pointer)
+    (setf (mem-ref trap :pointer) (null-pointer))
+    (with-foreign-object (raw '(:struct wasmtime-extern) (max 1 (length imports)))
+      (loop for import in imports for i from 0
+            do (copy-struct (mem-aptr raw '(:struct wasmtime-extern) i) import '(:struct wasmtime-extern)))
+      (check-error (wasmtime-instance-new context module raw (length imports) out trap))
+      (check-trap (mem-ref trap :pointer))))
+  out)
+(defmacro with-instance ((instance context module &optional imports) &body body)
+  `(with-foreign-object (,instance '(:struct wasmtime-instance))
+     (instantiate ,context ,module ,instance ,imports)
+     ,@body))
+(defun get-export (context instance name out &optional kind)
+  (with-foreign-string ((raw length) name :encoding :utf-8)
+    (unless (wasmtime-instance-export-get context instance raw (1- length) out)
+      (error "No WASM export named ~S." name)))
+  (when (and kind (/= kind (foreign-slot-value out '(:struct wasmtime-extern) 'kind)))
+    (wasmtime-extern-delete out)
+    (error "WASM export ~S has the wrong kind." name))
+  out)
+(defmacro with-export ((export context instance name &optional kind) &body body)
+  `(with-foreign-object (,export '(:struct wasmtime-extern))
+     (get-export ,context ,instance ,name ,export ,kind)
+     (unwind-protect (progn ,@body) (wasmtime-extern-delete ,export))))
+
+(defparameter *value-types* '((:i32 0 i32 :int32) (:i64 1 i64 :int64)
+                            (:f32 2 f32 :float) (:f64 3 f64 :double)))
+(defun write-value (pointer kind value)
+  (let ((type (find kind *value-types* :key #'second)))
+    (unless type (error "Unsupported host value kind: ~D." kind))
+    (setf (foreign-slot-value pointer '(:struct wasmtime-val) 'kind) kind
+          (foreign-slot-value (foreign-slot-pointer pointer '(:struct wasmtime-val) 'of)
+                              '(:union wasmtime-valunion) (third type))
+          (case kind (2 (coerce value 'single-float)) (3 (coerce value 'double-float)) (t value)))))
+(defun read-value (pointer)
+  (let* ((kind (foreign-slot-value pointer '(:struct wasmtime-val) 'kind))
+         (type (find kind *value-types* :key #'second)))
+    (unless type (error "Unsupported host result kind: ~D." kind))
+    (foreign-slot-value (foreign-slot-pointer pointer '(:struct wasmtime-val) 'of)
+                        '(:union wasmtime-valunion) (third type))))
+(defun type-kinds (vector)
+  (with-foreign-slots ((size data) vector (:struct wasm-valtype-vec))
+    (loop for i below size collect (wasm-valtype-kind (mem-aref data :pointer i)))))
+(defun instance-call (context instance name &rest arguments)
+  "Call a numeric export, inferring its signature. Return multiple WASM results as values."
+  (with-export (export context instance name 0)
+    (let* ((func (extern-payload export 'func)) (type (wasmtime-func-type context func)))
+      (unwind-protect
+           (let ((params (type-kinds (wasm-functype-params type)))
+                 (results (type-kinds (wasm-functype-results type))))
+             (unless (= (length params) (length arguments))
+               (error "~A expects ~D arguments, got ~D." name (length params) (length arguments)))
+             (with-foreign-objects ((args '(:struct wasmtime-val) (max 1 (length params)))
+                                    (out '(:struct wasmtime-val) (max 1 (length results)))
+                                    (trap :pointer))
+               (loop for kind in params for value in arguments for i from 0
+                     do (write-value (mem-aptr args '(:struct wasmtime-val) i) kind value))
+               (setf (mem-ref trap :pointer) (null-pointer))
+               (check-error (wasmtime-func-call context func args (length params) out (length results) trap))
+               (check-trap (mem-ref trap :pointer))
+               (unwind-protect
+                    (values-list (loop for i below (length results)
+                                       collect (read-value (mem-aptr out '(:struct wasmtime-val) i))))
+                 (dotimes (i (length results)) (wasmtime-val-unroot (mem-aptr out '(:struct wasmtime-val) i))))))
+        (wasm-functype-delete type)))))
+
+(defun callback-func (context callback &key parameters results)
+  "Allocate a host function handle; free its storage with FOREIGN-FREE after use."
+  (with-foreign-objects ((params '(:struct wasm-valtype-vec)) (returns '(:struct wasm-valtype-vec)))
+    (labels ((fill-types (vector kinds)
+               (wasm-valtype-vec-new-uninitialized vector (length kinds))
+               (let ((data (foreign-slot-value vector '(:struct wasm-valtype-vec) 'data)))
+                 (loop for kind in kinds for i from 0
+                       do (setf (mem-aref data :pointer i)
+                                (wasm-valtype-new (or (second (assoc kind *value-types*))
+                                                     (error "Unknown value type ~S." kind))))))))
+      ;; Validate before allocating any owned vector elements.
+      (dolist (kind (append parameters results))
+        (unless (assoc kind *value-types*) (error "Unknown value type ~S." kind)))
+      (fill-types params parameters)
+      (fill-types returns results)
+      (let ((type (wasm-functype-new params returns))
+            (func (foreign-alloc '(:struct wasmtime-func))))
+        (unwind-protect
+             (wasmtime-func-new context type callback (null-pointer) (null-pointer) func)
+          (wasm-functype-delete type))
+        func))))
+(defmacro with-callback-func ((func context callback &rest options) &body body)
+  `(let ((,func (callback-func ,context ,callback ,@options)))
+     (unwind-protect (progn ,@body) (foreign-free ,func))))
+(defun func-instance (context module func)
+  "Compatibility helper for a module with one function import. Free the returned handle."
+  (with-foreign-object (import '(:struct wasmtime-extern))
+    (setf (foreign-slot-value import '(:struct wasmtime-extern) 'kind) 0)
+    (copy-struct (extern-payload import 'func) func '(:struct wasmtime-func))
+    (let ((instance (foreign-alloc '(:struct wasmtime-instance))))
+      (handler-case (instantiate context module instance (list import))
+        (error (e) (foreign-free instance) (error e))))))

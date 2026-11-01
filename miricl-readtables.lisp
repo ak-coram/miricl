@@ -1,16 +1,112 @@
-;;;; miricl-readtables.lisp
-
+;;;; A WAT template is an ordinary Lisp expression, with comma escapes to Lisp.
 (in-package #:miricl)
 
-(eval-when (:compile-toplevel :load-toplevel)
-  (defun read-wat-form (stream char p)
-    (declare (ignore char p))
-    (let ((table (copy-readtable nil)))
-      (setf (readtable-case table) :preserve)
-      (let ((*readtable* table))
-        (read stream t nil t))))
+(defstruct (wat-fragment (:constructor wat-fragment (text))) text)
+
+(defun wat-string (form)
+  "Render a WAT tree. Strings are WAT strings; WAT-FRAGMENT inserts raw text."
+  (with-output-to-string (out)
+    (labels ((emit (value)
+               (typecase value
+                 (wat-fragment (write-string (wat-fragment-text value) out))
+                 (string
+                  (write-char #\" out)
+                  (loop for char across value do
+                    (case char
+                      (#\" (write-string "\\\"" out))
+                      (#\\ (write-string "\\\\" out))
+                      (#\Newline (write-string "\\0a" out))
+                      (#\Return (write-string "\\0d" out))
+                      (#\Tab (write-string "\\09" out))
+                      (otherwise
+                       (if (< (char-code char) 32)
+                           (format out "\\~2,'0x" (char-code char))
+                           (write-char char out)))))
+                  (write-char #\" out))
+                 (null (write-string "()" out))
+                 (symbol (write-string (if (symbol-package value)
+                                           (string-downcase (symbol-name value))
+                                           (symbol-name value)) out))
+                 (integer (format out "~D" value))
+                 (float
+                  (let ((*read-default-float-format* 'double-float))
+                    (write-string (map 'string (lambda (char) (if (find char "sfdl") #\e char))
+                                       (string-downcase (write-to-string value))) out)))
+                 (cons
+                  (write-char #\( out)
+                  (loop for rest on value do (emit (car rest))
+                        when (cdr rest) do (write-char #\Space out))
+                  (write-char #\) out))
+                 (t (error "Cannot render ~S as WAT." value)))))
+      (emit form))))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun read-wat-form (stream char argument)
+    (declare (ignore char))
+    (when argument (error "#@ does not accept a numeric argument."))
+    (let ((held-open nil))
+      (labels ((peek () (if held-open #\( (peek-char nil stream nil nil t)))
+             (take () (if held-open (progn (setf held-open nil) #\() (read-char stream t nil t)))
+             (spacep (char) (and char (find char '(#\Space #\Tab #\Newline #\Return #\Page))))
+             (skip-block ()
+               (loop with depth = 1
+                     for a = (take) for b = (peek)
+                     do (cond ((and (char= a #\() (eql b #\;)) (take) (incf depth))
+                              ((and (char= a #\;) (eql b #\)))
+                               (take) (when (zerop (decf depth)) (return))))))
+             (skip ()
+               (loop
+                 (when held-open (return))
+                 (cond ((spacep (peek)) (take))
+                       ((eql (peek) #\;)
+                        (take)
+                        (unless (eql (take) #\;) (error "Expected WAT ;; comment."))
+                        (loop for c = (read-char stream nil nil t)
+                              while (and c (not (eql c #\Newline)))))
+                       ((eql (peek) #\()
+                        (take)
+                        (if (eql (peek) #\;) (progn (take) (skip-block))
+                            (progn (setf held-open t) (return))))
+                       (t (return)))))
+             (token ()
+               (let ((text (with-output-to-string (out)
+                             (loop for c = (peek)
+                                   while (and c (not (spacep c)) (not (find c "();\",")))
+                                   do (write-char (take) out)))))
+                 (when (zerop (length text)) (error "Expected a WAT token."))
+                 `',(make-symbol text)))
+             (form (&optional in-list)
+               (skip)
+               (case (peek)
+                 (#\(
+                  (take)
+                  (let ((parts nil))
+                    (loop (skip) (when (eql (peek) #\)) (take) (return))
+                          (multiple-value-bind (expression splice) (form t)
+                            (push (if splice expression `(list ,expression)) parts)))
+                    (values `(append ,@(nreverse parts)) nil)))
+                 (#\,
+                  (take)
+                  (let ((splice (eql (peek) #\@)))
+                    (when splice (take))
+                    (unless (or in-list (not splice)) (error "WAT splice must be inside a list."))
+                    (let ((*readtable* (named-readtables:find-readtable :miricl-wat)))
+                      (values (read stream t nil t) splice))))
+                 (#\"
+                  ;; Keep WAT escapes verbatim; Lisp's string reader would discard them.
+                  (take)
+                  (let ((text (with-output-to-string (out)
+                                (write-char #\" out)
+                                (loop for c = (take) do
+                                  (write-char c out)
+                                  (cond ((char= c #\\) (write-char (take) out))
+                                        ((char= c #\") (return)))))))
+                    `(wat-fragment ,text)))
+                 ((nil) (error 'end-of-file :stream stream))
+                 (#\) (error "Unexpected closing parenthesis in WAT."))
+                 (otherwise (token)))))
+      `(wat-string ,(form)))))
 
   (named-readtables:defreadtable :miricl-wat
     (:merge :standard)
-    (:macro-char #\# :dispatch)
     (:dispatch-macro-char #\# #\@ #'read-wat-form)))

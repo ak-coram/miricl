@@ -1,0 +1,137 @@
+name: Browser REPL Pages
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Let an active deployment finish before publishing the latest build.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build REPL and ANSI results
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      LISP: sbcl-bin
+      LIBWASMTIME_VERSION: 50.0.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Lisp
+        uses: 40ants/setup-lisp@v4
+        with:
+          cache: true
+
+      - name: Install libwasmtime
+        shell: bash
+        run: |
+          libwasmtime_dir="$RUNNER_TEMP/wasmtime"
+          mkdir -p "$libwasmtime_dir"
+          curl --fail --location --retry 3 \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/v${LIBWASMTIME_VERSION}/wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux-c-api.tar.xz" \
+            --output "$RUNNER_TEMP/wasmtime.tar.xz"
+          tar -xf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$libwasmtime_dir" --strip-components 2 \
+            "wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux-c-api/lib/libwasmtime.so"
+          echo "LD_LIBRARY_PATH=$libwasmtime_dir" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+
+      - name: Build standalone browser REPL and interpreter
+        shell: bash
+        run: |
+          ros --eval '(ql-dist:install-dist "http://dist.ultralisp.org/" :prompt nil)' --eval '(uiop:quit)'
+          # --load keeps Roswell's trailing SBCL options out of the builder's argv.
+          ros -L sbcl-bin run -- --load scripts/build-wasm.lisp --load scripts/build-html.lisp --quit
+          test -s miricl.html
+          mkdir -p "$RUNNER_TEMP/pages"
+          cp miricl.html "$RUNNER_TEMP/pages/index.html"
+
+      - name: Test published HTML in Chromium
+        env:
+          CHROMIUM: google-chrome
+        run: |
+          node tests/browser-repl.mjs "$RUNNER_TEMP/pages/index.html"
+          node tests/ansi-html.mjs
+
+      - name: Run full ANSI suite
+        timeout-minutes: 20
+        # Conformance failures are report content; incomplete runs must not deploy.
+        continue-on-error: true
+        env:
+          MIRICL_ANSI_REPORT: ansi-full-results.json
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/ansi-sbcl" <<'SH'
+          #!/usr/bin/env bash
+          exec ros -L sbcl-bin run -- "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/ansi-sbcl"
+          SBCL="$RUNNER_TEMP/ansi-sbcl" node tests/ansi.mjs interpreter.wasm --full
+
+      - name: Build standalone ANSI results page
+        run: |
+          node scripts/build-ansi-html.mjs ansi-full-results.json ansi-results.html
+          cp ansi-results.html "$RUNNER_TEMP/pages/ansi-results.html"
+
+      - name: Check full ANSI suite completion
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const report = JSON.parse(fs.readFileSync('ansi-full-results.json', 'utf8'));
+          const s = report.summary;
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `### Full ANSI suite\n\n${s.passed} passed, ${s.failed} failed, ${s.blocked} blocked, ${s.timedOut} timed out; ${s.total}/${s.expected} tests accounted for, ${s.loadErrors} load errors.\n`);
+          assert.equal(report.error, null, report.error);
+          assert.equal(s.complete, true, 'Full ANSI suite did not finish');
+          assert.ok(s.total > 0);
+          assert.equal(s.total, s.expected);
+          JS
+
+      - name: Upload full ANSI report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ansi-full-results
+          path: |
+            ansi-full-results.json
+            ansi-results.html
+          if-no-files-found: ignore
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/pages
+
+  deploy:
+    name: Deploy REPL and ANSI results
+    needs: build
+    # Manual runs from other branches may build, but only main may publish.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy GitHub Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@v4

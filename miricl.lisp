@@ -1,12 +1,426 @@
-;;;; miricl.lisp
-
+;;;; Host bootstrap: object transport, resource lifetime, and a terminal REPL.
 (in-package #:miricl)
 
-(named-readtables:in-readtable :miricl-wat)
+(define-condition interpreter-error (error)
+  ((code :initarg :code :reader interpreter-error-code)
+   (message :initarg :message :reader interpreter-error-message))
+  (:report (lambda (condition stream) (write-string (interpreter-error-message condition) stream))))
 
-(defparameter *example*
-  (wt:wat-to-wasm
-   (format nil "~A"
-           '#@(module
-               (func $add (param $x i32) (param $y i32) (result i32)
-                     (i32.add (local.get $x) (local.get $y)))))))
+(define-condition interpreter-package-error (interpreter-error) ())
+(define-condition interpreter-unbound-variable (interpreter-error unbound-variable) ())
+(define-condition interpreter-warning (warning)
+  ((message :initarg :message :reader interpreter-warning-message))
+  (:report (lambda (condition stream) (write-string (interpreter-warning-message condition) stream))))
+
+(defstruct (guest-function (:constructor %guest-function (owner id))) owner id)
+(defmethod print-object ((object guest-function) stream)
+  (print-unreadable-object (object stream :type t :identity t)))
+
+(defstruct (guest-instance (:constructor %guest-instance (owner id))) owner id)
+(defstruct (guest-opaque-object (:constructor %guest-opaque-object (owner id tag))) owner id tag)
+
+(defstruct (guest-condition (:constructor %guest-condition (owner id))) owner id)
+(defstruct (guest-restart (:constructor %guest-restart (owner id))) owner id)
+
+(defstruct (guest-package (:constructor %guest-package (owner id name))) owner id name)
+(defstruct (guest-symbol (:constructor %guest-symbol (owner id-slot name package))) owner id-slot name package)
+(defmethod print-object ((object guest-package) stream)
+  (print-unreadable-object (object stream :type t)
+    (write-string (or (guest-package-name object) "deleted") stream)))
+(defmethod print-object ((object guest-symbol) stream)
+  (let ((*print-gensym* nil) (*print-readably* nil))
+    (let ((package (guest-symbol-package object)))
+      (cond ((null package) (write-string "#:" stream))
+          ((equal (guest-package-name package) "KEYWORD") (write-char #\: stream))
+          (t (prin1 (make-symbol (or (guest-package-name package) "deleted")) stream)
+             (write-string "::" stream)))
+      (prin1 (make-symbol (guest-symbol-name object)) stream))))
+
+(defclass interpreter ()
+  ((engine :initform nil :accessor interpreter-engine)
+   (store :initform nil :accessor interpreter-store)
+   (context :initform nil :accessor interpreter-context)
+   (module :initform nil :accessor interpreter-module)
+   (instance :initform nil :accessor interpreter-instance)
+   (fuel :initarg :fuel :reader interpreter-fuel)
+   (symbols :initform (make-hash-table :test 'eq) :reader interpreter-symbols)
+   (symbol-names :initform (make-hash-table) :reader interpreter-symbol-names)
+   (functions :initform (make-hash-table) :reader interpreter-function-objects)
+   (packages :initform (make-hash-table) :reader interpreter-packages)
+   (readtable :initform nil :accessor interpreter-readtable)))
+
+(cffi:defcallback interpreter-host-service :pointer
+    ((env :pointer) (caller :pointer) (args wt::p-wasmtime-val) (nargs wt::size)
+     (results wt::p-wasmtime-val) (nresults wt::size))
+  (declare (ignore env caller nargs nresults))
+  (wt:write-value results 3
+    (handler-case
+        (let ((operation (wt:read-value args))
+              (argument (wt:read-value (cffi:mem-aptr args '(:struct wt::wasmtime-val) 1))))
+          (coerce (case operation
+                    (0 (get-universal-time))
+                    (1 (* (get-internal-real-time) (/ 1000 internal-time-units-per-second)))
+                    (2 (* (get-internal-run-time) (/ 1000 internal-time-units-per-second)))
+                    (3 (sleep (/ argument 1000)) 0)
+                    (otherwise -1)) 'double-float))
+      (error () -1d0)))
+  (cffi:null-pointer))
+
+(defun install-interpreter-host-services (interpreter)
+  (let ((context (interpreter-context interpreter)))
+    (wt:with-callback-func (function context (cffi:callback interpreter-host-service)
+                                    :parameters '(:i32 :f64) :results '(:f64))
+      (wt:with-export (table context (interpreter-instance interpreter) "host-services" 2)
+        (cffi:with-foreign-object (value '(:struct wt::wasmtime-val))
+          (setf (cffi:foreign-slot-value value '(:struct wt::wasmtime-val) 'wt::kind) 5)
+          (wt::copy-struct
+            (cffi:foreign-slot-pointer
+              (cffi:foreign-slot-pointer value '(:struct wt::wasmtime-val) 'wt::of)
+              '(:union wt::wasmtime-valunion) 'wt::funcref)
+            function '(:struct wt::wasmtime-func))
+          (wt:check-error (wt::wasmtime-table-set context (wt:extern-payload table 'wt::table) 0 value)))))))
+
+(defun wasm-without-debug-names (bytes)
+  "Remove only the optional name section, retaining all executable bytes."
+  (let ((position 8) (size (length bytes)) (kept (list (cons 0 8))) (total 8))
+    (when (< size 8) (error "Truncated WASM header."))
+    (labels ((u32 (limit)
+               (let ((result 0))
+                 (loop for shift from 0 below 35 by 7 do
+                   (when (>= position limit) (error "Truncated WASM section length."))
+                   (let ((byte (aref bytes position)))
+                     (incf position)
+                     (setf result (logior result (ash (logand byte 127) shift)))
+                     (when (< byte 128)
+                       (unless (typep result '(unsigned-byte 32)) (error "Invalid WASM section length."))
+                       (return-from u32 result))))
+                 (error "Invalid WASM section length."))))
+      (loop while (< position size) do
+        (let* ((start position) (id (aref bytes position))
+               (end (progn (incf position) (+ (u32 size) position)))
+               (debug-name-p nil))
+          (when (> end size) (error "Truncated WASM section."))
+          (when (zerop id)
+            (let ((length (u32 end)))
+              (when (> (+ position length) end) (error "Truncated WASM custom section name."))
+              (setf debug-name-p (and (= length 4)
+                (loop for code across #(110 97 109 101) for i from position
+                      always (= code (aref bytes i)))))))
+          (unless debug-name-p (push (cons start end) kept) (incf total (- end start)))
+          (setf position end))))
+    (let ((result (make-array total :element-type '(unsigned-byte 8))) (to 0))
+      (dolist (span (nreverse kept) result)
+        (replace result bytes :start1 to :start2 (car span) :end2 (cdr span))
+        (incf to (- (cdr span) (car span)))))))
+
+(defparameter *interpreter-wasm* nil)
+(defparameter *interpreter-wasm-compact* nil)
+(defun interpreter-wasm (&key wasi debug-names)
+  "Return the interpreter binary. DEBUG-NAMES retains native debugging names."
+  (if wasi
+      (let ((bytes (wt:wat-to-wasm (interpreter-wat :wasi t))))
+        (if debug-names bytes (wasm-without-debug-names bytes)))
+      (let ((raw (or *interpreter-wasm* (setf *interpreter-wasm* (wt:wat-to-wasm (interpreter-wat))))))
+        (copy-seq (if debug-names raw
+          (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
+            (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw))))))))))
+(defun write-interpreter-wasm (pathname &key wasi debug-names)
+  "Write the interpreter. WASI adds the REPL; DEBUG-NAMES retains native names."
+  (with-open-file (stream pathname :direction :output :if-exists :supersede
+                                  :element-type '(unsigned-byte 8))
+    (write-sequence (interpreter-wasm :wasi wasi :debug-names debug-names) stream))
+  pathname)
+
+(defun close-interpreter (interpreter)
+  "Release all Wasmtime resources. It is safe to close an interpreter twice."
+  (when (interpreter-instance interpreter)
+    (cffi:foreign-free (interpreter-instance interpreter))
+    (setf (interpreter-instance interpreter) nil))
+  (when (interpreter-store interpreter)
+    (wt::wasmtime-store-delete (interpreter-store interpreter))
+    (setf (interpreter-store interpreter) nil (interpreter-context interpreter) nil))
+  (when (interpreter-module interpreter)
+    (wt::wasmtime-module-delete (interpreter-module interpreter))
+    (setf (interpreter-module interpreter) nil))
+  (when (interpreter-engine interpreter)
+    (wt::wasm-engine-delete (interpreter-engine interpreter))
+    (setf (interpreter-engine interpreter) nil))
+  (values))
+
+(defun make-interpreter (&key (fuel 500000000) parallel-compilation)
+  "Create an isolated guest with FUEL instructions available per evaluation."
+  (check-type fuel (unsigned-byte 64))
+  (let ((interpreter (make-instance 'interpreter :fuel fuel)))
+    (handler-case
+        (progn
+          (let ((config (wt::wasm-config-new)))
+            (wt::wasmtime-config-wasm-gc-set config t)
+            (wt::wasmtime-config-wasm-exceptions-set config t)
+            (wt::wasmtime-config-signals-based-traps-set config nil)
+            (wt::wasmtime-config-consume-fuel-set config t)
+            ;; Avoid retaining large compiler-worker allocator arenas per engine.
+            (wt::wasmtime-config-parallel-compilation-set config parallel-compilation)
+            (setf (interpreter-engine interpreter) (wt::wasm-engine-new-with-config config)))
+          (when (cffi:null-pointer-p (interpreter-engine interpreter)) (error "Cannot create Wasmtime engine."))
+          (setf (interpreter-store interpreter)
+                (wt::wasmtime-store-new (interpreter-engine interpreter) (cffi:null-pointer) (cffi:null-pointer)))
+          (setf (interpreter-context interpreter) (wt::wasmtime-store-context (interpreter-store interpreter)))
+          (wt:check-error (wt:wasmtime-context-set-fuel (interpreter-context interpreter) (max fuel 1000000000)))
+          (setf (interpreter-module interpreter) (wt:compile-module (interpreter-engine interpreter) (interpreter-wasm :debug-names t)))
+          (setf (interpreter-instance interpreter) (cffi:foreign-alloc '(:struct wt::wasmtime-instance)))
+          (wt:instantiate (interpreter-context interpreter) (interpreter-module interpreter) (interpreter-instance interpreter))
+          (install-interpreter-host-services interpreter)
+          (loop for symbol in *runtime-symbols* for id from 0 do
+            (setf (gethash symbol (interpreter-symbols interpreter)) id
+                  (gethash id (interpreter-symbol-names interpreter)) symbol))
+          (wt:instance-call (interpreter-context interpreter) (interpreter-instance interpreter) "initialize")
+          (let ((seed (make-random-state t)))
+            (apply #'wt:instance-call (interpreter-context interpreter) (interpreter-instance interpreter) "seed-random"
+              (loop repeat 4 for word = (random #x100000000 seed)
+                    collect (if (logbitp 31 word) (- word #x100000000) word))))
+          interpreter)
+      (error (condition) (close-interpreter interpreter) (error condition)))))
+
+(defmacro with-interpreter ((name &rest options) &body body)
+  `(let ((,name (make-interpreter ,@options)))
+     (unwind-protect (progn ,@body) (close-interpreter ,name))))
+
+(defun guest-symbol-id (interpreter symbol)
+  (multiple-value-bind (id found) (gethash symbol (interpreter-symbols interpreter))
+    (if found id
+        (let* ((guest (guest-request interpreter "resolve-symbol"
+                                    (list (symbol-name symbol) (when (keywordp symbol) "KEYWORD"))
+                                    (if (symbol-package symbol) 0 2)))
+               (id (cond ((null guest) 0) ((guest-symbol-p guest) (guest-symbol-id-slot guest))
+                         (t (gethash guest (interpreter-symbols interpreter))))))
+          (setf (gethash symbol (interpreter-symbols interpreter)) id
+                (gethash id (interpreter-symbol-names interpreter)) symbol)
+          id))))
+
+
+(defun encode-form (interpreter form)
+  (let ((bytes (make-array 64 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+        (active (make-hash-table :test 'eq)))
+    (labels ((u32 (word) (dotimes (i 4) (vector-push-extend (ldb (byte 8 (* i 8)) word) bytes)))
+             (encode (value)
+               (typecase value
+                 (null (u32 0))
+                 (integer
+                  (u32 1) (u32 (signum value))
+                  (let* ((magnitude (abs value)) (n (max 1 (ceiling (integer-length magnitude) 15))))
+                    (u32 n) (dotimes (i n) (u32 (ldb (byte 15 (* 15 i)) magnitude)))))
+                 (ratio (u32 2) (encode (numerator value)) (encode (denominator value)))
+                 (float
+                  (u32 (if (typep value 'single-float) 3 4))
+                  (cffi:with-foreign-object (raw :double)
+                    (setf (cffi:mem-ref raw :double) (coerce value 'double-float))
+                    (let ((bits (cffi:mem-ref raw :uint64)))
+                      (u32 (ldb (byte 32 0) bits)) (u32 (ldb (byte 32 32) bits)))))
+                 (complex (u32 5) (encode (realpart value)) (encode (imagpart value)))
+                 (character (u32 16) (u32 (char-code value)))
+                 (guest-function
+                  (unless (eq interpreter (guest-function-owner value)) (error "Function belongs to a different interpreter."))
+                  (u32 8) (u32 (guest-function-id value)))
+                 (guest-instance
+                  (unless (eq interpreter (guest-instance-owner value)) (error "Instance belongs to a different interpreter."))
+                  (u32 23) (u32 (guest-instance-id value)))
+                 (guest-opaque-object
+                  (unless (eq interpreter (guest-opaque-object-owner value)) (error "Object belongs to a different interpreter."))
+                  (u32 (guest-opaque-object-tag value)) (u32 (guest-opaque-object-id value)))
+                 (guest-condition
+                  (unless (eq interpreter (guest-condition-owner value)) (error "Condition belongs to a different interpreter."))
+                  (u32 17) (u32 (guest-condition-id value)))
+                 (guest-restart
+                  (unless (eq interpreter (guest-restart-owner value)) (error "Restart belongs to a different interpreter."))
+                  (u32 19) (u32 (guest-restart-id value)))
+                 (guest-symbol
+                  (unless (eq interpreter (guest-symbol-owner value)) (error "Symbol belongs to a different interpreter."))
+                  (u32 6) (u32 (guest-symbol-id-slot value)))
+                 (guest-package
+                  (unless (eq interpreter (guest-package-owner value)) (error "Package belongs to a different interpreter."))
+                  (u32 12) (u32 (guest-package-id value)))
+                 (symbol (u32 6) (u32 (guest-symbol-id interpreter value)))
+                 (cons
+                  (let ((tail value) (count 0))
+                    (unwind-protect
+                      (progn
+                        (loop while (consp tail) do
+                          (when (gethash tail active) (error "Circular forms are not supported."))
+                          (setf (gethash tail active) t)
+                          (incf count)
+                          (u32 7) (encode (car tail)) (setf tail (cdr tail)))
+                        (encode tail))
+                      (loop repeat count for cell = value then (cdr cell)
+                            do (remhash cell active)))))
+                 (simple-string (u32 10) (u32 0) (u32 (length value))
+                         (loop for char across value do (u32 (char-code char))))
+                 (simple-vector
+                  (when (gethash value active) (error "Circular forms are not supported."))
+                  (setf (gethash value active) t)
+                  (unwind-protect
+                    (progn (u32 34) (u32 (length value)) (map nil #'encode value))
+                    (remhash value active)))
+                 (simple-bit-vector
+                  (u32 36) (u32 (length value))
+                  (loop for first from 0 below (length value) by 32 do
+                    (u32 (loop for j below (min 32 (- (length value) first))
+                               sum (ash (bit value (+ first j)) j)))))
+                 (array
+                  (when (gethash value active) (error "Circular forms are not supported."))
+                  (setf (gethash value active) t)
+                  (unwind-protect
+                    (let* ((element-type (array-element-type value))
+                           (kind (cond ((null element-type) 3)
+                                       ((subtypep element-type 'character) 1)
+                                       ((subtypep element-type 'bit) 2) (t 0))))
+                      (u32 35) (u32 (logior kind (if (adjustable-array-p value) 4 0)))
+                      (u32 (array-rank value)) (mapc #'u32 (array-dimensions value))
+                      (u32 (if (array-has-fill-pointer-p value) (fill-pointer value) #xffffffff))
+                      (unless (= kind 3)
+                        (dotimes (i (array-total-size value)) (encode (row-major-aref value i)))))
+                    (remhash value active)))
+                 (t (error "Cannot transfer ~S to the interpreter." value)))))
+      (encode form)) bytes))
+
+(defun decode-result (interpreter bytes)
+  (let ((position 0))
+    (labels ((u32 (&optional peek)
+               (when (> (+ position 4) (length bytes)) (error "Truncated guest result."))
+               (prog1 (loop for i below 4 sum (ash (aref bytes (+ position i)) (* 8 i)))
+                 (unless peek (incf position 4))))
+             (decode ()
+               (case (u32)
+                 (0 nil)
+                 (1 (let* ((sign (u32)) (length (u32))
+                           (magnitude (loop for i below length sum (ash (u32) (* 15 i)))))
+                      ;; ECL multiplication by -1 can leave the minimum fixnum
+                      ;; boxed as an unnormalized bignum, breaking EQL and =.
+                      (if (= sign #xffffffff) (- magnitude) (* sign magnitude))))
+                 (2 (/ (decode) (decode)))
+                 ((3 4)
+                  (let ((tag (aref bytes (- position 4))))
+                    (cffi:with-foreign-object (raw :uint64)
+                      (let* ((lo (u32)) (hi (u32)))
+                        (setf (cffi:mem-ref raw :uint64) (logior lo (ash hi 32))))
+                      (coerce (cffi:mem-ref raw :double) (if (= tag 3) 'single-float 'double-float)))))
+                 (5 (complex (decode) (decode)))
+                 (34 (let ((result (make-array (u32))))
+                       (dotimes (i (length result) result) (setf (aref result i) (decode)))))
+                 (36 (let* ((length (u32)) (result (make-array length :element-type 'bit)))
+                       (loop for first from 0 below length by 32 for word = (u32) do
+                         (dotimes (j (min 32 (- length first)))
+                           (setf (bit result (+ first j)) (ldb (byte 1 j) word)))) result))
+                 (35 (let* ((flags (u32)) (rank (u32)) (dimensions (loop repeat rank collect (u32)))
+                            (fill (u32)) (kind (logand flags 3))
+                            (options (append (list :element-type (nth kind '(t character bit nil))
+                                                   :adjustable (logbitp 2 flags))
+                                             (unless (= fill #xffffffff) (list :fill-pointer fill))))
+                            (result (apply #'make-array dimensions options)))
+                       (unless (= kind 3)
+                         (dotimes (i (array-total-size result)) (setf (row-major-aref result i) (decode)))) result))
+                 (6 (let* ((id (u32)) (name (decode)) (package (decode)))
+                      (multiple-value-bind (symbol found) (gethash id (interpreter-symbol-names interpreter))
+                        (cond ((and found (guest-symbol-p symbol))
+                               (setf (guest-symbol-name symbol) name (guest-symbol-package symbol) package) symbol)
+                              (found symbol)
+                              (t (setf (gethash id (interpreter-symbol-names interpreter))
+                                       (%guest-symbol interpreter id name package)))))))
+                 (8 (let ((id (u32)))
+                      (or (gethash id (interpreter-function-objects interpreter))
+                          (setf (gethash id (interpreter-function-objects interpreter)) (%guest-function interpreter id)))))
+                 ((17 19 22 23 28 29 37 38 39 40 41 42 43 44 45 46) (let ((tag (aref bytes (- position 4))) (id (u32)))
+                            (or (gethash id (interpreter-function-objects interpreter))
+                                (setf (gethash id (interpreter-function-objects interpreter))
+                                      (case tag (17 (%guest-condition interpreter id)) (19 (%guest-restart interpreter id))
+                                        (23 (%guest-instance interpreter id))
+                                        (otherwise (%guest-opaque-object interpreter id tag)))))))
+                 (12 (let* ((id (u32)) (name (decode))
+                            (package (or (gethash id (interpreter-packages interpreter))
+                                         (setf (gethash id (interpreter-packages interpreter))
+                                               (%guest-package interpreter id name)))))
+                       (setf (guest-package-name package) name) package))
+                 (16 (code-char (u32)))
+                 (7 (let* ((head (cons (decode) nil)) (tail head))
+                      (loop while (= (u32 t) 7) do
+                        (u32)
+                        (setf (cdr tail) (cons (decode) nil) tail (cdr tail)))
+                      (setf (cdr tail) (decode)) head))
+                 (10 (u32) (coerce (loop repeat (u32) collect (code-char (u32))) 'string))
+                 (otherwise (error "Invalid guest result tag.")))))
+      (unless (= 14 (u32)) (error "Missing guest values packet."))
+      (let ((values (decode)))
+        (unless (= position (length bytes)) (error "Trailing guest result bytes."))
+        (values-list values)))))
+
+(defun guest-status (interpreter &optional (value nil supplied-p))
+  (wt:with-export (export (interpreter-context interpreter) (interpreter-instance interpreter) "error" 1)
+    (cffi:with-foreign-object (raw '(:struct wt::wasmtime-val))
+      (let ((global (wt:extern-payload export 'wt::global)))
+        (if supplied-p
+            (progn (wt:write-value raw 0 value)
+                   (wt:check-error (wt::wasmtime-global-set (interpreter-context interpreter) global raw)))
+            (progn (wt::wasmtime-global-get (interpreter-context interpreter) global raw)
+                   (wt:read-value raw)))))))
+
+(defun guest-request (interpreter operation form &rest arguments)
+  (unless (interpreter-context interpreter) (error "Interpreter is closed."))
+  (let ((context (interpreter-context interpreter)) (instance (interpreter-instance interpreter))
+        (input (encode-form interpreter form)))
+    (guest-status interpreter 0)
+    (wt:check-error (wt:wasmtime-context-set-fuel context (interpreter-fuel interpreter)))
+    (wt:with-export (export context instance "memory" 3)
+      (let* ((memory (wt:extern-payload export 'wt::memory))
+             (size (wt:wasmtime-memory-data-size context memory)))
+        (when (> (length input) size)
+          (cffi:with-foreign-object (previous :uint64)
+            (wt:check-error (wt::wasmtime-memory-grow context memory (ceiling (- (length input) size) 65536) previous))))
+        (let ((data (wt:wasmtime-memory-data context memory)))
+          (dotimes (i (length input)) (setf (cffi:mem-aref data :uint8 i) (aref input i))))
+        (let ((length
+                (handler-case (apply #'wt:instance-call context instance operation (length input) arguments)
+                  (wt:wasm-trap (condition)
+                    (let* ((code (guest-status interpreter))
+                           (message (if (and (< 0 code) (< code (length *guest-errors*)))
+                                        (aref *guest-errors* code) (princ-to-string condition))))
+                      ;; Wasm traps bypass guest returns; unwind all dynamic bindings.
+                      (wt:check-error (wt:wasmtime-context-set-fuel context 1000000))
+                      (wt:instance-call context instance "unwind")
+                      (when (plusp code)
+                        (setf message (or (ignore-errors
+                          (let ((size (wt:instance-call context instance "format-error")))
+                            (cffi:foreign-string-to-lisp (wt:wasmtime-memory-data context memory)
+                              :count size :encoding :utf-8))) message)))
+                      (when (= code (runtime-error-code :unbound-variable))
+                        (let ((id (wt:instance-call context instance "unbound-symbol")))
+                          (error 'interpreter-unbound-variable :code code :message message
+                            :name (or (gethash id (interpreter-symbol-names interpreter))
+                                      (guest-request interpreter "unbound-variable-name" nil)))))
+                      (error (if (member code '(12 13)) 'interpreter-package-error 'interpreter-error) :code code :message message))))))
+          ;; Guest serialization can grow memory; reacquire its base pointer.
+          (let ((output (make-array length :element-type '(unsigned-byte 8)))
+                (data (wt:wasmtime-memory-data context memory)))
+            (dotimes (i length) (setf (aref output i) (cffi:mem-aref data :uint8 i)))
+            (decode-result interpreter output)))))))
+
+(defun evaluate (interpreter form)
+  "Evaluate FORM in WASM and return its multiple values as host representations."
+  (unwind-protect (guest-request interpreter "evaluate" form)
+    (write-string (guest-request interpreter "output" nil))
+    (dolist (message (guest-request interpreter "warnings" nil))
+      (warn 'interpreter-warning :message message))))
+
+(defun repl (&key (input *standard-input*) (output *standard-output*) interpreter)
+  "Read host CL forms and evaluate them in WASM until EOF or :QUIT."
+  (labels ((run (vm)
+             (let ((eof (gensym)) (*read-eval* nil) (*standard-output* output))
+               (loop (write-string "miricl> " output) (finish-output output)
+                     (handler-case
+                         (let ((form (read-form vm input nil eof)))
+                           (when (or (eq form eof) (or (eq form :quit)
+                                 (and (guest-symbol-p form) (equal (guest-symbol-name form) "QUIT")
+                                      (guest-symbol-package form)
+                                      (equal (guest-package-name (guest-symbol-package form)) "KEYWORD")))) (return))
+                           (dolist (value (multiple-value-list (evaluate vm form)))
+                             (prin1 value output) (terpri output)))
+                       (error (condition) (format output "~A~%" condition)))))))
+    (if interpreter (run interpreter) (with-interpreter (vm) (run vm)))))

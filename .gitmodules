@@ -1,0 +1,3 @@
+[submodule "tests/ansi-test"]
+	path = tests/ansi-test
+	url = https://gitlab.common-lisp.net/ansi-test/ansi-test.git

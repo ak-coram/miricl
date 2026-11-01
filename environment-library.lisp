@@ -1,0 +1,66 @@
+;;;; Interactive facilities share the portable stream and filesystem APIs.
+(defun %query-boolean (long control arguments)
+  (when control (fresh-line *query-io*) (apply 'format *query-io* control arguments))
+  (loop
+    (write-string (if long " (Yes or No) " " (Y or N) ") *query-io*)
+    (force-output *query-io*)
+    (let ((answer (string-trim '(#\Space #\Tab #\Return) (read-line *query-io*))))
+      (cond ((if long (string-equal answer "yes")
+                    (and (plusp (length answer)) (char-equal (char answer 0) #\y))) (return t))
+            ((if long (string-equal answer "no")
+                    (and (plusp (length answer)) (char-equal (char answer 0) #\n))) (return nil))
+            (t (write-string (if long "Please answer Yes or No." "Please answer Y or N.") *query-io*))))))
+(defun y-or-n-p (&optional control &rest arguments) (%query-boolean nil control arguments))
+(defun yes-or-no-p (&optional control &rest arguments) (%query-boolean t control arguments))
+
+;; The standard explicitly permits normal execution as the minimal stepper.
+(defmacro step (form) (list 'locally form))
+
+(defvar %dribble-state nil)
+(defun dribble (&optional (pathname nil suppliedp))
+  (when %dribble-state
+    (setq *standard-input* (cadr %dribble-state) *standard-output* (caddr %dribble-state))
+    (close (car %dribble-state)) (setq %dribble-state nil))
+  (when suppliedp
+    (let* ((stream (open pathname :direction :output :if-exists :append :if-does-not-exist :create))
+           (input (make-echo-stream *standard-input* stream))
+           (output (make-broadcast-stream *standard-output* stream)))
+      (setq %dribble-state (list stream *standard-input* *standard-output*)
+            *standard-input* input *standard-output* output)))
+  nil)
+
+(defvar *editor-function* nil)
+(defun ed (&optional object)
+  (unless (or (null object) (symbolp object) (pathnamep object) (stringp object)
+              (and (consp object) (eq (car object) 'setf) (= (length object) 2) (symbolp (cadr object))))
+    (error 'type-error :datum object :expected-type '(or null symbol pathname string cons)))
+  (if *editor-function* (funcall *editor-function* object)
+      (error "No resident editor is installed. Set MIRICL:*EDITOR-FUNCTION* to an editor callback.")))
+
+(defun %inspect-part (object part &optional (value nil suppliedp))
+  (cond ((consp object)
+         (case part
+           (:car (if suppliedp (setf (car object) value) (car object)))
+           (:cdr (if suppliedp (setf (cdr object) value) (cdr object)))
+           (otherwise (error "Use :CAR or :CDR for a cons."))))
+        ((arrayp object)
+         (if suppliedp (setf (row-major-aref object part) value) (row-major-aref object part)))
+        ((typep object 'standard-object)
+         (if suppliedp (setf (slot-value object part) value) (slot-value object part)))
+        (t (error "This object has no inspectable parts."))))
+(defun inspect (object)
+  (let ((parents nil) (*print-circle* t) (*print-readably* nil) (*print-level* 4) (*print-length* 20))
+    (loop
+      (describe object *query-io*)
+      (write-string "Inspect (:GET part, :SET part value, :UP, :QUIT, :HELP): " *query-io*)
+      (force-output *query-io*)
+      (let ((command (read *query-io* nil :quit)))
+        (handler-case
+          (cond ((eq command :quit) (return (values)))
+                ((eq command :up) (when parents (setq object (pop parents))))
+                ((and (consp command) (eq (car command) :get) (= (length command) 2))
+                 (let ((next (%inspect-part object (cadr command)))) (push object parents) (setq object next)))
+                ((and (consp command) (eq (car command) :set) (= (length command) 3))
+                 (%inspect-part object (cadr command) (caddr command)))
+                (t (write-line "Parts: :CAR/:CDR for conses, a row-major array index, or a slot name. SET values are read literally." *query-io*)))
+          (error (condition) (format *query-io* "~&~A~%" condition)))))))
