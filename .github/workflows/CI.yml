@@ -18,14 +18,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lisp: [sbcl-bin, ccl-bin/1.13, ecl/24.5.10]
+        lisp: [sbcl-bin, ccl-bin/1.13, ecl/26.5.5]
         os: [ubuntu-latest, windows-latest, macos-14]
-        libwasmtime: [35.0.0]
+        libwasmtime: [50.0.1]
         exclude:
           - os: windows-latest
             lisp: ccl-bin/1.13
           - os: windows-latest
-            lisp: ecl/24.5.10
+            lisp: ecl/26.5.5
           - os: macos-14
             lisp: ccl-bin/1.13
     env:

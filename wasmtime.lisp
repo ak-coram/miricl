@@ -121,7 +121,7 @@
     (foreign-string-to-lisp data :count size)))
 
 (defun get-error-message (error)
-  (with-foreign-object (error-message 'p-wasm-byte-vec)
+  (with-foreign-object (error-message '(:struct wasm-byte-vec))
     (wasmtime-error-message error error-message)
     (byte-vec-to-string error-message)))
 
@@ -134,7 +134,7 @@
 
 (defun wat-to-wasm (input)
   (with-foreign-string ((wat wat-size) input)
-    (with-foreign-object (wasm 'p-wasm-byte-vec)
+    (with-foreign-object (wasm '(:struct wasm-byte-vec))
       ;; wat2wasm doesn't expect null-terminator, reduce size by 1:
       (let ((error (wasmtime-wat2wasm wat (1- wat-size) wasm)))
         (if (null-pointer-p error)
@@ -158,7 +158,7 @@
 (defmacro with-byte-vec ((byte-vec-var octets) &body body)
   (alexandria:with-gensyms (octets-sym octet-sym i-sym)
     `(let ((,octets-sym ,octets))
-       (with-foreign-object (,byte-vec-var 'p-wasm-byte-vec)
+       (with-foreign-object (,byte-vec-var '(:struct wasm-byte-vec))
          (wasm-byte-vec-new-uninitialized ,byte-vec-var (length ,octets-sym))
          (unwind-protect
               (progn

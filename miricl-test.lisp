@@ -32,8 +32,8 @@
   (null-pointer))
 
 (defun callback-func (context callback)
-  (with-foreign-objects ((params 'wt::p-wasm-valtype-vec)
-                         (results 'wt::p-wasm-valtype-vec))
+  (with-foreign-objects ((params '(:struct wt::wasm-valtype-vec))
+                         (results '(:struct wt::wasm-valtype-vec)))
     (let ((func (foreign-alloc '(:struct wt::wasmtime-func))))
       (wt::wasm-valtype-vec-new-empty params)
       (wt::wasm-valtype-vec-new-empty results)
