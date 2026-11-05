@@ -26,6 +26,7 @@
            #:evaluate #:evaluate-string #:load-source #:read-form #:repl
            #:interpreter-wasm #:write-interpreter-wasm
            #:interpreter-error #:interpreter-package-error #:interpreter-unbound-variable
+           #:interpreter-error-backtrace
            #:interpreter-warning
            #:guest-function-p #:guest-instance-p
            #:guest-opaque-object-p

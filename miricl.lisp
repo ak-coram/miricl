@@ -3,8 +3,13 @@
 
 (define-condition interpreter-error (error)
   ((code :initarg :code :reader interpreter-error-code)
-   (message :initarg :message :reader interpreter-error-message))
-  (:report (lambda (condition stream) (write-string (interpreter-error-message condition) stream))))
+   (message :initarg :message :reader interpreter-error-message)
+   (backtrace :initarg :backtrace :initform "" :reader interpreter-error-backtrace))
+  (:report (lambda (condition stream)
+             (write-string (interpreter-error-message condition) stream)
+             (unless (equal "" (interpreter-error-backtrace condition))
+               (terpri stream)
+               (write-string (interpreter-error-backtrace condition) stream)))))
 
 (define-condition interpreter-package-error (interpreter-error) ())
 (define-condition interpreter-unbound-variable (interpreter-error unbound-variable) ())
@@ -380,6 +385,7 @@
                 (handler-case (apply #'wt:instance-call context instance operation (length input) arguments)
                   (wt:wasm-trap (condition)
                     (let* ((code (guest-status interpreter))
+                           (backtrace "")
                            (message (if (and (< 0 code) (< code (length *guest-errors*)))
                                         (aref *guest-errors* code) (princ-to-string condition))))
                       ;; Wasm traps bypass guest returns; unwind all dynamic bindings.
@@ -389,13 +395,18 @@
                         (setf message (or (ignore-errors
                           (let ((size (wt:instance-call context instance "format-error")))
                             (cffi:foreign-string-to-lisp (wt:wasmtime-memory-data context memory)
-                              :count size :encoding :utf-8))) message)))
+                              :count size :encoding :utf-8))) message))
+                        (setf backtrace (or (ignore-errors
+                          (let ((size (wt:instance-call context instance "format-backtrace")))
+                            (cffi:foreign-string-to-lisp (wt:wasmtime-memory-data context memory)
+                              :count size :encoding :utf-8))) "")))
                       (when (= code (runtime-error-code :unbound-variable))
                         (let ((id (wt:instance-call context instance "unbound-symbol")))
-                          (error 'interpreter-unbound-variable :code code :message message
+                          (error 'interpreter-unbound-variable :code code :message message :backtrace backtrace
                             :name (or (gethash id (interpreter-symbol-names interpreter))
                                       (guest-request interpreter "unbound-variable-name" nil)))))
-                      (error (if (member code '(12 13)) 'interpreter-package-error 'interpreter-error) :code code :message message))))))
+                      (error (if (member code '(12 13)) 'interpreter-package-error 'interpreter-error)
+                        :code code :message message :backtrace backtrace))))))
           ;; Guest serialization can grow memory; reacquire its base pointer.
           (let ((output (make-array length :element-type '(unsigned-byte 8)))
                 (data (wt:wasmtime-memory-data context memory)))

@@ -121,7 +121,7 @@ self.onmessage = async ({data}) => {
     }
   } catch (error) {
     self.postMessage({type: data.type === 'initialize' ? 'fatal' : 'error',
-      message: error.message, output: error.output ?? ''});
+      message: error.message, output: error.output ?? '', backtrace: error.backtrace ?? ''});
   }
 };
 </script>
@@ -231,6 +231,7 @@ function startSession(message) {
       } else if (data.type === 'error') {
         append(data.output);
         append(`Error: ${data.message}`, 'error');
+        if (data.backtrace) append(data.backtrace, 'error');
         setState('Ready · evaluation failed', true);
       } else if (data.type === 'result') {
         append(data.output);

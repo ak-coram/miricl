@@ -167,7 +167,7 @@ explicit labels for nested loops. The list local is consumed."
 (defparameter *runtime-dynamic-state*
   '($dynamic-package $dynamic-variables $handlers $restarts $restart-associations $catches $targets))
 
-(defun wat-dynamic-call (expression)
+(defun wat-dynamic-call (expression &key cleanup)
   "Restore dynamic scope on ordinary returns and guest nonlocal transfers."
   (runtime-wat-sequence
    (runtime-wat-forms
@@ -180,6 +180,7 @@ explicit labels for nested loops. The list local is consumed."
        (local.set $thrown (i32.const 1)))
    (runtime-wat-forms
     (loop for name in *runtime-dynamic-state* collect `(global.set ,name (local.get ,name))))
+   (or cleanup (runtime-wat-sequence))
    #@(if (local.get $thrown) (then (throw $transfer)))
    #@(local.get $result)))
 

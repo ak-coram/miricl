@@ -40,6 +40,8 @@
     ()
     ()
   (:export "unwind")
+  #@(global.set $backtrace-depth (i32.const 0))
+  #@(array.fill $objects (global.get $backtrace-frames) (i32.const 0) (ref.null $obj) (i32.const 64))
   #@(global.set $javascript-depth (i32.const 0))
   #@(global.set $derived-type-environment (ref.null $obj))
   #@(global.set $dynamic-package (ref.null $obj))

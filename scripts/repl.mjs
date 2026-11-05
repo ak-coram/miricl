@@ -17,6 +17,7 @@ function prompt() {
 function report(error) {
   if (error.output) process.stdout.write(error.output);
   process.stderr.write(`Error: ${error.message}\n`);
+  if (error.backtrace) process.stderr.write(error.backtrace);
 }
 input.on('SIGINT', () => {
   if (pending) {pending = ''; process.stdout.write('\n'); prompt();}

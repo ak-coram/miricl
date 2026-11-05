@@ -2,6 +2,21 @@
 (in-package #:miricl-test)
 (in-suite :miricl)
 
+(test lightweight-error-backtrace
+  (m:with-interpreter (vm)
+    (m:evaluate-string vm "(defun trace-host-leaf () (error \"host trace\"))
+      (defun trace-host-root () (trace-host-leaf))")
+    (dolist (form '("(trace-host-root)" (trace-host-root)))
+      (handler-case
+          (progn (if (stringp form) (m:evaluate-string vm form) (m:evaluate vm form))
+                 (fail "Expected a guest error."))
+        (m:interpreter-error (condition)
+          (is (string= "host trace" (m::interpreter-error-message condition)))
+          (is (search "COMMON-LISP-USER::TRACE-HOST-LEAF" (m:interpreter-error-backtrace condition)))
+          (is (search "COMMON-LISP-USER::TRACE-HOST-ROOT" (m:interpreter-error-backtrace condition)))
+          (is (search "Backtrace" (princ-to-string condition))))))
+    (is (= 42 (m:evaluate vm '(+ 20 22))))))
+
 (test lexical-tagbody-control
   (m:with-interpreter (vm :fuel 100000000)
     (dolist (form
@@ -253,7 +268,7 @@
       (symbol-value 'unbound-recovery)))))
     (is (= 43 (m:evaluate vm 'unbound-recovery)))
     (handler-case (m:evaluate vm '(error "Bad ~A: ~D" "value" 7))
-      (m:interpreter-error (c) (is (string= "Bad value: 7" (princ-to-string c)))))
+      (m:interpreter-error (c) (is (string= "Bad value: 7" (m::interpreter-error-message c)))))
     (is (= 3 (m:evaluate vm '(+ 1 2))))))
 
 (test condition-reports
@@ -266,7 +281,7 @@
     (is (string= "Bad 7" (m:evaluate-string vm "(let ((c (make-condition 'report-error :value 0)))
       (set-report-value 7 c) (format nil \"~A\" c))")))
     (handler-case (m:evaluate-string vm "(error 'report-error :value 8)")
-      (m:interpreter-error (c) (is (string= "Bad 8" (princ-to-string c)))))
+      (m:interpreter-error (c) (is (string= "Bad 8" (m::interpreter-error-message c)))))
     (is (string= "λ" (m:evaluate vm '(format nil (lambda (stream x) (write-string x stream)) "λ"))))))
 
 (test restart-reports-and-debugger-scopes

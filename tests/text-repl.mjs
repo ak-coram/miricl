@@ -192,13 +192,14 @@ assert.equal(output('(+ 1 2)'), '3\n');
 assert.equal(vm.evaluate(':quit (/ 1 0)').quit, true);
 
 const repl = fileURLToPath(new URL('../scripts/repl.mjs', import.meta.url));
+const traceHeader = 'Backtrace (most recent call first):\n';
 const session = '(defun f (x)\n (+ x 1))\n(f 41)\n(/ 1 0)\n(+ 3 4)\n:quit\n(/ 1 0)\n';
 if (!inProcess) {
   const node = spawnSync(process.execPath, [repl, binary], {input: session, encoding: 'utf8'});
   assert.ifError(node.error);
   assert.equal(node.status, 0, node.stderr);
   assert.equal(node.stdout, 'F\n42\n7\n');
-  assert.equal(node.stderr, 'Error: Division by zero.\n');
+  assert.equal(node.stderr, `Error: Division by zero.\n${traceHeader}  COMMON-LISP:/\n`);
   const eof = spawnSync(process.execPath, [repl, binary], {input: '(+ 1', encoding: 'utf8'});
   assert.ifError(eof.error);
   assert.equal(eof.status, 1);
@@ -252,7 +253,7 @@ if (wasiBinary) {
     return new TextDecoder().decode(Uint8Array.from(written));
   };
   assert.equal(await runInProcess(`"${'λ🙂'.repeat(300)}"\n:quit\n`), `miricl> "${'λ🙂'.repeat(300)}"\nmiricl> `);
-  assert.equal(await runInProcess(session), 'miricl> ...> F\nmiricl> 42\nmiricl> Error: Division by zero.\nmiricl> 7\nmiricl> ');
+  assert.equal(await runInProcess(session), `miricl> ...> F\nmiricl> 42\nmiricl> Error: Division by zero.\n${traceHeader}  COMMON-LISP:/\nmiricl> 7\nmiricl> `);
   assert.match(await runInProcess('('), /Error: Incomplete input\./);
   assert.equal(await runInProcess('(+ 1 2)'), 'miricl> 3\n');
   const clockCalls = [];
@@ -271,7 +272,7 @@ if (wasiBinary) {
     '(handler-case (/ 1 0) (error () 42))\n' +
     '(restart-case (invoke-restart \'use 7) (use (v) v))\n' +
     '(error "Bad ~A" "λ")\n(warn "hello")\n:quit\n'),
-    'miricl> 42\nmiricl> 7\nmiricl> Error: Bad λ\nmiricl> Warning: hello\nNIL\nmiricl> ');
+    `miricl> 42\nmiricl> 7\nmiricl> Error: Bad λ\n${traceHeader}  COMMON-LISP:ERROR\nmiricl> Warning: hello\nNIL\nmiricl> `);
   assert.equal(await runInProcess(
     '(format t "~{~D~^, ~}~%" (loop for i from 1 to 3 collect i))\n' +
     '(loop for i below 5 sum i)\n:quit\n'), 'miricl> 1, 2, 3\nNIL\nmiricl> 10\nmiricl> ');
@@ -288,7 +289,7 @@ if (wasiBinary) {
       const wasi = spawnSync(command, args, {input: session, encoding: 'utf8'});
       assert.ifError(wasi.error);
       assert.equal(wasi.status, 0, wasi.stderr);
-      assert.equal(wasi.stdout, 'miricl> ...> F\nmiricl> 42\nmiricl> Error: Division by zero.\nmiricl> 7\nmiricl> ');
+      assert.equal(wasi.stdout, `miricl> ...> F\nmiricl> 42\nmiricl> Error: Division by zero.\n${traceHeader}  COMMON-LISP:/\nmiricl> 7\nmiricl> `);
       const unfinished = spawnSync(command, args, {input: '(', encoding: 'utf8'});
       assert.ifError(unfinished.error);
       assert.equal(unfinished.status, 0, unfinished.stderr);
@@ -301,7 +302,7 @@ if (wasiBinary) {
       assert.ifError(conditions.error);
       assert.equal(conditions.status, 0, conditions.stderr);
       assert.equal(conditions.stdout,
-        'miricl> 42\nmiricl> 7\nmiricl> Error: Bad λ\nmiricl> Warning: hello\nNIL\nmiricl> ');
+        `miricl> 42\nmiricl> 7\nmiricl> Error: Bad λ\n${traceHeader}  COMMON-LISP:ERROR\nmiricl> Warning: hello\nNIL\nmiricl> `);
       const formatting = spawnSync(command, args, {input:
         '(format t "~{~D~^, ~}~%" (loop for i from 1 to 3 collect i))\n' +
         '(loop for i below 5 sum i)\n:quit\n', encoding: 'utf8'});

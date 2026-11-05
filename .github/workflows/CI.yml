@@ -96,6 +96,7 @@ jobs:
           ros --eval '(ql:quickload :miricl)' --eval '(miricl:write-interpreter-wasm "interpreter.wasm")' --eval '(miricl:write-interpreter-wasm "miricl-repl.wasm" :wasi t)' --eval '(uiop:quit)'
           node tests/standalone.mjs interpreter.wasm
           node tests/text-repl.mjs interpreter.wasm miricl-repl.wasm
+          node tests/backtrace.mjs interpreter.wasm
           node tests/development.mjs interpreter.wasm
           node tests/ansi-runner.mjs interpreter.wasm
 

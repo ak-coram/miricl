@@ -212,6 +212,7 @@
         (global.set $dynamic-variables (local.get $binding))))
   #@(global.set $last-condition (local.get $condition))
   #@(global.set $error (struct.get $obj $n (local.get $condition)))
+  #@(call $capture-backtrace)
   #@(call $transfer-to (ref.null $obj) (ref.null $obj)))
 
 (define-runtime-function $fail (($code i32)) ()

@@ -240,11 +240,13 @@ class JavaScriptHost {
 }
 
 export class MiriclError extends Error {
-  constructor(message, code, output = '') {
-    super(message);
+  constructor(message, code, output = '', backtrace = '', cause) {
+    super(message, {cause});
     this.name = 'MiriclError';
     this.code = code;
     this.output = output;
+    this.backtrace = backtrace;
+    if (backtrace) this.stack += `\n${backtrace}`;
   }
 }
 
@@ -283,7 +285,12 @@ export class Miricl {
     const output = this.text(this.vm['text-output-length'].value);
     this.vm.unwind();
     const message = code ? this.text(this.vm['format-error']()) : cause.message;
-    return new MiriclError(message, code, output);
+    let backtrace = '';
+    if (code && this.vm['format-backtrace']) {
+      try { backtrace = this.text(this.vm['format-backtrace']()); }
+      catch { this.vm.unwind(); } // A broken printer must not replace the original error.
+    }
+    return new MiriclError(message, code, output, backtrace, cause);
   }
 
   hostService(operation, argument) {

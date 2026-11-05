@@ -79,6 +79,7 @@
                (:file "runtime-sequence-binding")
                (:file "runtime-sequence-reduce")
                (:file "runtime-apply")
+               (:file "runtime-backtrace")
                (:file "runtime-io")
                (:file "runtime-text-codec")
                (:file "runtime-text-number")

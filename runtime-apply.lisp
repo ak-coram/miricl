@@ -9,9 +9,20 @@
            ($handlers :nullable-object) ($restarts :nullable-object)
            ($restart-associations :nullable-object) ($catches :nullable-object) ($targets :nullable-object)
            ($thrown i32)
+           ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object)
            ($result :nullable-object))
+  ;; Reuse a bounded ring, restoring overwritten entries on return as well as
+  ;; nonlocal exits. No frame objects or argument lists are allocated here.
+  #@(local.set $backtrace-depth (global.get $backtrace-depth))
+  #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
+  #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
+  #@(array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $name))
+  #@(global.set $backtrace-depth (i32.add (local.get $backtrace-depth) (i32.const 1)))
   #@(call $clear-values)
-  (wat-dynamic-call #@(call $apply1 (local.get $name) (local.get $args))))
+  (wat-dynamic-call #@(call $apply1 (local.get $name) (local.get $args))
+    :cleanup #@(block
+      (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
+      (global.set $backtrace-depth (local.get $backtrace-depth)))))
 
 (define-runtime-function $apply-spread (($args :nullable-object)) (:nullable-object)
   (:locals ($function :nullable-object) ($scan :nullable-object) ($head :nullable-object)

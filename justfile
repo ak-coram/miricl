@@ -44,7 +44,7 @@ test:
     {{ quote(sbcl) }} --noinform --non-interactive --load {{ quote(quicklisp) }} --eval '(require :asdf)' --eval '(asdf:load-asd (truename "miricl.asd"))' --eval '(ql:quickload :miricl/test)' --eval '(asdf:test-system :miricl)'
 
 # Run all Node integration tests, including the WASI REPL.
-test-js: test-standalone test-text test-development test-compilation test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-ansi-runner
+test-js: test-standalone test-text test-development test-compilation test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
 
 # Check the standalone module's object transport.
 test-standalone: build
@@ -134,6 +134,10 @@ test-random: build
 # Check optional JavaScript interop, callbacks, and typed bindings.
 test-javascript: build
     {{ quote(node) }} tests/javascript.mjs {{ quote(interpreter) }}
+
+# Check bounded Lisp error traces and stack restoration across nonlocal exits.
+test-backtrace: build
+    {{ quote(node) }} tests/backtrace.mjs {{ quote(interpreter) }}
 
 # Check ANSI accounting and recovery from load errors and hanging tests.
 test-ansi-runner: build

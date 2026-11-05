@@ -116,6 +116,10 @@ try {
     (and (random-state-p a) (loop repeat 50 always (= (random 100000 a) (random 100000 b)))))`), 'T\n');
   assert.equal(await input('(progn (format t "before λ~%") (error "after"))'), 'before λ\n');
   assert.match(await js("document.getElementById('transcript').innerText"), /Error: after/);
+  await input('(defun browser-trace () (error "browser trace"))');
+  await input('(browser-trace)');
+  assert.match(await js("document.getElementById('transcript').innerText"),
+    /Error: browser trace[\s\S]*Backtrace \(most recent call first\):\n  COMMON-LISP:ERROR\n  COMMON-LISP-USER::BROWSER-TRACE/);
   assert.equal(await input('(browser-double 3)'), '6\n');
   assert.equal(await input(`(let ((start (get-internal-real-time)))
     (and (null (sleep 1/50)) (>= (- (get-internal-real-time) start) 15)

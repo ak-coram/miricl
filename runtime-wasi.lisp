@@ -111,7 +111,8 @@
       (global.set $source (array.new_default $digits (i32.const 0)))
       (global.set $source-end (i32.const 0))
       (global.set $cursor (global.get $text-output-length)) ,(emit-text "Error: ") (call $print-error)
-      (call $emit-char (i32.const 10)) (call $terminal-write) (local.set $status (i32.const 0)))
+      (call $emit-char (i32.const 10)) (call $print-backtrace)
+      (call $terminal-write) (local.set $status (i32.const 0)))
     (if (i32.or (i32.eq (local.get $c) (i32.const -1)) (i32.eq (local.get $status) (i32.const 2))) (then (return)))
     (if (i32.eqz (local.get $status)) (then (local.set $length (i32.const 0)))) (br $prompt)))
 
