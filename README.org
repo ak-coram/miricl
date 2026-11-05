@@ -45,6 +45,15 @@ I prefer an unethical sausage to no sausage.
 Yes, tokens don't grow on trees and that's what I spend any funding
 on.
 
+** Usage
+
+You'll need a host Common Lisp implementation (e.g. SBCL) and a recent
+version of [[https://github.com/bytecodealliance/wasmtime/releases/][libwasmtime]] for building the interpreter. See the [[./justfile][justfile]]
+for build commands.
+
+If you require JS interop you'll need to run [[./scripts/miricl.mjs][miricl.mjs]] before using
+the interpreter. See [[./scripts/todo.html][todo.html]] for a full example.
+
 ** Legal
 
 - Released under the GNU Lesser General Public License
