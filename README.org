@@ -47,12 +47,105 @@ on.
 
 ** Usage
 
-You'll need a host Common Lisp implementation (e.g. SBCL) and a recent
-version of [[https://github.com/bytecodealliance/wasmtime/releases/][libwasmtime]] for building the interpreter. See the [[./justfile][justfile]]
-for build commands.
+*** Prerequisites
 
-If you require JS interop you'll need to run [[./scripts/miricl.mjs][miricl.mjs]] before using
-the interpreter. See [[./scripts/todo.html][todo.html]] for a full example.
+- A host Common Lisp implementation and Quicklisp. The commands below use
+  SBCL and expect Quicklisp at =~/quicklisp/setup.lisp=.
+- The [[https://github.com/bytecodealliance/wasmtime/releases/][Wasmtime C API shared library]], version 50 (CI uses 50.0.1).
+  Install the C API library separately from the Wasmtime CLI. Make
+  =libwasmtime.so=, =libwasmtime.dylib= or =wasmtime.dll= discoverable by
+  your system's library loader; use =LD_LIBRARY_PATH= on Linux,
+  =DYLD_LIBRARY_PATH= on macOS or =PATH= on Windows for a custom location.
+- Git and [[https://just.systems/][just]] for the checkout and build commands.
+- Node.js 26 (used by CI) for the Node REPL and size reports.
+- The Wasmtime 50 CLI and =rlwrap= for the terminal examples below.
+- Python 3 and a browser supporting WasmGC and Wasm exception handling
+  for the small HTML example.
+
+*** Build
+
+Run the following from a terminal:
+
+#+begin_src sh
+git clone https://github.com/ak-coram/miricl.git
+cd miricl
+just build
+#+end_src
+
+This produces =interpreter.wasm=, the import-free interpreter, and
+=miricl-repl.wasm=, the standalone WASI interpreter and terminal REPL.
+Quicklisp loads the Lisp dependencies automatically. If your Quicklisp
+setup file is elsewhere, set =QUICKLISP_SETUP= when building:
+
+#+begin_src sh
+QUICKLISP_SETUP=/path/to/quicklisp/setup.lisp just build
+#+end_src
+
+*** Terminal REPLs
+
+From the repository root, start the Node REPL with line editing and
+history through =rlwrap=. The =-a= option keeps rlwrap's editor active
+when Node's readline interface changes terminal modes:
+
+#+begin_src sh
+rlwrap -a node scripts/repl.mjs interpreter.wasm
+#+end_src
+
+Or run the standalone WASI REPL with Wasmtime:
+
+#+begin_src sh
+rlwrap wasmtime run miricl-repl.wasm
+#+end_src
+
+Try =(+ 20 22)= or =(format t "Hello, world!~%")=. Forms can span
+multiple lines. Enter =:quit= or press Ctrl+D to exit. The Node
+adapter enables JavaScript interop through the =MIRICL-JS= package,
+nicknamed =JS=.
+
+*** A small HTML page
+
+After =just build=, save this as =hello.html= in the repository root:
+
+#+begin_src html
+<!doctype html>
+<meta charset="utf-8">
+<title>Common Lisp hello world</title>
+
+<script type="text/x-common-lisp">
+  (js:invoke (js:global "console") "log" "Hello, world from Common Lisp!")
+</script>
+
+<script type="module">
+  import {Miricl} from "./scripts/miricl.mjs";
+
+  const bytes = await (await fetch("./interpreter.wasm")).arrayBuffer();
+  const lisp = await Miricl.instantiate(bytes);
+  for (const script of document.querySelectorAll('script[type="text/x-common-lisp"]')) {
+    lisp.evaluate(script.textContent, {eof: true});
+  }
+</script>
+#+end_src
+
+The adapter enables JS interop automatically. The loop evaluates every
+=text/x-common-lisp= script in document order, sharing one
+interpreter, so later scripts can use definitions from earlier ones.
+
+Serve the repository root so the browser can load the JavaScript
+module and Wasm file:
+
+#+begin_src sh
+python3 -m http.server 8000 --bind 127.0.0.1
+#+end_src
+
+Open [[http://127.0.0.1:8000/hello.html][hello.html]] and check the browser's developer console for =Hello,
+world from Common Lisp!=. This calls the browser's =console.log= from
+Common Lisp via =js:invoke=.
+
+*** Standalone browser pages
+
+The [[./scripts/todo.html][TODO source]] demonstrates DOM access, events, callbacks and
+persistence through JS interop. See the [[./justfile][justfile]] for more build and
+test targets.
 
 ** Legal
 

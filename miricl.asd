@@ -7,9 +7,6 @@
   :depends-on (#:alexandria
                #:bordeaux-threads
                #:cffi
-               ;; Don't load libffi on ECL without DFFI
-               (:feature (:or (:not :ecl) :dffi)
-                         #:cffi-libffi)
                #:named-readtables)
   :components ((:file "package")
                (:file "wasmtime")

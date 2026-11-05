@@ -41,7 +41,7 @@ repl: build
 
 # Start the standalone WASI REPL with Wasmtime.
 repl-wasi: build
-    {{ quote(wasmtime) }} run -W gc=y -W exceptions=y {{ quote(wasi_repl) }}
+    {{ quote(wasmtime) }} run {{ quote(wasi_repl) }}
 
 # Start the Common Lisp host REPL backed by Wasmtime.
 repl-host:

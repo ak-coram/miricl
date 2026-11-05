@@ -284,7 +284,8 @@ if (wasiBinary) {
   if (!inProcess) {
     const runner = fileURLToPath(new URL('./wasi-runner.mjs', import.meta.url));
     const runtimes = [[process.execPath, ['--disable-warning=ExperimentalWarning', runner, wasiBinary]]];
-    if (process.env.MIRICL_TEST_WASMTIME === '1') runtimes.push(['wasmtime', ['run', '-W', 'gc=y', '-W', 'exceptions=y', wasiBinary]]);
+    // Exercise the documented command with Wasmtime's default feature set.
+    if (process.env.MIRICL_TEST_WASMTIME === '1') runtimes.push(['wasmtime', ['run', wasiBinary]]);
     for (const [command, args] of runtimes) {
       const wasi = spawnSync(command, args, {input: session, encoding: 'utf8'});
       assert.ifError(wasi.error);
