@@ -766,6 +766,7 @@
         (%%directory 1 $directory-native (0))
         (%%make-logical-path 2 $make-logical-path (0 1))
         (%%host-service 2 $host-service-object (0 1))
+        (%%javascript 4 $javascript ((:index 0) 1 2 3))
         (%%calendar 3 $calendar-native ((:index 0) 1 2))
         (%%pathname-metadata 2 $pathname-metadata (0 1))
         (%%pathname-match 2 $pathname-match-native (0 1))

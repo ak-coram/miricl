@@ -494,6 +494,8 @@
     (then (call $print-pathname (local.get $x) (i32.add (local.get $depth) (i32.const 1))) (return)))
   #@(if (i32.eq (local.get $tag) (i32.const 29))
     (then (call $require-printable-readably (local.get $x)) ,(emit-text "#<HASH-TABLE>") (return)))
+  #@(if (i32.eq (local.get $tag) (i32.const 47))
+    (then (call $require-printable-readably (local.get $x)) ,(emit-text "#<JS:VALUE>") (return)))
   #@(if (i32.eq (local.get $tag) (i32.const 37))
     (then (call $require-printable-readably (local.get $x)) ,(emit-text "#<READTABLE>") (return)))
   #@(if (i32.eq (local.get $tag) (i32.const 42))

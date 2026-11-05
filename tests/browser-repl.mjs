@@ -23,6 +23,7 @@ const pending = new Map();
 const requests = [];
 const exceptions = [];
 const browserLogs = [];
+const consoleCalls = [];
 function failPending(error) {
   for (const {reject, timer} of pending.values()) {
     clearTimeout(timer);
@@ -40,6 +41,10 @@ browser.stdio[4].on('data', chunk => {
   while ((end = received.indexOf('\0')) !== -1) {
     const message = JSON.parse(received.slice(0, end));
     received = received.slice(end + 1);
+    if (message.method === 'Target.attachedToTarget' && message.params.targetInfo.type === 'worker')
+      send('Runtime.enable', {}, message.params.sessionId).catch(failPending);
+    if (message.method === 'Runtime.consoleAPICalled')
+      consoleCalls.push({...message.params, sessionId: message.sessionId});
     if (message.method === 'Network.requestWillBeSent') requests.push(message.params.request.url);
     if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
     if (message.method === 'Log.entryAdded') browserLogs.push(message.params.entry);
@@ -93,6 +98,7 @@ try {
   }
 
   await command('Page.enable');
+  await command('Target.setAutoAttach', {autoAttach: true, waitForDebuggerOnStart: false, flatten: true});
   await command('Runtime.enable');
   await command('Log.enable');
   await command('Network.enable');
@@ -100,6 +106,9 @@ try {
   await command('Page.navigate', {url: pathToFileURL(html).href});
   await waitFor(`document.getElementById('run') && ${ready}`);
   assert.equal(await input('(+ 1 2)'), '3\n');
+  assert.equal(await input(`(and (js:available-p)
+    (= (js:from-js (js:invoke (js:global "Math") "sqrt" 81)) 9)
+    (handler-case (js:call (js:global "notAFunction")) (js:javascript-error () t)))`), 'T\n');
   assert.equal(await input('(defun browser-double (n) (* 2 n))'), 'BROWSER-DOUBLE\n');
   assert.equal(await input('(browser-double 21)'), '42\n');
   assert.equal(await input('(values "λ 🙂" 1/3 (expt 2 100))'), '"λ 🙂"\n1/3\n1267650600228229401496703205376\n');
@@ -147,6 +156,63 @@ try {
   await js("document.getElementById('examples').value = 'function'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
   await waitFor(completed);
   assert.match(await output(), /FACTORIAL\n265252859812191058636308480000000\n$/);
+
+  await js("document.getElementById('clear').click(); document.getElementById('examples').value = 'environment'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
+  await waitFor(completed);
+  const environmentOutput = await output();
+  const environmentHeading = 'Browser environment (also logged to the browser console):\n';
+  assert.ok(environmentOutput.startsWith(environmentHeading));
+  const printedEnvironment = JSON.parse(environmentOutput.slice(environmentHeading.length));
+  const environmentLog = consoleCalls.find(call => call.type === 'log' && call.args[0]?.value === 'Browser environment');
+  assert.ok(environmentLog, 'The Lisp example must call console.log in the worker');
+  const logged = await send('Runtime.callFunctionOn', {
+    objectId: environmentLog.args[1].objectId, functionDeclaration: 'function() { return this; }', returnByValue: true,
+  }, environmentLog.sessionId);
+  assert.equal(logged.exceptionDetails, undefined);
+  const environment = logged.result.value;
+  assert.deepEqual(printedEnvironment, environment, 'The REPL and console must show the same environment details');
+  assert.equal(environment.timeZone, await js('Intl.DateTimeFormat().resolvedOptions().timeZone'));
+  assert.deepEqual(environment.preferredLocales, await js('navigator.languages'));
+  assert.equal(environment.locale, await js('Intl.DateTimeFormat().resolvedOptions().locale'));
+  assert.equal(typeof environment.calendar, 'string');
+  assert.equal(typeof environment.numberingSystem, 'string');
+  assert.equal(typeof environment.userAgent, 'string');
+  assert.ok(environment.hardwareConcurrency >= 1);
+  assert.equal(typeof environment.onLine, 'boolean');
+  assert.equal(typeof environment.isSecureContext, 'boolean');
+  assert.equal(typeof environment.crossOriginIsolated, 'boolean');
+  const workerOrigin = await send('Runtime.evaluate', {expression: 'location.origin', returnByValue: true}, environmentLog.sessionId);
+  assert.equal(environment.origin, workerOrigin.result.value);
+
+  await js("document.getElementById('clear').click(); document.getElementById('examples').value = 'timeout'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
+  await waitFor(completed);
+  assert.equal(await output(), 'Timer scheduled. You can keep using the REPL while it waits.\n');
+  assert.equal(await js("document.getElementById('run').disabled"), false);
+  await waitFor("Array.from(document.querySelectorAll('#transcript pre')).some(p => !p.className && p.textContent.includes('Hello from a Lisp callback!'))");
+  assert.equal(await output(), 'Timer scheduled. You can keep using the REPL while it waits.\nHello from a Lisp callback!\n');
+  assert.ok(consoleCalls.some(call => call.type === 'log' && call.args[0]?.value === 'Hello from a Lisp callback!'));
+  assert.equal(await input('(+ 20 22)'), '42\n');
+
+  // A main-thread interpreter has DOM access; the REPL worker has worker globals.
+  const adapterURL = 'data:text/javascript;base64,' + Buffer.from(
+    await fs.readFile(new URL('../scripts/miricl.mjs', import.meta.url), 'utf8')).toString('base64');
+  assert.equal(await js(`(async () => {
+    const {Miricl} = await import(${JSON.stringify(adapterURL)});
+    const bytes = Uint8Array.from(atob(document.getElementById('miricl-wasm').textContent.trim()), c => c.charCodeAt(0));
+    globalThis.domMiricl = await Miricl.instantiate(bytes);
+    return domMiricl.evaluate(\`(progn
+      (defparameter *dom-clicks* 0)
+      (defparameter *dom-button* (js:invoke (js:global "document") "createElement" "button"))
+      (setf (js:property *dom-button* "id") "lisp-dom-test")
+      (setf (js:property *dom-button* "textContent") "Lisp button")
+      (js:invoke *dom-button* "addEventListener" "click"
+        (js:callback (lambda (event)
+          (when (string= (js:from-js (js:property event "type")) "click") (incf *dom-clicks*)))))
+      (js:invoke (js:property (js:global "document") "body") "appendChild" *dom-button*) t)\`).output;
+  })()`), 'T\n');
+  assert.equal(await js(`document.getElementById('lisp-dom-test').click();
+    domMiricl.evaluate('(= *dom-clicks* 1)').output`), 'T\n');
+  await js(`domMiricl.evaluate('(js:invoke *dom-button* "remove")'); delete globalThis.domMiricl`);
 
   await command('Emulation.setDeviceMetricsOverride', {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
   assert.equal(await js('document.documentElement.scrollWidth <= innerWidth'), true, 'Mobile page must fit the viewport');

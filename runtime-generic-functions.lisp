@@ -18,6 +18,8 @@
 (define-runtime-function $dispatch-class (($object :nullable-object)) (:nullable-object)
   (:locals ($tag i32) ($id i32) ($length i32) ($high i32) ($class :nullable-object))
   #@(local.set $tag (call $tag (local.get $object)))
+  #@(if (i32.eq (local.get $tag) (i32.const 47))
+    (then (return (call $named-class ,(clos-library-reference 'miricl-js:value)))))
   #@(if (i32.eq (local.get $tag) (i32.const 23))
     (then (return (struct.get $obj $a (local.get $object)))))
   #@(if (i32.eq (local.get $tag) (i32.const 17))

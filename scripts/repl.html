@@ -77,6 +77,8 @@
           <option value="arithmetic">Arithmetic</option>
           <option value="function">Functions</option>
           <option value="loop">Loops &amp; output</option>
+          <option value="environment">Browser environment</option>
+          <option value="timeout">Callback with setTimeout</option>
         </select>
         <button id="run" disabled title="Run selection or the whole editor (Ctrl/Cmd+Enter)">Run</button>
         <button id="stop" disabled title="Stop evaluation and reset the Lisp session">Stop</button>
@@ -97,6 +99,7 @@
     </section>
   </div>
   <footer>Runs entirely in your browser. No server or network needed. Stop and Reset discard Lisp definitions. Reloading starts a fresh session.
+    <a href="todo.html">CLOS TODO example</a> ·
     <a href="ansi-results.html">Full ANSI test results</a></footer>
 </main>
 <script id="miricl-wasm" type="application/octet-stream">@@MIRICL_WASM@@</script>
@@ -107,7 +110,9 @@ let interpreter;
 self.onmessage = async ({data}) => {
   try {
     if (data.type === 'initialize') {
-      interpreter = await Miricl.instantiate(data.bytes);
+      interpreter = await Miricl.instantiate(data.bytes, {
+        onOutput: output => self.postMessage({type: 'output', output})
+      });
       self.postMessage({type: 'ready'});
     } else if (data.type === 'evaluate') {
       const start = performance.now();
@@ -138,7 +143,34 @@ let busy = false;
 const exampleSources = {
   arithmetic: '(+ 1/3 2/3)\n(expt 2 100)\n(values "hello λ 🙂" #c(1 2))',
   function: '(defun factorial (n)\n  (if (zerop n)\n      1\n      (* n (factorial (1- n)))))\n\n(factorial 30)',
-  loop: '(loop for n from 1 to 5\n      do (format t "~D squared is ~D~%" n (* n n))\n      collect (* n n))'
+  loop: '(loop for n from 1 to 5\n      do (format t "~D squared is ~D~%" n (* n n))\n      collect (* n n))',
+  environment: `;; Open your browser's developer console to inspect the logged object.
+(let* ((navigator (js:global "navigator"))
+       (formatter (js:new (js:property (js:global "Intl") "DateTimeFormat")))
+       (options (js:invoke formatter "resolvedOptions"))
+       (info (js:new (js:global "Object"))))
+  (dolist (key '("timeZone" "locale" "calendar" "numberingSystem"))
+    (setf (js:property info key) (js:property options key)))
+  (setf (js:property info "preferredLocales") (js:property navigator "languages"))
+  (dolist (key '("language" "userAgent" "hardwareConcurrency" "onLine"))
+    (setf (js:property info key) (js:property navigator key)))
+  (setf (js:property info "origin") (js:property (js:global "location") "origin"))
+  (setf (js:property info "isSecureContext") (js:global "isSecureContext"))
+  (setf (js:property info "crossOriginIsolated") (js:global "crossOriginIsolated"))
+  (js:invoke (js:global "console") "log" "Browser environment" info)
+  (format t "Browser environment (also logged to the browser console):~%~A~%"
+    (js:from-js (js:invoke (js:global "JSON") "stringify" info js:+null+ 2)))
+  (values))`,
+  timeout: `;; The timer returns immediately; the Lisp closure runs one second later.
+(let ((message "Hello from a Lisp callback!"))
+  (js:call (js:global "setTimeout")
+    (js:callback (lambda ()
+      (format t "~A~%" message)
+      (js:invoke (js:global "console") "log" message)
+      js:+undefined+))
+    1000)
+  (format t "Timer scheduled. You can keep using the REPL while it waits.~%")
+  (values))`
 };
 
 function append(text, kind = '') {
@@ -194,6 +226,8 @@ function startSession(message) {
         setState('Ready', true);
       } else if (data.type === 'fatal') {
         fail(`Could not load the interpreter: ${data.message}\nUse a browser with WebAssembly GC and exception handling support.`);
+      } else if (data.type === 'output') {
+        append(data.output);
       } else if (data.type === 'error') {
         append(data.output);
         append(`Error: ${data.message}`, 'error');

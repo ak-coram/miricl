@@ -67,15 +67,18 @@ Keep source order within each index range to preserve compression locality."
 (defmacro define-runtime-function (name parameters results &body body)
   "Define a host generator with the same $NAME as its guest function.
 PARAMETERS and :LOCALS contain (name type) pairs; RESULTS is a list of
-types. Optional :EXPORT and :LOCALS clauses precede ordinary Lisp
+types. Optional :EXPORT, :EXPORT-RAW and :LOCALS clauses precede ordinary Lisp
 expressions producing WAT instructions, usually #@ templates. The
-generator returns a WAT-FRAGMENT; calling it never executes guest code."
-  (let ((exports nil) (locals nil))
+generator returns a WAT-FRAGMENT; calling it never executes guest code.
+:EXPORT-RAW lets a reentrant host bridge propagate guest transfers instead
+of converting them to the ordinary top-level host trap."
+  (let ((exports nil) (raw-exports nil) (locals nil))
     (loop while (and (consp (first body))
-                     (member (caar body) '(:export :locals)))
+                     (member (caar body) '(:export :export-raw :locals)))
           for clause = (pop body)
           do (ecase (car clause)
                (:export (setf exports (cdr clause)))
+               (:export-raw (setf exports (cdr clause) raw-exports t))
                (:locals (setf locals (cdr clause)))))
     `(defun ,name ()
        (runtime-function-definition ',name (wat-fragment
@@ -88,7 +91,7 @@ generator returns a WAT-FRAGMENT; calling it never executes guest code."
                    (list `(quote (result ,@(mapcar #'runtime-wat-type results)))))
                ,@(loop for (local type) in locals
                        collect `(list 'local ',local ',(runtime-wat-type type)))
-               ,(if exports
+               ,(if (and exports (not raw-exports))
                     `(runtime-wat-sequence
                       #@(block $export-failed
                           (try_table (catch $transfer $export-failed)

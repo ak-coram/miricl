@@ -99,7 +99,7 @@ jobs:
           node tests/development.mjs interpreter.wasm
           node tests/ansi-runner.mjs interpreter.wasm
 
-      - name: Build standalone browser REPL
+      - name: Build standalone browser examples
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
         shell: bash
         env:
@@ -107,8 +107,9 @@ jobs:
         # --script treats Roswell's trailing SBCL options as script arguments.
         # --load lets SBCL consume those options before the builder reads argv.
         run: |
-          ros -L sbcl-bin run -- --load scripts/build-html.lisp --quit
+          ros -L sbcl-bin run -- --load scripts/build-html.lisp --load scripts/build-todo.lisp --quit
           test -s miricl.html
+          test -s todo.html
 
       - name: Test standalone browser REPL
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -116,6 +117,7 @@ jobs:
           CHROMIUM: google-chrome
         run: |
           node tests/browser-repl.mjs miricl.html
+          node tests/browser-todo.mjs todo.html
           node tests/ansi-html.mjs
 
       - name: Upload standalone browser REPL
@@ -123,7 +125,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: miricl-browser-repl
-          path: miricl.html
+          path: |
+            miricl.html
+            todo.html
           if-no-files-found: error
 
       - name: ANSI tests in the standalone interpreter

@@ -1,4 +1,13 @@
 ;;;; package.lisp
+(defpackage #:miricl-js
+  (:use #:cl)
+  (:shadow #:array)
+  (:nicknames #:js)
+  (:export #:available-p #:value #:valuep #:global #:property #:call #:call-with-this
+           #:invoke #:new #:to-js #:from-js #:typeof #:strict-equal #:callback #:array
+           #:+null+ #:+undefined+ #:javascript-error #:javascript-error-value
+           #:javascript-unavailable #:define-import))
+
 (defpackage #:wasmtime
   (:use #:cl #:cffi)
   (:export #:with-engine #:with-store #:with-byte-vec #:with-module

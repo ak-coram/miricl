@@ -328,7 +328,7 @@
                  (8 (let ((id (u32)))
                       (or (gethash id (interpreter-function-objects interpreter))
                           (setf (gethash id (interpreter-function-objects interpreter)) (%guest-function interpreter id)))))
-                 ((17 19 22 23 28 29 37 38 39 40 41 42 43 44 45 46) (let ((tag (aref bytes (- position 4))) (id (u32)))
+                 ((17 19 22 23 28 29 37 38 39 40 41 42 43 44 45 46 47) (let ((tag (aref bytes (- position 4))) (id (u32)))
                             (or (gethash id (interpreter-function-objects interpreter))
                                 (setf (gethash id (interpreter-function-objects interpreter))
                                       (case tag (17 (%guest-condition interpreter id)) (19 (%guest-restart interpreter id))

@@ -40,6 +40,7 @@
     ()
     ()
   (:export "unwind")
+  #@(global.set $javascript-depth (i32.const 0))
   #@(global.set $derived-type-environment (ref.null $obj))
   #@(global.set $dynamic-package (ref.null $obj))
   #@(global.set $dynamic-variables (ref.null $obj))

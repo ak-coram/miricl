@@ -8,6 +8,236 @@ const serviceBridge = new WebAssembly.Module(new Uint8Array([
   2,16,1,4,104,111,115,116,...serviceName,0,0,
   7,11,1,...serviceName,0,0,
 ]));
+const javascriptBridge = new WebAssembly.Module(new Uint8Array([
+  0,97,115,109,1,0,0,0,
+  1,10,1,96,4,127,111,111,111,2,111,127,
+  2,16,1,4,104,111,115,116,...serviceName,0,0,
+  7,11,1,...serviceName,0,0,
+]));
+
+// The bridge retains GC references directly. No integer object registry or
+// finalization protocol is needed, including for retained Lisp callbacks.
+class JavaScriptHost {
+  get depth() { return this.vm['javascript-depth'].value; }
+  set depth(value) { this.vm['javascript-depth'].value = value; }
+
+  constructor(owner, imports) {
+    this.owner = owner;
+    this.vm = owner.vm;
+    this.imports = imports;
+    this.callbacks = new WeakMap();
+    this.bindings = new WeakMap();
+    this.depth = 0;
+    this.void = Symbol('void');
+    this.null = this.link(4);
+    this.undefined = this.link(5);
+    this.true = this.link(6);
+    const bridge = new WebAssembly.Instance(javascriptBridge, {host: {service: (...args) => this.service(...args)}});
+    this.vm['javascript-services'].set(0, bridge.exports.service);
+  }
+
+  link(op, a = null, b = null) { return this.vm['javascript-link'](op, a, b); }
+  kind(value) { return this.vm['javascript-info'](0, value); }
+  wrap(value) { return this.vm['javascript-wrap'](value); }
+  unwrap(value) { return this.vm['javascript-unwrap'](value); }
+  bool(value) { return this.vm['javascript-make'](0, value ? 1 : 0, 0, 0); }
+  number(value) { return this.vm['javascript-make'](1, 0, 0, value); }
+
+  data(value) {
+    const [start, length] = this.vm['javascript-data'](value);
+    // CURSOR can be unaligned, so use DataView rather than a typed array view.
+    return {view: new DataView(this.vm.memory.buffer, start, length * 4), length};
+  }
+
+  text(value) {
+    const {view, length} = this.data(value);
+    const chunks = [];
+    for (let start = 0; start < length; start += 4096) {
+      const codes = [];
+      for (let i = start; i < Math.min(start + 4096, length); i++) codes.push(view.getUint32(i * 4, true));
+      chunks.push(String.fromCodePoint(...codes));
+    }
+    return chunks.join('');
+  }
+
+  makeData(op, sign, data) {
+    if (data.length > 0x3fffffff) throw new RangeError('JavaScript conversion is too large.');
+    const start = this.vm['javascript-buffer'](data.length * 4);
+    const view = new DataView(this.vm.memory.buffer, start, data.length * 4);
+    data.forEach((code, i) => view.setUint32(i * 4, code, true));
+    return this.vm['javascript-make'](op, sign, data.length, 0);
+  }
+
+  makeText(value) { return this.makeData(2, 0, Array.from(value, c => c.codePointAt(0))); }
+  makeInteger(value) {
+    const sign = value < 0n ? -1 : value > 0n ? 1 : 0;
+    let magnitude = value < 0n ? -value : value;
+    const digits = [];
+    do { digits.push(Number(magnitude & 32767n)); magnitude >>= 15n; } while (magnitude);
+    return this.makeData(3, sign, digits);
+  }
+
+  integer(value) {
+    const {view, length} = this.data(value);
+    let result = 0n;
+    for (let i = length; i > 0; i--) result = (result << 15n) | BigInt(view.getUint32((i - 1) * 4, true));
+    return this.vm['javascript-info'](2, value) < 0 ? -result : result;
+  }
+
+  toJS(value) {
+    if (value === null) return false;
+    if (value === this.true) return true;
+    if (value === this.null) return null;
+    if (value === this.undefined) return undefined;
+    switch (this.kind(value)) {
+      case 47: return this.unwrap(value);
+      case 1: {
+        const integer = this.integer(value);
+        return integer >= -9007199254740991n && integer <= 9007199254740991n ? Number(integer) : integer;
+      }
+      case 2: case 3: case 4: return this.vm['javascript-info'](1, value);
+      case 10: case 35: {
+        // General/displaced character arrays use the runtime's STRING-CONTENTS.
+        if (this.kind(value) === 35 && !this.vm['javascript-info'](3, value))
+          throw new TypeError('Convert arrays explicitly with js:array.');
+        return this.text(value);
+      }
+      default: throw new TypeError('Expected a JavaScript value, string, real, boolean, or JS null/undefined sentinel.');
+    }
+  }
+
+  fromJS(value, original) {
+    if (value === null) return this.null;
+    switch (typeof value) {
+      case 'undefined': return this.undefined;
+      case 'boolean': return this.bool(value);
+      case 'number': return this.number(value);
+      case 'bigint': return this.makeInteger(value);
+      case 'string': return this.makeText(value);
+      default: return original ?? this.wrap(value);
+    }
+  }
+
+  list(value, convert = x => this.toJS(x)) {
+    const result = [];
+    for (let tail = value; tail !== null; tail = this.link(1, tail)) result.push(convert(this.link(0, tail)));
+    return result;
+  }
+
+  callback(function_) {
+    let callback = this.callbacks.get(function_);
+    if (callback) return callback;
+    callback = (...args) => {
+      const depth = this.depth;
+      const nested = depth > 0;
+      this.depth = depth + 1;
+      let result;
+      try {
+        let arguments_ = null;
+        for (let i = args.length - 1; i >= 0; i--) arguments_ = this.link(2, this.wrap(args[i]), arguments_);
+        result = this.toJS(this.link(3, function_, arguments_));
+      } catch (cause) {
+        if (nested) throw cause;
+        throw this.owner.failure(cause);
+      } finally { this.depth = depth; }
+      if (!nested && this.owner.onOutput) {
+        const output = this.link(8);
+        if (output !== null) {
+          const text = this.text(output);
+          if (text) this.owner.onOutput(text);
+        }
+      }
+      return result;
+    };
+    this.callbacks.set(function_, callback);
+    return callback;
+  }
+
+  check(type, value) {
+    if (type === 'VALUE') return value;
+    if (type === 'STRING' && typeof value === 'string') return value;
+    if (type === 'BOOLEAN' && typeof value === 'boolean') return value;
+    if (['NUMBER', 'F32', 'F64'].includes(type) && typeof value === 'number' && Number.isFinite(value)) {
+      const result = type === 'F32' ? Math.fround(value) : value;
+      if (Number.isFinite(result)) return result;
+    }
+    if (['BIGINT', 'I64', 'I32', 'U32'].includes(type) &&
+        (typeof value === 'bigint' || typeof value === 'number' && Number.isSafeInteger(value))) {
+      const integer = BigInt(value);
+      if (type === 'BIGINT' || type === 'I64' && integer >= -(1n << 63n) && integer < (1n << 63n)) return integer;
+      if (type === 'I32' && integer >= -2147483648n && integer <= 2147483647n ||
+          type === 'U32' && integer >= 0n && integer <= 4294967295n) return Number(integer);
+    }
+    throw new TypeError(`Value does not satisfy JavaScript binding type :${type.toLowerCase()}.`);
+  }
+
+  importCall(descriptor, arguments_) {
+    let binding = this.bindings.get(descriptor);
+    if (!binding) {
+      const [namespace, name, parameters, result] = this.list(descriptor, x => x);
+      const moduleName = this.text(namespace), memberName = this.text(name);
+      const receiver = Object.hasOwn(this.imports, moduleName) ? this.imports[moduleName]
+        : moduleName === '' ? globalThis : globalThis[moduleName];
+      const function_ = receiver?.[memberName];
+      if (typeof function_ !== 'function') throw new TypeError(`Missing JavaScript import ${moduleName}.${memberName}.`);
+      const symbolName = x => this.text(this.link(7, x));
+      binding = {receiver, function_, parameters: this.list(parameters, symbolName), result: symbolName(result)};
+      this.bindings.set(descriptor, binding);
+    }
+    const args = this.list(arguments_, x => x);
+    if (args.length !== binding.parameters.length) throw new TypeError('Wrong JavaScript import arity.');
+    for (let i = 0; i < args.length; i++) {
+      const type = binding.parameters[i];
+      const numeric = ['NUMBER', 'F32', 'F64'].includes(type) && [1, 2, 3, 4].includes(this.kind(args[i]));
+      args[i] = this.check(type, numeric ? this.vm['javascript-info'](1, args[i]) : this.toJS(args[i]));
+    }
+    const value = Reflect.apply(binding.function_, binding.receiver, args);
+    if (binding.result === 'VOID') return this.void;
+    const checked = this.check(binding.result, value);
+    if (binding.result === 'VALUE') return this.wrap(checked);
+    if (['I32', 'U32', 'I64', 'BIGINT'].includes(binding.result)) return this.makeInteger(BigInt(checked));
+    if (binding.result === 'F32') return this.vm['javascript-make'](4, 0, 0, checked);
+    return this.fromJS(checked);
+  }
+
+  service(op, a, b, c) {
+    const depth = this.depth;
+    this.depth = depth + 1;
+    try {
+      const value = this.operation(op, a, b, c);
+      return value === this.void ? [null, 2] : [value, 0];
+    } catch (cause) {
+      // Lisp transfers must retain their target and unwind through Lisp cleanup.
+      if (cause instanceof WebAssembly.Exception || cause instanceof WebAssembly.RuntimeError) throw cause;
+      return [cause, 1];
+    } finally { this.depth = depth; }
+  }
+
+  operation(op, a, b, c) {
+    switch (op) {
+      case 2: return this.wrap(a === null ? globalThis : globalThis[this.toJS(a)]);
+      case 3: return this.wrap(this.toJS(a)[this.toJS(b)]);
+      case 4: {
+        if (!Reflect.set(this.toJS(a), this.toJS(b), this.toJS(c))) throw new TypeError('JavaScript property is not writable.');
+        return c;
+      }
+      case 5: return this.wrap(Reflect.apply(this.toJS(a), this.toJS(b), this.list(c)));
+      case 6: {
+        const receiver = this.toJS(a);
+        return this.wrap(Reflect.apply(receiver[this.toJS(b)], receiver, this.list(c)));
+      }
+      case 7: return this.wrap(Reflect.construct(this.toJS(a), this.list(c)));
+      case 8: return this.kind(a) === 47 ? a : this.wrap(this.toJS(a));
+      case 9: return this.fromJS(this.unwrap(a), a);
+      case 10: return this.makeText(typeof this.toJS(a));
+      case 11: return this.bool(this.toJS(a) === this.toJS(b));
+      case 12: return this.wrap(this.callback(a));
+      case 13: return this.wrap(this.list(a));
+      case 14: return this.importCall(a, b);
+      default: throw new RangeError('Unknown JavaScript bridge operation.');
+    }
+  }
+}
 
 export class MiriclError extends Error {
   constructor(message, code, output = '') {
@@ -19,8 +249,9 @@ export class MiriclError extends Error {
 }
 
 export class Miricl {
-  constructor(instance) {
+  constructor(instance, {imports = {}, onOutput} = {}) {
     this.vm = instance.exports;
+    this.onOutput = onOutput;
     this.encoder = new TextEncoder();
     this.decoder = new TextDecoder('utf-8', {fatal: true});
     this.realOrigin = performance.now();
@@ -35,15 +266,24 @@ export class Miricl {
       this.vm['host-services'].set(0, bridge.exports.service);
     }
     this.vm.initialize();
+    if (this.vm['javascript-services']) this.javascript = new JavaScriptHost(this, imports);
     if (this.vm['seed-random']) {
       const seed = globalThis.crypto.getRandomValues(new Uint32Array(4));
       this.vm['seed-random'](...seed);
     }
   }
 
-  static async instantiate(bytes) {
+  static async instantiate(bytes, options) {
     const result = await WebAssembly.instantiate(bytes);
-    return new Miricl(result.instance ?? result);
+    return new Miricl(result.instance ?? result, options);
+  }
+
+  failure(cause) {
+    const code = this.vm.error.value;
+    const output = this.text(this.vm['text-output-length'].value);
+    this.vm.unwind();
+    const message = code ? this.text(this.vm['format-error']()) : cause.message;
+    return new MiriclError(message, code, output);
   }
 
   hostService(operation, argument) {
@@ -91,6 +331,8 @@ export class Miricl {
   }
 
   evaluate(source, {eof = false} = {}) {
+    if (this.javascript?.depth > 0)
+      throw new Error('Use a Lisp callback to reenter an active interpreter.');
     const bytes = this.encoder.encode(source);
     const missing = bytes.length - this.vm.memory.buffer.byteLength;
     if (missing > 0) this.vm.memory.grow(Math.ceil(missing / 65536));
@@ -102,11 +344,7 @@ export class Miricl {
     try {
       length = this.vm['evaluate-source'](bytes.length);
     } catch (cause) {
-      const code = this.vm.error.value;
-      const output = this.text(this.vm['text-output-length'].value);
-      this.vm.unwind();
-      const message = code ? this.text(this.vm['format-error']()) : cause.message;
-      throw new MiriclError(message, code, output);
+      throw this.failure(cause);
     } finally {
       this.runTime += performance.now() - this.activeStart - this.sleepTime;
       this.activeStart = null;

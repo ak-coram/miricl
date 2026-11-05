@@ -23,6 +23,10 @@ size: build
 build-html:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-html.lisp {{ quote(build_dir) }}
 
+# Build the standalone CLOS TODO application (todo.html).
+build-todo:
+    {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-todo.lisp {{ quote(build_dir) }}
+
 # Start the standalone interpreter's Node REPL.
 repl: build
     {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }}
@@ -40,7 +44,7 @@ test:
     {{ quote(sbcl) }} --noinform --non-interactive --load {{ quote(quicklisp) }} --eval '(require :asdf)' --eval '(asdf:load-asd (truename "miricl.asd"))' --eval '(ql:quickload :miricl/test)' --eval '(asdf:test-system :miricl)'
 
 # Run all Node integration tests, including the WASI REPL.
-test-js: test-standalone test-text test-development test-compilation test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-ansi-runner
+test-js: test-standalone test-text test-development test-compilation test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-ansi-runner
 
 # Check the standalone module's object transport.
 test-standalone: build
@@ -53,6 +57,10 @@ test-text: build
 # Check the standalone HTML offline in headless Chromium (CHROMIUM overrides the executable).
 test-browser: build-html
     {{ quote(node) }} tests/browser-repl.mjs {{ quote(build_dir / 'miricl.html') }}
+
+# Check TODO interactions, persistence, offline startup, and mobile layout.
+test-todo: build-todo
+    {{ quote(node) }} tests/browser-todo.mjs {{ quote(build_dir / 'todo.html') }}
 
 # Also check the WASI REPL with the Wasmtime CLI.
 test-wasmtime: build
@@ -122,6 +130,10 @@ test-sequence-transformations: build
 
 test-random: build
     {{ quote(node) }} tests/random.mjs {{ quote(interpreter) }}
+
+# Check optional JavaScript interop, callbacks, and typed bindings.
+test-javascript: build
+    {{ quote(node) }} tests/javascript.mjs {{ quote(interpreter) }}
 
 # Check ANSI accounting and recovery from load errors and hanging tests.
 test-ansi-runner: build

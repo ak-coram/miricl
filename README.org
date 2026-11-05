@@ -13,6 +13,38 @@
 </p>
 #+end_html
 
+** Q&A
+
+*** What is miricl?
+
+Currently it's a Common Lisp interpreter for Wasm runtimes (such as
+browsers, Node.js and Wasmtime). You can try it in your browser [[https://ak-coram.github.io/miricl/][here]].
+
+*** Is it slop?
+
+Absolutely! I didn't even read most of the source.
+
+*** Why?
+
+As usual this project intends to fill a void: the current interpreter
+is a fraction of the size of ECL compiled with Emscripten to
+Wasm. This enables deployment of Common Lisp programs in environments
+where size can be an issue (such as [[https://ak-coram.github.io/miricl/todo.html][websites]]).
+
+*** How?
+
+I've set up a cage fighting match between an LLM and [[https://gitlab.common-lisp.net/ansi-test/ansi-test][ansi-test]] which
+lasted for days. You can view the results [[https://ak-coram.github.io/miricl/ansi-results.html][here]].
+
+*** Don't you care how the sausage is made?
+
+I prefer an unethical sausage to no sausage.
+
+*** Are you asking for funding?
+
+Yes, tokens don't grow on trees and that's what I spend any funding
+on.
+
 ** Legal
 
 - Released under the GNU Lesser General Public License

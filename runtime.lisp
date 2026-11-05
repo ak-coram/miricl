@@ -73,6 +73,7 @@
       ,(constructed-stream-runtime-wat)
       ,(file-runtime-wat)
       ,(time-runtime-wat)
+      ,(javascript-runtime-wat)
       ,@(when wasi (list (wasi-repl-wat)))
       ,($evaluate)
       (data $output-literal-data ,(runtime-library-data *runtime-output-bytes*))

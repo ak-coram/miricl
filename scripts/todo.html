@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A TODO application written in Common Lisp with CLOS, running locally in WebAssembly.">
+  <link rel="icon" href="data:,">
+  <title>miricl — TODO</title>
+  <style>
+    :root { color-scheme: light; --paper: #ffffea; --tag: #eaffff; --select: #eeee9e;
+      --border: #8888cc; --ink: #000; --muted: #454557; --error: #8b2020; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; background: var(--border); color: var(--ink);
+      font: 15px/1.5 "Lucida Console", "DejaVu Sans Mono", monospace; }
+    ::selection { background: var(--select); color: var(--ink); }
+    main { max-width: 900px; margin: 0 auto; border: 1px solid black; background: var(--paper);
+      min-height: calc(100dvh - 40px); display: flex; flex-direction: column; }
+    header, .tag, footer, summary { background: var(--tag); }
+    header { padding: 8px 14px; border-bottom: 1px solid black; display: flex;
+      align-items: baseline; gap: 10px 20px; flex-wrap: wrap; }
+    header strong { margin-right: auto; }
+    a { color: #000099; }
+    button, input { font: inherit; color: inherit; border-radius: 0; }
+    button { padding: 3px 8px; border: 1px solid var(--border); background: var(--tag); cursor: pointer; }
+    button:hover:enabled { background: var(--select); }
+    button:disabled { opacity: .45; cursor: default; }
+    :focus-visible { outline: 2px solid #000099; outline-offset: 2px; }
+    h1 { font-size: 28px; font-weight: normal; margin: 0 0 20px; }
+    .workspace { padding: 32px; flex: 1; }
+    .window { border: 1px solid black; }
+    .tag { border-bottom: 1px solid black; display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
+    .handle { width: 12px; height: 18px; border: 1px solid black; background: var(--border); }
+    #status { margin-left: auto; color: var(--muted); font-size: 12px; }
+    #new-todo-form { display: flex; gap: 10px; padding: 16px; border-bottom: 1px solid var(--border); }
+    #new-todo { min-width: 0; flex: 1; padding: 8px 10px; background: var(--paper); border: 1px solid var(--border); }
+    .tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 16px; }
+    .tools label { display: flex; align-items: center; gap: 8px; }
+    input[type="checkbox"] { width: 18px; height: 18px; accent-color: #666699; cursor: pointer; }
+    #todo-list { list-style: none; margin: 0; padding: 0; }
+    .todo { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border); }
+    .todo-title { flex: 1; min-width: 0; overflow-wrap: anywhere; cursor: text; }
+    .completed .todo-title { text-decoration: line-through; color: var(--muted); }
+    .delete { background: transparent; border-color: transparent; color: var(--error); }
+    .edit { min-width: 0; flex: 1; padding: 5px; border: 1px solid var(--border); background: var(--paper); }
+    .editing .todo-title, .editing .toggle, .editing .delete { display: none; }
+    [hidden] { display: none !important; }
+    #empty { padding: 30px 16px; margin: 0; color: var(--muted); text-align: center; }
+    .bottom { border-top: 1px solid black; background: var(--tag); }
+    #remaining { margin-right: auto; }
+    .filters { display: flex; gap: 4px; }
+    .filters button[aria-pressed="true"] { background: var(--select); border-color: black; }
+    .hint { margin: 12px 0 24px; color: var(--muted); font-size: 12px; }
+    details { border: 1px solid var(--border); }
+    summary { cursor: pointer; padding: 6px 10px; }
+    pre { margin: 0; padding: 16px; border-top: 1px solid var(--border); max-height: 500px;
+      overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 12px; }
+    footer { border-top: 1px solid black; padding: 8px 14px; color: var(--muted); font-size: 12px; }
+    .error { color: var(--error) !important; }
+    noscript p { padding: 16px; }
+    @media (max-width: 600px) {
+      body { padding: 6px; font-size: 14px; }
+      main { min-height: calc(100dvh - 12px); }
+      .workspace { padding: 20px 12px; }
+      #status { width: 100%; margin-left: 20px; }
+      .bottom { gap: 10px; }
+      .filters { order: 3; width: 100%; }
+      #new-todo-form { padding: 12px; gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header><strong>miricl / TODO</strong><a href="./">REPL</a><a href="ansi-results.html">ANSI results</a></header>
+  <noscript><p>Enable JavaScript to run this application.</p></noscript>
+  <section class="workspace" aria-label="TODO application">
+    <h1>Things to do</h1>
+    <div class="window">
+      <div class="tag"><span class="handle" aria-hidden="true"></span><span>todo.lisp</span>
+        <span id="status" role="status" aria-live="polite">Loading interpreter…</span></div>
+      <form id="new-todo-form">
+        <input id="new-todo" aria-label="New task" placeholder="What needs to be done?" autocomplete="off" disabled>
+        <button id="add-todo" type="submit" disabled>Add</button>
+      </form>
+      <div class="tools"><label><input id="toggle-all" type="checkbox" disabled>Complete all</label></div>
+      <ul id="todo-list" aria-label="Tasks"></ul>
+      <p id="empty">Your list is empty.</p>
+      <div class="tools bottom">
+        <span id="remaining" aria-live="polite">0 items left</span>
+        <nav class="filters" aria-label="Filter tasks">
+          <button id="filter-all" type="button" aria-pressed="true" disabled>All</button>
+          <button id="filter-active" type="button" aria-pressed="false" disabled>Active</button>
+          <button id="filter-completed" type="button" aria-pressed="false" disabled>Completed</button>
+        </nav>
+        <button id="clear-completed" type="button" disabled>Clear completed</button>
+      </div>
+    </div>
+    <p class="hint">Double-click a task to edit it. Enter saves; Escape cancels. An empty title deletes the task.</p>
+    <details><summary>View the Common Lisp source</summary><pre id="lisp-source" tabindex="0"></pre></details>
+  </section>
+  <footer>Common Lisp + CLOS, running in WebAssembly. Your list stays in this browser. No server or account needed.</footer>
+</main>
+
+<script type="text/x-common-lisp">
+(defpackage :todo-demo (:use :cl))
+(in-package :todo-demo)
+
+(defclass todo-item ()
+  ((id :initarg :id :reader item-id)
+   (title :initarg :title :accessor item-title)
+   (completed :initarg :completed :initform nil :accessor completed-p)))
+
+(defclass todo-application ()
+  ((items :initform nil :accessor items)
+   (next-id :initform 1 :accessor next-id)
+   (filter :initform :all :accessor current-filter)
+   (storage :initform nil :accessor storage)
+   (notice :initform nil :accessor notice)))
+
+(defparameter *storage-key* "miricl.todo.v1")
+(defparameter *document* (js:global "document"))
+(defparameter *application* (make-instance 'todo-application))
+
+(defun dom (id) (js:invoke *document* "getElementById" id))
+(defun element (tag) (js:invoke *document* "createElement" tag))
+(defun text (node value) (setf (js:property node "textContent") value))
+(defun listen (node event function)
+  (js:invoke node "addEventListener" event
+    (js:callback (lambda (event)
+      (handler-case (funcall function event)
+        (error (condition)
+          (text (dom "status") (format nil "Error: ~A" condition))))
+      js:+undefined+))))
+(defun trimmed (title) (string-trim '(#\Space #\Tab #\Newline #\Return) title))
+
+(defgeneric save-items (application))
+(defmethod save-items ((app todo-application))
+  (when (storage app)
+    (handler-case
+      (let ((rows (apply #'js:array
+                    (mapcar (lambda (item)
+                      (js:array (item-id item) (item-title item) (completed-p item))) (items app)))))
+        (js:invoke (storage app) "setItem" *storage-key*
+          (js:invoke (js:global "JSON") "stringify" rows)))
+      (js:javascript-error () (setf (storage app) nil)))))
+
+(defgeneric load-items (application))
+(defmethod load-items ((app todo-application))
+  (setf (storage app) (handler-case (js:global "localStorage") (js:javascript-error () nil)))
+  (when (storage app)
+    (handler-case
+      (let ((saved (js:invoke (storage app) "getItem" *storage-key*)))
+        (unless (js:strict-equal saved js:+null+)
+          (let ((rows (js:invoke (js:global "JSON") "parse" saved)) (loaded nil) (largest 0))
+            (unless (js:from-js (js:invoke (js:global "Array") "isArray" rows)) (error "Invalid saved list."))
+            (dotimes (index (floor (js:from-js (js:property rows "length"))))
+              (let* ((row (js:property rows index))
+                     (id (js:from-js (js:property row 0)))
+                     (title (js:from-js (js:property row 1)))
+                     (completed (js:from-js (js:property row 2))))
+                (unless (and (realp id) (> id 0) (= id (floor id))
+                             (stringp title) (> (length (trimmed title)) 0)
+                             (member completed '(nil t))
+                             (not (find (floor id) loaded :key #'item-id)))
+                  (error "Invalid saved task."))
+                (push (make-instance 'todo-item :id (floor id) :title title :completed completed) loaded)
+                (setf largest (max largest (floor id)))))
+            (setf (items app) (nreverse loaded) (next-id app) (1+ largest)))))
+      (error () (setf (notice app) "Could not read the saved list; starting a new list.")))))
+
+(defgeneric render (application))
+(defun changed (app) (setf (notice app) nil) (save-items app) (render app))
+
+(defgeneric add-item (application title))
+(defmethod add-item ((app todo-application) title)
+  (let ((title (trimmed title)))
+    (when (> (length title) 0)
+      (setf (items app) (nconc (items app)
+        (list (make-instance 'todo-item :id (next-id app) :title title))))
+      (incf (next-id app))
+      (setf (js:property (dom "new-todo") "value") "")
+      (changed app))))
+
+(defgeneric remove-item (application item))
+(defmethod remove-item ((app todo-application) (item todo-item))
+  (setf (items app) (delete item (items app))) (changed app))
+
+(defgeneric edit-item (application item title))
+(defmethod edit-item ((app todo-application) (item todo-item) title)
+  (let ((title (trimmed title)))
+    (if (zerop (length title)) (remove-item app item)
+      (progn (setf (item-title item) title) (changed app)))))
+
+(defgeneric render-item (application item))
+(defmethod render-item ((app todo-application) (item todo-item))
+  (let ((row (element "li")) (toggle (element "input"))
+        (label (element "span")) (editor (element "input")) (remove (element "button"))
+        (finished nil))
+    (setf (js:property row "className") (if (completed-p item) "todo completed" "todo"))
+    (js:invoke row "setAttribute" "data-id" (format nil "~D" (item-id item)))
+    (setf (js:property toggle "type") "checkbox" (js:property toggle "className") "toggle"
+          (js:property toggle "id") (format nil "todo-toggle-~D" (item-id item))
+          (js:property toggle "checked") (completed-p item))
+    (js:invoke toggle "setAttribute" "aria-label" (format nil "Complete ~A" (item-title item)))
+    (setf (js:property label "className") "todo-title" (js:property label "tabIndex") 0)
+    (text label (item-title item))
+    (js:invoke label "setAttribute" "aria-label" (format nil "Edit ~A" (item-title item)))
+    (setf (js:property editor "className") "edit" (js:property editor "hidden") t
+          (js:property editor "value") (item-title item))
+    (js:invoke editor "setAttribute" "aria-label" "Edit task")
+    (setf (js:property remove "className") "delete" (js:property remove "type") "button")
+    (text remove "Delete")
+    (js:invoke remove "setAttribute" "aria-label" (format nil "Delete ~A" (item-title item)))
+    (listen toggle "change" (lambda (event) (declare (ignore event))
+      (setf (completed-p item) (js:from-js (js:property toggle "checked"))) (changed app)))
+    (listen remove "click" (lambda (event) (declare (ignore event)) (remove-item app item)))
+    (flet ((begin-edit ()
+             (setf finished nil (js:property row "className") "todo editing"
+                   (js:property editor "hidden") nil)
+             (js:invoke editor "focus") (js:invoke editor "select")))
+      (listen label "dblclick" (lambda (event) (declare (ignore event)) (begin-edit)))
+      (listen label "keydown" (lambda (event)
+        (when (string= (js:from-js (js:property event "key")) "Enter")
+          (js:invoke event "preventDefault") (begin-edit)))))
+    (listen editor "keydown" (lambda (event)
+      (let ((key (js:from-js (js:property event "key"))))
+        (cond ((string= key "Escape") (setf finished t) (render app))
+              ((string= key "Enter")
+               (js:invoke event "preventDefault") (setf finished t)
+               (edit-item app item (js:from-js (js:property editor "value"))))))))
+    (listen editor "blur" (lambda (event) (declare (ignore event))
+      (unless finished
+        (setf finished t) (edit-item app item (js:from-js (js:property editor "value"))))))
+    (dolist (child (list toggle label editor remove)) (js:invoke row "appendChild" child))
+    row))
+
+(defmethod render ((app todo-application))
+  (let* ((list (dom "todo-list")) (active (count-if-not #'completed-p (items app)))
+         (shown 0) (focused (js:from-js (js:property (js:property *document* "activeElement") "id"))))
+    (js:invoke list "replaceChildren")
+    (dolist (item (items app))
+      (when (or (eq (current-filter app) :all)
+                (and (eq (current-filter app) :active) (not (completed-p item)))
+                (and (eq (current-filter app) :completed) (completed-p item)))
+        (js:invoke list "appendChild" (render-item app item)) (incf shown)))
+    (setf (js:property (dom "empty") "hidden") (> shown 0))
+    (text (dom "empty") (case (current-filter app)
+      (:active "No active tasks.") (:completed "No completed tasks.") (t "Your list is empty.")))
+    (text (dom "remaining") (format nil "~D item~:P left" active))
+    (setf (js:property (dom "toggle-all") "checked") (and (items app) (zerop active))
+          (js:property (dom "toggle-all") "disabled") (null (items app))
+          (js:property (dom "clear-completed") "disabled") (= active (length (items app))))
+    (dolist (filter '(:all :active :completed))
+      (js:invoke (dom (format nil "filter-~(~A~)" filter)) "setAttribute" "aria-pressed"
+        (if (eq filter (current-filter app)) "true" "false")))
+    (text (dom "status") (or (notice app)
+      (if (storage app) "Saved in this browser." "Storage unavailable; this list lasts until you close the page.")))
+    (when (and (stringp focused) (> (length focused) 0))
+      (let ((node (dom focused)))
+        (unless (js:strict-equal node js:+null+) (js:invoke node "focus"))))))
+
+(defun start (app)
+  (load-items app)
+  (listen (dom "new-todo-form") "submit" (lambda (event)
+    (js:invoke event "preventDefault")
+    (add-item app (js:from-js (js:property (dom "new-todo") "value")))
+    (js:invoke (dom "new-todo") "focus")))
+  (listen (dom "toggle-all") "change" (lambda (event) (declare (ignore event))
+    (let ((done (js:from-js (js:property (dom "toggle-all") "checked"))))
+      (dolist (item (items app)) (setf (completed-p item) done)) (changed app))))
+  (listen (dom "clear-completed") "click" (lambda (event) (declare (ignore event))
+    (setf (items app) (delete-if #'completed-p (items app))) (changed app)))
+  (dolist (filter '(:all :active :completed))
+    (let ((filter filter))
+      (listen (dom (format nil "filter-~(~A~)" filter)) "click" (lambda (event) (declare (ignore event))
+        (setf (current-filter app) filter) (render app)))))
+  (dolist (id '("new-todo" "add-todo" "filter-all" "filter-active" "filter-completed"))
+    (setf (js:property (dom id) "disabled") nil))
+  (render app)
+  (js:invoke (dom "new-todo") "focus"))
+
+(start *application*)
+(values)
+</script>
+<script id="miricl-wasm" type="application/octet-stream">@@MIRICL_WASM@@</script>
+<script>
+@@MIRICL_ADAPTER@@
+
+// Application state, DOM rendering, persistence and events are all in Lisp.
+// Evaluate all embedded Common Lisp scripts in document order.
+let todoInterpreter;
+(async () => {
+  const scripts = Array.from(document.querySelectorAll('script[type="text/x-common-lisp"]'));
+  document.getElementById('lisp-source').textContent = scripts.map(script => script.textContent.trim()).join('\n\n');
+  try {
+    const bytes = Uint8Array.from(atob(document.getElementById('miricl-wasm').textContent.trim()), c => c.charCodeAt(0));
+    todoInterpreter = await Miricl.instantiate(bytes);
+    for (const script of scripts) todoInterpreter.evaluate(script.textContent, {eof: true});
+  } catch (error) {
+    const status = document.getElementById('status');
+    status.className = 'error';
+    status.textContent = `Could not start: ${error.message}`;
+  }
+})();
+</script>
+</body>
+</html>

@@ -22,7 +22,7 @@
     %%generic-discriminator %ensure-layout %%property-method %%property-effective %%values-expander %%condition-method %%proclaim-variable
     %find-slot %%slot-operation %%builtin-macro %%define-constant %%define-package))
 
-(setf *clos-primitives* (append *clos-primitives* '(%%open-file %%filesystem %%pathname-metadata %%pathname-match %%make-logical-path %%host-service %%calendar %%compile)))
+(setf *clos-primitives* (append *clos-primitives* '(%%open-file %%filesystem %%pathname-metadata %%pathname-match %%make-logical-path %%host-service %%calendar %%compile %%javascript)))
 
 ;; The remaining high function IDs are reserved for formatters, complements, constant macro expanders,
 ;; generic functions, and condition readers in $APPLY1.
@@ -32,11 +32,13 @@
 
 (defparameter *clos-library*
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp") append
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp") append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let ((*package* (find-package :miricl)))
         (loop for form = (read in nil :eof) until (eq form :eof)
-              collect (lower-runtime-library form))))))
+              if (and (consp form) (eq (car form) 'in-package))
+                do (setf *package* (find-package (second form)))
+              else collect (lower-runtime-library form))))))
 (defparameter *clos-library-symbols*
   ;; UNION may share its tail with the primitive list, whose order defines IDs.
   (stable-sort (copy-list (union *clos-primitives* (runtime-library-symbols *clos-library*)))

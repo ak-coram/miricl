@@ -2,6 +2,7 @@
 *.fas
 *.wasm
 miricl.html
+/todo.html
 ansi-results.json
 ansi-full-results.json
 ansi-results.html
