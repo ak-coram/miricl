@@ -9,6 +9,18 @@ import {gzipSync, brotliCompressSync, constants} from 'node:zlib';
 const sectionNames = ['custom', 'type', 'import', 'function', 'table', 'memory',
   'global', 'export', 'start', 'element', 'code', 'data', 'data-count', 'tag'];
 
+function measureBytes(file, bytes) {
+  return {file, rawBytes: bytes.length,
+    gzipBytes: gzipSync(bytes, {level: 9}).length,
+    brotliBytes: brotliCompressSync(bytes,
+      {params: {[constants.BROTLI_PARAM_QUALITY]: 11}}).length};
+}
+
+// HTML pages are measured as complete files, including embedded Wasm and JS.
+export function measureFile(file) {
+  return measureBytes(file, fs.readFileSync(file));
+}
+
 export function measureWasm(file) {
   const bytes = fs.readFileSync(file);
   assert.ok(bytes.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])),
@@ -41,10 +53,7 @@ export function measureWasm(file) {
     sections.push({name, bytes: end - start});
     position = end;
   }
-  return {file, rawBytes: bytes.length,
-    gzipBytes: gzipSync(bytes, {level: 9}).length,
-    brotliBytes: brotliCompressSync(bytes,
-      {params: {[constants.BROTLI_PARAM_QUALITY]: 11}}).length, sections};
+  return {...measureBytes(file, bytes), sections};
 }
 
 // Preserve distribution measurements with results, independently of the images.

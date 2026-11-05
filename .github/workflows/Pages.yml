@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build browser examples and ANSI results
+    name: Build browser examples, sizes and ANSI results
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -59,6 +59,9 @@ jobs:
           cp miricl.html "$RUNNER_TEMP/pages/index.html"
           cp todo.html "$RUNNER_TEMP/pages/todo.html"
 
+      - name: Build image size summary
+        run: node scripts/build-size-html.mjs . "$RUNNER_TEMP/pages/image-sizes.html" index.html
+
       - name: Test published HTML in Chromium
         env:
           CHROMIUM: google-chrome
@@ -66,6 +69,7 @@ jobs:
           node tests/browser-repl.mjs "$RUNNER_TEMP/pages/index.html"
           node tests/browser-todo.mjs "$RUNNER_TEMP/pages/todo.html"
           node tests/ansi-html.mjs
+          node tests/size-html.mjs
 
       - name: Run full ANSI suite
         timeout-minutes: 20
@@ -119,7 +123,7 @@ jobs:
           path: ${{ runner.temp }}/pages
 
   deploy:
-    name: Deploy browser examples and ANSI results
+    name: Deploy browser examples, sizes and ANSI results
     needs: build
     # Manual runs from other branches may build, but only main may publish.
     if: github.ref == 'refs/heads/main'

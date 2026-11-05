@@ -3,6 +3,8 @@
 *.wasm
 miricl.html
 /todo.html
+/image-sizes.html
+/image-sizes.json
 ansi-results.json
 ansi-full-results.json
 ansi-results.html

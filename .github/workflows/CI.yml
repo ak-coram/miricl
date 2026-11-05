@@ -111,6 +111,7 @@ jobs:
           ros -L sbcl-bin run -- --load scripts/build-html.lisp --load scripts/build-todo.lisp --quit
           test -s miricl.html
           test -s todo.html
+          node scripts/build-size-html.mjs
 
       - name: Test standalone browser REPL
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -120,6 +121,7 @@ jobs:
           node tests/browser-repl.mjs miricl.html
           node tests/browser-todo.mjs todo.html
           node tests/ansi-html.mjs
+          node tests/size-html.mjs
 
       - name: Upload standalone browser REPL
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -129,6 +131,8 @@ jobs:
           path: |
             miricl.html
             todo.html
+            image-sizes.html
+            image-sizes.json
           if-no-files-found: error
 
       - name: ANSI tests in the standalone interpreter

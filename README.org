@@ -27,7 +27,7 @@ Absolutely! I didn't even read most of the source.
 *** Why?
 
 As usual this project intends to fill a void: the current interpreter
-is a fraction of the size of ECL compiled with Emscripten to
+is a [[https://ak-coram.github.io/miricl/image-sizes.html][fraction of the size]] of ECL compiled with Emscripten to
 Wasm. This enables deployment of Common Lisp programs in environments
 where size can be an issue (such as [[https://ak-coram.github.io/miricl/todo.html][websites]]).
 

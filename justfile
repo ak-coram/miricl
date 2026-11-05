@@ -27,6 +27,14 @@ build-html:
 build-todo:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-todo.lisp {{ quote(build_dir) }}
 
+# Build raw, gzip and Brotli size reports for the Wasm images and HTML pages.
+build-sizes: build build-html build-todo
+    {{ quote(node) }} scripts/build-size-html.mjs {{ quote(build_dir) }}
+
+# Check size accounting and the standalone report in a browser.
+test-size-html:
+    {{ quote(node) }} tests/size-html.mjs
+
 # Start the standalone interpreter's Node REPL.
 repl: build
     {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }}
