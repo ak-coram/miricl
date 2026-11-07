@@ -73,6 +73,7 @@
       ,(stream-sequence-runtime-wat)
       ,(constructed-stream-runtime-wat)
       ,(file-runtime-wat)
+      ,(file-host-runtime-wat)
       ,(time-runtime-wat)
       ,(javascript-runtime-wat)
       ,(thread-runtime-wat)

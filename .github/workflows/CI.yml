@@ -107,8 +107,13 @@ jobs:
           node --experimental-wasm-wasmfx tests/text-repl.mjs interpreter.wasm miricl-repl.wasm
           node tests/repl-bridge.mjs interpreter.wasm miricl-repl.wasm
           node tests/repl-websocket.mjs interpreter.wasm miricl-repl.wasm
+          node tests/dev-filesystem-server.mjs interpreter.wasm miricl-repl.wasm
           node tests/backtrace.mjs interpreter.wasm
           node tests/development.mjs interpreter.wasm
+          node tests/dev-filesystem.mjs interpreter.wasm
+          node scripts/build-asdf.mjs
+          node tests/asdf-build.mjs
+          node tests/asdf.mjs interpreter.wasm build/asdf/asdf.lisp
           node tests/ansi-runner.mjs interpreter.wasm
 
       - name: Build standalone browser examples

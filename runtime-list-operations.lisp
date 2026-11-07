@@ -763,7 +763,7 @@
         (%%oddp 1 $oddp-native (0))
         (%%string-element 4 $string-element (0 1 2 (:truth 3)))
         (%%list-set 6 $list-set-native ((:index 0) 1 2 3 4 5))
-        (%%directory 1 $directory-native (0))
+        (%%directory 2 $directory-native (0 (:truth 1)))
         (%%make-logical-path 2 $make-logical-path (0 1))
         (%%host-service 2 $host-service-object (0 1))
         (%%javascript 4 $javascript ((:index 0) 1 2 3))

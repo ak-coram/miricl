@@ -20,7 +20,10 @@ export class DevRepl {
     this.evaluate = interpreter.evaluateAsync;
     this.evaluations = Promise.resolve();
     this.queuedEvaluate = (...args) => {
-      const result = this.evaluations.then(() => this.evaluate.call(interpreter, ...args));
+      const result = this.evaluations.then(() => {
+        this.filesystem?.refresh();
+        return this.evaluate.call(interpreter, ...args);
+      });
       this.evaluations = result.catch(() => {});
       return result;
     };
@@ -115,6 +118,7 @@ export class DevRepl {
   close(code = 1000) {
     if (this.closed) return;
     this.closed = true;
+    this.filesystem?.close();
     clearTimeout(this.timer);
     this.socket?.close(code);
     const interpreter = this.interpreter;

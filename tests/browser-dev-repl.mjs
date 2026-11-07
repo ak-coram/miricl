@@ -10,6 +10,20 @@ const binary = path.resolve(process.argv[2] ?? 'interpreter.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
 const httpOrigin = `http://127.0.0.1:${testPorts.http}`;
 const directory = await createWebapp(binary);
+await fs.copyFile(process.argv[4] ?? 'build/asdf/asdf.lisp', path.join(directory, 'asdf.lisp'));
+await fs.mkdir(path.join(directory, 'project/dependency'), {recursive: true});
+const sources = [
+  ['project/dependency/remote-dependency.asd', '(asdf:defsystem "remote-dependency" :components ((:file "macro")))'],
+  ['project/dependency/macro.lisp', '(defpackage :remote-dependency (:use :cl) (:export :twice)) (in-package :remote-dependency) (defmacro twice (x) `(+ ,x ,x))'],
+  ['project/remote-app.asd', '(asdf:defsystem "remote-app" :depends-on ("remote-dependency") :serial t :components ((:file "package") (:file "hello")))'],
+  ['project/package.lisp', '(defpackage :remote-app (:use :cl :remote-dependency) (:export :answer))'],
+  ['project/hello.lisp', '(in-package :remote-app) (defvar *loads* 0) (incf *loads*) (defun answer () (twice 21))'],
+];
+for (const [name, source] of sources) {
+  await fs.writeFile(path.join(directory, name), source);
+  await fs.utimes(path.join(directory, name), 1700000000, 1700000000);
+}
+await fs.writeFile(path.join(directory, 'project/raw data λ.bin'), Uint8Array.of(0, 255, 128, 65));
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-app-chromium-'));
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run',
@@ -45,7 +59,7 @@ browser.stdio[4].on('data', bytes => {
 function send(method, params = {}, sessionId) {
   return new Promise((resolve, reject) => {
     const id = ++nextId;
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timeout: ${method}\n${diagnostics}`)); }, 15000);
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timeout: ${method}\n${diagnostics}`)); }, 60000);
     pending.set(id, {resolve, reject, timer});
     browser.stdio[3].write(JSON.stringify({id, method, params, sessionId}) + '\0');
   });
@@ -70,9 +84,16 @@ try {
       await waitFor(() => js('globalThis.ready === true'), 'production webapp startup');
       assert.equal(await js('app.dev === undefined'), true);
       assert.equal(requests.slice(startRequests).some(url => url.includes('dev-repl.mjs')), false);
+      assert.equal(requests.slice(startRequests).some(url => url.includes('dev-filesystem.mjs')), false);
       assert.equal(sockets.length, startSockets, 'Production must not open a WebSocket.');
       await js('document.getElementById("counter").click()');
       await waitFor(() => js('document.getElementById("value").value === "42"'), 'production app evaluation');
+      await command('Page.navigate', {url: `${httpOrigin}/?dev&no-filesystem`});
+      await waitFor(() => js('globalThis.ready === true && app.dev?.state === "connected"'), 'file access opt-out');
+      const disabledRequests = requests.length;
+      assert.equal(await js('app.dev.filesystem === undefined && app.vm["filesystem-services"].get(0) === null'), true);
+      assert.equal(await js(`app.evaluateAsync('(null (probe-file "/project/remote-app.asd"))').then(result => result.output)`), 'T\n');
+      assert.equal(requests.slice(disabledRequests).some(url => url.includes('/__miricl__/fs/')), false);
       await command('Page.navigate', {url: `${httpOrigin}/?dev`});
       await waitFor(() => js('location.search === "?dev" && globalThis.ready === true && app.dev?.state === "connected"'), 'development attachment');
       terminal = await connectTerminal(); await terminal.ready();
@@ -82,6 +103,32 @@ try {
       assert.equal(await terminal.send('*app-count*'), '43\nmiricl> ');
       assert.equal(await terminal.send('(setf (js:property (js:global "webapp") "count") 99)'), '99\nmiricl> ');
       assert.equal(await js('webapp.count'), 99);
+      assert.equal(await js('app.dev.filesystem !== undefined'), true, 'File access is enabled by default in dev mode.');
+      assert.equal(await terminal.send('(file-write-date "/project/hello.lisp")'), '3908988800\nmiricl> ');
+      await js(`app.dev.filesystem.url = new URL(${JSON.stringify(`http://localhost:${testPorts.http}/`)});`);
+      assert.equal(await terminal.send(`(with-open-file (s "/project/raw data λ.bin" :element-type '(unsigned-byte 8)) (loop for byte = (read-byte s nil nil) while byte collect byte))`),
+        '(0 255 128 65)\nmiricl> ');
+      assert.equal(await terminal.send('(null (probe-file "/project/missing"))'), 'T\nmiricl> ');
+      await js(`app.dev.filesystem.url = new URL(${JSON.stringify(httpOrigin + '/')});`);
+      await js(`globalThis.guestDate = 3908988801;
+        globalThis.originalClock = app.hostService.bind(app);
+        app.hostService = (op, argument) => op === 0 ? guestDate : originalClock(op, argument);`);
+      assert.equal(await js(`app.evaluateAsync('(load "/asdf.lisp")').then(result => result.output)`), 'T\n');
+      assert.equal(await js(`app.evaluateAsync(\`(progn
+        (asdf:initialize-source-registry '(:source-registry (:tree "/project/") :ignore-inherited-configuration))
+        (asdf:initialize-output-translations '(:output-translations (t "/build-cache/") :ignore-inherited-configuration))
+        (asdf:load-system "remote-app"))\`).then(result => result.output)`), 'T\n');
+      assert.equal(await terminal.send('(list (remote-app:answer) remote-app::*loads*)'), '(42 1)\nmiricl> ');
+      assert.equal(await js(`app.evaluateAsync('(asdf:load-system "remote-app")').then(result => result.output)`), 'T\n');
+      assert.equal(await terminal.send('remote-app::*loads*'), '1\nmiricl> ');
+      await fs.writeFile(path.join(directory, 'project/hello.lisp'),
+        '(in-package :remote-app) (defvar *loads* 0) (incf *loads*) (defun answer () (twice 22))');
+      await fs.utimes(path.join(directory, 'project/hello.lisp'), 1700000002, 1700000002);
+      await js('guestDate = 3908988803');
+      assert.equal(await js(`app.evaluateAsync('(asdf:load-system "remote-app")').then(result => result.output)`), 'T\n');
+      assert.equal(await terminal.send('(list (remote-app:answer) remote-app::*loads*)'), '(44 2)\nmiricl> ');
+      await assert.rejects(fs.stat(path.join(directory, 'build-cache')), {code: 'ENOENT'});
+      console.log(`PASS ${runtime} browser ASDF: host files, nested system discovery, binary data, caching, and host edits`);
       const start = host.output.length;
       host.child.stdin.write('(setf (js:property (js:invoke (js:global "document") "getElementById" "value") "value") "from Lisp")\n');
       await waitFor(() => js('document.getElementById("value").value === "from Lisp"'), 'terminal access to the webapp DOM');
@@ -105,7 +152,11 @@ try {
       await waitFor(() => js('document.getElementById("value").value === "42"'), 'webapp still works after :quit');
       console.log(`PASS ${runtime} browser development adapter detaches on :quit and the webapp keeps working`);
       await command('Page.navigate', {url: 'about:blank'});
-    } finally { terminal?.socket.destroy(); await host.close(); }
+    } finally {
+      terminal?.socket.destroy(); await host.close();
+      await fs.writeFile(path.join(directory, 'project/hello.lisp'), sources.at(-1)[1]);
+      await fs.utimes(path.join(directory, 'project/hello.lisp'), 1700000000, 1700000000);
+    }
   }
 } finally {
   await send('Browser.close').catch(() => {});

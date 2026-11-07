@@ -171,6 +171,12 @@ status appears in the terminal. Use =--browser-repl= instead of
 Omit =dev= in production to disable the adapter and connection.
 Enter =:quit= to stop the host command and detach the development adapter.
 
+Development mode reads host files through the dev server automatically. The
+served directory appears as =/= to Lisp; =load=, =open=, =directory= and file
+timestamps work through =evaluateAsync= and the terminal REPL. Writes and compiled
+files stay in the browser. Use ={dev: {filesystem: false}}= to disable file access,
+or set =filesystem= to the dev server's HTTP URL when serving the webapp elsewhere.
+
 Ports default to HTTP 8000, WebSocket 4006 and TCP 4005 (when enabled); override them
 with =--http-port=, =--websocket-port= and =--tcp-port=. For a custom
 WebSocket port, use ={dev: {url: "ws://127.0.0.1:PORT/repl"}}=.
@@ -193,6 +199,34 @@ This provides an inferior Lisp buffer and source evaluation commands.
 The buffer shows browser connection status and stays connected across
 browser reloads. TCP submissions and responses also appear in the
 terminal. Interrupts and Swank/Slynk are not implemented.
+
+*** ASDF
+
+Build the optional ASDF/UIOP library from the pinned upstream Git submodule:
+
+#+begin_src sh
+just asdf-init
+just build-asdf
+#+end_src
+
+This applies =patches/asdf/series= to a source copy under =build/asdf/source/=
+and writes =build/asdf/asdf.lisp=. The submodule stays clean; a failed patch
+stops the build. ASDF is not included in the base interpreter images.
+
+With the repository served by the dev server and ={dev: true}= in the browser,
+load ASDF and your application's system from the terminal:
+
+#+begin_src lisp
+(load "/build/asdf/asdf.lisp")
+(asdf:load-asd #P"/app/app.asd")
+(asdf:load-system "app")
+#+end_src
+
+Use =asdf:initialize-source-registry= to discover systems under a directory.
+Host source edits are visible on subsequent loads; compiled =.wasm= FASLs stay
+in memory and can be loaded in another interpreter without ASDF. Outside dev
+mode, supply files explicitly with =mountFile=. Run =just test-asdf= to check
+the port and =just test-browser-dev= for browser access through both servers.
 
 *** Standalone browser pages
 

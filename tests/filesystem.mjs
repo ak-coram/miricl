@@ -169,6 +169,25 @@ check(`(let ((table *readtable*))
     (eq table *readtable*)))`);
 console.log('Memory files: directories, metadata, Unicode, binary I/O, positions, aborts, rename, delete, and file/stream loading pass.');
 
+// Directory discovery includes both explicitly created and implied parents.
+vm.mountFile('registry/alpha/one.lisp', '');
+vm.mountFile('registry/alpha/two.lisp', '');
+vm.mountFile('registry/alpha/deep/three.lisp', '');
+vm.mountFile('registry/λ🙂/four.lisp', '');
+check('(progn (ensure-directories-exist "registry/empty/child/") t)');
+check(`(sort (mapcar #'namestring (directory "registry/*/")) #'string<)`,
+  '("/registry/alpha/" "/registry/empty/" "/registry/λ🙂/")');
+check(`(sort (mapcar #'namestring (directory "registry/**/")) #'string<)`,
+  '("/registry/" "/registry/alpha/" "/registry/alpha/deep/" "/registry/empty/" "/registry/empty/child/" "/registry/λ🙂/")');
+check('(mapcar #\'namestring (directory "registry/alpha"))', '("/registry/alpha/")');
+check('(mapcar #\'namestring (directory "/"))', '("/")');
+check('(directory "registry/missing/")', 'NIL');
+check(`(let* ((first (directory "registry/*/")) (second (directory "registry/*/")))
+  (and (not (eq first second))
+    (every (lambda (path) (equal path (truename path))) first)
+    (= (length (remove-duplicates first :test #'equal)) 3)))`);
+console.log('Memory directories: implicit parents, empty directories, recursive wildcards, root, Unicode, unique truenames, and fresh lists pass.');
+
 // A controlled clock exercises real modification dates without sleeping.
 const service = vm.hostService.bind(vm);
 let date = 4000000000;

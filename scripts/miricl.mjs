@@ -49,6 +49,7 @@ class GreenThreads {
     this.evaluateSource = WebAssembly.promising(this.vm['evaluate-source']);
   }
   startSegment() {
+    this.segment = (this.segment ?? 0) + 1;
     this.running = true;
     this.owner.activeStart = performance.now();
     this.owner.sleepTime = 0;
@@ -427,10 +428,17 @@ export class Miricl {
     const result = await WebAssembly.instantiate(bytes);
     const interpreter = new Miricl(result.instance ?? result, options);
     if (options?.dev) {
+      let filesystem;
       try {
         const {DevRepl} = await import('./dev-repl.mjs');
+        if (options.dev === true || options.dev.filesystem !== false) {
+          const {DevFilesystem} = await import('./dev-filesystem.mjs');
+          filesystem = new DevFilesystem(interpreter, options.dev.filesystem ?? true);
+        }
         interpreter.dev = new DevRepl(interpreter, options.dev);
+        interpreter.dev.filesystem = filesystem;
       } catch (error) {
+        filesystem?.close();
         interpreter.close();
         throw error;
       }
@@ -486,10 +494,15 @@ export class Miricl {
     if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
       const bytes = source instanceof ArrayBuffer ? new Uint8Array(source)
         : new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
-      return this.evaluate(`(cl:progn
-        (cl:with-open-file (stream ${string(path)} :direction :output
-            :element-type '(cl:unsigned-byte 8) :if-exists :supersede)
-          (cl:write-sequence '#(${bytes.join(' ')}) stream)) (cl:values))`, {eof: true});
+      // Explicit mounts always create local files, including in dev mode.
+      const provider = this.vm['filesystem-services']?.get(0);
+      this.vm['filesystem-services']?.set(0, null);
+      try {
+        return this.evaluate(`(cl:progn
+          (cl:with-open-file (stream ${string(path)} :direction :output
+              :element-type '(cl:unsigned-byte 8) :if-exists :supersede)
+            (cl:write-sequence '#(${bytes.join(' ')}) stream)) (cl:values))`, {eof: true});
+      } finally { this.vm['filesystem-services']?.set(0, provider ?? null); }
     }
     if (typeof source !== 'string') throw new TypeError('mountFile expects UTF-8 text or a byte buffer.');
     return this.evaluate(`(cl::register-source-file ${string(path)} ${string(source)})`, {eof: true});

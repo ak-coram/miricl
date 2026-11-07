@@ -153,7 +153,8 @@
     (if (call $source-path-prefix (local.get $path) (call $car (call $car (local.get $scan))))
       (then (return (i32.const 1))))
     (local.set $scan (call $cdr (local.get $scan))) (br $next)))
-  #@(i32.const 0))
+  #@(if (i32.eqz (ref.is_null (call $local-source-file (local.get $path)))) (then (return (i32.const 0))))
+  #@(call $eql (call $car (call $host-file (i32.const 0) (local.get $path))) (call $int (i32.const 2))))
 
 (define-runtime-function $source-directory-delete (($path :nullable-object)) ()
   (:locals ($scan :nullable-object) ($previous :nullable-object) ($candidate :nullable-object))
@@ -182,8 +183,9 @@
   (:locals ($entry :nullable-object) ($date f64))
   #@(if (i32.eq (local.get $mode) (i32.const 6))
     (then
-      (local.set $entry (call $source-file (local.get $path)))
-      (if (ref.is_null (local.get $entry)) (then (return (ref.null $obj))))
+      (local.set $entry (call $local-source-file (local.get $path)))
+      (if (ref.is_null (local.get $entry))
+        (then (return (call $cdr (call $host-file (i32.const 0) (local.get $path))))))
       ;; Unflushed output has no committed modification date yet.
       (if (struct.get $obj $n (local.get $entry)) (then (return (ref.null $obj))))
       (local.set $date (struct.get $source-entry $modified (ref.cast (ref $source-entry) (local.get $entry))))
@@ -204,8 +206,8 @@
       (if (i32.eqz (ref.is_null (call $source-file (local.get $path)))) (then (call $file-error (local.get $path))))
       (global.set $source-directories (call $cons (local.get $path) (global.get $source-directories)))
       (return (call $symbol (i32.const 1)))))
-  #@(local.set $entry (call $source-file (local.get $path)))
-  #@(if (i32.eqz (local.get $mode)) (then (return (local.get $entry))))
+  #@(if (i32.eqz (local.get $mode)) (then (return (call $source-file (local.get $path)))))
+  #@(local.set $entry (call $local-source-file (local.get $path)))
   #@(if (ref.is_null (local.get $entry))
     (then
       (if (i32.eq (local.get $mode) (i32.const 1))
@@ -236,6 +238,9 @@
         (then
           (if (i32.eqz (local.get $exists)) (then (return (ref.null $obj))))
           (if (i32.eq (local.get $exists) (i32.const 1)) (then (call $file-error (local.get $pathname))))
+          ;; Materialize a private overlay before mutating a host-backed file.
+          (if (ref.is_null (call $local-source-file (local.get $path)))
+            (then (global.set $source-files (call $cons (local.get $entry) (global.get $source-files)))))
           (if (i32.ge_u (local.get $exists) (i32.const 4))
             (then
               (local.set $old (local.get $entry))
@@ -269,7 +274,7 @@
   #@(if (i32.and (local.get $abort)
       (i32.eq (i32.and (array.get $digits (struct.get $obj $digits (local.get $stream)) (i32.const 0)) (i32.const 6)) (i32.const 6)))
     (then
-      (if (ref.eq (call $source-file (struct.get $obj $a (local.get $entry))) (local.get $entry))
+      (if (ref.eq (call $local-source-file (struct.get $obj $a (local.get $entry))) (local.get $entry))
         (then
           (call $file-unlink (local.get $entry))
           (local.set $old (struct.get $obj $c (local.get $descriptor)))

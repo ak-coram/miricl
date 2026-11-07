@@ -77,9 +77,10 @@ dev-server-repl-bridge-wasi directory='.' : build
 test-repl-bridge: build
     {{ quote(node) }} tests/repl-bridge.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
     {{ quote(node) }} tests/repl-websocket.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
+    {{ quote(node) }} tests/dev-filesystem-server.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
 
-test-browser-dev: build
-    {{ quote(node) }} tests/browser-dev-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
+test-browser-dev: build build-asdf
+    {{ quote(node) }} tests/browser-dev-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }} {{ quote(build_dir / 'build/asdf/asdf.lisp') }}
 
 # Start the Common Lisp host REPL backed by Wasmtime.
 repl-host:
@@ -90,7 +91,7 @@ test:
     {{ quote(sbcl) }} --noinform --non-interactive --load {{ quote(quicklisp) }} --eval '(require :asdf)' --eval '(asdf:load-asd (truename "miricl.asd"))' --eval '(ql:quickload :miricl/test)' --eval '(asdf:test-system :miricl)'
 
 # Run all Node integration tests, including the WASI REPL.
-test-js: test-threads test-standalone test-text test-repl-bridge test-development test-compilation test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
+test-js: test-threads test-standalone test-text test-repl-bridge test-development test-compilation test-asdf test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
 
 # Check the shared green-thread scheduler in Node.
 test-threads: build
@@ -159,6 +160,7 @@ test-input-streams: build
 # Check portable file streams and physical pathname semantics.
 test-filesystem: build
     {{ quote(node) }} tests/filesystem.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/dev-filesystem.mjs {{ quote(interpreter) }}
 
 test-composite-streams: build
     {{ quote(node) }} tests/composite-streams.mjs {{ quote(interpreter) }}
@@ -201,6 +203,19 @@ test-ansi-runner: build
 # Initialize the pinned upstream ANSI test submodule.
 ansi-init:
     git submodule update --init tests/ansi-test
+
+# Initialize the pinned upstream ASDF/UIOP sources.
+asdf-init:
+    git submodule update --init vendor/asdf
+
+# Assemble the optional guest ASDF library from a patched source copy.
+build-asdf:
+    {{ quote(node) }} scripts/build-asdf.mjs {{ quote(build_dir / 'build/asdf') }}
+
+# Check patch preparation and upstream ASDF system loading in the guest.
+test-asdf: build build-asdf
+    {{ quote(node) }} tests/asdf-build.mjs
+    {{ quote(node) }} tests/asdf.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/asdf/asdf.lisp') }}
 
 # Run the default ANSI profile, or pass upstream paths and runner options.
 [positional-arguments]

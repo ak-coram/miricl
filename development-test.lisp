@@ -655,9 +655,11 @@
         ("dir-tests/*.lisp" "/dir-tests/a.lisp" "/dir-tests/alpha.lisp"
           "/dir-tests/archive.test.lisp" "/dir-tests/λ.lisp")
         ("dir-tests/a*.lisp" "/dir-tests/a.lisp" "/dir-tests/alpha.lisp" "/dir-tests/archive.test.lisp")
-        ("dir-tests/*" "/dir-tests/README")
+        ("dir-tests/*" "/dir-tests/README" "/dir-tests/sub/")
         ("dir-tests/*.*" "/dir-tests/README" "/dir-tests/a.lisp" "/dir-tests/a.wasm"
-          "/dir-tests/alpha.lisp" "/dir-tests/archive.test.lisp" "/dir-tests/λ.lisp")
+          "/dir-tests/alpha.lisp" "/dir-tests/archive.test.lisp" "/dir-tests/sub/" "/dir-tests/λ.lisp")
+        ("dir-tests/*/" "/dir-tests/sub/")
+        ("dir-tests/**/" "/dir-tests/" "/dir-tests/sub/" "/dir-tests/sub/deep/")
         ("dir-tests/*/*.lisp" "/dir-tests/sub/b.lisp")
         ("dir-tests/**/*.lisp" "/dir-tests/a.lisp" "/dir-tests/alpha.lisp"
           "/dir-tests/archive.test.lisp" "/dir-tests/sub/b.lisp" "/dir-tests/sub/deep/c.lisp"

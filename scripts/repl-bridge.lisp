@@ -72,14 +72,7 @@
     ;; Instantiate memory first, so canonical imports and the core share it.
     (core module $storage
       (memory (export "memory") 292)
-      (global $heap (mut i32) (i32.const 32768))
-      (func (export "realloc") (param i32 i32) (param $align i32) (param $size i32) (result i32)
-        (local $p i32)
-        (local.set $p (i32.and (i32.add (global.get $heap) (i32.sub (local.get $align) (i32.const 1)))
-          (i32.sub (i32.const 0) (local.get $align))))
-        (global.set $heap (i32.add (local.get $p) (local.get $size)))
-        (if (i32.gt_u (global.get $heap) (i32.const 65536)) (then unreachable))
-        (local.get $p)))
+      ,(repl-filesystem-allocator-wat))
     (core instance $storage (instantiate $storage))
     (alias core export $storage "memory" (core memory $memory))
     (alias core export $storage "realloc" (core func $realloc))
@@ -100,6 +93,13 @@
     (core func $directories (canon lower (func $preopens "get-directories") (memory $memory) (realloc $realloc)))
     (core func $open-file (canon lower (func $filesystem "[method]descriptor.open-at") async (memory $memory) (realloc $realloc)))
     (core func $file-type (canon lower (func $filesystem "[method]descriptor.get-type") async (memory $memory) (realloc $realloc)))
+    (core func $file-stat (canon lower (func $filesystem "[method]descriptor.stat") async (memory $memory) (realloc $realloc)))
+    (core func $file-directory (canon lower (func $filesystem "[method]descriptor.read-directory") (memory $memory)))
+    (core func $read-directory (canon stream.read $directory-entries async (memory $memory) (realloc $realloc)))
+    (core func $drop-directory (canon stream.drop-readable $directory-entries))
+    (core func $cancel-directory (canon stream.cancel-read $directory-entries))
+    (core func $read-file-status (canon future.read $file-status async (memory $memory) (realloc $realloc)))
+    (core func $cancel-file-status (canon future.cancel-read $file-status))
     (core func $file-read (canon lower (func $filesystem "[method]descriptor.read-via-stream") (memory $memory)))
     (core func $drop-file (canon resource.drop $descriptor))
     (core func $drop-file-status (canon future.drop-readable $file-status))
@@ -129,6 +129,14 @@
       (import "" "directories" (func $directories (param i32)))
       (import "" "open-file" (func $open-file (param i32 i32) (result i32)))
       (import "" "file-type" (func $file-type (param i32 i32) (result i32)))
+      (import "" "file-stat" (func $file-stat (param i32 i32) (result i32)))
+      (import "" "file-directory" (func $file-directory (param i32 i32)))
+      (import "" "read-directory" (func $read-directory (param i32 i32 i32) (result i32)))
+      (import "" "drop-directory" (func $drop-directory (param i32)))
+      (import "" "cancel-directory" (func $cancel-directory (param i32) (result i32)))
+      (import "" "read-file-status" (func $read-file-status (param i32 i32) (result i32)))
+      (import "" "cancel-file-status" (func $cancel-file-status (param i32) (result i32)))
+      (import "" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
       (import "" "file-read" (func $file-read (param i32 i64 i32)))
       (import "" "drop-file" (func $drop-file (param i32)))
       (import "" "drop-file-status" (func $drop-file-status (param i32)))
@@ -161,6 +169,11 @@
       ;; read-pending, write-pending, input-length, output-length, output-offset,
       ;; fragmented-message. Each client owns two fixed 1 MiB buffers.
       ;; States: 0 free, 1 Emacs, 2 HTTP handshake, 3 WebSocket, 4 closing, 5 drain.
+      ;; HTTP states: 6 headers, 7 opening, 8 file bytes, 9 directory entries,
+      ;; 11 completion status. State 10 belongs to the console.
+      ;; HTTP offsets: 52 stream, 56 status, 60 read pending, 64 open result,
+      ;; 96 task, 104 open stage, 108 descriptor, 112 HEAD, 116 path length,
+      ;; 120 filesystem operation, 124 pending completion status.
       (func $input (param $c i32) (result i32)
         (i32.add (i32.const 65536) (i32.mul (i32.sub (local.get $c) (i32.const 4096)) (i32.const 16384))))
       (func $output (param $c i32) (result i32) (i32.add (call $input (local.get $c)) (i32.const 1048576)))
@@ -258,8 +271,14 @@
               (i32.eq (call $cancel-write (i32.load offset=12 (local.get $c))) (i32.const -1)))))
         (if (i32.load offset=60 (local.get $c))
           (then (call $join (i32.load offset=52 (local.get $c)) (i32.const 0))
-            (drop (call $cancel-read (i32.load offset=52 (local.get $c))))
+            (if (i32.eq (i32.load offset=120 (local.get $c)) (i32.const 3))
+              (then (call $filesystem-directory-result (local.get $c) (call $cancel-directory (i32.load offset=52 (local.get $c)))))
+              (else (drop (call $cancel-read (i32.load offset=52 (local.get $c))))))
             (i32.store offset=60 (local.get $c) (i32.const 0))))
+        (if (i32.load offset=124 (local.get $c))
+          (then
+            (call $join (i32.load offset=56 (local.get $c)) (i32.const 0))
+            (call $filesystem-status (local.get $c) (call $cancel-file-status (i32.load offset=56 (local.get $c))))))
         (if (i32.eq (local.get $c) (i32.const 5120)) (then (i32.store (local.get $c) (i32.const 0)))))
       (func $accepted (param $p i32) (param $r i32)
         (local $c i32) (local $pair i64)
@@ -324,7 +343,7 @@
           (then (i32.store (local.get $c) (i32.const 3)) (call $close (local.get $c))))
         (if (i32.eq (i32.load (local.get $c)) (i32.const 4))
           (then
-            (if (i32.eqz (i32.or (i32.load offset=24 (local.get $c)) (i32.load offset=28 (local.get $c))))
+            (if (i32.eqz (i32.or (i32.or (i32.load offset=24 (local.get $c)) (i32.load offset=28 (local.get $c))) (i32.load offset=96 (local.get $c))))
               (then
                 (call $drop-reader (i32.load offset=8 (local.get $c)))
                 (call $drop-writer (i32.load offset=12 (local.get $c)))
@@ -332,7 +351,11 @@
                 (call $drop-status (i32.load offset=20 (local.get $c)))
                 (call $drop-socket (i32.load offset=4 (local.get $c)))
                 (if (i32.load offset=52 (local.get $c))
-                  (then (call $drop-reader (i32.load offset=52 (local.get $c))) (call $drop-file-status (i32.load offset=56 (local.get $c)))))
+                  (then
+                    (if (i32.eq (i32.load offset=120 (local.get $c)) (i32.const 3))
+                      (then (call $drop-directory (i32.load offset=52 (local.get $c))))
+                      (else (call $drop-reader (i32.load offset=52 (local.get $c)))))
+                    (call $drop-file-status (i32.load offset=56 (local.get $c)))))
                 (if (i32.load offset=108 (local.get $c)) (then (call $drop-file (i32.load offset=108 (local.get $c)))))
                 (i32.store (local.get $c) (i32.const 0))))
             return))
@@ -404,7 +427,12 @@
                   (i32.store offset=24 (local.get $c) (i32.const 0))
                   (if (i32.ne (i32.load (local.get $c)) (i32.const 4)) (then (call $read-result (local.get $c) (local.get $result))))))
               (if (i32.eq (local.get $handle) (i32.load offset=52 (local.get $c)))
-                (then (call $http-file-result (local.get $c) (local.get $result))))
+                (then
+                  (if (i32.eq (i32.load offset=120 (local.get $c)) (i32.const 3))
+                    (then (call $filesystem-directory-result (local.get $c) (local.get $result)))
+                    (else (call $http-file-result (local.get $c) (local.get $result))))))
+              (if (i32.and (i32.eq (local.get $handle) (i32.load offset=56 (local.get $c))) (i32.load offset=124 (local.get $c)))
+                (then (call $filesystem-status (local.get $c) (local.get $result))))
               (if (i32.and (i32.eq (local.get $handle) (i32.load offset=96 (local.get $c))) (i32.eq (local.get $result) (i32.const 2)))
                 (then (call $drop-task (local.get $handle)) (i32.store offset=96 (local.get $c) (i32.const 0)) (call $http-opened (local.get $c))))
               (if (i32.eq (local.get $handle) (i32.load offset=12 (local.get $c)))
@@ -417,6 +445,7 @@
       ;; Protocol helpers are inserted by the builder below.
       ,(repl-bridge-websocket-wat)
       ,(repl-http-wat)
+      ,(repl-filesystem-wat)
       ,(repl-console-wat))
     (core instance $relay (instantiate $relay (with "" (instance
       (export "memory" (memory $memory))
@@ -429,6 +458,10 @@
       (export "cancel-write" (func $cancel-write)) (export "drop-status" (func $drop-status))
       (export "directories" (func $directories)) (export "open-file" (func $open-file))
       (export "file-type" (func $file-type)) (export "file-read" (func $file-read))
+      (export "file-stat" (func $file-stat)) (export "file-directory" (func $file-directory))
+      (export "read-directory" (func $read-directory)) (export "drop-directory" (func $drop-directory))
+      (export "cancel-directory" (func $cancel-directory)) (export "realloc" (func $realloc))
+      (export "read-file-status" (func $read-file-status)) (export "cancel-file-status" (func $cancel-file-status))
       (export "drop-file" (func $drop-file)) (export "drop-file-status" (func $drop-file-status))
       (export "drop-task" (func $drop-task))
       (export "stdin" (func $stdin)) (export "stdout" (func $stdout))

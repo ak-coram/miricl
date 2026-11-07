@@ -377,7 +377,7 @@
   #@(local.set $b (call $car (call $cdr (local.get $args))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%source-file-p)))
     (then ,(wat-arity 1)
-      (return (call $bool (i32.eqz (ref.is_null (call $source-file (local.get $a))))))))
+      (return (call $bool (call $source-file-p (local.get $a))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%make-source-path)))
     (then ,(wat-arity 1)
       (return (call $node (i32.const 28) (i32.const 0) (call $string-contents (local.get $a))

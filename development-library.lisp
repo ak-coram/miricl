@@ -837,10 +837,10 @@
 (defun truename (path) (or (probe-file path) (error 'file-error :pathname path)))
 (defun directory (pathspec &key)
   (let ((merged (merge-pathnames pathspec)))
-    (%%directory (%canonical-path
-      (make-pathname :defaults merged
+    (let ((pattern (make-pathname :defaults merged
         :name (or (pathname-name merged) (pathname-name *default-pathname-defaults*))
-        :type (or (pathname-type merged) (pathname-type *default-pathname-defaults*)))))))
+        :type (or (pathname-type merged) (pathname-type *default-pathname-defaults*)))))
+      (%%directory (%canonical-path pattern) (string= (file-namestring pattern) "")))))
 
 ;; Source paths are portable names in an explicitly mounted virtual filesystem.
 (defun %canonical-path (path)

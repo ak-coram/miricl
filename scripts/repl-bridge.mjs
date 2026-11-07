@@ -47,11 +47,29 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
     });
   }
   function complete(stream, event, value) {
+    if (closed) return;
     stream.pending = null;
     events.set(stream.handle, {event, result: value});
     schedule();
   }
   function readAvailable(stream, p, n) {
+    if (stream.kind === 'file-status') {
+      if (!stream.done) return -1;
+      new Uint8Array(memory.buffer, p, 20).fill(0);
+      if (stream.error) { store(p, 1); store(p + 4, 12); }
+      return 0;
+    }
+    if (stream.kind === 'directory-read') {
+      if (!stream.entries) return -1;
+      if (stream.index === stream.entries.length) return 1;
+      const entry = stream.entries[stream.index++];
+      const name = new TextEncoder().encode(entry.name);
+      new Uint8Array(memory.buffer, p, 24).fill(0);
+      store(p, entry.isFile() ? 5 : entry.isDirectory() ? 2 : entry.isSymbolicLink() ? 4 : 7);
+      store(p + 16, p + 64); store(p + 20, name.length);
+      new Uint8Array(memory.buffer, p + 64, name.length).set(name);
+      return 16;
+    }
     if (stream.kind === 'accept') {
       if (!stream.queue.length) return -1;
       store(p, stream.queue.shift());
@@ -71,7 +89,7 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
     if (!stream.pending) return;
     const {p, n} = stream.pending;
     const count = readAvailable(stream, p, n);
-    if (count !== -1) complete(stream, 2, count);
+    if (count !== -1) complete(stream, stream.kind === 'file-status' ? 4 : 2, count);
   }
   function read(handle, p, n) {
     const stream = handles.get(handle);
@@ -106,6 +124,15 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
       schedule();
     });
     return handle << 4 | 1;
+  }
+  function fileStatus() {
+    const status = {kind: 'file-status'};
+    status.handle = allocate(status);
+    return status;
+  }
+  function finishFileStatus(status, error = false) {
+    if (status.done) return;
+    status.done = true; status.error = error; readable(status);
   }
   const services = {
     memory,
@@ -207,8 +234,11 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
             throw new Error('Path is outside the served directory.');
           const descriptor = await fs.open(file, 'r');
           if (closed) { await descriptor.close(); return; }
-          result(out, allocate({kind: 'file', descriptor}));
-        } catch { store(out, 1); store(out + 4, 19); }
+          result(out, allocate({kind: 'file', descriptor, path: file}));
+        } catch (error) {
+          store(out, 1);
+          store(out + 4, error.code === 'ENOENT' ? 19 : error.code === 'ENOTDIR' ? 23 : 0);
+        }
       });
     },
     'file-type'(handle, out) {
@@ -216,18 +246,49 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
         try {
           const stat = await handles.get(handle).descriptor.stat();
           result(out, stat.isFile() ? 5 : stat.isDirectory() ? 2 : 7);
-        } catch { store(out, 1); store(out + 4, 19); }
+        } catch { store(out, 1); store(out + 4, 0); }
       });
     },
+    'file-stat'(handle, out) {
+      return task(async () => {
+        try {
+          const stat = await handles.get(handle).descriptor.stat();
+          new Uint8Array(memory.buffer, out, 112).fill(0);
+          store(out + 8, stat.isFile() ? 5 : stat.isDirectory() ? 2 : 7);
+          view().setBigUint64(out + 24, BigInt(stat.nlink), true);
+          view().setBigUint64(out + 32, BigInt(stat.size), true);
+          if (Number.isFinite(stat.mtimeMs)) {
+            store(out + 64, 1);
+            view().setBigInt64(out + 72, BigInt(Math.floor(stat.mtimeMs / 1000)), true);
+          }
+        } catch { store(out, 1); store(out + 8, 0); }
+      });
+    },
+    'file-directory'(handle, out) {
+      const stream = {kind: 'directory-read', index: 0};
+      const status = fileStatus();
+      stream.handle = allocate(stream);
+      store(out, stream.handle); store(out + 4, status.handle);
+      fs.readdir(handles.get(handle).path, {withFileTypes: true}).then(entries => {
+        stream.entries = entries; finishFileStatus(status); readable(stream);
+      }, () => { stream.entries = []; finishFileStatus(status, true); readable(stream); });
+    },
+    'read-directory': read,
+    'cancel-directory': cancel,
+    'read-file-status': read,
+    'cancel-file-status': cancel,
+    'drop-directory'(handle) { handles.delete(handle); events.delete(handle); },
+    realloc() { return 0; }, // Node's directory names use the request's fixed buffer.
     'file-read'(handle, offset, p) {
       const socket = handles.get(handle).descriptor.createReadStream({start: Number(offset), autoClose: false});
       const stream = {kind: 'file-read', socket};
+      const status = fileStatus();
       stream.handle = allocate(stream);
       socket.on('readable', () => readable(stream));
-      socket.on('end', () => readable(stream));
-      socket.on('close', () => readable(stream));
-      socket.on('error', () => readable(stream));
-      store(p, stream.handle); store(p + 4, allocate({kind: 'status'}));
+      socket.on('end', () => { finishFileStatus(status); readable(stream); });
+      socket.on('close', () => { finishFileStatus(status, true); readable(stream); });
+      socket.on('error', () => { finishFileStatus(status, true); readable(stream); });
+      store(p, stream.handle); store(p + 4, status.handle);
     },
     'drop-file'(handle) {
       handles.get(handle)?.descriptor.close().catch(() => {});

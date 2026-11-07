@@ -1,0 +1,128 @@
+From: miricl contributors
+Subject: [PATCH] Add miricl virtual filesystem and interpreter support to UIOP
+
+The guest has a POSIX-shaped virtual filesystem on all hosts, no process
+environment or command-line arguments, and Unicode character support.
+Process launching and image dumping remain unsupported.
+
+--- a/uiop/common-lisp.lisp
++++ b/uiop/common-lisp.lisp
+@@ -21,7 +21,7 @@
+   #+(or mcl cmucl) (:shadow #:user-homedir-pathname))
+ (in-package :uiop/common-lisp)
+
+-#-(or abcl allegro clasp clisp clozure cmucl cormanlisp ecl gcl genera lispworks mcl mezzano mkcl sbcl scl xcl)
++#-(or miricl abcl allegro clasp clisp clozure cmucl cormanlisp ecl gcl genera lispworks mcl mezzano mkcl sbcl scl xcl)
+ (error "ASDF is not supported on your implementation. Please help us port it.")
+
+ ;; (declaim (optimize (speed 1) (debug 3) (safety 3))) ; DON'T: trust implementation defaults.
+@@ -29,13 +29,13 @@
+
+ ;;;; Early meta-level tweaks
+
+-#+(or allegro clasp clisp clozure cmucl ecl lispworks mezzano mkcl sbcl abcl)
++#+(or miricl allegro clasp clisp clozure cmucl ecl lispworks mezzano mkcl sbcl abcl)
+ (eval-when (:load-toplevel :compile-toplevel :execute)
+   (when (and #+allegro (member :ics *features*)
+              #+(or clasp clisp cmucl ecl lispworks mkcl) (member :unicode *features*)
+              #+clozure (member :openmcl-unicode-strings *features*)
+              #+sbcl (member :sb-unicode *features*)
+-             #+abcl t)
++             #+(or miricl abcl) t)
+     ;; Check for unicode at runtime, so that a hypothetical FASL compiled with unicode
+     ;; but loaded in a non-unicode setting (e.g. on Allegro) won't tell a lie.
+     (pushnew :asdf-unicode *features*)))
+--- a/uiop/os.lisp
++++ b/uiop/os.lisp
+@@ -41,7 +41,8 @@
+
+   (defun os-unix-p ()
+     "Is the underlying operating system some Unix variant?"
+-    (or (featurep '(:or :unix :cygwin :haiku)) (os-macosx-p)))
++    ;; MIRICL uses POSIX syntax in its virtual filesystem on every host.
++    (or (featurep :miricl) (featurep '(:or :unix :cygwin :haiku)) (os-macosx-p)))
+
+   (defun os-windows-p ()
+     "Is the underlying operating system Microsoft Windows?"
+@@ -108,7 +109,7 @@
+         (ct:free buffer)
+         (ct:free buffer1)))
+     #+gcl (system:getenv x)
+-    #+(or genera mezzano) nil
++    #+(or miricl genera mezzano) nil
+     #+lispworks (lispworks:environment-variable x)
+     #+mcl (ccl:with-cstrs ((name x))
+             (let ((value (_getenv name)))
+@@ -116,7 +117,7 @@
+                 (ccl:%get-cstring value))))
+     #+mkcl (#.(or (find-symbol* 'getenv :si nil) (find-symbol* 'getenv :mk-ext nil)) x)
+     #+sbcl (sb-ext:posix-getenv x)
+-    #-(or abcl allegro clasp clisp clozure cmucl cormanlisp ecl gcl genera lispworks mcl mezzano mkcl sbcl scl xcl)
++    #-(or miricl abcl allegro clasp clisp clozure cmucl cormanlisp ecl gcl genera lispworks mcl mezzano mkcl sbcl scl xcl)
+     (not-implemented-error 'getenv))
+
+   (defsetf getenv (x) (val)
+@@ -198,7 +199,7 @@
+   (defun implementation-type ()
+     "The type of Lisp implementation used, as a short UIOP-standardized keyword"
+     (first-feature
+-     '(:abcl (:acl :allegro) (:ccl :clozure) :clisp (:corman :cormanlisp)
++     '(:miricl :abcl (:acl :allegro) (:ccl :clozure) :clisp (:corman :cormanlisp)
+        (:cmu :cmucl :cmu) :clasp :ecl :gcl
+        (:lwpe :lispworks-personal-edition) (:lw :lispworks)
+        :mcl :mezzano :mkcl :sbcl :scl (:smbx :symbolics) :xcl)))
+@@ -326,7 +327,7 @@
+
+   (defun getcwd ()
+     "Get the current working directory as per POSIX getcwd(3), as a pathname object"
+-    (or #+(or abcl genera mezzano xcl) (truename *default-pathname-defaults*) ;; d-p-d is canonical!
++    (or #+(or miricl abcl genera mezzano xcl) (truename *default-pathname-defaults*) ;; d-p-d is canonical!
+         #+allegro (excl::current-directory)
+         #+clisp (ext:default-directory)
+         #+clozure (ccl:current-directory)
+@@ -344,7 +345,7 @@
+   (defun chdir (x)
+     "Change current directory, as per POSIX chdir(2), to a given pathname object"
+     (if-let (x (pathname x))
+-      #+(or abcl genera mezzano xcl) (setf *default-pathname-defaults* (truename x)) ;; d-p-d is canonical!
++      #+(or miricl abcl genera mezzano xcl) (setf *default-pathname-defaults* (truename x)) ;; d-p-d is canonical!
+       #+allegro (excl:chdir x)
+       #+clisp (ext:cd x)
+       #+clozure (setf (ccl:current-directory) x)
+@@ -357,7 +358,7 @@
+       #+lispworks (hcl:change-directory x)
+       #+mkcl (mk-ext:chdir x)
+       #+sbcl (progn (require :sb-posix) (symbol-call :sb-posix :chdir (sb-ext:native-namestring x)))
+-      #-(or abcl allegro clasp clisp clozure cmucl cormanlisp ecl gcl genera lispworks mkcl sbcl scl xcl)
++      #-(or miricl abcl allegro clasp clisp clozure cmucl cormanlisp ecl gcl genera lispworks mkcl sbcl scl xcl)
+       (not-implemented-error 'chdir))))
+
+
+--- a/uiop/pathname.lisp
++++ b/uiop/pathname.lisp
+@@ -92,7 +92,7 @@
+   ;; This will be :unspecific if supported, or NIL if not.
+   (defparameter *unspecific-pathname-type*
+     #+(or abcl allegro clozure cmucl lispworks sbcl scl) :unspecific
+-    #+(or genera clasp clisp ecl mkcl gcl xcl #|These haven't been tested:|# cormanlisp mcl mezzano) nil
++    #+(or miricl genera clasp clisp ecl mkcl gcl xcl #|These haven't been tested:|# cormanlisp mcl mezzano) nil
+     "Unspecific type component to use with the underlying implementation's MAKE-PATHNAME")
+
+   (defun make-pathname* (&rest keys &key directory host device name type version defaults
+--- a/uiop/image.lisp
++++ b/uiop/image.lisp
+@@ -232,12 +232,12 @@
+     #+clozure ccl:*command-line-argument-list*
+     #+(or cmucl scl) extensions:*command-line-strings*
+     #+gcl si:*command-args*
+-    #+(or genera mcl mezzano) nil
++    #+(or miricl genera mcl mezzano) nil
+     #+lispworks sys:*line-arguments-list*
+     #+mkcl (loop :for i :from 0 :below (mkcl:argc) :collect (mkcl:argv i))
+     #+sbcl sb-ext:*posix-argv*
+     #+xcl system:*argv*
+-    #-(or abcl allegro clasp clisp clozure cmucl ecl gcl genera lispworks mcl mezzano mkcl sbcl scl xcl)
++    #-(or miricl abcl allegro clasp clisp clozure cmucl ecl gcl genera lispworks mcl mezzano mkcl sbcl scl xcl)
+     (not-implemented-error 'raw-command-line-arguments))
+
+   (defun command-line-arguments (&optional (arguments (raw-command-line-arguments)))
