@@ -11,7 +11,7 @@ wasi_repl := build_dir / 'miricl-repl.wasm'
 default:
     @just --list
 
-# Build the import-free interpreter and standalone WASI REPL.
+# Build the import-free interpreter and WASI REPL.
 build:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-wasm.lisp {{ quote(build_dir) }}
 
@@ -39,9 +39,9 @@ test-size-html:
 repl: build
     {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }}
 
-# Start the standalone WASI REPL with Wasmtime.
+# Start the WASI green-thread REPL with Wasmtime.
 repl-wasi: build
-    {{ quote(wasmtime) }} run {{ quote(wasi_repl) }}
+    {{ quote(wasmtime) }} run -W stack-switching=y {{ quote(wasi_repl) }}
 
 # Start the Common Lisp host REPL backed by Wasmtime.
 repl-host:
@@ -52,7 +52,15 @@ test:
     {{ quote(sbcl) }} --noinform --non-interactive --load {{ quote(quicklisp) }} --eval '(require :asdf)' --eval '(asdf:load-asd (truename "miricl.asd"))' --eval '(ql:quickload :miricl/test)' --eval '(asdf:test-system :miricl)'
 
 # Run all Node integration tests, including the WASI REPL.
-test-js: test-standalone test-text test-development test-compilation test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
+test-js: test-threads test-standalone test-text test-development test-compilation test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
+
+# Check the shared green-thread scheduler in Node.
+test-threads: build
+    {{ quote(node) }} tests/threads.mjs {{ quote(interpreter) }}
+
+# Also check the native stack-switching adapter in Wasmtime.
+test-threads-wasi: build
+    {{ quote(node) }} tests/threads.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
 
 # Check the standalone module's object transport.
 test-standalone: build
@@ -60,7 +68,7 @@ test-standalone: build
 
 # Check text evaluation and both Node and WASI REPLs.
 test-text: build
-    {{ quote(node) }} tests/text-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
+    {{ quote(node) }} --experimental-wasm-wasmfx tests/text-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
 
 # Check the standalone HTML offline in headless Chromium (CHROMIUM overrides the executable).
 test-browser: build-html
@@ -72,7 +80,7 @@ test-todo: build-todo
 
 # Also check the WASI REPL with the Wasmtime CLI.
 test-wasmtime: build
-    MIRICL_TEST_WASMTIME=1 {{ quote(node) }} tests/text-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
+    {{ quote(node) }} --experimental-wasm-wasmfx tests/text-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
 
 # Check macros, source loading, and guest development facilities.
 test-development: build

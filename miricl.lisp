@@ -130,7 +130,7 @@
           (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
             (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw))))))))))
 (defun write-interpreter-wasm (pathname &key wasi debug-names)
-  "Write the interpreter. WASI adds the REPL; DEBUG-NAMES retains native names."
+  "Write the interpreter. WASI adds the REPL and its stack-switching driver."
   (with-open-file (stream pathname :direction :output :if-exists :supersede
                                   :element-type '(unsigned-byte 8))
     (write-sequence (interpreter-wasm :wasi wasi :debug-names debug-names) stream))
@@ -170,7 +170,8 @@
           (setf (interpreter-store interpreter)
                 (wt::wasmtime-store-new (interpreter-engine interpreter) (cffi:null-pointer) (cffi:null-pointer)))
           (setf (interpreter-context interpreter) (wt::wasmtime-store-context (interpreter-store interpreter)))
-          (wt:check-error (wt:wasmtime-context-set-fuel (interpreter-context interpreter) (max fuel 1000000000)))
+          ;; Bootstrap loads the shared runtime libraries before per-request fuel applies.
+          (wt:check-error (wt:wasmtime-context-set-fuel (interpreter-context interpreter) (max fuel 3000000000)))
           (setf (interpreter-module interpreter) (wt:compile-module (interpreter-engine interpreter) (interpreter-wasm :debug-names t)))
           (setf (interpreter-instance interpreter) (cffi:foreign-alloc '(:struct wt::wasmtime-instance)))
           (wt:instantiate (interpreter-context interpreter) (interpreter-module interpreter) (interpreter-instance interpreter))

@@ -11,6 +11,7 @@
            ($thrown i32)
            ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object)
            ($result :nullable-object))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   ;; Reuse a bounded ring, restoring overwritten entries on return as well as
   ;; nonlocal exits. No frame objects or argument lists are allocated here.
   #@(local.set $backtrace-depth (global.get $backtrace-depth))

@@ -22,7 +22,7 @@
     %%generic-discriminator %ensure-layout %%property-method %%property-effective %%values-expander %%condition-method %%proclaim-variable
     %find-slot %%slot-operation %%builtin-macro %%define-constant %%define-package))
 
-(setf *clos-primitives* (append *clos-primitives* '(%%open-file %%filesystem %%pathname-metadata %%pathname-match %%make-logical-path %%host-service %%calendar %%compile %%javascript)))
+(setf *clos-primitives* (append *clos-primitives* '(%%open-file %%filesystem %%pathname-metadata %%pathname-match %%make-logical-path %%host-service %%calendar %%compile %%javascript %%thread)))
 
 ;; The remaining high function IDs are reserved for formatters, complements, constant macro expanders,
 ;; generic functions, and condition readers in $APPLY1.
@@ -32,13 +32,28 @@
 
 (defparameter *clos-library*
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp") append
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp") append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
-      (let ((*package* (find-package :miricl)))
-        (loop for form = (read in nil :eof) until (eq form :eof)
-              if (and (consp form) (eq (car form) 'in-package))
-                do (setf *package* (find-package (second form)))
-              else collect (lower-runtime-library form))))))
+      (let* ((*package* (find-package :miricl))
+             (forms (loop for form = (read in nil :eof) until (eq form :eof)
+                      if (and (consp form) (eq (car form) 'in-package))
+                        do (setf *package* (find-package (second form)))
+                      else collect (lower-runtime-library form))))
+        ;; Establish the native package and symbol identities before DEFSTRUCT
+        ;; generates accessors. Public exports are declared in PACKAGE.LISP.
+        (when (equal file "thread-library.lisp")
+          (let* ((package (find-package :miricl-threads))
+                 (exports (sort (loop for symbol being the external-symbols of package collect symbol)
+                                #'string< :key #'symbol-name))
+                 (symbols (union exports (runtime-library-symbols forms))))
+            (setf forms (list (lower-runtime-library
+              `(let ((*package* (find-package "MIRICL-THREADS"))) ,@forms))))
+            (push (lower-runtime-library
+              `(let ((package (make-package "MIRICL-THREADS" :use '("CL"))))
+                 (shadowing-import ',(remove-if-not
+                   (lambda (symbol) (eq (symbol-package symbol) package)) symbols) package)
+                 (export ',exports package))) forms)))
+        forms))))
 (defparameter *clos-library-symbols*
   ;; UNION may share its tail with the primitive list, whose order defines IDs.
   (stable-sort (copy-list (union *clos-primitives* (runtime-library-symbols *clos-library*)))
@@ -600,7 +615,7 @@
   #@(call $text (local.get $digits)))
 
 (define-runtime-function $initialize-clos () ()
-  (:locals ($names (ref $bootstrap-bytes)))
+  (:locals ($names (ref $bootstrap-bytes)) ($forms :nullable-object) ($scan :nullable-object))
   #@(local.set $names (array.new_data $bootstrap-bytes $clos-name-data
     (i32.const 0) (i32.const ,(length (bootstrap-private-symbol-bytes *clos-library-symbols* *clos-primitives*)))))
   #@(data.drop $clos-name-data)
@@ -611,9 +626,13 @@
   #@(call $reserve (global.get $limit))
   #@(memory.init $clos-library-data (i32.const 0) (i32.const 0) (global.get $limit))
   #@(data.drop $clos-library-data)
+  ;; Decode before evaluating: library forms may use the printer's scratch memory.
   #@(block $done (loop $next
     (br_if $done (i32.ge_u (global.get $cursor) (global.get $limit)))
-    (drop (call $eval (call $read-library-literal) (ref.null $obj))) (br $next)))
+    (local.set $forms (call $cons (call $read-library-literal) (local.get $forms))) (br $next)))
+  #@(local.set $scan (call $reverse-onto (local.get $forms) (ref.null $obj) (i32.const 0)))
+  (wat-list-loop ($scan)
+    #@(drop (call $eval (call $car (local.get $scan)) (ref.null $obj))))
   #@(drop (call $set-symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*gensym-counter*)))
     (call $int (i32.const 0))))
   #@(call $clear-values))

@@ -15,6 +15,151 @@ const javascriptBridge = new WebAssembly.Module(new Uint8Array([
   7,11,1,...serviceName,0,0,
 ]));
 
+// JSPI preserves the evaluator's native Wasm stack while the common scheduler
+// runs another Lisp thread. No Lisp objects leave this WebAssembly instance.
+const threadBridge = new WebAssembly.Module(new Uint8Array([
+  0,97,115,109,1,0,0,0,
+  1,4,1,96,0,0,
+  2,16,1,4,104,111,115,116,...serviceName,0,0,
+  7,11,1,...serviceName,0,0,
+]));
+
+class GreenThreads {
+  constructor(owner) {
+    this.owner = owner;
+    this.vm = owner.vm;
+    this.waiting = new Map();
+    this.running = false;
+    this.initialized = false;
+    const dispatch = () => { this.scheduled = false; if (!this.closed) this.pump(); };
+    if (typeof globalThis.setImmediate === 'function') {
+      this.postTask = () => globalThis.setImmediate(dispatch);
+    } else if (typeof MessageChannel === 'function') {
+      this.channel = new MessageChannel();
+      this.channel.port1.onmessage = dispatch;
+      this.postTask = () => this.channel.port2.postMessage(null);
+    } else {
+      this.postTask = () => setTimeout(dispatch, 0);
+    }
+    const bridge = new WebAssembly.Instance(threadBridge, {
+      host: {service: new WebAssembly.Suspending(() => this.suspend())}
+    });
+    this.vm['thread-services'].set(0, bridge.exports.service);
+    this.run = WebAssembly.promising(this.vm['thread-run']);
+    this.evaluateSource = WebAssembly.promising(this.vm['evaluate-source']);
+  }
+  startSegment() {
+    this.running = true;
+    this.owner.activeStart = performance.now();
+    this.owner.sleepTime = 0;
+  }
+  endSegment() {
+    if (this.owner.activeStart !== null)
+      this.owner.runTime += performance.now() - this.owner.activeStart - this.owner.sleepTime;
+    this.owner.activeStart = null;
+    this.running = false;
+  }
+  flushOutput() {
+    if (!this.owner.onOutput || !this.owner.javascript) return;
+    const output = this.owner.javascript.link(8);
+    if (output !== null) this.owner.onOutput(this.owner.javascript.text(output));
+  }
+  suspend() {
+    const id = this.vm['thread-current-id']();
+    this.endSegment();
+    this.flushOutput();
+    return new Promise(resolve => {
+      this.waiting.set(id, resolve);
+      this.schedule();
+    });
+  }
+  close() {
+    this.closed = true;
+    clearTimeout(this.timer);
+    this.waiting.clear();
+    this.channel?.port1.close();
+    this.channel?.port2.close();
+  }
+  schedule(delay = 0) {
+    if (this.closed) return;
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    if (delay <= 0) {
+      if (!this.scheduled) { this.scheduled = true; this.postTask(); }
+    } else {
+      this.timer = setTimeout(() => { this.timer = undefined; if (!this.closed) this.pump(); }, Math.min(delay, 2147483647));
+    }
+  }
+  pump() {
+    if (this.running) return;
+    const id = this.vm['thread-next']();
+    if (id < 0) {
+      const delay = this.vm['thread-delay']();
+      if (delay >= 0) this.schedule(delay);
+      return;
+    }
+    this.vm['thread-enter'](id);
+    this.vm['thread-active'].value = 1;
+    this.startSegment();
+    const resume = this.waiting.get(id);
+    if (resume) {
+      this.waiting.delete(id);
+      resume();
+    } else {
+      this.run(id).then(() => {
+        this.endSegment();
+        this.flushOutput();
+        this.vm['thread-retire'](id);
+        this.schedule();
+      }, error => {
+        this.endSegment();
+        this.vm['thread-active'].value = 0;
+        const failure = this.owner.failure(error);
+        this.vm['thread-failed'](id);
+        this.flushOutput();
+        this.vm['thread-retire'](id);
+        this.schedule();
+        this.owner.onThreadError?.(failure);
+      });
+    }
+  }
+  async evaluate(source, {eof = false} = {}) {
+    if (this.closed) throw new Error('The interpreter has been closed.');
+    if (this.main) throw new Error('An evaluation is already running.');
+    if (this.owner.javascript?.depth > 0) throw new Error('Cannot start an evaluation inside a Lisp callback.');
+    this.main = true;
+    if (!this.initialized) {
+      this.vm['thread-save']();
+      this.initialized = true;
+    }
+    this.vm['thread-enter'](0);
+    this.vm['thread-main-state'](0);
+    this.vm['thread-active'].value = 1;
+    const bytes = this.owner.encoder.encode(source);
+    const missing = bytes.length - this.vm.memory.buffer.byteLength;
+    if (missing > 0) this.vm.memory.grow(Math.ceil(missing / 65536));
+    new Uint8Array(this.vm.memory.buffer).set(bytes);
+    this.vm.error.value = 0;
+    this.startSegment();
+    try {
+      const length = await this.evaluateSource(bytes.length);
+      const status = this.vm['text-status'].value;
+      if (eof && status === 1) throw new MiriclError('Incomplete input.', 16);
+      return {output: this.owner.text(length), incomplete: status === 1, quit: status === 2};
+    } catch (error) {
+      if (error instanceof MiriclError) throw error;
+      this.vm['thread-active'].value = 0;
+      throw this.owner.failure(error);
+    } finally {
+      this.endSegment();
+      this.vm['thread-save']();
+      this.vm['thread-main-state'](1);
+      this.vm['thread-active'].value = 1;
+      this.main = false;
+      this.schedule();
+    }
+  }
+}
+
 // The bridge retains GC references directly. No integer object registry or
 // finalization protocol is needed, including for retained Lisp callbacks.
 class JavaScriptHost {
@@ -251,9 +396,10 @@ export class MiriclError extends Error {
 }
 
 export class Miricl {
-  constructor(instance, {imports = {}, onOutput} = {}) {
+  constructor(instance, {imports = {}, onOutput, onThreadError} = {}) {
     this.vm = instance.exports;
     this.onOutput = onOutput;
+    this.onThreadError = onThreadError;
     this.encoder = new TextEncoder();
     this.decoder = new TextDecoder('utf-8', {fatal: true});
     this.realOrigin = performance.now();
@@ -269,6 +415,8 @@ export class Miricl {
     }
     this.vm.initialize();
     if (this.vm['javascript-services']) this.javascript = new JavaScriptHost(this, imports);
+    if (this.vm['thread-services'] && typeof WebAssembly.Suspending === 'function')
+      this.threads = new GreenThreads(this);
     if (this.vm['seed-random']) {
       const seed = globalThis.crypto.getRandomValues(new Uint32Array(4));
       this.vm['seed-random'](...seed);
@@ -337,9 +485,18 @@ export class Miricl {
     return this.evaluate(`(cl::register-source-file ${string(path)} ${string(source)})`, {eof: true});
   }
 
+  close() { this.threads?.close(); }
+
+  evaluateAsync(source, options) {
+    return this.threads ? this.threads.evaluate(source, options) : Promise.resolve(this.evaluate(source, options));
+  }
+
   evaluate(source, {eof = false} = {}) {
     if (this.javascript?.depth > 0)
       throw new Error('Use a Lisp callback to reenter an active interpreter.');
+    if (this.threads?.main) throw new Error('An asynchronous evaluation is already running.');
+    if (this.threads?.initialized) this.vm['thread-enter'](0);
+    if (this.vm['thread-active']) this.vm['thread-active'].value = 0;
     const bytes = this.encoder.encode(source);
     const missing = bytes.length - this.vm.memory.buffer.byteLength;
     if (missing > 0) this.vm.memory.grow(Math.ceil(missing / 65536));
@@ -355,6 +512,7 @@ export class Miricl {
     } finally {
       this.runTime += performance.now() - this.activeStart - this.sleepTime;
       this.activeStart = null;
+      if (this.threads?.initialized) this.vm['thread-save']();
     }
     const status = this.vm['text-status'].value;
     if (eof && status === 1) throw new MiriclError('Incomplete input.', 16);

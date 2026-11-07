@@ -147,6 +147,7 @@
            ($kind i32)
            ($operator :nullable-object)
            ($result :nullable-object))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(call $clear-values)
   ;; Atomic reads introduce no dynamic state. Keep the save/unwind boundary
   ;; around compound evaluation, where forms can establish bindings/handlers.

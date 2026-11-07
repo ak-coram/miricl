@@ -86,6 +86,15 @@ jobs:
         with:
           node-version: '26'
 
+      - name: Install Wasmtime CLI
+        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
+        shell: bash
+        run: |
+          aria2c "https://github.com/bytecodealliance/wasmtime/releases/download/v${LIBWASMTIME_VERSION}/wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux.tar.xz"
+          mkdir -p wasmtime-cli
+          tar -xf wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux.tar.xz -C wasmtime-cli --strip-components 1
+          echo "$PWD/wasmtime-cli" >> "$GITHUB_PATH"
+
       - name: Standalone interpreter and REPLs
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
         shell: bash
@@ -93,8 +102,9 @@ jobs:
           LD_LIBRARY_PATH: ./
         run: |
           ros --eval '(ql:quickload :miricl)' --eval '(miricl:write-interpreter-wasm "interpreter.wasm")' --eval '(miricl:write-interpreter-wasm "miricl-repl.wasm" :wasi t)' --eval '(uiop:quit)'
+          node tests/threads.mjs interpreter.wasm miricl-repl.wasm
           node tests/standalone.mjs interpreter.wasm
-          node tests/text-repl.mjs interpreter.wasm miricl-repl.wasm
+          node --experimental-wasm-wasmfx tests/text-repl.mjs interpreter.wasm miricl-repl.wasm
           node tests/backtrace.mjs interpreter.wasm
           node tests/development.mjs interpreter.wasm
           node tests/ansi-runner.mjs interpreter.wasm

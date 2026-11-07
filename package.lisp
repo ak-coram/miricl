@@ -8,6 +8,24 @@
            #:+null+ #:+undefined+ #:javascript-error #:javascript-error-value
            #:javascript-unavailable #:define-import))
 
+(defpackage #:miricl-threads
+  (:use #:cl)
+  (:export #:thread #:threadp #:thread-name #:current-thread #:all-threads
+           #:make-thread #:join-thread #:thread-alive-p #:thread-yield
+           #:interrupt-thread #:destroy-thread #:start-multiprocessing
+           #:+supports-threads-p+ #:*standard-io-bindings* #:*default-special-bindings*
+           #:thread-error #:abnormal-exit #:abnormal-exit-condition #:abnormal-exit-thread
+           #:lock #:lockp #:lock-name #:make-lock #:acquire-lock #:release-lock #:with-lock-held
+           #:recursive-lock #:recursive-lock-p #:make-recursive-lock
+           #:acquire-recursive-lock #:release-recursive-lock #:with-recursive-lock-held
+           #:condition-variable #:condition-variable-p #:make-condition-variable
+           #:condition-wait #:condition-notify #:condition-broadcast
+           #:semaphore #:semaphorep #:semaphore-name #:semaphore-count
+           #:make-semaphore #:signal-semaphore #:wait-on-semaphore
+           #:atomic-integer #:atomic-integer-p #:make-atomic-integer
+           #:atomic-integer-value #:atomic-integer-compare-and-swap
+           #:atomic-integer-incf #:atomic-integer-decf #:timeout #:with-timeout))
+
 (defpackage #:wasmtime
   (:use #:cl #:cffi)
   (:export #:with-engine #:with-store #:with-byte-vec #:with-module

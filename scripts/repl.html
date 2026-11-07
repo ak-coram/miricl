@@ -117,7 +117,8 @@ self.onmessage = async ({data}) => {
       self.postMessage({type: 'ready'});
     } else if (data.type === 'evaluate') {
       const start = performance.now();
-      const result = interpreter.evaluate(data.source);
+      const result = await interpreter.evaluateAsync(data.source);
+      if (result.quit) interpreter.close();
       self.postMessage({type: 'result', ...result, elapsed: performance.now() - start});
     }
   } catch (error) {

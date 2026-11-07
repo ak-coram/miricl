@@ -1,4 +1,4 @@
-// node tests/text-repl.mjs interpreter.wasm [miricl-repl.wasm] [--in-process]
+// node --experimental-wasm-wasmfx tests/text-repl.mjs interpreter.wasm [miricl-repl.wasm] [--in-process]
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -249,7 +249,8 @@ if (wasiBinary) {
       },
     }});
     exports = partial.exports;
-    exports._start();
+    // Inject terminal faults directly; the real command below also exercises scheduling.
+    exports['terminal-start']();
     return new TextDecoder().decode(Uint8Array.from(written));
   };
   assert.equal(await runInProcess(`"${'λ🙂'.repeat(300)}"\n:quit\n`), `miricl> "${'λ🙂'.repeat(300)}"\nmiricl> `);
@@ -282,10 +283,8 @@ if (wasiBinary) {
     '(let ((x \'#1=(1 . #1#))) (eq x (cdr x)))\n:quit\n'),
     'miricl> (31 60)\nmiricl> (1 3 2)\nmiricl> T\nmiricl> ');
   if (!inProcess) {
-    const runner = fileURLToPath(new URL('./wasi-runner.mjs', import.meta.url));
-    const runtimes = [[process.execPath, ['--disable-warning=ExperimentalWarning', runner, wasiBinary]]];
-    // Exercise the documented command with Wasmtime's default feature set.
-    if (process.env.MIRICL_TEST_WASMTIME === '1') runtimes.push(['wasmtime', ['run', wasiBinary]]);
+    // Execute native stack switching in Wasmtime. Node exercises the JSPI adapter.
+    const runtimes = [[process.env.WASMTIME ?? 'wasmtime', ['run', '-W', 'stack-switching=y', wasiBinary]]];
     for (const [command, args] of runtimes) {
       const wasi = spawnSync(command, args, {input: session, encoding: 'utf8'});
       assert.ifError(wasi.error);

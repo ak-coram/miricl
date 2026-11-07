@@ -78,6 +78,6 @@
 (define-runtime-section backtrace-runtime-wat ()
   #@(global $backtrace-depth (mut i32) (i32.const 0))
   #@(global $backtrace-saved-depth (mut i32) (i32.const 0))
-  #@(global $backtrace-frames (ref $objects) (array.new_default $objects (i32.const 64)))
-  #@(global $backtrace-saved (ref $objects) (array.new_default $objects (i32.const 64)))
+  #@(global $backtrace-frames (mut (ref $objects)) (array.new_default $objects (i32.const 64)))
+  #@(global $backtrace-saved (mut (ref $objects)) (array.new_default $objects (i32.const 64)))
   ($backtrace-name) ($capture-backtrace) ($print-backtrace) ($format-backtrace))

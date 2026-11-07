@@ -40,8 +40,15 @@ macros and hand over compilation and some optimizations to the
 wasmtime library.
 
 The wasmtime runtime also serves for running tests, the REPL by
-default. The main target is the browser. Advanced WASM features such
-as WasmGC should be used where applicable.
+default. The main target is the browser. Use only stable WASM and WASI
+features; do not rely on experimental proposals or features requiring
+experimental runtime flags. Advanced, stable WASM features such as
+WasmGC should be used where applicable.
+
+Explicit exception: native WASM stack switching is permitted for green
+threads. Its experimental runtime flag and the current lack of ARM
+support in the WASI adapter are accepted for now. This exception does
+not permit other unstable WASM or WASI features.
 
 # Other
 

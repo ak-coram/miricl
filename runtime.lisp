@@ -75,8 +75,10 @@
       ,(file-runtime-wat)
       ,(time-runtime-wat)
       ,(javascript-runtime-wat)
+      ,(thread-runtime-wat)
       ,@(when wasi (list (wasi-repl-wat)))
       ,($evaluate)
+      ,@(when wasi (list (thread-native-wat)))
       (data $output-literal-data ,(runtime-library-data *runtime-output-bytes*))
       ;; Use the same layout in both images, leaving room for the two raw
       ;; function declarations and the five optional WASI imports.

@@ -5,7 +5,6 @@
   :license "LGPL-3.0-or-later"
   :serial t
   :depends-on (#:alexandria
-               #:bordeaux-threads
                #:cffi
                #:named-readtables)
   :components ((:file "package")
@@ -61,6 +60,7 @@
                (:static-file "environment-library.lisp")
                (:static-file "pretty-library.lisp")
                (:static-file "javascript-library.lisp")
+               (:static-file "thread-library.lisp")
                (:file "runtime-clos")
                (:file "runtime-generic-functions")
                (:file "runtime-development")
@@ -93,7 +93,9 @@
                (:file "runtime-files")
                (:file "runtime-time")
                (:file "runtime-javascript")
+               (:file "runtime-threads")
                (:file "runtime-wasi")
+               (:file "runtime-thread-native")
                (:file "runtime")
                (:file "miricl")
                (:file "interpreter-reader"))

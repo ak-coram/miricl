@@ -767,6 +767,7 @@
         (%%make-logical-path 2 $make-logical-path (0 1))
         (%%host-service 2 $host-service-object (0 1))
         (%%javascript 4 $javascript ((:index 0) 1 2 3))
+        (%%thread 3 $thread-operation ((:index 0) 1 2))
         (%%calendar 3 $calendar-native ((:index 0) 1 2))
         (%%pathname-metadata 2 $pathname-metadata (0 1))
         (%%pathname-match 2 $pathname-match-native (0 1))

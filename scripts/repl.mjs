@@ -3,7 +3,10 @@ import fs from 'node:fs/promises';
 import readline from 'node:readline';
 import {Miricl} from './miricl.mjs';
 
-const interpreter = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'interpreter.wasm'));
+const interpreter = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'interpreter.wasm'), {
+  onOutput: output => process.stdout.write(output),
+  onThreadError: report
+});
 const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const input = readline.createInterface({input: process.stdin, output: process.stdout, terminal});
 let pending = '';
@@ -27,7 +30,7 @@ prompt();
 for await (const line of input) {
   pending += `${line}\n`;
   try {
-    const result = interpreter.evaluate(pending);
+    const result = await interpreter.evaluateAsync(pending);
     if (result.output) process.stdout.write(result.output);
     if (!result.incomplete) pending = '';
     if (result.quit) {quit = true; input.close(); break;}
@@ -38,6 +41,8 @@ for await (const line of input) {
   prompt();
 }
 if (pending && !quit) {
-  try {process.stdout.write(interpreter.evaluate(pending, {eof: true}).output);}
+  try {process.stdout.write((await interpreter.evaluateAsync(pending, {eof: true})).output);}
   catch (error) {report(error); process.exitCode = 1;}
 }
+
+interpreter.close();

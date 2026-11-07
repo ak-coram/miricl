@@ -1,6 +1,7 @@
 // CHROMIUM=chromium node tests/browser-repl.mjs [miricl.html]
 // Exercise the built artifact over file:// in a real browser, without a server.
 import assert from 'node:assert/strict';
+import {threadCases} from './thread-cases.mjs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -106,6 +107,10 @@ try {
   await command('Page.navigate', {url: pathToFileURL(html).href});
   await waitFor(`document.getElementById('run') && ${ready}`);
   assert.equal(await input('(+ 1 2)'), '3\n');
+  for (const [name, source] of threadCases)
+    assert.equal(await input(source), 'T\n', `Browser green threads: ${name}`);
+  assert.match(await input('(progn (miricl-threads:make-thread (lambda () (sleep 0.02) (format t "background-thread-output~%"))) (values))'), /^(?:background-thread-output\n)?$/);
+  await waitFor("Array.from(document.querySelectorAll('#transcript pre')).filter(p => !p.className).some(p => p.textContent.includes('background-thread-output\\n'))");
   assert.equal(await input(`(and (js:available-p)
     (= (js:from-js (js:invoke (js:global "Math") "sqrt" 81)) 9)
     (handler-case (js:call (js:global "notAFunction")) (js:javascript-error () t)))`), 'T\n');

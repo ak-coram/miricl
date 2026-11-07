@@ -50,9 +50,42 @@
     (local.set $offset (i32.add (local.get $offset) (local.get $written)))
     (local.set $length (i32.sub (local.get $length) (local.get $written))) (br $next))))
 
+(define-runtime-function $terminal-poll (($delay f64)) (i32)
+  (:locals ($p i32) ($count i32) ($i i32) ($ready i32))
+  #@(local.set $p (i32.and (i32.add (global.get $cursor) (i32.const 7)) (i32.const -8)))
+  #@(call $reserve (i32.const 176))
+  #@(memory.fill (local.get $p) (i32.const 0) (i32.const 176))
+  ;; Preview1 subscriptions: stdin readability plus an optional monotonic timer.
+  #@(i64.store (local.get $p) (i64.const 1))
+  #@(i32.store offset=8 (local.get $p) (i32.const 1))
+  #@(local.set $count (i32.const 1))
+  #@(if (f64.ge (local.get $delay) (f64.const 0))
+    (then
+      (local.set $count (i32.const 2))
+      (i32.store offset=64 (local.get $p) (i32.const 1))
+      (i64.store offset=72 (local.get $p) (i64.trunc_sat_f64_u (f64.mul (local.get $delay) (f64.const 1000000))))
+      (i64.store offset=80 (local.get $p) (i64.const 1000000))))
+  (wat-fail-when #@(call $poll-oneoff (local.get $p) (i32.add (local.get $p) (i32.const 96))
+    (local.get $count) (i32.add (local.get $p) (i32.const 160))) :terminal-io)
+  #@(block $done (loop $events
+    (br_if $done (i32.ge_u (local.get $i) (i32.load offset=160 (local.get $p))))
+    (if (i64.eq (i64.load (i32.add (local.get $p) (i32.add (i32.const 96) (i32.mul (local.get $i) (i32.const 32))))) (i64.const 1))
+      (then (local.set $ready (i32.const 1))))
+    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $events)))
+  #@(if (i32.and (local.get $ready) (global.get $terminal-waiting))
+    (then
+      (struct.set $green-thread $state (call $thread-find (i32.const 0)) (i32.const 0))
+      (global.set $terminal-waiting (i32.const 0))))
+  #@(local.get $ready))
+
 (define-runtime-function $terminal-read
     ()
     (i32)
+  #@(if (global.get $thread-active)
+    (then (block $ready (loop $wait
+      (br_if $ready (call $terminal-poll (f64.const 0)))
+      (global.set $terminal-waiting (i32.const 1))
+      (call $thread-park (f64.const -1)) (br $wait)))))
   #@(i32.store (i32.const 0) (i32.const 16))
   #@(i32.store (i32.const 4) (i32.const 1))
   (wat-fail-when #@(call $fd-read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 8)) :terminal-io)
@@ -73,16 +106,17 @@
   #@(call $terminal-write)
   #@(global.get $text-status))
 
-(define-runtime-function $start
+(define-runtime-function $terminal-start
     ()
     ()
-  (:export "_start")
+  (:export "terminal-start")
   (:locals ($bytes :digits)
            ($new :digits)
            ($length i32)
            ($c i32)
            ($status i32))
   #@(call $initialize)
+  #@(global.set $thread-active (i32.eqz (ref.is_null (table.get $thread-services (i32.const 0)))))
   (wat-fail-when #@(call $random-get (i32.const 0) (i32.const 16)) :terminal-io)
   #@(call $seed-random (i32.load (i32.const 0)) (i32.load (i32.const 4))
     (i32.load (i32.const 8)) (i32.load (i32.const 12)))
@@ -133,6 +167,7 @@
   #@(elem (table $host-services) (i32.const 0) func $wasi-host-service)
   ($wasi-host-service)
   ($terminal-write)
-  ($terminal-read)
+  #@(global $terminal-waiting (mut i32) (i32.const 0))
+  ($terminal-poll) ($terminal-read)
   ($terminal-submit)
-  ($start))
+  ($terminal-start))

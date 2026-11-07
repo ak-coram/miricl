@@ -73,7 +73,7 @@ just build
 #+end_src
 
 This produces =interpreter.wasm=, the import-free interpreter, and
-=miricl-repl.wasm=, the standalone WASI interpreter and terminal REPL.
+=miricl-repl.wasm=, the WASI terminal REPL with green threads.
 Quicklisp loads the Lisp dependencies automatically. If your Quicklisp
 setup file is elsewhere, set =QUICKLISP_SETUP= when building:
 
@@ -94,7 +94,7 @@ rlwrap -a node scripts/repl.mjs interpreter.wasm
 Or run the standalone WASI REPL with Wasmtime:
 
 #+begin_src sh
-rlwrap wasmtime run miricl-repl.wasm
+rlwrap wasmtime run -W stack-switching=y miricl-repl.wasm
 #+end_src
 
 Try =(+ 20 22)= or =(format t "Hello, world!~%")=. Forms can span
