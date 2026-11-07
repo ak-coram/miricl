@@ -32,7 +32,7 @@
 
 (defparameter *clos-library*
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp") append
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "bundle-library.lisp") append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let* ((*package* (find-package :miricl))
              (forms (loop for form = (read in nil :eof) until (eq form :eof)
@@ -41,15 +41,15 @@
                       else collect (lower-runtime-library form))))
         ;; Establish the native package and symbol identities before DEFSTRUCT
         ;; generates accessors. Public exports are declared in PACKAGE.LISP.
-        (when (equal file "thread-library.lisp")
-          (let* ((package (find-package :miricl-threads))
+        (when (member file '("thread-library.lisp" "bundle-library.lisp") :test #'equal)
+          (let* ((package (find-package (if (equal file "thread-library.lisp") :miricl-threads :miricl-bundle)))
                  (exports (sort (loop for symbol being the external-symbols of package collect symbol)
                                 #'string< :key #'symbol-name))
                  (symbols (union exports (runtime-library-symbols forms))))
             (setf forms (list (lower-runtime-library
-              `(let ((*package* (find-package "MIRICL-THREADS"))) ,@forms))))
+              `(let ((*package* (find-package ,(package-name package)))) ,@forms))))
             (push (lower-runtime-library
-              `(let ((package (make-package "MIRICL-THREADS" :use '("CL"))))
+              `(let ((package (make-package ,(package-name package) :use '("CL"))))
                  (shadowing-import ',(remove-if-not
                    (lambda (symbol) (eq (symbol-package symbol) package)) symbols) package)
                  (export ',exports package))) forms)))

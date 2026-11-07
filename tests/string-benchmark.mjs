@@ -7,7 +7,7 @@ import {Miricl} from '../scripts/miricl.mjs';
 
 const args = process.argv.slice(2);
 const host = args.includes('--sbcl-source');
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
 const long = 'a'.repeat(32768);
 const fixtures = `(defparameter *bench-short-a* "AbCdEfGh")
   (defparameter *bench-short-b* "aBcDeFgH")

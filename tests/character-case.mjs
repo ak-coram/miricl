@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'interpreter.wasm'));
+const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm'));
 const check = source => assert.equal(vm.evaluate(source, {eof: true}).output, 'T\n', source);
 check(`(loop for code in '(453 456 459 498) for c = (code-char code) always
   (and (eql c (char-upcase c)) (eql c (char-downcase c))

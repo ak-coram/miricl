@@ -6,7 +6,7 @@ import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {connectTerminal, createWebapp, startHost, testPorts, waitFor} from './repl-bridge-fixture.mjs';
 
-const binary = path.resolve(process.argv[2] ?? 'interpreter.wasm');
+const binary = path.resolve(process.argv[2] ?? 'miricl-interpreter.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
 const httpOrigin = `http://127.0.0.1:${testPorts.http}`;
 const directory = await createWebapp(binary);
@@ -27,7 +27,7 @@ await fs.writeFile(path.join(directory, 'project/raw data λ.bin'), Uint8Array.o
 await fs.writeFile(path.join(directory, 'production.html'), `<!doctype html>
 <script type="module">
   import {Miricl} from './scripts/miricl.mjs';
-  const bytes = await (await fetch('./interpreter.wasm')).arrayBuffer();
+  const bytes = await (await fetch('./miricl-interpreter.wasm')).arrayBuffer();
   globalThis.app = await Miricl.instantiate(bytes);
   app.mountFile('/app.wasm', await (await fetch('./app.wasm')).arrayBuffer());
   await app.evaluateAsync('(load "/app.wasm")');

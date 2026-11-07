@@ -1,0 +1,60 @@
+* Game of Life
+
+From the repository root, prepare the runtime and ASDF artifacts and Quicklisp
+source symlinks:
+
+#+begin_src sh
+just setup-game-of-life
+cd game-of-life
+just dev-node
+# or: just dev-wasi
+#+end_src
+
+Open http://127.0.0.1:8000/dev.html. Click and drag to draw or erase cells;
+Run/Pause and Step control the simulation. The 24×16 grid wraps at its edges.
+The colors follow Plan 9 / Acme.
+
+Both commands accept HTTP and WebSocket ports, followed by additional REPL
+flags. For example, =just dev-node 8001 4007 --repl-bridge= also enables the
+TCP REPL. Open =http://127.0.0.1:8001/dev.html?ws=4007= in that case.
+Wasmtime's command derives its directory preopens from the symlinks.
+
+The browser and terminal share the same Lisp state:
+
+#+begin_src lisp
+life:*world*                 ; prints the current world as an ASCII grid
+(life:print-grid)            ; just the grid, with # for life and . for empty
+(life:world-generation life:*world*)
+(fset2:size (life:world-cells life:*world*))
+
+(defparameter *snapshot* life:*world*)
+(setf life:*world* (life:paint life:*world* 4 5))
+(life:render)
+*snapshot*                  ; the old world is unchanged
+#+end_src
+
+=life:paint=, =life:seed= and =life:next-generation= return new values using
+FSet 2 persistent sets. Only the UI boundary replaces =life:*world*=.
+ASDF can reload edits with =(asdf:load-system "game-of-life")=.
+
+Build the production FASL from a fresh interpreter:
+
+#+begin_src sh
+just build
+#+end_src
+
+This invokes the shipped Node REPL's =--bundle= mode, with no browser.
+=just build-wasi= performs the same operation through WASI. Both write only
+=build/game-of-life.wasm=: the ASDF application and dependency FASLs.
+Serve =index.html= with the separate =runtime/miricl.js= and
+=images/miricl-interpreter.wasm= files; for example, use the existing dev server
+and open http://127.0.0.1:8000/index.html. The production page does not enable
+the development connection or fetch Quicklisp sources.
+
+The application uses the =fset2= package from Quicklisp's FSet system.
+Setup links the runtime distribution, compiled ASDF and dependency sources;
+it does not require copying MIRICL's repository into the application.
+A small MIRICL locking port is appended to FSet's =port.lisp= in the guest
+filesystem; the Quicklisp checkout is untouched.
+The named-readtables port omits its PAX documentation component and dependency,
+so the production FASL needs no ASDF/UIOP library.

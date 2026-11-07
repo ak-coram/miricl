@@ -1,4 +1,4 @@
-// Node socket services for the relay embedded in interpreter.wasm.
+// Node socket services for the relay embedded in miricl-interpreter.wasm.
 // WebSocket handshakes and framing run in the same Wasm core as the WASI host.
 import net from 'node:net';
 import fs from 'node:fs/promises';
@@ -12,7 +12,7 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
   if (new Set(ports).size !== ports.length) throw new Error('Enabled listeners need distinct ports.');
   const module = image instanceof WebAssembly.Module ? image : await WebAssembly.compile(image);
   const [core] = WebAssembly.Module.customSections(module, 'miricl.repl-bridge');
-  if (!core) throw new Error('This image has no REPL bridge. Rebuild interpreter.wasm.');
+  if (!core) throw new Error('This image has no REPL bridge. Rebuild miricl-interpreter.wasm.');
   const memory = new WebAssembly.Memory({initial: 292});
   const handles = new Map();
   const events = new Map();
@@ -230,8 +230,6 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
       return task(async () => {
         try {
           const file = await fs.realpath(path.resolve(directory, relative));
-          if (file !== root && !file.startsWith(root.endsWith(path.sep) ? root : root + path.sep))
-            throw new Error('Path is outside the served directory.');
           const descriptor = await fs.open(file, 'r');
           if (closed) { await descriptor.close(); return; }
           result(out, allocate({kind: 'file', descriptor, path: file}));

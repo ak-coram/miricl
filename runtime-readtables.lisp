@@ -294,6 +294,54 @@
       (ref.is_null (struct.get $obj $b (local.get $to)))))))
   #@(local.get $to))
 
+(define-runtime-function $readtable-macro-characters (($table :nullable-object) ($dispatch :nullable-object)) (:nullable-object)
+  (:locals ($codes :nullable-object) ($scan :nullable-object) ($entry :nullable-object) ($map :nullable-object)
+           ($result :nullable-object) ($code i32) ($syntax i32) ($sub i32))
+  #@(drop (call $require-readtable (local.get $table)))
+  #@(local.set $map (struct.get $obj $b (local.get $table)))
+  #@(if (i32.eqz (ref.is_null (local.get $dispatch)))
+    (then
+      (local.set $code (call $character-code (local.get $dispatch)))
+      (local.set $syntax (call $readtable-syntax (local.get $table) (local.get $code)))
+      ,(wat-fail-when #@(i32.eqz (i32.or (i32.eq (local.get $syntax) (i32.const 35))
+        (i32.or (i32.eq (local.get $syntax) (i32.const 130)) (i32.eq (local.get $syntax) (i32.const 131))))) :reader-syntax)
+      (local.set $map (call $readtable-entry (local.get $table) (local.get $code)))
+      (if (i32.eqz (ref.is_null (local.get $map))) (then (local.set $map (struct.get $obj $b (local.get $map)))))
+      (local.set $code (i32.const 0))))
+  ;; Every built-in macro is ASCII; explicitly modified Unicode characters
+  ;; live in the sparse map. No Unicode-space scan is needed.
+  #@(if (i32.eqz (ref.is_null (local.get $map)))
+    (then (local.set $scan (struct.get $obj $b (local.get $map)))))
+  #@(block $done (loop $keys
+    (br_if $done (ref.is_null (local.get $scan)))
+    (local.set $entry (call $car (local.get $scan)))
+    (if (i32.ge_u (call $natural-count (struct.get $obj $a (local.get $entry))) (i32.const 128))
+      (then (local.set $codes (call $cons (struct.get $obj $a (local.get $entry)) (local.get $codes)))))
+    (local.set $scan (call $cdr (local.get $scan))) (br $keys)))
+  #@(loop $ascii
+    (local.set $codes (call $cons (call $int (local.get $code)) (local.get $codes)))
+    (local.set $code (i32.add (local.get $code) (i32.const 1)))
+    (br_if $ascii (i32.lt_u (local.get $code) (i32.const 128))))
+  #@(block $done (loop $next
+    (br_if $done (ref.is_null (local.get $codes)))
+    (local.set $code (call $natural-count (call $car (local.get $codes))))
+    (local.set $codes (call $cdr (local.get $codes)))
+    (if (ref.is_null (local.get $dispatch))
+      (then (local.set $sub (i32.gt_u (call $readtable-syntax (local.get $table) (local.get $code)) (i32.const 3))))
+      (else
+        (local.set $entry (ref.null $obj))
+        (if (i32.eq (local.get $syntax) (i32.const 35))
+          (then (local.set $entry (call $standard-dispatch-function (local.get $code)))))
+        (if (i32.eqz (ref.is_null (local.get $map)))
+          (then
+            (local.set $scan (call $hash-cell-native (call $int (local.get $code)) (local.get $map)))
+            (if (i32.eqz (ref.is_null (local.get $scan))) (then (local.set $entry (struct.get $obj $b (local.get $scan)))))))
+        (local.set $sub (i32.eqz (ref.is_null (local.get $entry))))))
+    (if (local.get $sub)
+      (then (local.set $result (call $cons (call $node (i32.const 16) (local.get $code) (ref.null $obj) (ref.null $obj) (ref.null $obj)) (local.get $result)))))
+    (br $next)))
+  #@(call $clear-values) #@(local.get $result))
+
 (define-runtime-section readtable-runtime-wat ()
   #@(global $reader-standard-syntax (mut i32) (i32.const 1))
   #@(global $reader-readtable (mut (ref null $obj)) (ref.null $obj))
@@ -302,4 +350,5 @@
   ($standard-reader-syntax) ($readtable-syntax) ($reader-syntax) ($reader-white) ($refresh-reader-readtable)
   ($copy-reader-entries) ($copy-reader-entry) ($set-reader-syntax) ($set-syntax-from-char)
   ($readtable-entry) ($macro-character-apply) ($dispatch-character-apply) ($standard-dispatch-function)
+  ($readtable-macro-characters)
   ($require-readtable) ($readtable-mode) ($readtable-case-access) ($readtable-apply))

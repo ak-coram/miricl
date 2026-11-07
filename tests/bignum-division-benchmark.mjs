@@ -38,7 +38,7 @@ if (args.includes('--sbcl-source')) {
             (* 1000.0d0 (/ (- (get-internal-real-time) start) internal-time-units-per-second))))))`);
   }
 } else {
-  const binary = args[0] ?? 'interpreter.wasm';
+  const binary = args[0] ?? 'miricl-interpreter.wasm';
   const vm = await Miricl.instantiate(fs.readFileSync(binary));
   vm.evaluate(fixtures);
   const milliseconds = {};

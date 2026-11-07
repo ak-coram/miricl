@@ -26,6 +26,10 @@
            #:atomic-integer-value #:atomic-integer-compare-and-swap
            #:atomic-integer-incf #:atomic-integer-decf #:timeout #:with-timeout))
 
+(defpackage #:miricl-bundle
+  (:use #:cl)
+  (:export #:initialize #:dump-system))
+
 (defpackage #:wasmtime
   (:use #:cl #:cffi)
   (:export #:with-engine #:with-store #:with-byte-vec #:with-module

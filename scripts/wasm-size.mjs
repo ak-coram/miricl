@@ -71,7 +71,7 @@ export function measureWasmImages(binary) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  for (const file of process.argv.length > 2 ? process.argv.slice(2) : ['interpreter.wasm']) {
+  for (const file of process.argv.length > 2 ? process.argv.slice(2) : ['miricl-interpreter.wasm']) {
     console.log(JSON.stringify(measureWasm(file), null, 2));
   }
 }

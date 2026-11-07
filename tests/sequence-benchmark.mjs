@@ -6,7 +6,7 @@ import {Miricl} from '../scripts/miricl.mjs';
 
 const args = process.argv.slice(2);
 const host = args.includes('--sbcl-source');
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
 const fixtures = `(defparameter *bench-text* "${'abcd'.repeat(8192)}")
   (defparameter *bench-unicode* "${'ÉλЖ🙂'.repeat(4096)}")
   (defparameter *bench-result* nil) (defparameter *bench-operation* nil)`;

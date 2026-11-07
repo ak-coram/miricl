@@ -1,4 +1,4 @@
-// node --experimental-wasm-wasmfx tests/text-repl.mjs interpreter.wasm [miricl-repl.wasm] [--in-process]
+// node --experimental-wasm-wasmfx tests/text-repl.mjs miricl-interpreter.wasm [miricl-repl.wasm] [--in-process]
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -9,7 +9,7 @@ import {terminalCore, terminalFixture} from './component-core.mjs';
 const options = process.argv.slice(2);
 const inProcess = options.includes('--in-process');
 const paths = options.filter(option => !option.startsWith('--'));
-const binary = paths[0] ?? 'interpreter.wasm';
+const binary = paths[0] ?? 'miricl-interpreter.wasm';
 const wasiBinary = paths[1];
 const module = await WebAssembly.compile(fs.readFileSync(binary));
 assert.deepEqual(WebAssembly.Module.imports(module), []);

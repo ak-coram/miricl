@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 
 const args = process.argv.slice(2);
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
 const calls = 5000;
 const ordinaryOnly = args.includes('--ordinary-only');
 const fixture = `(defstruct (bench-record (:constructor bench-record (x y z))

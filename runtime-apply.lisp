@@ -106,6 +106,10 @@
       (i32.add (i32.sub (local.get $id) (i32.const ,(1- (runtime-symbol-id 'string/=))))
         (i32.ge_u (local.get $id) (i32.const ,(runtime-symbol-id 'string-not-equal))))))))
   (wat-symbol-case #@(local.get $id)
+    (readtable-macro-characters
+      (wat-arity 1 2)
+      #@(return (call $readtable-macro-characters (call $car (local.get $args))
+        (call $car (call $cdr (local.get $args))))))
     (subtypep
       (wat-arity 2 3)
       #@(return (call $subtypep-native (call $car (local.get $args))

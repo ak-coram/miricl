@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 import {DevFilesystem} from '../scripts/dev-filesystem.mjs';
 
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'interpreter.wasm'));
+const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm'));
 const fetch = globalThis.fetch;
 const encoder = new TextEncoder();
 const files = new Map([
@@ -88,6 +88,19 @@ try {
       (and (= (read-byte s) 17) (= (file-length s) 1))))`);
   assert.deepEqual(files.get('host/space λ.bin'), Uint8Array.of(0, 255, 128, 65),
     'Compiler output and edits must stay in the browser overlay.');
+  await check(`(progn
+    (delete-file "host/space λ.bin")
+    (and (null (probe-file "host/space λ.bin"))
+      (handler-case (progn (file-write-date "host/space λ.bin") nil) (file-error () t))
+      (null (directory "host/*.bin"))
+      (progn (rename-file "host/nested/child.lisp" "replacement.lisp")
+        (null (probe-file "host/nested/child.lisp")))
+      (probe-file "host/nested/replacement.lisp")
+      (progn (with-open-file (s "host/space λ.bin" :direction :output)
+               (write-string "new" s))
+        (probe-file "host/space λ.bin"))
+      (= (length (directory "host/*.bin")) 1)))`);
+  assert.ok(files.has('host/nested/child.lisp'), 'Renames stay in the overlay.');
 
   delayed.add('host/main.lisp');
   await check(`(let ((progress nil)

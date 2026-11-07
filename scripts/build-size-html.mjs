@@ -6,7 +6,7 @@ import {pathToFileURL} from 'node:url';
 import {measureFile, measureWasm} from './wasm-size.mjs';
 
 const artifacts = [
-  {file: 'interpreter.wasm', description: 'Import-free Common Lisp interpreter', kind: 'wasm'},
+  {file: 'miricl-interpreter.wasm', description: 'Import-free Common Lisp interpreter', kind: 'wasm'},
   {file: 'miricl-repl.wasm', description: 'Interpreter and WASI terminal REPL', kind: 'wasm'},
   {file: 'miricl.html', description: 'Complete browser REPL page', kind: 'html'},
   {file: 'todo.html', description: 'Complete Common Lisp + CLOS TODO page', kind: 'html'},

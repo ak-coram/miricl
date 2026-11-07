@@ -4,7 +4,7 @@ node := env('NODE', 'node')
 wasmtime := env('WASMTIME', 'wasmtime')
 quicklisp := env('QUICKLISP_SETUP', env('HOME') / 'quicklisp/setup.lisp')
 build_dir := env('MIRICL_BUILD_DIR', '.')
-interpreter := build_dir / 'interpreter.wasm'
+interpreter := build_dir / 'miricl-interpreter.wasm'
 wasi_repl := build_dir / 'miricl-repl.wasm'
 
 # List available commands.
@@ -26,6 +26,14 @@ build-html:
 # Build the standalone CLOS TODO application (todo.html).
 build-todo:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-todo.lisp {{ quote(build_dir) }}
+
+# Prepare an independent application directory with runtime and library symlinks.
+setup-game-of-life: build asdf-init build-asdf
+    {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/setup-application.lisp {{ quote(absolute_path("game-of-life")) }} game-of-life {{ quote(absolute_path(build_dir)) }} {{ quote(node) }}
+
+# Build the FSet 2 example application FASL for its production HTML page.
+build-game-of-life: setup-game-of-life
+    just --justfile game-of-life/justfile build
 
 # Build raw, gzip and Brotli size reports for the Wasm images and HTML pages.
 build-sizes: build build-html build-todo
@@ -128,6 +136,15 @@ test-development: build
 test-compilation: build
     {{ quote(node) }} tests/compilation.mjs {{ quote(interpreter) }}
     {{ quote(node) }} tests/file-compilation.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/nested-backquote.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/structure-printers.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/readtable-iteration.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/nested-backquote.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/structure-printers.mjs {{ quote(interpreter) }}
+
+# Exercise the FSet 2 application and its separate production assets in Chromium.
+test-game-of-life: build-game-of-life
+    {{ quote(node) }} tests/browser-game-of-life.mjs game-of-life/index.html
 
 test-environment: build
     {{ quote(node) }} tests/environment.mjs {{ quote(interpreter) }}
@@ -209,8 +226,8 @@ asdf-init:
     git submodule update --init vendor/asdf
 
 # Assemble the optional guest ASDF library from a patched source copy.
-build-asdf:
-    {{ quote(node) }} scripts/build-asdf.mjs {{ quote(build_dir / 'build/asdf') }}
+build-asdf: build
+    {{ quote(node) }} scripts/build-asdf.mjs {{ quote(build_dir / 'build/asdf') }} {{ quote(interpreter) }} {{ quote(build_dir / 'miricl-asdf.wasm') }}
 
 # Check patch preparation, system loading, and production FASL bundles.
 test-asdf: build build-asdf
@@ -243,3 +260,7 @@ ansi-cons +files: build
 
 # Run project tests, Node integration tests, and the default ANSI profile.
 check: test test-js ansi
+
+# Build ASDF FASL bundles through both terminal hosts, without a browser.
+test-bundle: build build-asdf
+    {{ quote(node) }} tests/bundle-command.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }} {{ quote(build_dir / 'miricl-asdf.wasm') }}

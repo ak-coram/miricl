@@ -59,6 +59,18 @@ jobs:
           cp miricl.html "$RUNNER_TEMP/pages/index.html"
           cp todo.html "$RUNNER_TEMP/pages/todo.html"
 
+      - name: Build FSet 2 Game of Life
+        shell: bash
+        run: |
+          node scripts/build-asdf.mjs build/asdf miricl-interpreter.wasm miricl-asdf.wasm
+          ros -L sbcl-bin run -- --script scripts/setup-application.lisp "$PWD/game-of-life" game-of-life "$PWD" node
+          node miricl.js miricl-interpreter.wasm --directory game-of-life --bundle game-of-life --output build/game-of-life.wasm
+          mkdir -p "$RUNNER_TEMP/pages/game-of-life/"{build,images,runtime}
+          cp game-of-life/index.html "$RUNNER_TEMP/pages/game-of-life/index.html"
+          cp game-of-life/build/game-of-life.wasm "$RUNNER_TEMP/pages/game-of-life/build/"
+          cp miricl-interpreter.wasm "$RUNNER_TEMP/pages/game-of-life/images/"
+          cp runtime/miricl.js "$RUNNER_TEMP/pages/game-of-life/runtime/"
+
       - name: Build image size summary
         run: node scripts/build-size-html.mjs . "$RUNNER_TEMP/pages/image-sizes.html" index.html
 
@@ -68,6 +80,7 @@ jobs:
         run: |
           node tests/browser-repl.mjs "$RUNNER_TEMP/pages/index.html"
           node tests/browser-todo.mjs "$RUNNER_TEMP/pages/todo.html"
+          node tests/browser-game-of-life.mjs "$RUNNER_TEMP/pages/game-of-life/index.html"
           node tests/ansi-html.mjs
           node tests/size-html.mjs
 
@@ -84,7 +97,7 @@ jobs:
           exec ros -L sbcl-bin run -- "$@"
           SH
           chmod +x "$RUNNER_TEMP/ansi-sbcl"
-          SBCL="$RUNNER_TEMP/ansi-sbcl" node tests/ansi.mjs interpreter.wasm --full
+          SBCL="$RUNNER_TEMP/ansi-sbcl" node tests/ansi.mjs miricl-interpreter.wasm --full
 
       - name: Build standalone ANSI results page
         run: |

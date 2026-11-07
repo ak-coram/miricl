@@ -15,7 +15,7 @@ const report = {
   profile: 'full', startedAt: '2026-11-03T12:00:00.000Z', elapsedMs: 1234,
   timeout: 10000, performanceBudgetMs: 2000, heapLimitMb: 512, inventory: 'SBCL inventory; WASM test bodies',
   imageSizes: [
-    {file: '/unavailable/interpreter.wasm', rawBytes: 278479, gzipBytes: 128962, brotliBytes: 113743},
+    {file: '/unavailable/miricl-interpreter.wasm', rawBytes: 278479, gzipBytes: 128962, brotliBytes: 113743},
     {file: '/unavailable/repl&"λ.wasm', rawBytes: 279578, gzipBytes: 129646, brotliBytes: 114337},
   ],
   tests: [
@@ -135,7 +135,7 @@ function browserChecks() {
 }
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'miricl-ansi-html-'));
 try {
-  const binary = path.join(directory, 'interpreter.wasm');
+  const binary = path.join(directory, 'miricl-interpreter.wasm');
   const companion = path.join(directory, 'miricl-repl.wasm');
   const core = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
   const repl = Buffer.concat([core, Buffer.from([0, 2, 1, 120])]);

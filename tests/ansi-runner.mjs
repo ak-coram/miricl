@@ -7,7 +7,7 @@ import {runFull} from './ansi-full.mjs';
 import {formatProgress} from './ansi-progress.mjs';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const binary = process.argv[2] ?? 'interpreter.wasm';
+const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
 const record = (source, tests = [], packageName = 'CL-TEST') => ({
   file: 'runner-fixture.lsp', package: packageName, source,
   tests: tests.map(name => `${packageName}::${name}`),

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 const options = process.argv.slice(2);
-const binary = options.find(option => !option.startsWith('--')) ?? 'interpreter.wasm';
+const binary = options.find(option => !option.startsWith('--')) ?? 'miricl-interpreter.wasm';
 const vm = await Miricl.instantiate(fs.readFileSync(binary));
 vm.evaluate(`(defparameter *symbol-anchor* (make-symbol "anchor"))
   (defparameter *symbol-closure*

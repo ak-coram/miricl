@@ -6,7 +6,7 @@ import {Miricl} from '../scripts/miricl.mjs';
 
 const args = process.argv.slice(2);
 const host = args.includes('--sbcl-source');
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
 const fixture = `(defparameter *bench-vector* #(${Array.from({length: 4096}, (_, i) => i).join(' ')}))
   (defparameter *bench-target* (copy-seq *bench-vector*))
   (defparameter *bench-result* nil) (defparameter *bench-operation* nil)

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Run the unmodified upstream RT harness inside the standalone interpreter.
-// node tests/ansi.mjs [interpreter.wasm] [--helpers=cons] [upstream-file.lsp ...]
+// node tests/ansi.mjs [miricl-interpreter.wasm] [--helpers=cons] [upstream-file.lsp ...]
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const binary = process.argv[2] ?? 'interpreter.wasm';
+const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
 if (process.argv.slice(3).includes('--full')) {
   const {main} = await import('./ansi-full.mjs');
   await main(binary, process.argv.slice(3).filter(arg => arg !== '--full'));

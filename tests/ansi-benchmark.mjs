@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const binary = process.argv[2] ?? 'interpreter.wasm';
+const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
 const count = Number(process.argv[3] ?? 120);
 assert.ok(Number.isSafeInteger(count) && count > 0, 'Test count must be a positive integer.');
 const started = performance.now();

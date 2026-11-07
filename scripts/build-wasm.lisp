@@ -5,7 +5,17 @@
   (asdf:load-asd (merge-pathnames "miricl.asd" root))
   (if (find-package :ql) (uiop:symbol-call :ql :quickload :miricl) (asdf:load-system :miricl))
   (ensure-directories-exist output)
-  (dolist (entry '(("interpreter.wasm" nil) ("miricl-repl.wasm" t)))
+  (dolist (entry '(("miricl-interpreter.wasm" nil) ("miricl-repl.wasm" t)))
     (let ((path (merge-pathnames (first entry) output)))
       (uiop:symbol-call :miricl :write-interpreter-wasm path :wasi (second entry))
       (format t "Wrote ~A~%" path))))
+
+;; The runtime distribution consists of ordinary files, never embedded assets.
+(let* ((root (uiop:pathname-parent-directory-pathname (uiop:pathname-directory-pathname *load-truename*)))
+       (output (uiop:ensure-directory-pathname (or (first (uiop:command-line-arguments)) (uiop:getcwd))))
+       (runtime (merge-pathnames "runtime/" output)))
+  (ensure-directories-exist runtime)
+  (uiop:run-program (list (or (uiop:getenv "NODE") "node")
+    (namestring (merge-pathnames "scripts/build-adapter.mjs" root))
+    (namestring (merge-pathnames "miricl.js" output))) :output *standard-output* :error-output *error-output*)
+  (uiop:copy-file (merge-pathnames "miricl.js" output) (merge-pathnames "miricl.js" runtime)))

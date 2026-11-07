@@ -1,6 +1,10 @@
 ;;;; Build-time lowering of private Lisp libraries into guest object literals.
 (in-package #:miricl)
 
+(defparameter *shared-loop-symbols*
+  '(%%while %%arithmetic-step %%case-form %%list-test %%list-accumulate
+    %%numeric-collect %%parallel-place-form))
+
 ;; Libraries execute in the guest evaluator. No host macroexpansion or reader
 ;; is needed at runtime, and their uninterned symbols cannot capture user names.
 (defun lower-runtime-library (form)
@@ -84,7 +88,7 @@
                 (eq symbols (symbol-value '*clos-library-symbols*))))
     (:loop (and (boundp '*loop-library-symbols*)
                 (or (and (= private-tag 25) (eq symbols (symbol-value '*loop-library-symbols*)))
-                    (and (= private-tag 24) (member (second entry) '(%%while %%arithmetic-step))
+                    (and (= private-tag 24) (member (second entry) *shared-loop-symbols*)
                          (eq loop-symbols (symbol-value '*loop-library-symbols*))))))
     (otherwise t)))
 
@@ -112,7 +116,7 @@ Entries retain symbol and namespace identities, rather than table offsets."
                      ((and form (symbolp form))
                       (let* ((id (position form *runtime-symbols*))
                              (namespace (unless id (if (or (= private-tag 25)
-                                       (member form '(%%while %%arithmetic-step))) :loop :clos)))
+                                       (member form *shared-loop-symbols*)) :loop :clos)))
                              (entry (list form namespace))
                              (index (or id (position form (if (eq namespace :loop)
                                                             (symbol-value '*loop-library-symbols*) symbols)))))
@@ -160,7 +164,7 @@ Other tags abbreviate the proper list prefixes in *RUNTIME-LIBRARY-PREFIXES*."
                                  (runtime-library-prefix-namespace-p (cons 0 entry) symbols private-tag loop-symbols)))
                                *runtime-library-symbol-codes*)))
                         (if compact (emit-byte (+ 128 compact))
-                            (let ((cross (and (= private-tag 24) (member form '(%%while %%arithmetic-step)))))
+                            (let ((cross (and (= private-tag 24) (member form *shared-loop-symbols*))))
                               (emit-byte (if id 6 (if cross 25 private-tag)))
                               (uleb (or id (position form (if cross loop-symbols symbols))
                                         (error "Unknown library symbol ~S" form)))))))

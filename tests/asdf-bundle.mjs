@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl, MiriclError} from '../scripts/miricl.mjs';
 
-const binary = fs.readFileSync(process.argv[2] ?? 'interpreter.wasm');
+const binary = fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm');
 const asdf = fs.readFileSync(process.argv[3] ?? 'build/asdf/asdf.lisp', 'utf8');
 const vm = await Miricl.instantiate(binary);
 const machines = [vm];

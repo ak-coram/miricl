@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const binary = fs.readFileSync(process.argv[2] ?? 'interpreter.wasm');
+const binary = fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm');
 const a = await Miricl.instantiate(binary);
 const b = await Miricl.instantiate(binary);
 const check = source => assert.equal(a.evaluate(source).output, 'T\n', source);

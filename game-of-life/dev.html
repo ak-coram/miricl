@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#9999cc">
+<title>Life / miricl</title>
+<style>
+  :root { color-scheme: light; font-family: "Lucida Console", "Courier New", monospace; color: #222; background: #9999cc; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px 16px; }
+  main { max-width: 668px; margin: auto; border: 1px solid #222; background: #ffffea; box-shadow: 4px 4px 0 #555588; }
+  header { background: #eaffff; border-bottom: 1px solid #222; display: flex; align-items: center; gap: 12px; padding: 8px 12px; font-size: 13px; }
+  .handle { background: #8888cc; width: 13px; height: 13px; border: 1px solid #222; }
+  #status { margin-left: auto; color: #444; font-size: 12px; }
+  section { padding: 24px; }
+  .eyebrow { font-size: 11px; letter-spacing: 2px; margin: 0 0 8px; }
+  h1 { font-size: 28px; font-weight: normal; margin: 0; }
+  .intro { line-height: 1.6; font-size: 13px; margin: 10px 0 22px; max-width: 52ch; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; padding: 9px; border: 1px solid #222; background: #eaffff; }
+  button { color: #222; font: inherit; font-size: 13px; background: #ffffea; border: 1px solid #222; padding: 5px 12px; cursor: pointer; }
+  button:hover:not(:disabled), button[aria-pressed="true"] { background: #cccc88; }
+  button:focus-visible, canvas:focus-visible { outline: 2px solid #0055aa; outline-offset: 3px; }
+  button:disabled { opacity: .45; cursor: wait; }
+  .presets { margin-left: auto; display: flex; gap: 6px; }
+  canvas { display: block; width: 100%; height: auto; aspect-ratio: 3 / 2; background: #eeeecc; image-rendering: pixelated; touch-action: none; cursor: crosshair; border: 1px solid #222; border-top: 0; }
+  .readout { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; font-size: 12px; }
+  .readout strong { font-weight: normal; }
+  .hint { color: #555; font-size: 11px; line-height: 1.6; margin: 0 0 22px; }
+  details { border-top: 1px solid #cccc99; padding-top: 12px; font-size: 12px; }
+  summary { cursor: pointer; }
+  pre { font-size: 12px; line-height: 1.4; overflow: auto; }
+  footer { padding: 10px 14px; background: #eaffff; border-top: 1px solid #222; font-size: 11px; }
+  .error { color: #aa0000 !important; }
+  @media(max-width: 520px) { body { padding: 12px 8px; } section { padding: 16px 12px; } .toolbar { gap: 6px; } .presets { margin-left: 0; } button { padding: 5px 9px; } h1 { font-size: 25px; } }
+</style>
+</head>
+<body>
+<main>
+  <header><span class="handle" aria-hidden="true"></span><span>life / a little world</span><span id="status" role="status" aria-live="polite">Loading…</span></header>
+  <section>
+    <p class="eyebrow">CONWAY'S GAME OF LIFE</p>
+    <h1>Small rules. Endless life.</h1>
+    <p class="intro">Give a few cells a place to begin. Watch what happens when every generation follows the same three rules.</p>
+    <div class="toolbar" aria-label="Simulation controls">
+      <button id="run" aria-pressed="false" disabled>Run</button><button id="step" disabled>Step</button><button id="clear" disabled>Clear</button>
+      <div class="presets"><button data-pattern="glider" disabled>Glider</button><button data-pattern="r-pentomino" disabled>R-pentomino</button></div>
+    </div>
+    <canvas id="grid" width="576" height="384" tabindex="0" aria-label="24 by 16 Life grid. Click or drag to draw; draw over a live cell to erase. Space runs or pauses; N advances one generation." aria-disabled="true"></canvas>
+    <div class="readout"><span>GENERATION <strong id="generation">0000</strong></span><span>ALIVE <strong id="population">000</strong></span><span>24 × 16</span></div>
+    <p class="hint">Click + drag to draw or erase. Space to run / pause. N to step.<br>The edges wrap around. Two neighbors sustain a cell; three bring one to life.</p>
+    <details><summary>ASCII view</summary><pre id="ascii" aria-label="Current grid in ASCII"></pre></details>
+  </section>
+  <footer>Common Lisp · FSet 2 · miricl / Wasm</footer>
+</main>
+<noscript>This simulation needs JavaScript and WebAssembly.</noscript>
+<script type="module">
+  import {Miricl} from "./runtime/miricl.js";
+  const report = error => {
+    document.getElementById("status").textContent = error.message;
+    document.getElementById("status").classList.add("error");
+    console.error(error);
+  };
+  try {
+    const image = await fetch("./images/miricl-interpreter.wasm");
+    const url = new URL(location.href);
+    url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    url.port = new URLSearchParams(location.search).get("ws") ?? "4006";
+    url.pathname = "/repl"; url.search = ""; url.hash = "";
+    const lisp = globalThis.miriclInterpreter = await Miricl.instantiate(await image.arrayBuffer(), {
+      dev: {url: url.href}, onThreadError: report
+    });
+    await lisp.evaluateAsync(`
+      (miricl-bundle:initialize)
+      (asdf:load-asd "/game-of-life.asd")
+      (asdf:load-system "game-of-life")
+      (life:start)
+    `, {eof: true});
+  } catch (error) { report(error); }
+</script>
+</body>
+</html>

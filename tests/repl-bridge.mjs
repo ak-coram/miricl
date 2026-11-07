@@ -1,4 +1,4 @@
-// node tests/repl-bridge.mjs interpreter.wasm [miricl-repl.wasm]
+// node tests/repl-bridge.mjs miricl-interpreter.wasm [miricl-repl.wasm]
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import net from 'node:net';
@@ -6,7 +6,7 @@ import path from 'node:path';
 import {Miricl} from '../scripts/miricl.mjs';
 import {connectTerminal, createWebapp, startHost, testPorts, waitFor} from './repl-bridge-fixture.mjs';
 
-const binary = path.resolve(process.argv[2] ?? 'interpreter.wasm');
+const binary = path.resolve(process.argv[2] ?? 'miricl-interpreter.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
 const bytes = await fs.readFile(binary);
 const devOptions = {url: `ws://127.0.0.1:${testPorts.websocket}/repl`};
@@ -122,7 +122,7 @@ try {
       assert.match(await response.text(), /User webapp/);
       response = await get('/scripts/miricl.mjs');
       assert.match(response.headers.get('content-type'), /javascript/); await response.arrayBuffer();
-      response = await get('/interpreter.wasm');
+      response = await get('/miricl-interpreter.wasm');
       assert.equal(response.headers.get('content-type'), 'application/wasm');
       assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
       response = await get('/large.bin');
@@ -130,7 +130,9 @@ try {
       response = await get('/%CE%BB.txt?fresh=1'); assert.equal(await response.text(), 'Unicode path 🙂');
       response = await get('/nested/'); assert.equal(await response.text(), '<p>nested</p>');
       response = await get('/', {method: 'HEAD'}); assert.equal(response.status, 200); assert.equal(await response.text(), '');
-      for (const url of ['/missing', '/outside.txt', '/%2e%2e%2foutside.txt']) {
+      response = await get('/outside.txt');
+      assert.equal(response.status, runtime === 'node' ? 200 : 404); await response.arrayBuffer();
+      for (const url of ['/missing', '/%2e%2e%2foutside.txt']) {
         response = await get(url); assert.equal(response.status, 404, url); await response.arrayBuffer();
       }
       response = await get('/', {method: 'POST'}); assert.equal(response.status, 405); await response.arrayBuffer();

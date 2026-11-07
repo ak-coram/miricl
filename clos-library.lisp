@@ -9,8 +9,9 @@
 (defparameter %cache-permitted t)
 
 (defun %remove (item items)
-  (if items (if (eq item (car items)) (%remove item (cdr items))
-               (cons (car items) (%remove item (cdr items)))) nil))
+  ;; A generic function can have thousands of methods. Keep removal on the
+  ;; native sequence traversal instead of recursing through the guest stack.
+  (%%remove-sequence 0 item items nil #'eq nil nil 0 nil nil nil nil))
 (defun (setf %get) (value object key) (%%put object key value))
 (defun %quote (x) (list 'quote x))
 (defun %map (fn items)
@@ -1288,6 +1289,7 @@
       :marker-index (and named marker)
       :markers (append (and include (%get include :markers)) (and named (list marker name)))
       :slots (reverse slots) :finalized t) t)))
+(defvar %structure-print-depth 0)
 (defun %define-structure (name options specs documentation package)
   (let ((*gensym-counter* 0)) (%define-structure-1 name options specs documentation package)))
 (defun %define-structure-1 (name options specs documentation package)
@@ -1296,7 +1298,7 @@
          (predicate (%struct-name text "-P" package))
          (copier (%struct-name "COPY-" text package)) (include nil) (include-name nil)
          (overrides nil) (slots nil) (readonly nil) (representation nil) (named nil)
-         (offset 0) (offset-option nil) (predicate-option nil))
+         (offset 0) (offset-option nil) (predicate-option nil) (printer-option nil))
     (%%while options
       (let ((option (pop options)))
         (cond
@@ -1320,9 +1322,12 @@
            (setq offset-option t offset (cadr option))
            (unless (typep offset '(integer 0 *)) (error 'program-error)))
           ((eq (car option) :documentation) nil)
-          ;; Custom printer syntax requires methods on PRINT-OBJECT.
+          ((%member (car option) '(:print-object :print-function))
+           (when (or printer-option (cddr option)) (error 'program-error))
+           (setq printer-option option))
           (t (error 'program-error)))))
     (when (and offset-option (not representation)) (error 'program-error))
+    (when (and representation printer-option) (error 'program-error))
     (when representation
       (unless named
         (when (and predicate-option predicate) (error "A predicate requires a named structure."))
@@ -1395,6 +1400,18 @@
         (if representation (lambda (object) (%%typed-structure-p object class))
             (lambda (object) (%instancep object class)))))
       (when copier (setf (fdefinition copier) (lambda (object) (%struct-copy object class))))
+      (when printer-option
+        (%ensure-method 'print-object nil '(object stream) (list class (find-class t))
+          (lambda (args next)
+            (let ((object (car args)) (stream (cadr args)))
+              (if (cdr printer-option)
+                  (let* ((name (cadr printer-option))
+                         (printer (if (functionp name) name (fdefinition name))))
+                    (if (eq (car printer-option) :print-function)
+                        (funcall printer object stream %structure-print-depth)
+                        (funcall printer object stream)))
+                  (%%print-structure object stream))
+              object))))
       name)))
 (defun %expand-struct-spec (spec)
   (if (symbolp spec) (%quote spec)
@@ -1408,9 +1425,12 @@
     (list '%define-structure (%quote name)
       (cons 'list (%map (lambda (option)
         (when (symbolp option) (setq option (list option)))
+        (if (and (%member (car option) '(:print-function :print-object))
+                 (consp (cadr option)) (eq (caadr option) 'lambda))
+            (list 'list (%quote (car option)) (list 'function (cadr option)))
         (if (eq (car option) :include)
             (cons 'list (append (list :include (%quote (cadr option)))
-              (%map '%expand-struct-spec (cddr option)))) (%quote option))) options))
+              (%map '%expand-struct-spec (cddr option)))) (%quote option)))) options))
       (cons 'list (%map '%expand-struct-spec specs)) documentation (%quote *package*))))
 (defun %define-short-combination (name options)
   (unless (symbolp name) (error 'program-error))

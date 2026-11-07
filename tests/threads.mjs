@@ -4,7 +4,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {Miricl} from '../scripts/miricl.mjs';
 import {threadCases} from './thread-cases.mjs';
 
-const binary = process.argv[2] ?? 'interpreter.wasm';
+const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
 const errors = [];
 const vm = await Miricl.instantiate(await fs.readFile(binary), {onThreadError: error => errors.push(error)});
 assert.ok(vm.threads, 'The runtime must expose JavaScript Promise Integration.');

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 const args = process.argv.slice(2);
 const host = args.includes('--sbcl-source');
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
 const only = args.find(arg => arg.startsWith('--only='))?.slice(7);
 const fixture = `(defparameter *bench-operation* nil) (defparameter *bench-result* nil)
 (defparameter *bench-bit-a* (make-array 65536 :element-type 'bit :initial-element 1))

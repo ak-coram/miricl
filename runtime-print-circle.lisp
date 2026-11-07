@@ -91,6 +91,9 @@
   #@(global.set $method-print-depth (local.get $depth))
   #@(local.set $stream (call $report-stream))
   #@(local.set $dynamic (global.get $dynamic-variables))
+  #@(local.set $bindings (call $bind (ref.null $obj)
+    ,(clos-library-reference '%structure-print-depth) (call $int (local.get $depth))))
+  #@(call $activate-bindings (local.get $bindings) (ref.null $obj))
   ;; Bit zero selects the pretty printer's stream-first convention. Bit one
   ;; supplies the standard aesthetic printer bindings to user methods.
   #@(if (i32.and (local.get $stream-first) (i32.const 2))

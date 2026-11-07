@@ -509,3 +509,8 @@
   '(unicode-char-upcase unicode-char-downcase unicode-string-upcase unicode-string-downcase
     unicode-string-capitalize unicode-nstring-upcase unicode-nstring-downcase unicode-nstring-capitalize)))
 (setf *runtime-functions* (append *runtime-functions* '(unicode-char-upcase unicode-char-downcase)))
+
+;; Sparse readtable enumeration for implementation portability libraries.
+(push 'readtable-macro-characters *extension-symbols*)
+(setf *runtime-symbols* (append *runtime-symbols* '(readtable-macro-characters)))
+(push 'readtable-macro-characters *runtime-functions*)

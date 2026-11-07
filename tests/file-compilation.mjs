@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const binary = fs.readFileSync(process.argv[2] ?? 'interpreter.wasm');
+const binary = fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm');
 const vm = await Miricl.instantiate(binary);
 vm.mountFile('portable.lisp', `
   (defpackage :compiled-package (:use :cl))
@@ -10,6 +10,7 @@ vm.mountFile('portable.lisp', `
   (defparameter *literal* '#1=("é𝄞" . #1#))
   (defparameter *long-literal* '#.(let ((items (loop for i below 10000 collect i)))
     (setf (cdr (last items)) items) items))
+  (defparameter *deep-literal* '#.(loop with x = nil repeat 600 do (setq x (list x)) finally (return x)))
   (defparameter *package-literal* #.*package*)
   (defparameter *encoding-probe* #.(map 'string #'code-char '(0 233 20013 119070)))
   (defstruct persisted-structure (value 42))
@@ -23,6 +24,18 @@ vm.mountFile('portable.lisp', `
     (with-package-iterator (next package :external)
       (loop for more = (nth-value 0 (next)) while more count more)))
   (macrolet ((constant-macro () '42)) (defparameter *constant-expansion* (constant-macro)))
+  (defun checked-pathname (value &key required)
+    (macrolet ((check (condition) \`(unless ,condition (error "Expected a pathname."))))
+      (etypecase value
+        (pathname (check (pathnamep value)))
+        (null (check (not required))))
+      value))
+  (defun collected-values ()
+    (macrolet ((bump (x) \`(1+ ,x)))
+      (values (loop for x in '(1 2 3) collect (bump x))
+              (loop for x below (bump 2) sum (bump x))
+              (let ((x (list 1 2)))
+                (psetf (car x) (bump (cadr x)) (cadr x) (bump (car x))) x))))
 `);
 const check = (machine, source) => assert.equal(machine.evaluate(source, {eof: true}).output, 'T\n', source);
 check(vm, `(let ((result (multiple-value-list (compile-file "portable.lisp" :verbose nil :print nil))))
@@ -53,7 +66,13 @@ check(fresh, `(and (compiled-function-p #'compiled-package::persisted)
   (= (car (nthcdr 9999 compiled-package::*long-literal*)) 9999)
   (eq compiled-package::*long-literal* (nthcdr 10000 compiled-package::*long-literal*))
   (= (compiled-package::persisted-structure-value (compiled-package::make-persisted-structure)) 42)
+  (null (loop with x = compiled-package::*deep-literal* repeat 600 do (setq x (car x)) finally (return x)))
   (= compiled-package::*constant-expansion* 42)
+  (equal (multiple-value-list (compiled-package::collected-values)) '((2 3 4) 6 (3 2)))
+  (equal (compiled-package::checked-pathname #p"file") #p"file")
+  (null (compiled-package::checked-pathname nil))
+  (handler-case (progn (compiled-package::checked-pathname nil :required t) nil)
+    (error () t))
   (= (compiled-package::package-contents :keyword)
      (let ((count 0)) (do-external-symbols (symbol :keyword count) (incf count))))
   (compiled-function-p #'compiled-package::bounded-loop)

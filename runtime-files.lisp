@@ -78,6 +78,23 @@
       (i32.and (i32.eq (array.get $digits (local.get $data) (i32.const 2)) (i32.const 115))
         (i32.eq (array.get $digits (local.get $data) (i32.const 3)) (i32.const 109))))))
 
+(define-runtime-function $compiled-source (($stream :nullable-object) ($start :nullable-object) ($end :nullable-object)) (:nullable-object)
+  (:locals ($buffer (ref $text-stream)) ($data :digits) ($first i32) ($last i32) ($size i32) ($i i32))
+  #@(local.set $buffer (call $file-buffer (struct.get $obj $a (struct.get $obj $a (local.get $stream)))))
+  #@(local.set $data (struct.get $text-stream $data (local.get $buffer)))
+  #@(local.set $first (call $natural-count (local.get $start)))
+  #@(local.set $last (call $natural-count (local.get $end)))
+  (wat-fail-when #@(i32.or (i32.lt_u (local.get $last) (local.get $first))
+    (i32.gt_u (local.get $last) (struct.get $text-stream $length (local.get $buffer)))) :reader-syntax)
+  #@(local.set $size (i32.sub (local.get $last) (local.get $first)))
+  #@(call $reserve (local.get $size))
+  #@(block $done (loop $copy
+    (br_if $done (i32.eq (local.get $i) (local.get $size)))
+    (i32.store8 (i32.add (global.get $cursor) (local.get $i))
+      (array.get $digits (local.get $data) (i32.add (local.get $first) (local.get $i))))
+    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $copy)))
+  #@(call $decode-text (global.get $cursor) (local.get $size)))
+
 (define-runtime-function $file-source (($entry :nullable-object)) (:nullable-object)
   (:locals ($buffer (ref $text-stream)) ($data :digits) ($start i32) ($length i32) ($i i32) ($text :nullable-object))
   #@(local.set $text (struct.get $obj $b (local.get $entry)))
@@ -124,6 +141,16 @@
         (return)))
     (local.set $previous (local.get $scan)) (local.set $scan (call $cdr (local.get $scan))) (br $next))))
 
+;; Deleted read-through files stay hidden in the overlay. A later local write
+;; takes precedence; no deletion or rename mutates the host source tree.
+(define-runtime-function $source-deleted-p (($path :nullable-object)) (i32)
+  (:locals ($scan :nullable-object))
+  #@(local.set $scan (global.get $source-deleted))
+  (wat-list-loop ($scan)
+    #@(if (call $string-equal (local.get $path) (call $car (local.get $scan)))
+      (then (return (i32.const 1)))))
+  #@(i32.const 0))
+
 ;; Explicit empty directories are separate from files; mounted file paths also
 ;; imply their parents. No directory objects or new GC layouts are required.
 (define-runtime-function $source-path-prefix (($path :nullable-object) ($candidate :nullable-object)) (i32)
@@ -154,6 +181,7 @@
       (then (return (i32.const 1))))
     (local.set $scan (call $cdr (local.get $scan))) (br $next)))
   #@(if (i32.eqz (ref.is_null (call $local-source-file (local.get $path)))) (then (return (i32.const 0))))
+  #@(if (call $source-deleted-p (local.get $path)) (then (return (i32.const 0))))
   #@(call $eql (call $car (call $host-file (i32.const 0) (local.get $path))) (call $int (i32.const 2))))
 
 (define-runtime-function $source-directory-delete (($path :nullable-object)) ()
@@ -181,11 +209,15 @@
 
 (define-runtime-function $filesystem-native (($mode i32) ($path :nullable-object) ($value :nullable-object)) (:nullable-object)
   (:locals ($entry :nullable-object) ($date f64))
+  #@(if (i32.eq (local.get $mode) (i32.const 7))
+    (then (return (call $host-file (i32.const 3) (local.get $path)))))
   #@(if (i32.eq (local.get $mode) (i32.const 6))
     (then
       (local.set $entry (call $local-source-file (local.get $path)))
       (if (ref.is_null (local.get $entry))
-        (then (return (call $cdr (call $host-file (i32.const 0) (local.get $path))))))
+        (then
+          (if (call $source-deleted-p (local.get $path)) (then (return (ref.null $obj))))
+          (return (call $cdr (call $host-file (i32.const 0) (local.get $path))))))
       ;; Unflushed output has no committed modification date yet.
       (if (struct.get $obj $n (local.get $entry)) (then (return (ref.null $obj))))
       (local.set $date (struct.get $source-entry $modified (ref.cast (ref $source-entry) (local.get $entry))))
@@ -207,7 +239,7 @@
       (global.set $source-directories (call $cons (local.get $path) (global.get $source-directories)))
       (return (call $symbol (i32.const 1)))))
   #@(if (i32.eqz (local.get $mode)) (then (return (call $source-file (local.get $path)))))
-  #@(local.set $entry (call $local-source-file (local.get $path)))
+  #@(local.set $entry (call $source-file (local.get $path)))
   #@(if (ref.is_null (local.get $entry))
     (then
       (if (i32.eq (local.get $mode) (i32.const 1))
@@ -217,7 +249,10 @@
     (then (call $file-unlink (local.get $entry)))
     (else
       (if (i32.eqz (ref.is_null (call $source-file (local.get $value)))) (then (call $file-error (local.get $value))))
-      (struct.set $obj $a (local.get $entry) (local.get $value))))
+      (call $file-unlink (local.get $entry))
+      (struct.set $obj $a (local.get $entry) (local.get $value))
+      (global.set $source-files (call $cons (local.get $entry) (global.get $source-files)))))
+  #@(global.set $source-deleted (call $cons (local.get $path) (global.get $source-deleted)))
   #@(call $symbol (i32.const 1)))
 
 (define-runtime-function $open-file-native
@@ -525,9 +560,11 @@
 
 (define-runtime-section file-runtime-wat ()
   #@(global $source-directories (mut (ref null $obj)) (ref.null $obj))
+  #@(global $source-deleted (mut (ref null $obj)) (ref.null $obj))
+  ($source-deleted-p)
   ($source-path-prefix) ($source-directory-p) ($source-directory-delete)
   ($make-logical-path) ($print-pathname) ($pathname-metadata) ($pathname-parts) ($pathname-match-native)
   ($file-time) ($new-source-file) ($touch-source-file) ($flush-source-file)
-  ($file-type-error) ($file-error) ($file-buffer) ($compiled-file-p) ($file-source) ($file-grow) ($file-unlink)
+  ($file-type-error) ($file-error) ($file-buffer) ($compiled-file-p) ($compiled-source) ($file-source) ($file-grow) ($file-unlink)
   ($filesystem-native) ($open-file-native) ($close-file-native)
   ($file-column) ($file-write-text) ($file-byte) ($file-character) ($file-query))

@@ -742,6 +742,7 @@
   (:locals ($entry :nullable-object))
   #@(local.set $entry (call $local-source-file (local.get $path)))
   #@(if (i32.eqz (ref.is_null (local.get $entry))) (then (return (local.get $entry))))
+  #@(if (call $source-deleted-p (local.get $path)) (then (return (ref.null $obj))))
   #@(call $host-file (i32.const 1) (local.get $path)))
 
 ;; Match '*' within one pathname component; Unicode code points are compared
@@ -908,9 +909,10 @@
       (i32.const 1) (local.get $wild) (local.get $directories) (local.get $result))))
   #@(local.set $scan (call $host-file (i32.const 2) (call $text (local.get $wild))))
   (wat-list-loop ($scan)
-    #@(local.set $result (call $directory-path (call $car (call $car (local.get $scan)))
+    #@(if (i32.eqz (call $source-deleted-p (call $car (call $car (local.get $scan)))))
+      (then (local.set $result (call $directory-path (call $car (call $car (local.get $scan)))
       (i32.eqz (ref.is_null (call $cdr (call $car (local.get $scan)))))
-      (local.get $wild) (local.get $directories) (local.get $result))))
+      (local.get $wild) (local.get $directories) (local.get $result))))))
   #@(call $clear-values)
   #@(local.get $result))
 
@@ -1128,6 +1130,67 @@
     (then (call $fdefinition (local.get $name))) (else (struct.get $obj $a (local.get $binding)))))
   #@(call $apply (local.get $name) (call $eval-list (local.get $args) (local.get $env))))
 
+(define-runtime-function $fasl-cons-new
+    (($index i32) ($records (ref $objects)) ($values (ref $objects)) ($states (ref $objects))) ()
+  (:locals ($cell :nullable-object) ($flags i32))
+  #@(local.set $flags (call $natural-count (call $car (call $cdr (call $cdr (call $cdr
+    (array.get $objects (local.get $records) (local.get $index))))))))
+  #@(local.set $cell ,(wat-new-object #@(i32.const 7) :f #@(f64.convert_i32_u (local.get $flags))))
+  #@(array.set $objects (local.get $values) (local.get $index) (local.get $cell))
+  #@(array.set $objects (local.get $states) (local.get $index) (call $int (i32.const 3))))
+
+;; FASLs are dominated by cons records. Reconstruct their graph in a native
+;; traversal; the Lisp loader still handles atoms and MAKE-LOAD-FORM dependencies.
+(define-runtime-function $fasl-cons (($root :nullable-object)) (:nullable-object)
+  (:locals ($records (ref $objects)) ($values (ref $objects)) ($states (ref $objects))
+           ($stack :digits) ($new :digits) ($index i32) ($id i32) ($child i32) ($state i32)
+           ($frame i32) ($depth i32) ($capacity i32) ($record :nullable-object) ($value :nullable-object))
+  #@(local.set $records (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-records))))
+  #@(local.set $values (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-values))))
+  #@(local.set $states (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-states))))
+  #@(local.set $index (call $natural-count (local.get $root)))
+  #@(local.set $capacity (i32.const 32))
+  #@(local.set $stack (array.new_default $digits (local.get $capacity)))
+  #@(call $fasl-cons-new (local.get $index) (local.get $records) (local.get $values) (local.get $states))
+  #@(array.set $digits (local.get $stack) (i32.const 0) (i32.shl (local.get $index) (i32.const 1)))
+  #@(local.set $depth (i32.const 1))
+  #@(loop $next
+    (call $thread-checkpoint)
+    (local.set $frame (array.get $digits (local.get $stack) (i32.sub (local.get $depth) (i32.const 1))))
+    (local.set $id (i32.shr_u (local.get $frame) (i32.const 1)))
+    (local.set $record (call $cdr (array.get $objects (local.get $records) (local.get $id))))
+    (if (i32.and (local.get $frame) (i32.const 1)) (then (local.set $record (call $cdr (local.get $record)))))
+    (local.set $child (call $natural-count (call $car (local.get $record))))
+    (local.set $state (call $natural-count (array.get $objects (local.get $states) (local.get $child))))
+    (if (i32.and (i32.eqz (local.get $state))
+          (i32.eq (call $natural-count (call $car (array.get $objects (local.get $records) (local.get $child)))) (i32.const 5)))
+      (then
+        (call $fasl-cons-new (local.get $child) (local.get $records) (local.get $values) (local.get $states))
+        (if (i32.eq (local.get $depth) (local.get $capacity))
+          (then
+            (local.set $capacity (i32.mul (local.get $capacity) (i32.const 2)))
+            (local.set $new (array.new_default $digits (local.get $capacity)))
+            (array.copy $digits $digits (local.get $new) (i32.const 0) (local.get $stack) (i32.const 0) (local.get $depth))
+            (local.set $stack (local.get $new))))
+        (array.set $digits (local.get $stack) (local.get $depth) (i32.shl (local.get $child) (i32.const 1)))
+        (local.set $depth (i32.add (local.get $depth) (i32.const 1)))
+        (br $next)))
+    (local.set $value (if (result (ref null $obj)) (i32.ge_u (local.get $state) (i32.const 3))
+      (then (array.get $objects (local.get $values) (local.get $child)))
+      (else (call $apply ,(clos-library-reference '%fasl-object)
+        (call $cons (call $int (local.get $child)) (ref.null $obj))))))
+    (if (i32.and (local.get $frame) (i32.const 1))
+      (then
+        (struct.set $obj $b (array.get $objects (local.get $values) (local.get $id)) (local.get $value))
+        (array.set $objects (local.get $states) (local.get $id) (call $int (i32.const 4)))
+        (local.set $depth (i32.sub (local.get $depth) (i32.const 1))))
+      (else
+        (struct.set $obj $a (array.get $objects (local.get $values) (local.get $id)) (local.get $value))
+        (array.set $digits (local.get $stack) (i32.sub (local.get $depth) (i32.const 1))
+          (i32.add (local.get $frame) (i32.const 1)))))
+    (br_if $next (local.get $depth)))
+  #@(array.get $objects (local.get $values) (local.get $index)))
+
 (define-runtime-function $compile-primitive (($args :nullable-object)) (:nullable-object)
   (:locals ($mode i32) ($a :nullable-object) ($b :nullable-object) ($c :nullable-object)
            ($compiled :nullable-object) ($symbols (ref $objects)) ($i i32) ($namespace i32)
@@ -1138,6 +1201,9 @@
   #@(local.set $a (call $car (local.get $args)))
   #@(local.set $b (call $car (call $cdr (local.get $args))))
   #@(local.set $c (call $car (call $cdr (call $cdr (local.get $args)))))
+  #@(if (i32.eq (local.get $mode) (i32.const 13)) (then (return (call $fasl-cons (local.get $a)))))
+  #@(if (i32.eq (local.get $mode) (i32.const 14))
+    (then (return (call $compiled-source (local.get $a) (local.get $b) (local.get $c)))))
   #@(if (i32.eqz (local.get $mode))
     (then
       (call $check-type (local.get $a) (call $symbol (i32.const ,(runtime-symbol-id 'function))))
@@ -1219,7 +1285,7 @@
   #@(global $macro-bindings (ref $symbol-index) ,(empty-symbol-index-wat))
   #@(global $source-files (mut (ref null $obj)) (ref.null $obj))
   ($compiler-macro-access) ($setf-expander-access) ($make-symbol-macro-binding) ($symbol-macro-binding) ($define-symbol-macro)
-  ($eval-compiled) ($compile-primitive)
+  ($eval-compiled) ($fasl-cons-new) ($fasl-cons) ($compile-primitive)
   ($function-environment) ($lexical-function-id) ($lexical-function) ($set-macro) ($macro-function) ($constant-function) ($constant-macro-function) ($macroexpand-1) ($values-expansion)
   ($modifier-expansion) ($if-form) ($logical-expansion) ($conditional-expansion) ($case-expansion) ($selection-expansion) ($eval-case) ($native-place-p) ($capture-place) ($captured-place-function) ($read-captured-place) ($write-captured-place) ($parallel-place-expansion) ($psetq-expansion) ($eval-parallel-places) ($development-eval)
   ($local-source-file) ($source-file) ($path-component-match) ($path-directory-end) ($path-name-end)

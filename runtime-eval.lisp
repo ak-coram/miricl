@@ -79,7 +79,11 @@
       (call $arity (call $cdr (local.get $form)) (i32.const 1) (i32.const 1))
       (local.set $part (call $car (call $cdr (local.get $form))))
       (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'quasiquote)))
-        (then (local.set $depth (i32.add (local.get $depth) (i32.const 1))))
+        (then
+          (return (call $eval-backquote
+            (call $apply ,(clos-library-reference '%expand-backquote)
+              (call $cons (local.get $part) (ref.null $obj)))
+            (local.get $env) (local.get $depth))))
         (else
           (if (i32.eq (local.get $depth) (i32.const 1))
             (then

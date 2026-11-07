@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const module = await WebAssembly.compile(fs.readFileSync(process.argv[2] ?? 'interpreter.wasm'));
+const module = await WebAssembly.compile(fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm'));
 assert.deepEqual(WebAssembly.Module.imports(module), []);
 const vm = new Miricl(await WebAssembly.instantiate(module));
 const check = (source, expected = 'T') => {
@@ -215,3 +215,13 @@ check('(= (file-write-date "renamed-date") 4000000002)');
 vm.mountFile('undated', 'no clock');
 check('(null (file-write-date "undated"))');
 console.log('Memory files: mounted, character, binary, renamed, and rolled-back modification dates pass with optional clock support.');
+
+const large = Uint8Array.from({length: 1024 * 1024}, (_, i) => (i * 17) & 255);
+vm.mountFile('/bulk/../bytes λ.bin', large);
+const exported = await vm.readFile('/bytes λ.bin');
+assert.deepEqual(exported, large);
+exported[0] = 99;
+assert.equal((await vm.readFile('/bytes λ.bin'))[0], 0, 'Exported bytes are independent copies.');
+assert.throws(() => vm.mountFile('../outside.bin', large));
+assert.equal(vm.evaluate('(+ 20 22)').output, '42\n', 'An invalid mount leaves the evaluator usable.');
+console.log('Memory files: bulk byte transfers, canonical Unicode paths, independent copies and error cleanup pass.');

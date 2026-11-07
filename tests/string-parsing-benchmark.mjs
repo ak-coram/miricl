@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 const args = process.argv.slice(2);
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
 const fixtures = `(defparameter *parsing-operation* nil) (defparameter *parsing-result* nil)
   (defparameter *trim-ascii* "${'ab'.repeat(16384)}middle${'ba'.repeat(16384)}")
   (defparameter *trim-unicode* "${'λ🙂'.repeat(16384)}middle${'🙂λ'.repeat(16384)}")

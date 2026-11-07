@@ -1,7 +1,7 @@
-// Optional integration check: node tests/standalone.mjs interpreter.wasm
+// Optional integration check: node tests/standalone.mjs miricl-interpreter.wasm
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-const module = await WebAssembly.compile(fs.readFileSync(process.argv[2] ?? 'interpreter.wasm'));
+const module = await WebAssembly.compile(fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm'));
 assert.deepEqual(WebAssembly.Module.imports(module), []);
 const {exports: vm} = await WebAssembly.instantiate(module);
 vm.initialize();

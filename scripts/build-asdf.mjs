@@ -67,7 +67,31 @@ export function buildAsdf(output = path.join(root, 'build/asdf')) {
   }
 }
 
+export async function compileAsdf(source, image, output) {
+  const {Miricl} = await import('./miricl.mjs');
+  const lisp = await Miricl.instantiate(fs.readFileSync(image));
+  try {
+    lisp.mountFile('/asdf.lisp', fs.readFileSync(source, 'utf8'));
+    await lisp.evaluateAsync('(compile-file "/asdf.lisp" :output-file "/miricl-asdf.wasm")', {eof: true});
+    const bytes = await lisp.readFile('/miricl-asdf.wasm');
+    const filename = path.resolve(output);
+    fs.mkdirSync(path.dirname(filename), {recursive: true});
+    fs.writeFileSync(filename + '.tmp', bytes);
+    fs.renameSync(filename + '.tmp', filename);
+    console.log(`Wrote ${filename} (${bytes.length} bytes)`);
+    return filename;
+  } finally { lisp.close(); }
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { console.log(`Wrote ${buildAsdf(process.argv[2])}`); }
-  catch (error) { console.error(`ASDF build failed: ${error.message}`); process.exitCode = 1; }
+  try {
+    const source = buildAsdf(process.argv[2]);
+    console.log(`Wrote ${source}`);
+    if (process.argv[3]) await compileAsdf(source, process.argv[3], process.argv[4] ?? 'miricl-asdf.wasm');
+  } catch (error) {
+    if (error.output) console.error(error.output);
+    console.error(`ASDF build failed: ${error.message}`);
+    if (error.backtrace) console.error(error.backtrace);
+    process.exitCode = 1;
+  }
 }

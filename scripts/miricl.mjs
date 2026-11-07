@@ -449,10 +449,11 @@ export class Miricl {
   failure(cause) {
     const code = this.vm.error.value;
     const output = this.text(this.vm['text-output-length'].value);
+    if (!code && this.vm['capture-backtrace']) this.vm['capture-backtrace']();
     this.vm.unwind();
     const message = code ? this.text(this.vm['format-error']()) : cause.message;
     let backtrace = '';
-    if (code && this.vm['format-backtrace']) {
+    if (this.vm['format-backtrace']) {
       try { backtrace = this.text(this.vm['format-backtrace']()); }
       catch { this.vm.unwind(); } // A broken printer must not replace the original error.
     }
@@ -498,11 +499,19 @@ export class Miricl {
       const provider = this.vm['filesystem-services']?.get(0);
       this.vm['filesystem-services']?.set(0, null);
       try {
+        if (this.vm['filesystem-mount'] && this.javascript) {
+          const name = this.javascript.makeText(path);
+          const start = this.vm['javascript-buffer'](bytes.length);
+          new Uint8Array(this.vm.memory.buffer, start, bytes.length).set(bytes);
+          this.vm['filesystem-mount'](name, bytes.length);
+          return {output: '', incomplete: false, quit: false};
+        }
         return this.evaluate(`(cl:progn
           (cl:with-open-file (stream ${string(path)} :direction :output
               :element-type '(cl:unsigned-byte 8) :if-exists :supersede)
             (cl:write-sequence '#(${bytes.join(' ')}) stream)) (cl:values))`, {eof: true});
-      } finally { this.vm['filesystem-services']?.set(0, provider ?? null); }
+      } catch (cause) { throw cause instanceof MiriclError ? cause : this.failure(cause); }
+      finally { this.vm['filesystem-services']?.set(0, provider ?? null); }
     }
     if (typeof source !== 'string') throw new TypeError('mountFile expects UTF-8 text or a byte buffer.');
     return this.evaluate(`(cl::register-source-file ${string(path)} ${string(source)})`, {eof: true});
@@ -510,6 +519,12 @@ export class Miricl {
 
   async readFile(path) {
     if (typeof path !== 'string') throw new TypeError('readFile expects a string path.');
+    if (this.vm['filesystem-local-data'] && this.javascript) {
+      try {
+        const [start, length] = this.vm['filesystem-local-data'](this.javascript.makeText(path));
+        if (start >= 0) return new Uint8Array(this.vm.memory.buffer, start, length).slice();
+      } catch (cause) { throw this.failure(cause); }
+    }
     const name = `"${path.replace(/["\\]/g, '\\$&')}"`;
     // Use the ordinary file API, including asynchronous dev reads. Transport
     // byte values as character codes through the existing text output channel.

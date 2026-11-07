@@ -106,6 +106,30 @@
   #@(call $terminal-write)
   #@(global.get $text-status))
 
+(define-runtime-function $terminal-bundle-configure (($start i32) ($length i32) ($out i32) ($size i32)) ()
+  (:export-raw "terminal-bundle-configure")
+  #@(global.set $terminal-bundle-system (call $decode-text (local.get $start) (local.get $length)))
+  #@(if (local.get $size)
+    (then (global.set $terminal-bundle-output (call $decode-text (local.get $out) (local.get $size))))))
+
+(define-runtime-function $terminal-bundle () ()
+  (:locals ($value :nullable-object) ($args :nullable-object) ($failed i32))
+  #@(global.set $cursor (i32.const 0))
+  #@(local.set $args (call $cons (global.get $terminal-bundle-system) (ref.null $obj)))
+  #@(if (i32.eqz (ref.is_null (global.get $terminal-bundle-output)))
+    (then (local.set $args (call $cons (global.get $terminal-bundle-system)
+      (call $cons ,(clos-library-reference :output)
+        (call $cons (global.get $terminal-bundle-output) (ref.null $obj)))))))
+  #@(block $done
+    (block $error
+      (try_table (catch $guest-error $error) (catch $transfer $error)
+        (local.set $value (call $apply ,(clos-library-reference 'miricl-bundle:dump-system) (local.get $args)))
+        (call $print-object (local.get $value) (i32.const 0)) (call $emit-char (i32.const 10)) (br $done)))
+    (call $unwind) (global.set $cursor (global.get $text-output-length))
+    ,(emit-text "Error: ") (call $print-error) (call $emit-char (i32.const 10)) (call $print-backtrace)
+    (global.set $terminal-bundle-failed (i32.const 1)))
+  #@(call $terminal-write))
+
 (define-runtime-function $terminal-start
     ()
     ()
@@ -120,6 +144,8 @@
   (wat-fail-when #@(call $random-get (i32.const 0) (i32.const 16)) :terminal-io)
   #@(call $seed-random (i32.load (i32.const 0)) (i32.load (i32.const 4))
     (i32.load (i32.const 8)) (i32.load (i32.const 12)))
+  #@(if (i32.eqz (ref.is_null (global.get $terminal-bundle-system)))
+    (then (call $terminal-bundle) (return)))
   #@(local.set $bytes (array.new_default $digits (i32.const 256)))
   #@(loop $prompt
     (global.set $cursor (i32.const 0))
@@ -169,5 +195,9 @@
   ($terminal-write)
   #@(global $terminal-waiting (mut i32) (i32.const 0))
   ($terminal-poll) ($terminal-read)
+  #@(global $terminal-bundle-system (mut (ref null $obj)) (ref.null $obj))
+  #@(global $terminal-bundle-output (mut (ref null $obj)) (ref.null $obj))
+  #@(global $terminal-bundle-failed (export "terminal-bundle-failed") (mut i32) (i32.const 0))
+  ($terminal-bundle-configure) ($terminal-bundle)
   ($terminal-submit)
   ($terminal-start))

@@ -11,7 +11,7 @@ import {collectImageSizes, renderImageSizes} from '../scripts/build-size-html.mj
 
 function checkMeasurements(report, directory) {
   assert.deepEqual(report.artifacts.map(artifact => artifact.file),
-    ['interpreter.wasm', 'miricl-repl.wasm', 'miricl.html', 'todo.html']);
+    ['miricl-interpreter.wasm', 'miricl-repl.wasm', 'miricl.html', 'todo.html']);
   for (const artifact of report.artifacts) {
     const bytes = fs.readFileSync(path.join(directory, artifact.file));
     assert.equal(artifact.rawBytes, bytes.length, artifact.file);
@@ -55,7 +55,7 @@ function browserChecks(expected) {
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'miricl-size-html-'));
 try {
   const header = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
-  fs.writeFileSync(path.join(directory, 'interpreter.wasm'), header);
+  fs.writeFileSync(path.join(directory, 'miricl-interpreter.wasm'), header);
   fs.writeFileSync(path.join(directory, 'miricl-repl.wasm'), Buffer.concat([header, Buffer.from([0, 2, 1, 120])]));
   fs.writeFileSync(path.join(directory, 'miricl.html'), '<!doctype html><p>Complete REPL λ🙂</p>'.repeat(100));
   fs.writeFileSync(path.join(directory, 'todo.html'), '<script type="text/x-common-lisp">(print "TODO λ🙂")</script>'.repeat(150));

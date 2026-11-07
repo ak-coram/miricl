@@ -9,3 +9,7 @@ ansi-results.json
 ansi-full-results.json
 ansi-results.html
 /build/
+
+/runtime/
+
+/miricl.js

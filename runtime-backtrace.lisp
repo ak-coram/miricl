@@ -28,6 +28,7 @@
   #@(call $symbol (i32.const ,(runtime-symbol-id 'lambda))))
 
 (define-runtime-function $capture-backtrace () ()
+  (:export "capture-backtrace")
   (:locals ($i i32) ($count i32))
   #@(global.set $backtrace-saved-depth (global.get $backtrace-depth))
   #@(local.set $count (select (global.get $backtrace-depth) (i32.const 64)

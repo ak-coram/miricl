@@ -100,23 +100,7 @@
                (if (caddr record) (intern (cadr record) (or (find-package (caddr record))
                                (error 'package-error :package (caddr record))))
                    (make-symbol (cadr record)))))
-        (5
-         ;; Walk list spines without consuming one host/WASM frame per cons.
-         ;; Publish each cell before descending into its car, preserving cycles.
-         (let ((cursor index) (previous nil))
-           (loop
-             (let* ((record (aref %fasl-records cursor)) (flags (cadddr record))
-                    (cell (if (zerop flags) (cons nil nil) (%%compile flags nil nil)))
-                    (tail (caddr record)))
-               (setf (aref %fasl-values cursor) cell (aref %fasl-states cursor) 3)
-               (when previous (rplacd previous cell))
-               (rplaca cell (%fasl-object (cadr record)))
-               (setf (aref %fasl-states cursor) 4)
-               (unless (and (zerop (aref %fasl-states tail))
-                            (= (car (aref %fasl-records tail)) 5))
-                 (rplacd cell (%fasl-object tail))
-                 (return (aref %fasl-values index)))
-               (setq previous cell cursor tail)))))
+        (5 (%%compile 13 index))
         (6
          (let ((array (make-array (cadr record) :element-type (%fasl-object (caddr record)))))
            (setf (aref %fasl-values index) array (aref %fasl-states index) 3)
@@ -231,12 +215,14 @@
   ;; Bind these afresh for each unit, as if loading its original FASL separately.
   (let* ((*package* *package*) (*readtable* *readtable*)
          (%fasl-readtable (copy-readtable nil))
+         (source (%%compile 14 stream (file-position stream) end))
          (payload (let ((*readtable* %fasl-readtable) (*read-eval* nil) (*read-base* 10))
-                    (read stream)))
+                    (multiple-value-bind (value position) (read-from-string source)
+                      (unless (= position (length source)) (error "Invalid compiled payload size."))
+                      value)))
          (%fasl-records (coerce (caddr payload) 'vector))
          (%fasl-values (make-array (length %fasl-records)))
          (%fasl-states (make-array (length %fasl-records) :initial-element 0)) (%fasl-pending nil))
-    (unless (= (file-position stream) end) (error "Invalid compiled payload size."))
     (unless (eql (car payload) 1) (error "Unsupported compiled file version."))
     (dolist (index (cadr payload))
       (let ((form (%fasl-object index)))
@@ -247,12 +233,10 @@
     (%load-message truename (car options))
     (with-open-file (binary truename :element-type '(unsigned-byte 8))
       (%fasl-read-header binary)
-      (with-open-file (stream truename)
-        (loop while (< (file-position binary) (file-length binary)) do
-          (let ((end (%fasl-section-end binary)))
-            (file-position stream (file-position binary))
-            (%load-compiled-unit stream end (cadr options))
-            (file-position binary end)))))
+      (loop while (< (file-position binary) (file-length binary)) do
+        (let ((end (%fasl-section-end binary)))
+          (%load-compiled-unit binary end (cadr options))
+          (file-position binary end))))
     t))
 
 (defun compile-file (input-file &key (output-file nil outputp) (verbose *compile-verbose*) (print *compile-print*) (external-format :default))

@@ -3,6 +3,31 @@
 (defvar %compilation-complete t)
 (defvar %file-compiling nil)
 (defvar %file-load-values nil)
+(defun %compile-place-form (place environment)
+  (let ((expanded (macroexpand place environment)))
+    (if (consp expanded) (cons (car expanded) (%compile-forms (cdr expanded) environment)) expanded)))
+(defun %compile-parallel-places (operator args environment)
+  (let ((mode (car args)) (forms (cdr args)) (compiled nil))
+    (case mode
+      (3 (list operator mode (car forms) (%compile-form (cadr forms) environment)))
+      (4 (list operator mode (%compile-place-form (car forms) environment) (%compile-form (cadr forms) environment)))
+      (5 (list* operator mode (%compile-form (car forms) environment)
+                (%compile-place-form (cadr forms) environment) (%compile-forms (cddr forms) environment)))
+      (otherwise
+        (loop while forms do
+          (if (and (= mode 2) (not (cdr forms)))
+              (push (%compile-form (pop forms) environment) compiled)
+              (push (%compile-place-form (pop forms) environment) compiled))
+          (when (= mode 0) (push (%compile-form (pop forms) environment) compiled)))
+        (list* operator mode (nreverse compiled))))))
+(defun %compile-loop-collector (operator args environment)
+  (let ((compiled nil) (local (%%compile 3 environment (cadr args))) (size (length args)) (index 0))
+    (dolist (form args)
+      (push (if (or (= index 3) (= index (1- size))
+                    (and (= size 8) (= index 5)))
+                (%compile-form form (if (or (= index 3) (and (eq operator '%%numeric-collect) (= size 8) (= index 5))) environment local)) form) compiled)
+      (incf index))
+    (cons operator (nreverse compiled))))
 (defun %compile-forms (forms environment)
   (let ((result nil))
     (dolist (form forms) (push (%compile-form form environment) result))
@@ -51,6 +76,33 @@
         (push (if %compilation-complete (%%compile 2 (car definition) parts)
                   (cons (car definition) parts)) compiled)))
     (list* operator (nreverse compiled) (%compile-body body new-environment))))
+(defun %expand-backquote (form)
+  ;; Expand an inner backquote before processing its enclosing template.
+  ;; In particular, ,,@ can splice several unquotes into the outer template.
+  (when (typep form 'simple-vector)
+    (return-from %expand-backquote
+      (list 'apply '(function vector) (%expand-backquote (coerce form 'list)))))
+  (unless (consp form) (return-from %expand-backquote (list 'quote form)))
+  (when (member (car form) '(quasiquote unquote unquote-splicing unquote-nsplicing))
+    (unless (= (length form) 2) (error 'program-error))
+    (return-from %expand-backquote
+      (case (car form)
+        (quasiquote (%expand-backquote (%expand-backquote (cadr form))))
+        (unquote (cadr form))
+        (otherwise (error 'program-error)))))
+  (let ((parts nil))
+    (loop while (and (consp form)
+                    (not (member (car form) '(quasiquote unquote unquote-splicing unquote-nsplicing))))
+      do (let ((part (car form)))
+           (if (and (consp part) (member (car part) '(unquote-splicing unquote-nsplicing)))
+               (progn
+                 (unless (= (length part) 2) (error 'program-error))
+                 (push (cadr part) parts))
+               ;; LIST must remain variadic: an enclosing ,,@ can splice
+               ;; several arguments here, which a binary CONS cannot accept.
+               (push (list 'list (%expand-backquote part)) parts)))
+         (setq form (cdr form)))
+    (cons 'append (nreverse (cons (%expand-backquote form) parts)))))
 (defun %compile-backquote (form environment depth)
   (when (typep form 'simple-vector)
     (return-from %compile-backquote
@@ -59,7 +111,9 @@
   (unless (consp form) (return-from %compile-backquote (list 'quote form)))
   (when (member (car form) '(quasiquote unquote unquote-splicing unquote-nsplicing))
     (unless (= (length form) 2) (error 'program-error))
-    (cond ((eq (car form) 'quasiquote) (incf depth))
+    (cond ((eq (car form) 'quasiquote)
+           (return-from %compile-backquote
+             (%compile-backquote (%expand-backquote (cadr form)) environment depth)))
           ((= depth 1)
            (unless (eq (car form) 'unquote) (error 'program-error))
            (return-from %compile-backquote (%compile-form (cadr form) environment)))
@@ -167,6 +221,17 @@
       (locally (cons operator (%compile-body args environment)))
       ((if progn multiple-value-call multiple-value-prog1 catch throw unwind-protect progv)
         (cons operator (%compile-forms args environment)))
+      (%%case-form
+        (list* operator (car args)
+          (if (>= (car args) 4) (%compile-place-form (cadr args) environment)
+              (%compile-form (cadr args) environment))
+          (mapcar (lambda (clause) (cons (car clause) (%compile-body (cdr clause) environment))) (cddr args))))
+      ((%%list-test %%list-accumulate %%numeric-collect)
+        (%compile-loop-collector operator args environment))
+      (%%parallel-place-form (%compile-parallel-places operator args environment))
+      (%%symbol-iterate
+        (list* operator (car args) (%compile-form (cadr args) environment)
+          (%compile-body (cddr args) (%%compile 3 environment (car args)))))
       (%%while (cons operator (%compile-forms args environment)))
       (%%arithmetic-step
         (list operator (car args) (%compile-form (cadr args) environment)
