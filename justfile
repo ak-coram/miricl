@@ -212,10 +212,11 @@ asdf-init:
 build-asdf:
     {{ quote(node) }} scripts/build-asdf.mjs {{ quote(build_dir / 'build/asdf') }}
 
-# Check patch preparation and upstream ASDF system loading in the guest.
+# Check patch preparation, system loading, and production FASL bundles.
 test-asdf: build build-asdf
     {{ quote(node) }} tests/asdf-build.mjs
     {{ quote(node) }} tests/asdf.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/asdf/asdf.lisp') }}
+    {{ quote(node) }} tests/asdf-bundle.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/asdf/asdf.lisp') }}
 
 # Run the default ANSI profile, or pass upstream paths and runner options.
 [positional-arguments]

@@ -15,7 +15,7 @@ await fs.mkdir(path.join(directory, 'project/dependency'), {recursive: true});
 const sources = [
   ['project/dependency/remote-dependency.asd', '(asdf:defsystem "remote-dependency" :components ((:file "macro")))'],
   ['project/dependency/macro.lisp', '(defpackage :remote-dependency (:use :cl) (:export :twice)) (in-package :remote-dependency) (defmacro twice (x) `(+ ,x ,x))'],
-  ['project/remote-app.asd', '(asdf:defsystem "remote-app" :depends-on ("remote-dependency") :serial t :components ((:file "package") (:file "hello")))'],
+  ['project/remote-app.asd', '(asdf:defsystem "remote-app" :depends-on ("remote-dependency") :serial t :components ((:file "package") (:file "hello")) :build-operation "monolithic-compile-bundle-op" :build-pathname #P"dist/remote-app.wasm")'],
   ['project/package.lisp', '(defpackage :remote-app (:use :cl :remote-dependency) (:export :answer))'],
   ['project/hello.lisp', '(in-package :remote-app) (defvar *loads* 0) (incf *loads*) (defun answer () (twice 21))'],
 ];
@@ -24,6 +24,17 @@ for (const [name, source] of sources) {
   await fs.utimes(path.join(directory, name), 1700000000, 1700000000);
 }
 await fs.writeFile(path.join(directory, 'project/raw data λ.bin'), Uint8Array.of(0, 255, 128, 65));
+await fs.writeFile(path.join(directory, 'production.html'), `<!doctype html>
+<script type="module">
+  import {Miricl} from './scripts/miricl.mjs';
+  const bytes = await (await fetch('./interpreter.wasm')).arrayBuffer();
+  globalThis.app = await Miricl.instantiate(bytes);
+  app.mountFile('/app.wasm', await (await fetch('./app.wasm')).arrayBuffer());
+  await app.evaluateAsync('(load "/app.wasm")');
+  const result = await app.evaluateAsync('(remote-app:answer)');
+  document.body.textContent = result.output.trim();
+  globalThis.ready = true;
+</script>`);
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-app-chromium-'));
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run',
@@ -108,6 +119,7 @@ try {
       await js(`app.dev.filesystem.url = new URL(${JSON.stringify(`http://localhost:${testPorts.http}/`)});`);
       assert.equal(await terminal.send(`(with-open-file (s "/project/raw data λ.bin" :element-type '(unsigned-byte 8)) (loop for byte = (read-byte s nil nil) while byte collect byte))`),
         '(0 255 128 65)\nmiricl> ');
+      assert.deepEqual(await js('app.readFile("/project/raw data λ.bin").then(bytes => Array.from(bytes))'), [0, 255, 128, 65]);
       assert.equal(await terminal.send('(null (probe-file "/project/missing"))'), 'T\nmiricl> ');
       await js(`app.dev.filesystem.url = new URL(${JSON.stringify(httpOrigin + '/')});`);
       await js(`globalThis.guestDate = 3908988801;
@@ -129,6 +141,23 @@ try {
       assert.equal(await terminal.send('(list (remote-app:answer) remote-app::*loads*)'), '(44 2)\nmiricl> ');
       await assert.rejects(fs.stat(path.join(directory, 'build-cache')), {code: 'ENOENT'});
       console.log(`PASS ${runtime} browser ASDF: host files, nested system discovery, binary data, caching, and host edits`);
+      assert.equal(await js(`app.evaluateAsync('(asdf:make "remote-app")').then(result => result.output)`), 'T\n');
+      const bundled = await js('app.readFile("/project/dist/remote-app.wasm").then(bytes => Array.from(bytes))');
+      await fs.writeFile(path.join(directory, 'app.wasm'), Uint8Array.from(bundled));
+      await assert.rejects(fs.stat(path.join(directory, 'project/dist')), {code: 'ENOENT'});
+      const productionRequests = requests.length, productionSockets = sockets.length;
+      await js(`globalThis.production = document.createElement('iframe');
+        production.src = './production.html'; document.body.append(production);`);
+      await waitFor(() => js('production.contentWindow.ready === true'), 'production FASL bundle startup');
+      assert.equal(await js('production.contentDocument.body.textContent'), '44');
+      assert.equal(await js(`production.contentWindow.app.evaluateAsync(
+        '(and (null (find-package :asdf)) (null (probe-file "/project/remote-app.asd")))'
+      ).then(result => result.output)`), 'T\n');
+      assert.equal(await js('production.contentWindow.app.dev === undefined'), true);
+      assert.equal(sockets.length, productionSockets, 'Production bundle must not open a WebSocket.');
+      assert.equal(requests.slice(productionRequests).some(url => /dev-(repl|filesystem)\.mjs|\/__miricl__\/fs\//.test(url)), false);
+      await js('production.contentWindow.app.close(); production.remove();');
+      console.log(`PASS ${runtime} browser ASDF bundle: build, export, and fresh production startup without ASDF or dev access`);
       const start = host.output.length;
       host.child.stdin.write('(setf (js:property (js:invoke (js:global "document") "getElementById" "value") "value") "from Lisp")\n');
       await waitFor(() => js('document.getElementById("value").value === "from Lisp"'), 'terminal access to the webapp DOM');

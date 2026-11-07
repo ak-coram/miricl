@@ -508,6 +508,21 @@ export class Miricl {
     return this.evaluate(`(cl::register-source-file ${string(path)} ${string(source)})`, {eof: true});
   }
 
+  async readFile(path) {
+    if (typeof path !== 'string') throw new TypeError('readFile expects a string path.');
+    const name = `"${path.replace(/["\\]/g, '\\$&')}"`;
+    // Use the ordinary file API, including asynchronous dev reads. Transport
+    // byte values as character codes through the existing text output channel.
+    const {output} = await this.evaluateAsync(`(cl:with-open-file
+        (stream ${name} :element-type '(cl:unsigned-byte 8))
+      (cl:let ((bytes (cl:make-array (cl:file-length stream)
+                                    :element-type '(cl:unsigned-byte 8))))
+        (cl:read-sequence bytes stream)
+        (cl:write-string (cl:map 'cl:string (cl:function cl:code-char) bytes))
+        (cl:values)))`, {eof: true});
+    return Uint8Array.from(output, character => character.charCodeAt(0));
+  }
+
   close() { this.dev?.close(); this.threads?.close(); }
 
   evaluateAsync(source, options) {

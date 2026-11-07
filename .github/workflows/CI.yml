@@ -114,6 +114,7 @@ jobs:
           node scripts/build-asdf.mjs
           node tests/asdf-build.mjs
           node tests/asdf.mjs interpreter.wasm build/asdf/asdf.lisp
+          node tests/asdf-bundle.mjs interpreter.wasm build/asdf/asdf.lisp
           node tests/ansi-runner.mjs interpreter.wasm
 
       - name: Build standalone browser examples

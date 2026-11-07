@@ -11,10 +11,19 @@ environment or command-line arguments; launching processes and dumping native
 images remain unsupported. Compiled files are miricl FASLs, not standalone
 application executables.
 
+`0002-fasl-bundles.patch` implements UIOP's `combine-fasls`, enabling standard
+`compile-bundle-op`, `monolithic-compile-bundle-op` and their load operations.
+A bundle has one Wasm
+header and an ordered `miricl.fasl` custom section per compilation unit;
+combining bundles flattens their sections. The writer belongs to optional
+UIOP. The base interpreter's `load` reads individual FASLs and bundles without
+ASDF, keeping each unit's object graph, package and readtable bindings separate.
+
 Keep implementation-specific UIOP changes here. Fix Common Lisp conformance
 issues in the interpreter itself. Remove patches as equivalent support is
 accepted upstream, updating the submodule revision and tests together.
 
 `just test-asdf` checks preparation failures and runs upstream ASDF in the
 interpreter, including recursive system discovery, dependencies, compilation,
-cached loads, forced rebuilds, and loading generated FASLs without ASDF.
+cached loads, forced rebuilds, and loading generated FASLs and application
+bundles without ASDF.

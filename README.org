@@ -228,6 +228,42 @@ in memory and can be loaded in another interpreter without ASDF. Outside dev
 mode, supply files explicitly with =mountFile=. Run =just test-asdf= to check
 the port and =just test-browser-dev= for browser access through both servers.
 
+**** Production bundles
+
+Select ASDF's monolithic bundle operation to include the system and its
+dependencies in one loadable file:
+
+#+begin_src lisp
+(asdf:defsystem "app"
+  :depends-on ("some-library")
+  :serial t
+  :components ((:file "package") (:file "app"))
+  :build-operation "monolithic-compile-bundle-op"
+  :build-pathname #P"dist/app.wasm")
+
+(asdf:make "app")
+#+end_src
+
+The output is relative to the system directory. Builds run in MIRICL and
+write to its virtual filesystem; use =await lisp.readFile("/app/dist/app.wasm")=
+to obtain a =Uint8Array= for saving with Node's =fs.writeFile= or downloading
+in the browser with a =Blob=. Build in a fresh interpreter for a clean
+compilation environment.
+
+In production, mount and load only the bundle, then start the application:
+
+#+begin_src javascript
+const lisp = await Miricl.instantiate(interpreterBytes);
+lisp.mountFile("/app.wasm", await (await fetch("./app.wasm")).arrayBuffer());
+await lisp.evaluateAsync('(load "/app.wasm") (app:start)', {eof: true});
+#+end_src
+
+ASDF and source files are not needed at runtime unless the application itself
+uses them. Bundles retain interpreter code and load-time initialization;
+they are not standalone executables or whole-program optimized Wasm.
+Declare and supply non-Lisp resources separately. =compile-bundle-op= bundles
+only one system; =monolithic-compile-bundle-op= includes its dependencies.
+
 *** Standalone browser pages
 
 The [[./scripts/todo.html][TODO source]] demonstrates DOM access, events, callbacks and

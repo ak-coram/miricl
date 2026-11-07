@@ -1,0 +1,97 @@
+From: miricl contributors
+Subject: [PATCH] Combine MIRICL compilation units into one loadable Wasm FASL
+
+Retain compilation-unit boundaries and order by copying the custom sections
+under one Wasm header. The writer stays in optional UIOP; the interpreter's
+ordinary LOAD handles both individual FASLs and bundles without ASDF.
+
+--- a/bundle.lisp
++++ b/bundle.lisp
+@@ -187,6 +187,25 @@
+     ((selfward-operation :initform 'monolithic-compile-bundle-op :allocation :class))
+     (:documentation "Load a single fasl for the system and its dependencies."))
+
++  #+miricl
++  (progn
++    ;; The inherited LOAD-BUNDLE-OP methods select per-system bundles, and
++    ;; BUNDLE-OP's output method expects a bundle type for this load operation.
++    (defmethod component-depends-on ((o monolithic-load-bundle-op) (c system))
++      `((monolithic-compile-bundle-op ,c)))
++    (defmethod input-files ((o monolithic-load-bundle-op) (c system))
++      (output-files (find-operation o 'monolithic-compile-bundle-op) c))
++    (defmethod output-files ((o monolithic-load-bundle-op) (c system))
++      (declare (ignore o c))
++      nil)
++    (defmethod perform ((o monolithic-load-bundle-op) (c system))
++      (when (input-files o c)
++        (perform-lisp-load-fasl o c)
++        ;; The bundle has performed the component loads. Record their stamps
++        ;; before LOAD-BUNDLE-OP's after method marks the root LOAD-OP done.
++        (dolist (action (plan-actions (make-plan 'sequential-plan 'load-op c)))
++          (mark-operation-done (action-operation action) (action-component action))))))
++
+   (defclass monolithic-lib-op (lib-op monolithic-bundle-op non-propagating-operation) ()
+     (:documentation "Compile the system and produce a linkable static library (.a/.lib)
+ for all the linkable object files associated with the system or its dependencies. See LIB-OP."))
+--- a/uiop/filesystem.lisp
++++ b/uiop/filesystem.lisp
+@@ -604,7 +604,7 @@
+       #+clisp ;; in recent enough versions of CLISP, :if-exists :overwrite would make it atomic
+       (progn (funcall 'require "syscalls")
+              (symbol-call :posix :copy-file source target :method :rename))
+-      #+(and sbcl os-windows) (delete-file-if-exists target) ;; not atomic
++      #+(or miricl (and sbcl os-windows)) (delete-file-if-exists target) ;; not atomic
+       #-clisp
+       (rename-file source target
+                    #+(or clasp clozure ecl) :if-exists
+--- a/uiop/lisp-build.lisp
++++ b/uiop/lisp-build.lisp
+@@ -843,7 +843,47 @@
+   (defun combine-fasls (inputs output)
+     "Combine a list of FASLs INPUTS into a single FASL OUTPUT"
+-    #-(or abcl allegro clisp clozure cmucl lispworks sbcl scl xcl)
++    #-(or miricl abcl allegro clisp clozure cmucl lispworks sbcl scl xcl)
+     (not-implemented-error 'combine-fasls "~%inputs: ~S~%output: ~S" inputs output)
++    #+miricl
++    (labels ((uleb (stream)
++               (let ((value 0) (shift 0))
++                 (loop for byte = (read-byte stream) do
++                   (when (or (> shift 28) (and (= shift 28) (> byte 15)))
++                     (error "Invalid compiled section length."))
++                   (setf value (logior value (ash (logand byte 127) shift)))
++                   (unless (logbitp 7 byte) (return value)) (incf shift 7))))
++             (section-end (stream)
++               (unless (zerop (read-byte stream)) (error "Invalid compiled section kind."))
++               (let* ((size (uleb stream)) (end (+ (file-position stream) size)))
++                 (unless (and (> size 12) (<= end (file-length stream)))
++                   (error "Invalid compiled section size."))
++                 (unless (= (uleb stream) 11) (error "Invalid compiled section name."))
++                 (loop for character across "miricl.fasl" do
++                   (unless (= (char-code character) (read-byte stream))
++                     (error "Invalid compiled section name.")))
++                 (unless (< (file-position stream) end) (error "Invalid compiled section size."))
++                 end)))
++      (let ((buffer (make-array 65536 :element-type '(unsigned-byte 8))))
++        (with-open-file (out output :element-type '(unsigned-byte 8)
++                                   :direction :output :if-exists :rename-and-delete)
++          (write-sequence #(0 97 115 109 1 0 0 0) out)
++          (dolist (input inputs)
++            (with-open-file (in input :element-type '(unsigned-byte 8))
++              (dolist (byte '(0 97 115 109 1 0 0 0))
++                (unless (= byte (read-byte in)) (error "Invalid compiled file header.")))
++              (loop while (< (file-position in) (file-length in)) do
++                (let* ((start (file-position in))
++                       (end (section-end in)))
++                  ;; Existing bundles flatten naturally without interpreting or
++                  ;; reprinting their payloads, including Unicode and constants.
++                  (file-position in start)
++                  (loop for remaining = (- end (file-position in))
++                        while (plusp remaining) do
++                    (let ((count (min remaining (length buffer))))
++                      (unless (= (read-sequence buffer in :end count) count)
++                        (error "Truncated compiled file: ~A" input))
++                      (write-sequence buffer out :end count))))))))
++        output))
+     #+abcl (funcall 'sys::concatenate-fasls inputs output) ; requires ABCL 1.2.0
+     #+(or allegro clisp cmucl sbcl scl xcl) (concatenate-files inputs output)
+     #+clozure (ccl:fasl-concatenate output inputs :if-exists :supersede)
