@@ -44,10 +44,11 @@ console.log('PASS host exceptions terminate the worker and wake joiners');
 vm.close();
 
 if (process.argv[3]) {
+  const command = ['run', '-W', 'stack-switching=y', '-S', 'p3=y', process.argv[3]];
   const session = threadCases.map(([name, source]) =>
     `(assert ${source} () ${JSON.stringify(name)})`).join('\n') + '\n(format t "GREEN-THREADS-PASSED~%")\n:quit\n';
   const wasi = spawnSync(process.env.WASMTIME ?? 'wasmtime',
-    ['run', '-W', 'stack-switching=y', process.argv[3]],
+    command,
     {input: session, encoding: 'utf8', timeout: 30000});
   assert.ifError(wasi.error);
   assert.equal(wasi.status, 0, wasi.stdout + wasi.stderr);
@@ -57,7 +58,7 @@ if (process.argv[3]) {
 
   // Keep stdin open: a background thread must run while the REPL waits for input.
   const child = spawn(process.env.WASMTIME ?? 'wasmtime',
-    ['run', '-W', 'stack-switching=y', process.argv[3]], {stdio: ['pipe', 'pipe', 'pipe']});
+    command, {stdio: ['pipe', 'pipe', 'pipe']});
   let output = '', diagnostics = '', timer;
   const exited = new Promise((resolve, reject) => {
     child.on('error', reject);

@@ -130,10 +130,13 @@
           (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
             (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw))))))))))
 (defun write-interpreter-wasm (pathname &key wasi debug-names)
-  "Write the interpreter. WASI adds the REPL and its stack-switching driver."
+  "Write an interpreter image with the bridge, or the WASI 0.3 development command."
   (with-open-file (stream pathname :direction :output :if-exists :supersede
                                   :element-type '(unsigned-byte 8))
-    (write-sequence (interpreter-wasm :wasi wasi :debug-names debug-names) stream))
+    (write-sequence (if wasi
+                       (repl-command-wasm (interpreter-wasm :wasi t :debug-names debug-names))
+                       (wasm-with-custom-section (interpreter-wasm :debug-names debug-names)
+                         "miricl.repl-bridge" (repl-bridge-core-wasm))) stream))
   pathname)
 
 (defun close-interpreter (interpreter)

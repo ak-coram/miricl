@@ -8,6 +8,8 @@ import {gzipSync, brotliCompressSync, constants} from 'node:zlib';
 
 const sectionNames = ['custom', 'type', 'import', 'function', 'table', 'memory',
   'global', 'export', 'start', 'element', 'code', 'data', 'data-count', 'tag'];
+const componentSectionNames = ['custom', 'core-module', 'core-instance', 'core-type',
+  'component', 'component-instance', 'alias', 'type', 'canonical', 'start', 'import', 'export'];
 
 function measureBytes(file, bytes) {
   return {file, rawBytes: bytes.length,
@@ -23,8 +25,9 @@ export function measureFile(file) {
 
 export function measureWasm(file) {
   const bytes = fs.readFileSync(file);
-  assert.ok(bytes.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])),
-    `${file}: expected a WASM version 1 module`);
+  const component = bytes.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 13, 0, 1, 0]));
+  assert.ok(component || bytes.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])),
+    `${file}: expected a WASM module or component`);
   let position = 8;
   const sections = [{name: 'header', bytes: 8}];
   const u32 = limit => {
@@ -44,7 +47,7 @@ export function measureWasm(file) {
     const length = u32(bytes.length);
     const end = position + length;
     assert.ok(end <= bytes.length, `${file}: truncated section`);
-    let name = sectionNames[id] ?? `section-${id}`;
+    let name = (component ? componentSectionNames : sectionNames)[id] ?? `section-${id}`;
     if (id === 0) {
       const nameLength = u32(end);
       assert.ok(position + nameLength <= end, `${file}: truncated custom section name`);

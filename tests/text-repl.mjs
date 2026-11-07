@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {Miricl, MiriclError} from '../scripts/miricl.mjs';
+import {terminalCore, terminalFixture} from './component-core.mjs';
 
 const options = process.argv.slice(2);
 const inProcess = options.includes('--in-process');
@@ -195,22 +196,26 @@ const repl = fileURLToPath(new URL('../scripts/repl.mjs', import.meta.url));
 const traceHeader = 'Backtrace (most recent call first):\n';
 const session = '(defun f (x)\n (+ x 1))\n(f 41)\n(/ 1 0)\n(+ 3 4)\n:quit\n(/ 1 0)\n';
 if (!inProcess) {
-  const node = spawnSync(process.execPath, [repl, binary], {input: session, encoding: 'utf8'});
+  const help = spawnSync(process.execPath, [repl, '--help'], {encoding: 'utf8'});
+  assert.ifError(help.error);
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /--dev-server --repl-bridge/);
+  const node = spawnSync(process.execPath, [repl, binary], {input: session, encoding: 'utf8', timeout: 10000});
   assert.ifError(node.error);
   assert.equal(node.status, 0, node.stderr);
   assert.equal(node.stdout, 'F\n42\n7\n');
   assert.equal(node.stderr, `Error: Division by zero.\n${traceHeader}  COMMON-LISP:/\n`);
-  const eof = spawnSync(process.execPath, [repl, binary], {input: '(+ 1', encoding: 'utf8'});
+  const eof = spawnSync(process.execPath, [repl, binary], {input: '(+ 1', encoding: 'utf8', timeout: 10000});
   assert.ifError(eof.error);
   assert.equal(eof.status, 1);
   assert.equal(eof.stderr, 'Error: Incomplete input.\n');
-  const final = spawnSync(process.execPath, [repl, binary], {input: '(+ 1 2)', encoding: 'utf8'});
+  const final = spawnSync(process.execPath, [repl, binary], {input: '(+ 1 2)', encoding: 'utf8', timeout: 10000});
   assert.ifError(final.error);
   assert.equal(final.stdout, '3\n');
 }
 
 if (wasiBinary) {
-  const wasiModule = await WebAssembly.compile(fs.readFileSync(wasiBinary));
+  const wasiModule = await WebAssembly.compile(terminalCore(fs.readFileSync(wasiBinary)));
   assert.deepEqual(WebAssembly.Module.imports(wasiModule).map(x => `${x.module}.${x.name}`),
     ['wasi_snapshot_preview1.fd_read', 'wasi_snapshot_preview1.fd_write', 'wasi_snapshot_preview1.random_get',
       'wasi_snapshot_preview1.clock_time_get', 'wasi_snapshot_preview1.poll_oneoff']);
@@ -284,7 +289,12 @@ if (wasiBinary) {
     'miricl> (31 60)\nmiricl> (1 3 2)\nmiricl> T\nmiricl> ');
   if (!inProcess) {
     // Execute native stack switching in Wasmtime. Node exercises the JSPI adapter.
-    const runtimes = [[process.env.WASMTIME ?? 'wasmtime', ['run', '-W', 'stack-switching=y', wasiBinary]]];
+    const fixture = terminalFixture(wasiBinary);
+    try {
+    const runtimes = [
+      [process.env.WASMTIME ?? 'wasmtime', ['run', '-W', 'stack-switching=y', fixture.path]],
+      [process.env.WASMTIME ?? 'wasmtime', ['run', '-W', 'stack-switching=y', '-S', 'p3=y', wasiBinary]]
+    ];
     for (const [command, args] of runtimes) {
       const wasi = spawnSync(command, args, {input: session, encoding: 'utf8'});
       assert.ifError(wasi.error);
@@ -310,15 +320,17 @@ if (wasiBinary) {
       assert.equal(formatting.status, 0, formatting.stderr);
       assert.equal(formatting.stdout, 'miricl> 1, 2, 3\nNIL\nmiricl> 10\nmiricl> ');
       const clocks = spawnSync(command, args, {input:
+        '(dotimes (i 32) (sleep 1/100000))\n' +
         '(let ((real (get-internal-real-time)) (run (get-internal-run-time)))\n' +
         '  (sleep 1/100)\n' +
         '  (list (integerp (get-universal-time)) (<= real (get-internal-real-time))\n' +
-        '        (<= run (get-internal-run-time))))\n:quit\n', encoding: 'utf8'});
+        '        (<= run (get-internal-run-time))))\n:quit\n', encoding: 'utf8', timeout: 10000});
       assert.ifError(clocks.error);
       assert.equal(clocks.status, 0, clocks.stderr);
-      assert.equal(clocks.stdout, 'miricl> ...> ...> ...> (T T T)\nmiricl> ');
+      assert.equal(clocks.stdout, 'miricl> NIL\nmiricl> ...> ...> ...> (T T T)\nmiricl> ');
     }
+    } finally { fixture.close(); }
   }
 }
 console.log(inProcess ? 'Guest reader/printer, text API, and requested in-process WASI checks pass.' :
-  'Guest reader/printer, text API, Node REPL, and requested WASI checks pass.');
+  'Guest reader/printer, text API, command help, and requested WASI core checks pass.');

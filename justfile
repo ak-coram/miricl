@@ -35,13 +35,51 @@ build-sizes: build build-html build-todo
 test-size-html:
     {{ quote(node) }} tests/size-html.mjs
 
-# Start the standalone interpreter's Node REPL.
+# Start a local terminal REPL without network listeners.
 repl: build
     {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }}
 
-# Start the WASI green-thread REPL with Wasmtime.
+# Start the local WASI terminal REPL without network access.
 repl-wasi: build
-    {{ quote(wasmtime) }} run -W stack-switching=y {{ quote(wasi_repl) }}
+    {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y {{ quote(wasi_repl) }}
+
+# Connect the terminal to an interpreter in a webapp, without HTTP or TCP REPL.
+browser-repl: build
+    {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }} --browser-repl
+
+browser-repl-wasi: build
+    {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y -S inherit-network=y {{ quote(wasi_repl) }} --browser-repl
+
+# Relay a TCP REPL to an interpreter inside a webapp (Node's built-in sockets).
+repl-bridge: build
+    {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }} --repl-bridge
+
+# The same relay using WASI 0.3 sockets, with no Node dependency.
+repl-bridge-wasi: build
+    {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y -S inherit-network=y {{ quote(wasi_repl) }} --repl-bridge
+
+# Connect the terminal and serve a local webapp at http://127.0.0.1:8000/.
+dev-server directory='.' : build
+    {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }} --dev-server --directory={{ quote(directory) }}
+
+# Serve a directory with WASI 0.3 filesystem and socket capabilities.
+dev-server-wasi directory='.' : build
+    {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y -S inherit-network=y --dir {{ quote(directory + '::.') }} {{ quote(wasi_repl) }} --dev-server
+
+# Serve local files and enable the TCP REPL listener together.
+dev-server-repl-bridge directory='.' : build
+    {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }} --dev-server --repl-bridge --directory={{ quote(directory) }}
+
+dev-server-repl-bridge-wasi directory='.' : build
+    {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y -S inherit-network=y --dir {{ quote(directory + '::.') }} {{ quote(wasi_repl) }} --dev-server --repl-bridge
+
+# Exercise all four browser-connected modes, including custom ports.
+test-repl-bridge: build
+    {{ quote(node) }} tests/repl-bridge.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
+    {{ quote(node) }} tests/repl-websocket.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
+
+test-browser-dev: build
+    {{ quote(node) }} tests/browser-dev-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
 
 # Start the Common Lisp host REPL backed by Wasmtime.
 repl-host:
@@ -52,7 +90,7 @@ test:
     {{ quote(sbcl) }} --noinform --non-interactive --load {{ quote(quicklisp) }} --eval '(require :asdf)' --eval '(asdf:load-asd (truename "miricl.asd"))' --eval '(ql:quickload :miricl/test)' --eval '(asdf:test-system :miricl)'
 
 # Run all Node integration tests, including the WASI REPL.
-test-js: test-threads test-standalone test-text test-development test-compilation test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
+test-js: test-threads test-standalone test-text test-repl-bridge test-development test-compilation test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
 
 # Check the shared green-thread scheduler in Node.
 test-threads: build

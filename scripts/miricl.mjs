@@ -425,7 +425,17 @@ export class Miricl {
 
   static async instantiate(bytes, options) {
     const result = await WebAssembly.instantiate(bytes);
-    return new Miricl(result.instance ?? result, options);
+    const interpreter = new Miricl(result.instance ?? result, options);
+    if (options?.dev) {
+      try {
+        const {DevRepl} = await import('./dev-repl.mjs');
+        interpreter.dev = new DevRepl(interpreter, options.dev);
+      } catch (error) {
+        interpreter.close();
+        throw error;
+      }
+    }
+    return interpreter;
   }
 
   failure(cause) {
@@ -485,7 +495,7 @@ export class Miricl {
     return this.evaluate(`(cl::register-source-file ${string(path)} ${string(source)})`, {eof: true});
   }
 
-  close() { this.threads?.close(); }
+  close() { this.dev?.close(); this.threads?.close(); }
 
   evaluateAsync(source, options) {
     return this.threads ? this.threads.evaluate(source, options) : Promise.resolve(this.evaluate(source, options));

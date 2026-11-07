@@ -59,7 +59,7 @@ on.
 - Git and [[https://just.systems/][just]] for the checkout and build commands.
 - Node.js 26 (used by CI) for the Node REPL and size reports.
 - The Wasmtime 50 CLI and =rlwrap= for the terminal examples below.
-- Python 3 and a browser supporting WasmGC and Wasm exception handling
+- A browser supporting WasmGC and Wasm exception handling
   for the small HTML example.
 
 *** Build
@@ -73,7 +73,8 @@ just build
 #+end_src
 
 This produces =interpreter.wasm=, the import-free interpreter, and
-=miricl-repl.wasm=, the WASI terminal REPL with green threads.
+=miricl-repl.wasm=, the WASI 0.3 terminal REPL and development command. Both include the
+REPL bridge.
 Quicklisp loads the Lisp dependencies automatically. If your Quicklisp
 setup file is elsewhere, set =QUICKLISP_SETUP= when building:
 
@@ -81,26 +82,16 @@ setup file is elsewhere, set =QUICKLISP_SETUP= when building:
 QUICKLISP_SETUP=/path/to/quicklisp/setup.lisp just build
 #+end_src
 
-*** Terminal REPLs
+*** Terminal REPL
 
-From the repository root, start the Node REPL with line editing and
-history through =rlwrap=. The =-a= option keeps rlwrap's editor active
-when Node's readline interface changes terminal modes:
+Start a local terminal REPL with either command:
 
 #+begin_src sh
-rlwrap -a node scripts/repl.mjs interpreter.wasm
+node scripts/repl.mjs interpreter.wasm
+wasmtime run -W stack-switching=y -S p3=y miricl-repl.wasm
 #+end_src
 
-Or run the standalone WASI REPL with Wasmtime:
-
-#+begin_src sh
-rlwrap wasmtime run -W stack-switching=y miricl-repl.wasm
-#+end_src
-
-Try =(+ 20 22)= or =(format t "Hello, world!~%")=. Forms can span
-multiple lines. Enter =:quit= or press Ctrl+D to exit. The Node
-adapter enables JavaScript interop through the =MIRICL-JS= package,
-nicknamed =JS=.
+These commands evaluate locally and open no network listeners.
 
 *** A small HTML page
 
@@ -134,12 +125,74 @@ Serve the repository root so the browser can load the JavaScript
 module and Wasm file:
 
 #+begin_src sh
-python3 -m http.server 8000 --bind 127.0.0.1
+node scripts/repl.mjs interpreter.wasm --dev-server
 #+end_src
 
 Open [[http://127.0.0.1:8000/hello.html][hello.html]] and check the browser's developer console for =Hello,
 world from Common Lisp!=. This calls the browser's =console.log= from
 Common Lisp via =js:invoke=.
+
+*** Development mode
+
+After =just build=, save this as =dev.html= in the repository root:
+
+#+begin_src html
+<!doctype html>
+<meta charset="utf-8">
+<title>Common Lisp development</title>
+<script type="module">
+  import {Miricl} from "./scripts/miricl.mjs";
+
+  const bytes = await (await fetch("./interpreter.wasm")).arrayBuffer();
+  const lisp = await Miricl.instantiate(bytes, {dev: true});
+</script>
+#+end_src
+
+Start the terminal browser REPL and serve the current directory with
+either Node or Wasmtime. These commands enable HTTP and WebSocket;
+the TCP REPL listener is disabled unless =--repl-bridge= is also supplied:
+
+#+begin_src sh
+node scripts/repl.mjs interpreter.wasm --dev-server
+
+wasmtime run -W stack-switching=y -S p3=y -S inherit-network=y \
+  --dir .::. miricl-repl.wasm --dev-server
+#+end_src
+
+Open [[http://127.0.0.1:8000/dev.html][dev.html]], then evaluate this in the terminal to show a browser alert:
+
+#+begin_src lisp
+(js:invoke (js:global "window") "alert" "Hello, world!")
+#+end_src
+
+Evaluations run in the browser application's interpreter; connection
+status appears in the terminal. Use =--browser-repl= instead of
+=--dev-server= if files are served elsewhere.
+Omit =dev= in production to disable the adapter and connection.
+Enter =:quit= to stop the host command and detach the development adapter.
+
+Ports default to HTTP 8000, WebSocket 4006 and TCP 4005 (when enabled); override them
+with =--http-port=, =--websocket-port= and =--tcp-port=. For a custom
+WebSocket port, use ={dev: {url: "ws://127.0.0.1:PORT/repl"}}=.
+
+**** Emacs
+
+Add =--repl-bridge= to either command to enable the TCP REPL on
+=127.0.0.1:4005=. Evaluate this in your Lisp source buffer to connect
+directly, keeping the REPL selection buffer-local:
+
+#+begin_src emacs-lisp
+(progn
+  (require 'inf-lisp)
+  (setq-local inferior-lisp-buffer "*miricl*")
+  (pop-to-buffer (make-comint "miricl" '("127.0.0.1" . 4005)))
+  (inferior-lisp-mode))
+#+end_src
+
+This provides an inferior Lisp buffer and source evaluation commands.
+The buffer shows browser connection status and stays connected across
+browser reloads. TCP submissions and responses also appear in the
+terminal. Interrupts and Swank/Slynk are not implemented.
 
 *** Standalone browser pages
 
