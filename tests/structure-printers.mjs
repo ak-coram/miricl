@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const bytes = fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm');
+const bytes = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
 const vm = await Miricl.instantiate(bytes);
 const fresh = await Miricl.instantiate(bytes);
 const check = (machine, source, expected = 'T') =>

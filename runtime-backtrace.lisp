@@ -9,6 +9,10 @@
   #@(if (call $symbolp (local.get $function)) (then (return (local.get $function))))
   #@(if (i32.eq (call $tag (local.get $function)) (i32.const 8))
     (then
+      (if (ref.test (ref $native-function) (local.get $function))
+        (then (return (if (result (ref null $obj)) (ref.is_null (struct.get $obj $c (local.get $function)))
+          (then (call $symbol (i32.const ,(runtime-symbol-id 'lambda))))
+          (else (struct.get $obj $c (local.get $function)))))))
       (local.set $id (struct.get $obj $n (local.get $function)))
       (if (i32.lt_u (i32.sub (local.get $id) (i32.const 1)) (i32.const ,(length *runtime-symbols*)))
         (then (return (call $symbol (i32.sub (local.get $id) (i32.const 1))))))

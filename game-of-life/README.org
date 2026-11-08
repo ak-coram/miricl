@@ -6,16 +6,15 @@ source symlinks:
 #+begin_src sh
 just setup-game-of-life
 cd game-of-life
-just dev-node
-# or: just dev-wasi
+just dev
 #+end_src
 
 Open http://127.0.0.1:8000/dev.html. Click and drag to draw or erase cells;
 Run/Pause and Step control the simulation. The 24×16 grid wraps at its edges.
 The colors follow Plan 9 / Acme.
 
-Both commands accept HTTP and WebSocket ports, followed by additional REPL
-flags. For example, =just dev-node 8001 4007 --repl-bridge= also enables the
+=just dev= accepts HTTP and WebSocket ports, followed by additional REPL
+flags. For example, =just dev 8001 4007 --repl-bridge= also enables the
 TCP REPL. Open =http://127.0.0.1:8001/dev.html?ws=4007= in that case.
 Wasmtime's command derives its directory preopens from the symlinks.
 
@@ -37,19 +36,18 @@ life:*world*                 ; prints the current world as an ASCII grid
 FSet 2 persistent sets. Only the UI boundary replaces =life:*world*=.
 ASDF can reload edits with =(asdf:load-system "game-of-life")=.
 
-Build the production FASL from a fresh interpreter:
+Build the production application:
 
 #+begin_src sh
 just build
 #+end_src
 
-This invokes the shipped Node REPL's =--bundle= mode, with no browser.
-=just build-wasi= performs the same operation through WASI. Both write only
-=build/game-of-life.wasm=: the ASDF application and dependency FASLs.
-Serve =index.html= with the separate =runtime/miricl.js= and
-=images/miricl-interpreter.wasm= files; for example, use the existing dev server
-and open http://127.0.0.1:8000/index.html. The production page does not enable
-the development connection or fetch Quicklisp sources.
+Both commands use the shipped WASI REPL with its precompiled compiler.
+The build compiles and optimizes the ASDF system without a browser, then copies
+the production HTML, adapter and runtime into =build/=. Publish these four files
+together: =index.html=, =miricl.js=, =miricl.wasm= and =game-of-life.wasm=.
+=build/retention.txt= explains which definitions the optimizer keeps.
+=dev.html= loads source files through the development server instead.
 
 The application uses the =fset2= package from Quicklisp's FSet system.
 Setup links the runtime distribution, compiled ASDF and dependency sources;

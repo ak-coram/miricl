@@ -16,10 +16,11 @@ const tally = totals => Object.entries(totals).filter(([, count]) => count)
   .map(([status, count]) => `<span class="${status}">${number(count)} ${statuses[status].toLowerCase()}</span>`).join(' · ');
 
 function resultDetails(entry) {
-  const flags = ['code', 'extra', 'interrupted', 'timedOut', 'crashed']
+  const flags = ['code', 'extra', 'interrupted', 'timedOut', 'crashed', 'phase']
     .filter(key => entry[key] !== undefined)
     .map(key => `${key}: ${entry[key]}`).join(' · ');
   return `${flags ? `<p class="muted">${escape(flags)}</p>` : ''}
+    ${pre('Compilation', entry.compilation && JSON.stringify(entry.compilation))}
     ${pre('Error', entry.error)}${pre('Source', entry.source)}${pre('Output', entry.output)}`;
 }
 
@@ -71,6 +72,13 @@ export function renderAnsiReport(report, {commit = '', runURL = ''} = {}) {
     </details>`).join('\n')}
   </details>`;
   const metadata = [
+    ['Execution', report.execution === 'compiler' ? 'Native compiled test bodies' : 'Interpreter'],
+    ...(report.execution === 'compiler' ? [['Compiler bootstrap',
+      report.compilerBootstrap?.mode === 'self-compiled'
+        ? `Self-compiled frontend and backend (${number(report.compilerBootstrap.functions)} functions)`
+        : 'Not recorded']] : []),
+    ...(report.compilation ? [['Native compilations', report.compilation.compiled],
+      ['Compilation failures', report.compilation.failed]] : []),
     ['Started', report.startedAt ? `${report.startedAt} (UTC)` : 'Not recorded'],
     ['Duration', Number.isFinite(report.totalElapsedMs ?? report.elapsedMs) ? `${((report.totalElapsedMs ?? report.elapsedMs) / 1000).toFixed(1)} seconds` : 'Not recorded'],
     ...(Number.isFinite(report.loadElapsedMs) ? [['Upstream initialization', `${(report.loadElapsedMs / 1000).toFixed(1)} seconds`]] : []),

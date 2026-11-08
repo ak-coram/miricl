@@ -15,7 +15,7 @@ const report = {
   profile: 'full', startedAt: '2026-11-03T12:00:00.000Z', elapsedMs: 1234,
   timeout: 10000, performanceBudgetMs: 2000, heapLimitMb: 512, inventory: 'SBCL inventory; WASM test bodies',
   imageSizes: [
-    {file: '/unavailable/miricl-interpreter.wasm', rawBytes: 278479, gzipBytes: 128962, brotliBytes: 113743},
+    {file: '/unavailable/miricl.wasm', rawBytes: 278479, gzipBytes: 128962, brotliBytes: 113743},
     {file: '/unavailable/repl&"λ.wasm', rawBytes: 279578, gzipBytes: 129646, brotliBytes: 114337},
   ],
   tests: [
@@ -35,6 +35,13 @@ const report = {
 };
 const html = renderAnsiReport(report, {commit: 'abc123', runURL: 'https://example.com/run?a=1&b=2'});
 assert.match(html, /2,500 ms, above performance budget/);
+assert.match(renderAnsiReport({...report, execution: 'compiler', compilation: {compiled: 4, failed: 1}}),
+  /Execution<\/dt><dd>Native compiled test bodies/);
+assert.match(renderAnsiReport({...report, execution: 'compiler',
+  compilerBootstrap: {mode: 'self-compiled', functions: 93, elapsedMs: 6000}}),
+  /Compiler bootstrap<\/dt><dd>Self-compiled frontend and backend \(93 functions\)/);
+assert.match(renderAnsiReport({...report, execution: 'compiler'}),
+  /Compiler bootstrap<\/dt><dd>Not recorded/);
 assert.match(html, /interpreter\.wasm raw<\/dt><dd>278,479 bytes/);
 assert.match(html, /interpreter\.wasm gzip \(level 9\)<\/dt><dd>128,962 bytes/);
 assert.match(html, /interpreter\.wasm Brotli \(quality 11\)<\/dt><dd>113,743 bytes/);
@@ -135,7 +142,7 @@ function browserChecks() {
 }
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'miricl-ansi-html-'));
 try {
-  const binary = path.join(directory, 'miricl-interpreter.wasm');
+  const binary = path.join(directory, 'miricl.wasm');
   const companion = path.join(directory, 'miricl-repl.wasm');
   const core = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
   const repl = Buffer.concat([core, Buffer.from([0, 2, 1, 120])]);

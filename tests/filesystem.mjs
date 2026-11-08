@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const module = await WebAssembly.compile(fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm'));
+const module = await WebAssembly.compile(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 assert.deepEqual(WebAssembly.Module.imports(module), []);
 const vm = new Miricl(await WebAssembly.instantiate(module));
 const check = (source, expected = 'T') => {

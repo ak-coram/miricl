@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 
 const args = process.argv.slice(2);
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl.wasm';
 const calls = 10000;
 const fixture = `(defparameter *math-real* 1.25d0)
   (defparameter *math-small* 0.25d0)

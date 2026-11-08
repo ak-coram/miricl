@@ -1,4 +1,4 @@
-;;;; Native hits in the existing effective-method cache. Misses retain the MOP.
+;;;; Native cache hits and method invocation. Cache misses retain the MOP.
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
@@ -13,6 +13,35 @@
 (define-runtime-function $generic-property (($gf :nullable-object) ($key :nullable-object)) (:nullable-object)
   #@(call $car (call $property-cell (struct.get $obj $b (struct.get $obj $a (local.get $gf)))
     (local.get $key))))
+
+;; The next-method context has lexical extent through the method's closures.
+;; Keep its ordinary Lisp list representation, but establish the dynamic entry
+;; and invoke the method without interpreting an extra binding/traversal loop.
+(define-runtime-function $invoke-method
+    (($gf :nullable-object) ($method :nullable-object) ($rest :nullable-object)
+     ($args :nullable-object) ($continuation :nullable-object) ($forbidden i32)) (:nullable-object)
+  (:locals ($saved :nullable-object) ($context :nullable-object) ($result :nullable-object) ($thrown i32))
+  #@(local.set $context (call $cons (local.get $gf)
+    (call $cons (local.get $method) (call $cons (local.get $rest)
+      (call $cons (local.get $args) (call $cons (local.get $continuation)
+        (if (result (ref null $obj)) (local.get $forbidden)
+          (then (call $cons (call $symbol (i32.const 1)) (ref.null $obj)))
+          (else (ref.null $obj)))))))))
+  #@(local.set $saved (global.get $dynamic-variables))
+  #@(global.set $dynamic-variables (call $bind (local.get $saved)
+    ,(clos-library-reference '%next-context) (local.get $context)))
+  #@(block $returned
+    (block $thrown
+      (try_table (catch $transfer $thrown)
+        (local.set $result (call $apply
+          (call $car (call $property-cell (struct.get $obj $b (local.get $method))
+            ,(clos-library-reference :function)))
+          (call $cons (local.get $args) (call $cons (local.get $rest) (ref.null $obj)))))
+        (br $returned)))
+    (local.set $thrown (i32.const 1)))
+  #@(global.set $dynamic-variables (local.get $saved))
+  #@(if (local.get $thrown) (then (throw $transfer)))
+  #@(local.get $result))
 
 ;; Shared by CLASS-OF and cache lookup, including lazy condition class creation.
 (define-runtime-function $dispatch-class (($object :nullable-object)) (:nullable-object)
@@ -76,28 +105,34 @@
     (($key :nullable-object) ($a :nullable-object)
      ($ca :nullable-object) ($cb :nullable-object) ($cc :nullable-object) ($cd :nullable-object) ($mode i32)) (i32)
   (:locals ($position i32) ($object :nullable-object) ($class :nullable-object) ($scan :nullable-object) ($index i32))
+  ;; Low three bits hold required arity; bit 3 marks the zero-arity native path.
+  ;; Bits 4..7 select class tests; bits 8..11 add EQL tests at those positions.
+  #@(if (i32.eqz (i32.and (local.get $mode) (i32.const 7)))
+    (then (return (ref.is_null (local.get $key)))))
   #@(local.set $position (i32.sub (i32.and (local.get $mode) (i32.const 7)) (i32.const 1)))
   #@(loop $next
-    (local.set $scan (local.get $a)) (local.set $index (local.get $position))
-    (block $argument (loop $step
-      (br_if $argument (i32.eqz (local.get $index)))
-      (local.set $scan (call $cdr (local.get $scan)))
-      (local.set $index (i32.sub (local.get $index) (i32.const 1))) (br $step)))
-    (local.set $object (call $car (local.get $scan)))
-    (local.set $class (if (result (ref null $obj)) (i32.eq (local.get $position) (i32.const 3))
-      (then (local.get $cd)) (else
-        (if (result (ref null $obj)) (i32.eq (local.get $position) (i32.const 2))
-          (then (local.get $cc)) (else
-            (if (result (ref null $obj)) (local.get $position)
-              (then (local.get $cb)) (else (local.get $ca))))))))
-    (if (i32.and (local.get $mode) (i32.shl (i32.const 8) (local.get $position)))
+    (if (i32.and (local.get $mode) (i32.shl (i32.const 16) (local.get $position)))
       (then
-        (if (i32.eqz (call $eql (call $car (local.get $key)) (local.get $object)))
+        (local.set $scan (local.get $a)) (local.set $index (local.get $position))
+        (block $argument (loop $step
+          (br_if $argument (i32.eqz (local.get $index)))
+          (local.set $scan (call $cdr (local.get $scan)))
+          (local.set $index (i32.sub (local.get $index) (i32.const 1))) (br $step)))
+        (local.set $object (call $car (local.get $scan)))
+        (local.set $class (if (result (ref null $obj)) (i32.eq (local.get $position) (i32.const 3))
+          (then (local.get $cd)) (else
+            (if (result (ref null $obj)) (i32.eq (local.get $position) (i32.const 2))
+              (then (local.get $cc)) (else
+                (if (result (ref null $obj)) (local.get $position)
+                  (then (local.get $cb)) (else (local.get $ca))))))))
+        (if (i32.and (local.get $mode) (i32.shl (i32.const 256) (local.get $position)))
+          (then
+            (if (i32.eqz (call $eql (call $car (local.get $key)) (local.get $object)))
+              (then (return (i32.const 0))))
+            (local.set $key (call $cdr (local.get $key)))))
+        (if (i32.eqz (ref.eq (call $car (local.get $key)) (local.get $class)))
           (then (return (i32.const 0))))
         (local.set $key (call $cdr (local.get $key)))))
-    (if (i32.eqz (ref.eq (call $car (local.get $key)) (local.get $class)))
-      (then (return (i32.const 0))))
-    (local.set $key (call $cdr (local.get $key)))
     (if (i32.eqz (local.get $position)) (then (return (ref.is_null (local.get $key)))))
     (local.set $position (i32.sub (local.get $position) (i32.const 1))) (br $next))
   #@(i32.const 0))
@@ -130,12 +165,13 @@
                 (br_if $miss (i32.eqz (local.get $mode)))
                 (if (i32.eqz (local.get $computed))
                   (then
-                    (local.set $ca (call $dispatch-class (call $car (local.get $args))))
-                    (if (i32.ge_u (i32.and (local.get $mode) (i32.const 7)) (i32.const 2))
+                    (if (i32.and (local.get $mode) (i32.const 16))
+                      (then (local.set $ca (call $dispatch-class (call $car (local.get $args))))))
+                    (if (i32.and (local.get $mode) (i32.const 32))
                       (then (local.set $cb (call $dispatch-class (call $car (call $cdr (local.get $args)))))))
-                    (if (i32.ge_u (i32.and (local.get $mode) (i32.const 7)) (i32.const 3))
+                    (if (i32.and (local.get $mode) (i32.const 64))
                       (then (local.set $cc (call $dispatch-class (call $car (call $cdr (call $cdr (local.get $args))))))))
-                    (if (i32.eq (i32.and (local.get $mode) (i32.const 7)) (i32.const 4))
+                    (if (i32.and (local.get $mode) (i32.const 128))
                       (then (local.set $cd (call $dispatch-class (call $car (call $cdr (call $cdr (call $cdr (local.get $args)))))))))
                     (local.set $computed (i32.const 1))))
                 (local.set $key (call $car (call $cdr (local.get $entry))))
@@ -261,5 +297,5 @@
   #@(call $apply ,(clos-library-reference '%ensure-layout-general) (call $cons (local.get $object) (ref.null $obj))))
 
 (define-runtime-section generic-functions-runtime-wat ()
-  ($generic-discriminator) ($generic-property) ($dispatch-class) ($generic-key-match) ($generic-apply)
+  ($generic-discriminator) ($generic-property) ($invoke-method) ($dispatch-class) ($generic-key-match) ($generic-apply)
   ($find-instance-slot) ($instance-slot-operation) ($property-effective) ($ensure-instance-layout))

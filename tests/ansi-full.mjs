@@ -8,6 +8,7 @@ import {Worker} from 'node:worker_threads';
 import {progressReporter} from './ansi-progress.mjs';
 import {measureWasmImages} from '../scripts/wasm-size.mjs';
 import {runUpstream} from './ansi-upstream.mjs';
+import {validateExecution, compilerPhase, summarizeCompilation} from './ansi-compiler.mjs';
 
 const string = value => `"${value.replace(/["\\]/g, '\\$&')}"`;
 const directory = fileURLToPath(new URL('./ansi-test/', import.meta.url));
@@ -33,14 +34,16 @@ export function inventory(root = directory) {
 }
 
 export async function runFull({binary, records, sources, timeout = 10000, heapLimitMb = 512, testDirectory = null,
+  execution = 'interpreter',
   seed = Array.from(crypto.getRandomValues(new Uint32Array(4))),
   onFile = () => {}, onProgress = () => {}}) {
   if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('Timeout must be positive.');
+  validateExecution(execution);
   if (!Number.isSafeInteger(heapLimitMb) || heapLimitMb < 16) throw new Error('Heap limit must be an integer of at least 16 MiB.');
   if (!Array.isArray(seed) || seed.length !== 4 || seed.some(word => !Number.isInteger(word) || word < 0 || word > 0xffffffff))
     throw new Error('Seed must contain four unsigned 32-bit integers.');
   seed = [...seed];
-  const report = {binary, profile: 'full', runner: 'diagnostic', timeout, performanceBudgetMs: 2000, heapLimitMb, seed,
+  const report = {binary, profile: 'full', runner: 'diagnostic', execution, timeout, performanceBudgetMs: 2000, heapLimitMb, seed,
     imageSizes: measureWasmImages(binary),
     files: [...new Set(records.map(r => r.file))],
     inventory: 'SBCL with Miricl features; test bodies run in WASM',
@@ -58,7 +61,7 @@ export async function runFull({binary, records, sources, timeout = 10000, heapLi
   };
   let worker;
   const setup = [];
-  const request = (source, limit = timeout) => new Promise(resolve => {
+  const request = (source, limit = timeout, test = false) => new Promise(resolve => {
     const finish = result => {
       clearTimeout(timer);
       worker.off('message', message);
@@ -76,14 +79,15 @@ export async function runFull({binary, records, sources, timeout = 10000, heapLi
     worker.once('message', message);
     worker.once('error', error);
     worker.once('exit', exited);
-    if (source !== null) worker.postMessage({source, timeout: limit});
+    if (source !== null) worker.postMessage({source, timeout: limit, test});
   });
   const start = async () => {
     worker = new Worker(new URL('./ansi-worker.mjs', import.meta.url), {
-      workerData: {binary, sources, seed}, resourceLimits: {maxOldGenerationSizeMb: heapLimitMb},
+      workerData: {binary, sources, seed, execution}, resourceLimits: {maxOldGenerationSizeMb: heapLimitMb},
     });
     const ready = await request(null, 30_000);
     if (!ready.ready) throw new Error(`ANSI worker initialization failed: ${ready.error}`);
+    if (ready.compilerBootstrap) report.compilerBootstrap = ready.compilerBootstrap;
     let replayedOperations = 0;
     for (const source of setup) {
       const result = await request(source);
@@ -201,7 +205,9 @@ export async function runFull({binary, records, sources, timeout = 10000, heapLi
             (cl:if entry
               (cl:progn ${context(record)} (rt::add-entry entry)
                 (cl:if (rt:do-test (rt::name entry)) :pass :fail))
-              :blocked))`, testTimeout);
+              :blocked))`, testTimeout, true);
+        if (execution === 'compiler' && executed.output?.endsWith(':PASS\n') && !executed.compilation?.compiled)
+          executed.error = 'Test passed without native compilation.';
         const status = executed.timedOut || executed.interrupted ? 'timeout' : executed.error ? 'fail'
           : executed.output.endsWith(':PASS\n') ? 'pass'
           : executed.output.endsWith(':BLOCKED\n') ? 'blocked' : 'fail';
@@ -210,6 +216,7 @@ export async function runFull({binary, records, sources, timeout = 10000, heapLi
           ...(testTimeout !== timeout ? {timeout: testTimeout} : {}),
           ...(record.guestName ? {guestName: record.guestName} : {}),
           passed: status === 'pass', status,
+          ...(executed.compilation ? {phase: compilerPhase(executed.compilation)} : {}),
           elapsedMs, ...(elapsedMs > report.performanceBudgetMs ? {slow: true} : {}), ...trim(executed)});
         const counter = {pass: 'passed', fail: 'failed', blocked: 'blocked', timeout: 'timedOut'}[status];
         progress({testsProcessed: report.tests.length, [counter]: report.progress[counter] + 1});
@@ -241,17 +248,20 @@ export async function runFull({binary, records, sources, timeout = 10000, heapLi
     && report.summary.total === report.summary.expected && report.summary.total > 0;
   progress({phase: report.error ? 'aborted' : 'finished', test: undefined});
   report.elapsedMs = report.progress.elapsedMs;
+  summarizeCompilation(report);
   return report;
 }
 
 export async function main(binary, args = []) {
   const wholeStartedAt = Date.now();
   const reportPath = process.env.MIRICL_ANSI_REPORT ?? 'ansi-results.json';
+  fs.mkdirSync(path.dirname(reportPath), {recursive: true});
   let report;
   try {
     const diagnostic = args.includes('--diagnostic');
+    const compiler = args.includes('--compiler');
     const options = args.filter(arg => arg.startsWith('--timeout=') || arg.startsWith('--heap=') || arg.startsWith('--seed=') || arg.startsWith('--load-timeout='));
-    if (args.length !== options.length + Number(diagnostic)) throw new Error('Full suite accepts --timeout=<milliseconds>, --load-timeout=<milliseconds>, --heap=<MiB>, --seed=<a,b,c,d>, and --diagnostic.');
+    if (args.length !== options.length + Number(diagnostic) + Number(compiler)) throw new Error('Full suite accepts --timeout=<milliseconds>, --load-timeout=<milliseconds>, --heap=<MiB>, --seed=<a,b,c,d>, --compiler, and --diagnostic.');
     const option = (name, fallback) => {
       const value = options.findLast(arg => arg.startsWith(`--${name}=`));
       return value ? Number(value.slice(value.indexOf('=') + 1)) : fallback;
@@ -280,6 +290,7 @@ export async function main(binary, args = []) {
     const display = progressReporter();
     try {
       report = await (diagnostic ? runFull : runUpstream)({binary, records, sources, testDirectory: '/sandbox/',
+      execution: compiler ? 'compiler' : 'interpreter',
       // Checked against the pinned ebf9c806 upstream revision and the independent
       // diagnostic inventory. A partial load must never become a green report.
       ...(!diagnostic ? {expectedTests: 21945, loadTimeout: option('load-timeout', 120000)} : {}),
@@ -304,7 +315,7 @@ export async function main(binary, args = []) {
   report.totalElapsedMs = Date.now() - wholeStartedAt;
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   const s = report.summary;
-  console.log(`ANSI full: ${s.passed} passed, ${s.failed} failed, ${s.blocked} blocked, ${s.timedOut} timed out (${s.total}/${s.expected ?? '?'} tests accounted for; ${s.loadErrors ?? 0} load errors).`);
+  console.log(`ANSI full (${report.execution ?? 'interpreter'}): ${s.passed} passed, ${s.failed} failed, ${s.blocked} blocked, ${s.timedOut} timed out (${s.total}/${s.expected ?? '?'} tests accounted for; ${s.loadErrors ?? 0} load errors).`);
   if (report.error) console.error(report.error);
   process.exitCode = !s.complete || s.failed || s.blocked || s.timedOut || s.loadErrors ? 1 : 0;
   return report;

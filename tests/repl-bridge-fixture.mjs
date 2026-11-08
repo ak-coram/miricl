@@ -89,7 +89,7 @@ export async function connectTerminal(port = testPorts.tcp) {
 export async function createWebapp(binary) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-webapp-'));
   await fs.mkdir(path.join(directory, 'scripts'));
-  await fs.copyFile(binary, path.join(directory, 'miricl-interpreter.wasm'));
+  await fs.copyFile(binary, path.join(directory, 'miricl.wasm'));
   for (const file of ['miricl.mjs', 'dev-repl.mjs', 'dev-filesystem.mjs'])
     await fs.copyFile(path.join('scripts', file), path.join(directory, 'scripts', file));
   await fs.writeFile(path.join(directory, 'index.html'), `<!doctype html><meta charset="utf-8">
@@ -97,7 +97,7 @@ export async function createWebapp(binary) {
 <script type="module">
 import {Miricl} from './scripts/miricl.mjs';
 globalThis.webapp = {count: 41};
-globalThis.app = await Miricl.instantiate(await (await fetch('./miricl-interpreter.wasm')).arrayBuffer(), {
+globalThis.app = await Miricl.instantiate(await (await fetch('./miricl.wasm')).arrayBuffer(), {
   imports: {webapp}, dev: new URL(location).searchParams.has('dev')
     ? {url: ${JSON.stringify(`ws://127.0.0.1:${testPorts.websocket}/repl`)},
        filesystem: !new URL(location).searchParams.has('no-filesystem')} : false

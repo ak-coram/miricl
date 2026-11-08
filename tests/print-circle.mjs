@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {Script, createContext} from 'node:vm';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm'));
+const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 const context = createContext({vm, source: ''});
 const evaluate = new Script('vm.evaluate(source, {eof: true}).output');
 const run = source => {

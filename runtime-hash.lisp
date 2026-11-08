@@ -193,7 +193,8 @@
     (then (return (call $hash-code (i32.const ,(runtime-symbol-id 'equal))
       (call $pathname-parts (local.get $x)) (local.get $depth)))))
   ;; Bounded structural hashing must terminate for circular and deeply nested keys.
-  #@(if (i32.and (i32.eq (local.get $tag) (i32.const 7)) (local.get $depth))
+  #@(if (i32.and (i32.eq (local.get $tag) (i32.const 7))
+        (i32.ne (local.get $depth) (i32.const 0)))
     (then
       (block $done (loop $next
         (br_if $done (i32.or (i32.ne (call $tag (local.get $x)) (i32.const 7)) (i32.eq (local.get $i) (i32.const 16))))

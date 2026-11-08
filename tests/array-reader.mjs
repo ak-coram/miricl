@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm'));
+const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 for (const [source, expected] of [
   ['#*010101', '#*010101'], ['#*', '#*'], ['#0*', '#*'], ['#8*101', '#*10111111'],
   ['#8*100', '#*10000000'], ['#0A(1 2)', '#0A(1 2)'],

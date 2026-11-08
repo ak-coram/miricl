@@ -15,7 +15,7 @@ if (args.includes('--sbcl-source')) {
         (assert (zerop (append-benchmark-run)))
         (* 1000.0d0 (/ (- (get-internal-real-time) start) internal-time-units-per-second)))))`);
 } else {
-  const binary = args[0] ?? 'miricl-interpreter.wasm';
+  const binary = args[0] ?? 'miricl.wasm';
   const vm = await Miricl.instantiate(fs.readFileSync(binary));
   vm.evaluate(source);
   const run = () => assert.equal(vm.evaluate('(append-benchmark-run)').output, '0\n');

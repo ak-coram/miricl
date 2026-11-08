@@ -6,7 +6,7 @@ import {Miricl} from '../scripts/miricl.mjs';
 
 const args = process.argv.slice(2);
 const host = args.includes('--sbcl-source');
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl.wasm';
 const source = `(defparameter *bench-table* nil)
   (defun hash-benchmark-setup (test)
     (setq *bench-table* (make-hash-table :test test))

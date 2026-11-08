@@ -18,11 +18,15 @@
                 (when `(if ,(second form) (progn ,@(cddr form))))
                 (unless `(if ,(second form) nil (progn ,@(cddr form))))
                 (null `(not ,(second form)))
-                (push `(setq ,(third form) (cons ,(second form) ,(third form))))
+                (push (if (symbolp (third form))
+                          `(setq ,(third form) (cons ,(second form) ,(third form)))
+                          form))
                 (pop `(let ((%popped (car ,(second form))))
                         (setq ,(second form) (cdr ,(second form))) %popped))
-                (incf `(setq ,(second form) (+ ,(second form) ,(or (third form) 1))))
-                (decf `(setq ,(second form) (- ,(second form) ,(or (third form) 1))))
+                (incf (if (symbolp (second form))
+                          `(setq ,(second form) (+ ,(second form) ,(or (third form) 1))) form))
+                (decf (if (symbolp (second form))
+                          `(setq ,(second form) (- ,(second form) ,(or (third form) 1))) form))
                 (cadr `(car (cdr ,(second form))))
                 (cddr `(cdr (cdr ,(second form))))
                 (caddr `(car (cdr (cdr ,(second form)))))
@@ -40,6 +44,17 @@
                       (pushnew x symbols)))))
       (mapc #'walk forms))
     (nreverse symbols)))
+
+(defun runtime-library-structure-symbols (forms)
+  ;; Accessors first referenced by another tooling source still need their
+  ;; bootstrap identities installed before DEFSTRUCT interns their names.
+  (loop for form in forms when (and (consp form) (eq (car form) 'defstruct) (symbolp (second form))) append
+    (let* ((name (second form)) (package (symbol-package name)) (text (symbol-name name)))
+      (append (loop for suffix in '("-P" "") for prefix in '("" "COPY-")
+                collect (intern (concatenate 'string prefix text suffix) package))
+        (list (intern (concatenate 'string "MAKE-" text) package))
+        (loop for slot in (cddr form) for slot-name = (if (consp slot) (car slot) slot)
+              collect (intern (concatenate 'string text "-" (symbol-name slot-name)) package))))))
 
 (defparameter *runtime-library-prefixes*
   ;; Spare tags stand for a proper list's length and first symbol.

@@ -314,6 +314,78 @@
                 (setf (nth i different) (if (logbitp i mask) -1 1.5f0))
                 (is (eq t (m:evaluate-string vm (format nil "(eq :general (~A ~{~S~^ ~}))" name different))))))))))))
 
+(test generic-cache-local-invalidation
+  (m:with-interpreter (vm)
+    (dolist (source
+      '("(defgeneric warm-dispatch (x))
+         (defmethod warm-dispatch ((x t)) :warm)
+         (defgeneric edited-dispatch (x))
+         (defmethod edited-dispatch ((x t)) :old)
+         (defun dispatch-cache (gf)
+           (funcall (miricl-compiler::compiler-primitive 10 1 \"%GET\") gf :cache))
+         (assert (eq (warm-dispatch 1) :warm))
+         (assert (eq (edited-dispatch 1) :old))
+         (let ((cache (dispatch-cache #'warm-dispatch)))
+           (assert cache)
+           (defgeneric fresh-dispatch (x))
+           (defclass fresh-dispatch-class () ())
+           (ensure-generic-function 'edited-dispatch :lambda-list '(x))
+           (assert (eq (warm-dispatch 1) :warm))
+           (assert (eq cache (dispatch-cache #'warm-dispatch)))
+           (defmethod edited-dispatch ((x integer)) :integer)
+           (assert (eq (edited-dispatch 1) :integer))
+           (assert (eq (warm-dispatch 1) :warm))
+           (assert (eq cache (dispatch-cache #'warm-dispatch)))
+           (remove-method #'edited-dispatch
+             (find-method #'edited-dispatch nil (list (find-class 'integer))))
+           (and (eq (edited-dispatch 1) :old)
+                (eq cache (dispatch-cache #'warm-dispatch))))"
+        "(defclass counted-generic (standard-generic-function)
+            ((initializations :initform 0)))
+         (defmethod shared-initialize :after ((gf counted-generic) slots &rest initargs)
+           (declare (ignore slots initargs)) (incf (slot-value gf 'initializations)))
+         (defgeneric counted-dispatch (x) (:generic-function-class counted-generic))
+         (let ((count (slot-value #'counted-dispatch 'initializations)))
+           (defmethod counted-dispatch ((x t)) :general)
+           (defmethod counted-dispatch ((x integer)) :integer)
+           (and (= count (slot-value #'counted-dispatch 'initializations))
+                (eq (counted-dispatch 1) :integer) (eq (counted-dispatch nil) :general)))"
+        "(defgeneric relevant-dispatch (x y))
+         (defmethod relevant-dispatch ((x integer) y) (values x y))
+         (assert (equal (multiple-value-list (relevant-dispatch 1 nil)) '(1 nil)))
+         (let ((cache (dispatch-cache #'relevant-dispatch)))
+           (assert (equal (multiple-value-list (relevant-dispatch 2 :different-class)) '(2 :different-class)))
+           (assert (eq cache (dispatch-cache #'relevant-dispatch)))
+           (defmethod relevant-dispatch ((x integer) (y integer)) (+ x y))
+           (and (= (relevant-dispatch 3 4) 7)
+                (equal (multiple-value-list (relevant-dispatch 5 nil)) '(5 nil))))"
+        "(defgeneric all-arguments-general (x y))
+         (defmethod all-arguments-general (x y) (list x y))
+         (assert (equal (all-arguments-general 1 nil) '(1 nil)))
+         (let ((cache (dispatch-cache #'all-arguments-general)))
+           (and (equal (all-arguments-general :other '(:list)) '(:other (:list)))
+                (eq cache (dispatch-cache #'all-arguments-general))))"
+        "(defgeneric shared-dispatch-plan (x))
+         (defmethod shared-dispatch-plan ((x number)) x)
+         (assert (= (shared-dispatch-plan 1) 1))
+         (assert (= (shared-dispatch-plan 1.5) 1.5))
+         (let ((cache (dispatch-cache #'shared-dispatch-plan)))
+           (and (= (length cache) 2) (eq (third (first cache)) (third (second cache)))))"
+        "(defgeneric no-required-dispatch (&optional x))
+         (defmethod no-required-dispatch (&optional (x 17)) x)
+         (assert (= (no-required-dispatch) 17))
+         (let ((cache (dispatch-cache #'no-required-dispatch)))
+           (and (= (no-required-dispatch 23) 23)
+                (eq cache (dispatch-cache #'no-required-dispatch))
+                (handler-case (no-required-dispatch 1 2) (program-error () t))))"
+        "(defgeneric reordered-dispatch (x y))
+         (defmethod reordered-dispatch ((x integer) y) :x)
+         (defmethod reordered-dispatch (x (y integer)) :y)
+         (assert (eq (reordered-dispatch 1 2) :x))
+         (ensure-generic-function 'reordered-dispatch :argument-precedence-order '(y x))
+         (eq (reordered-dispatch 1 2) :y)"))
+      (is (eq t (m:evaluate-string vm source))))))
+
 (test generic-cache-method-plans-and-invalidation
   (m:with-interpreter (vm)
     (dolist (source
@@ -413,6 +485,17 @@
         "(equal (function-keywords (find-method #'default-effects nil (list (find-class 'integer))))
                  '(:a :alias))"))
       (is (eq t (m:evaluate-string vm source)) "Method lowering effect/capture mismatch: ~A" source))))
+
+(test method-next-context-unwinding
+  (m:with-interpreter (vm)
+    (is (eq t (m:evaluate-string vm "
+      (defmethod unwind-inner ((x t)) (throw 'inner :left))
+      (defmethod unwind-outer ((x t)) (values :base x))
+      (defmethod unwind-outer ((x integer))
+        (assert (eq (catch 'inner (unwind-inner x)) :left))
+        (call-next-method))
+      (dotimes (round 3 t)
+        (assert (equal (multiple-value-list (unwind-outer 17)) '(:base 17))))")))))
 
 (test method-combination-primary-requirements
   (m:with-interpreter (vm)

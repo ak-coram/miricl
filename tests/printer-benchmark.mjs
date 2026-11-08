@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 const args = process.argv.slice(2);
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl.wasm';
 const calls = 1000;
 const fixture = `(defstruct printer-bench x y)
   (defparameter *printer-structure* (make-printer-bench :x 17 :y '(1 2 3)))

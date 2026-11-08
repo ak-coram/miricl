@@ -118,6 +118,16 @@ export const threadCases = [
     (miricl-threads:thread-yield)
     (and (string= (format nil "~D" 123) "123")
       (string= (miricl-threads:join-thread worker) "leftright")))`],
+  ['next-method context across thread switches', `(progn
+    (defmethod yielding-next-method ((x t)) (values (1+ x) x))
+    (defmethod yielding-next-method ((x integer))
+      (let ((next (lambda () (call-next-method))))
+        (miricl-threads:thread-yield)
+        (funcall next)))
+    (let ((a (miricl-threads:make-thread (lambda () (multiple-value-list (yielding-next-method 17)))))
+          (b (miricl-threads:make-thread (lambda () (multiple-value-list (yielding-next-method 23))))))
+      (and (equal (miricl-threads:join-thread a) '(18 17))
+           (equal (miricl-threads:join-thread b) '(24 23)))))`],
   ['interrupt sleeping thread', `(let ((ready (miricl-threads:make-semaphore)) (interrupted nil))
     (let ((worker (miricl-threads:make-thread (lambda () (miricl-threads:signal-semaphore ready) (sleep 0.02) :done))))
       (miricl-threads:wait-on-semaphore ready)

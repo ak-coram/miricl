@@ -36,10 +36,19 @@ jobs:
         with:
           submodules: true
 
+      # These are upstream fixtures, not MIRICL's tests or dependencies.
+      - name: Remove ASDF fixtures during dependency setup
+        shell: bash
+        run: rm -rf vendor/asdf/test
+
       - name: Setup Lisp
         uses: 40ants/setup-lisp@v4
         with:
           cache: true
+
+      # The ASDF builder requires a clean upstream source checkout.
+      - name: Restore ASDF source checkout
+        run: git -C vendor/asdf restore --worktree -- test
 
       - name: Install libwasmtime (Linux)
         if: runner.os == 'Linux'
@@ -95,6 +104,9 @@ jobs:
           tar -xf wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux.tar.xz -C wasmtime-cli --strip-components 1
           echo "$PWD/wasmtime-cli" >> "$GITHUB_PATH"
 
+      - uses: extractions/setup-just@v4
+        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
+
       - name: Standalone interpreter and REPLs
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
         shell: bash
@@ -102,24 +114,35 @@ jobs:
           LD_LIBRARY_PATH: ./
         run: |
           ros -L sbcl-bin run -- --load scripts/build-wasm.lisp --quit
-          node tests/threads.mjs miricl-interpreter.wasm miricl-repl.wasm
-          node tests/standalone.mjs miricl-interpreter.wasm
-          node --experimental-wasm-wasmfx tests/text-repl.mjs miricl-interpreter.wasm miricl-repl.wasm
-          node tests/repl-bridge.mjs miricl-interpreter.wasm miricl-repl.wasm
-          node tests/repl-websocket.mjs miricl-interpreter.wasm miricl-repl.wasm
-          node tests/dev-filesystem-server.mjs miricl-interpreter.wasm miricl-repl.wasm
-          node tests/backtrace.mjs miricl-interpreter.wasm
-          node tests/development.mjs miricl-interpreter.wasm
-          node tests/dev-filesystem.mjs miricl-interpreter.wasm
-          node scripts/build-asdf.mjs build/asdf miricl-interpreter.wasm miricl-asdf.wasm
+          node tests/threads.mjs miricl.wasm miricl-repl.wasm
+          node tests/standalone.mjs miricl.wasm
+          node --experimental-wasm-wasmfx tests/text-repl.mjs miricl.wasm miricl-repl.wasm
+          node tests/repl-bridge.mjs miricl.wasm miricl-repl.wasm
+          node tests/repl-websocket.mjs miricl.wasm miricl-repl.wasm
+          node tests/dev-filesystem-server.mjs miricl.wasm miricl-repl.wasm
+          node tests/backtrace.mjs miricl.wasm
+          node tests/development.mjs miricl.wasm
+          node tests/dev-filesystem.mjs miricl.wasm
+          node scripts/build-asdf.mjs build/asdf miricl.wasm miricl-asdf.wasm
           node tests/asdf-build.mjs
-          node tests/asdf.mjs miricl-interpreter.wasm build/asdf/asdf.lisp
-          node tests/asdf-bundle.mjs miricl-interpreter.wasm build/asdf/asdf.lisp
-          node tests/bundle-command.mjs miricl-interpreter.wasm miricl-repl.wasm
-          node tests/nested-backquote.mjs miricl-interpreter.wasm
-          node tests/structure-printers.mjs miricl-interpreter.wasm
-          node tests/readtable-iteration.mjs miricl-interpreter.wasm
-          node tests/ansi-runner.mjs miricl-interpreter.wasm
+          node tests/asdf.mjs miricl.wasm build/asdf/asdf.lisp
+          node tests/asdf-bundle.mjs miricl.wasm build/asdf/asdf.lisp
+          node tests/bundle-command.mjs miricl.wasm miricl-repl.wasm
+          node tests/nested-backquote.mjs miricl.wasm
+          node tests/structure-printers.mjs miricl.wasm
+          node tests/readtable-iteration.mjs miricl.wasm
+          node tests/whole-program.mjs miricl.wasm
+          node tests/fasl-format.mjs miricl.wasm
+          node tests/file-compilation.mjs miricl.wasm
+          node tests/file-code-sharing.mjs miricl.wasm
+          node tests/class-reachability.mjs miricl.wasm
+          node tests/hash-structural.mjs miricl.wasm
+          node tests/compiler-runtime.mjs
+          node tests/hir.mjs miricl.wasm
+          node tests/native-compilation.mjs miricl.wasm
+          node tests/native-size.mjs miricl.wasm
+          node tests/ansi-compiler-runner.mjs miricl.wasm
+          node tests/ansi-runner.mjs miricl.wasm
 
       - name: Upload MIRICL distribution
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -128,7 +151,7 @@ jobs:
           name: miricl-runtime
           path: |
             miricl.js
-            miricl-interpreter.wasm
+            miricl.wasm
             miricl-repl.wasm
             miricl-asdf.wasm
           if-no-files-found: error
@@ -144,6 +167,8 @@ jobs:
           ros -L sbcl-bin run -- --load scripts/build-html.lisp --load scripts/build-todo.lisp --quit
           test -s miricl.html
           test -s todo.html
+          ros -L sbcl-bin run -- --load "$HOME/.roswell/lisp/quicklisp/setup.lisp" --script scripts/setup-application.lisp "$PWD/game-of-life" game-of-life "$PWD" node
+          just --justfile game-of-life/justfile build
           node scripts/build-size-html.mjs
 
       - name: Test standalone browser REPL
@@ -153,26 +178,32 @@ jobs:
         run: |
           node tests/browser-repl.mjs miricl.html
           node tests/browser-todo.mjs todo.html
-          node tests/browser-dev-repl.mjs miricl-interpreter.wasm miricl-repl.wasm
+          node tests/browser-game-of-life.mjs game-of-life/build/index.html
+          node tests/browser-compiler.mjs
+          node tests/browser-dev-repl.mjs miricl.wasm miricl-repl.wasm
           node tests/ansi-html.mjs
           node tests/size-html.mjs
 
-      - name: Upload standalone browser REPL
+      - name: Upload standalone browser examples and size report
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
         uses: actions/upload-artifact@v4
         with:
-          name: miricl-browser-repl
+          name: miricl-browser-examples
           path: |
             miricl.html
             todo.html
             image-sizes.html
             image-sizes.json
+            game-of-life/build/index.html
+            game-of-life/build/miricl.js
+            game-of-life/build/miricl.wasm
+            game-of-life/build/game-of-life.wasm
           if-no-files-found: error
 
       - name: ANSI tests in the standalone interpreter
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
         timeout-minutes: 10
-        run: node tests/ansi.mjs miricl-interpreter.wasm
+        run: node tests/ansi.mjs miricl.wasm
 
       - name: Full ANSI conformance suite
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -182,19 +213,21 @@ jobs:
         continue-on-error: true
         env:
           MIRICL_ANSI_REPORT: ansi-full-results.json
-        shell: bash
-        run: |
-          # setup-lisp provides Roswell; a bare sbcl need not be on PATH.
-          cat > "$RUNNER_TEMP/ansi-sbcl" <<'SH'
-          #!/usr/bin/env bash
-          exec ros -L sbcl-bin run -- "$@"
-          SH
-          chmod +x "$RUNNER_TEMP/ansi-sbcl"
-          SBCL="$RUNNER_TEMP/ansi-sbcl" node tests/ansi.mjs miricl-interpreter.wasm --full
+        run: node tests/ansi.mjs miricl.wasm --full
+
+      - name: Full ANSI suite with self-compiled compiler
+        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
+        timeout-minutes: 20
+        continue-on-error: true
+        env:
+          MIRICL_ANSI_REPORT: ansi-compiler-results.json
+        run: node tests/ansi.mjs miricl.wasm --full --compiler
 
       - name: Build standalone ANSI results page
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        run: node scripts/build-ansi-html.mjs ansi-full-results.json ansi-results.html
+        run: |
+          node scripts/build-ansi-html.mjs ansi-full-results.json ansi-results.html
+          node scripts/build-ansi-html.mjs ansi-compiler-results.json ansi-compiler-results.html
 
       - name: Check full ANSI suite completion
         if: always() && runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -203,14 +236,24 @@ jobs:
           node --input-type=module <<'JS'
           import fs from 'node:fs';
           import assert from 'node:assert/strict';
-          const report = JSON.parse(fs.readFileSync('ansi-full-results.json', 'utf8'));
-          const s = report.summary;
-          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-            `### Full ANSI suite\n\n${s.passed} passed, ${s.failed} failed, ${s.blocked} blocked, ${s.timedOut} timed out; ${s.total}/${s.expected} tests accounted for, ${s.loadErrors} load errors.\n`);
-          assert.equal(report.error, null, report.error);
-          assert.equal(s.complete, true, 'Full ANSI suite did not finish');
-          assert.ok(s.total > 0);
-          assert.equal(s.total, s.expected);
+          for (const file of ['ansi-full-results.json', 'ansi-compiler-results.json']) {
+            const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const s = report.summary;
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              `### Full ANSI suite (${report.execution})\n\n${s.passed} passed, ${s.failed} failed, ${s.blocked} blocked, ${s.timedOut} timed out; ${s.total}/${s.expected} tests accounted for, ${s.loadErrors} load errors.\n`);
+            assert.equal(report.error, null, report.error);
+            assert.equal(s.complete, true, 'Full ANSI suite did not finish');
+            assert.ok(s.total > 0);
+            assert.equal(s.total, s.expected);
+            if (report.execution === 'compiler') {
+              assert.equal(report.compilerBootstrap?.mode, 'self-compiled',
+                'The ANSI compiler was not bootstrapped with itself');
+              assert.equal(report.compilerBootstrap.origin, 'first-use');
+              assert.ok(report.compilerBootstrap.functions >= 93);
+              assert.ok(report.tests.filter(test => test.passed).every(test => test.compilation?.compiled > 0),
+                'A compiler test passed without native compilation');
+            }
+          }
           JS
 
       - name: Upload ANSI results
@@ -222,4 +265,6 @@ jobs:
             ansi-results.json
             ansi-full-results.json
             ansi-results.html
+            ansi-compiler-results.json
+            ansi-compiler-results.html
           if-no-files-found: ignore

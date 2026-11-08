@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 import {DevFilesystem} from '../scripts/dev-filesystem.mjs';
 
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm'));
+const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 const fetch = globalThis.fetch;
 const encoder = new TextEncoder();
 const files = new Map([

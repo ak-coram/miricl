@@ -1,6 +1,6 @@
 ;;;; RFC 6455 framing for the development relay, over WASI TCP byte streams.
-;;;; Only binary application messages are accepted: their contents are the raw
-;;;; UTF-8 REPL stream. Control frames may appear between message fragments.
+;;;; Binary messages carry the UTF-8 terminal stream; text messages carry
+;;;; private compiler packets. Control frames may appear between fragments.
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
@@ -301,16 +301,30 @@
           (then (call $frame (local.get $c) (i32.const 10) (local.get $data) (local.get $size)))
           (else (if (i32.ne (local.get $opcode) (i32.const 10))
             (then
-              (if (i32.eq (local.get $opcode) (i32.const 1)) (then (call $ws-error (local.get $c) (i32.const 1003)) return))
               (if (i32.eqz (i32.or
-                    (i32.and (i32.eq (local.get $opcode) (i32.const 2)) (i32.eqz (i32.load offset=44 (local.get $c))))
+                    (i32.and (i32.or (i32.eq (local.get $opcode) (i32.const 1))
+                                    (i32.eq (local.get $opcode) (i32.const 2)))
+                             (i32.eqz (i32.load offset=44 (local.get $c))))
                     (i32.and (i32.eqz (local.get $opcode)) (i32.load offset=44 (local.get $c)))))
                 (then (call $ws-error (local.get $c) (i32.const 1002)) return))
               (i32.store offset=48 (local.get $c) (i32.add (i32.load offset=48 (local.get $c)) (local.get $size)))
               (if (i32.gt_u (i32.load offset=48 (local.get $c)) (i32.const 1048562)) (then (call $ws-error (local.get $c) (i32.const 1009)) return))
-              (call $queue (global.get $emacs) (local.get $data) (local.get $size))
-              (call $queue (i32.const 5120) (local.get $data) (local.get $size))
-              (i32.store offset=44 (local.get $c) (i32.eqz (i32.and (local.get $first) (i32.const 128))))
+              (if (local.get $opcode) (then (i32.store offset=44 (local.get $c) (local.get $opcode))))
+              (if (i32.eq (i32.load offset=44 (local.get $c)) (i32.const 1))
+                (then
+                  (memory.copy
+                    (i32.add (i32.const 18874368) (i32.sub (i32.load offset=48 (local.get $c)) (local.get $size)))
+                    (local.get $data) (local.get $size))
+                  (if (i32.and (local.get $first) (i32.const 128))
+                    (then
+                      (if (i32.eqz (call $utf8 (i32.const 18874368) (i32.load offset=48 (local.get $c))))
+                        (then (call $ws-error (local.get $c) (i32.const 1007)) return))
+                      (call $compile (i32.const 18874368) (i32.load offset=48 (local.get $c)) (i32.const 30000))
+                      (call $frame (local.get $c) (i32.const 1) (i32.load (i32.const 30000)) (i32.load (i32.const 30004))))))
+                (else
+                  (call $queue (global.get $emacs) (local.get $data) (local.get $size))
+                  (call $queue (i32.const 5120) (local.get $data) (local.get $size))))
+              (if (i32.and (local.get $first) (i32.const 128)) (then (i32.store offset=44 (local.get $c) (i32.const 0))))
               (if (i32.eqz (i32.load offset=44 (local.get $c))) (then (i32.store offset=48 (local.get $c) (i32.const 0))))))))
         (call $consume (local.get $c) (i32.add (i32.add (local.get $h) (i32.const 4)) (local.get $size)))
         (br $frames))))))

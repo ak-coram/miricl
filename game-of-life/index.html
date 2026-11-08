@@ -55,18 +55,18 @@
 </main>
 <noscript>This simulation needs JavaScript and WebAssembly.</noscript>
 <script type="module">
-  import {Miricl} from "./runtime/miricl.js";
+  import {Miricl} from "./miricl.js";
   const report = error => {
     document.getElementById("status").textContent = error.message;
     document.getElementById("status").classList.add("error");
     console.error(error);
   };
   try {
-    const image = await fetch("./images/miricl-interpreter.wasm");
+    const image = await fetch("./miricl.wasm");
     const lisp = globalThis.miriclInterpreter = await Miricl.instantiate(await image.arrayBuffer(), {
       onThreadError: report
     });
-    const application = await fetch("./build/game-of-life.wasm");
+    const application = await fetch("./game-of-life.wasm");
     lisp.mountFile("/application.wasm", await application.arrayBuffer());
     await lisp.evaluateAsync('(load "/application.wasm") (life:start)', {eof: true});
   } catch (error) { report(error); }

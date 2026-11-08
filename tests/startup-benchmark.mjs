@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
+const binary = process.argv[2] ?? 'miricl.wasm';
 const bytes = fs.readFileSync(binary);
 const started = performance.now();
 const module = await WebAssembly.compile(bytes);

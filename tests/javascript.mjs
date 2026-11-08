@@ -1,10 +1,10 @@
-// node tests/javascript.mjs [miricl-interpreter.wasm]
+// node tests/javascript.mjs [miricl.wasm]
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Script, createContext} from 'node:vm';
 import {Miricl, MiriclError} from '../scripts/miricl.mjs';
 
-const bytes = fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm');
+const bytes = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
 const module = await WebAssembly.compile(bytes);
 assert.deepEqual(WebAssembly.Module.imports(module), []);
 const fixture = {

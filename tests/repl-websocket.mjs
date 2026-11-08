@@ -4,7 +4,7 @@ import net from 'node:net';
 import path from 'node:path';
 import {connectTerminal, startHost, waitFor} from './repl-bridge-fixture.mjs';
 
-const binary = path.resolve(process.argv[2] ?? 'miricl-interpreter.wasm');
+const binary = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
 const request = 'GET /repl HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n' +
   'Connection: keep-alive, Upgrade\r\nSec-WebSocket-Version: 13\r\n' +

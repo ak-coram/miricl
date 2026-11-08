@@ -859,7 +859,7 @@
           (local.set $scan (global.get $catches))
           (block $found (loop $next (br_if $found (ref.is_null (local.get $scan)))
             (local.set $target (call $car (local.get $scan)))
-            (br_if $found (call $eql (struct.get $obj $a (local.get $target)) (local.get $name)))
+            (br_if $found (ref.eq (struct.get $obj $a (local.get $target)) (local.get $name)))
             (local.set $target (ref.null $obj)) (local.set $scan (call $cdr (local.get $scan))) (br $next))))
         (else (call $require-symbol (local.get $name))
           (local.set $target (call $find (local.get $env) (i32.sub (i32.const -1) (call $id (local.get $name)))) )

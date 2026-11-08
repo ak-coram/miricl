@@ -1,19 +1,49 @@
-// Node socket services for the relay embedded in miricl-interpreter.wasm.
+// Node socket services for the relay embedded in miricl.wasm.
 // WebSocket handshakes and framing run in the same Wasm core as the WASI host.
 import net from 'node:net';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {Miricl} from './miricl.mjs';
+
+// The REPL deliverable also carries a precompiled core without WASI imports or
+// stack-switching instructions, so Node can use it without experimental flags.
+export async function replCompilerImage(interpreterPath) {
+  let bytes;
+  try { bytes = await fs.readFile(path.join(path.dirname(interpreterPath), 'miricl-repl.wasm')); }
+  catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
+  let position = 8;
+  const u32 = () => {
+    let value = 0, shift = 0, byte;
+    do {
+      if (position >= bytes.length || shift > 28) throw new Error('Invalid REPL component section.');
+      byte = bytes[position++]; value += (byte & 127) * 2 ** shift; shift += 7;
+    } while (byte & 128);
+    return value;
+  };
+  while (position < bytes.length) {
+    const id = bytes[position++], size = u32(), end = position + size;
+    if (end > bytes.length) throw new Error('Truncated REPL component section.');
+    if (id === 0) {
+      const length = u32(), name = new TextDecoder().decode(bytes.subarray(position, position + length));
+      position += length;
+      if (name === 'miricl.node-compiler') return bytes.subarray(position, end);
+    }
+    position = end;
+  }
+  return undefined;
+}
 
 export async function startReplBridge(image, {devServer = false, tcpBridge = false, directory = '.',
-  tcpPort = 4005, websocketPort = 4006, httpPort = 8000} = {}) {
+  tcpPort = 4005, websocketPort = 4006, httpPort = 8000, compilerImage} = {}) {
   for (const port of [tcpPort, websocketPort, httpPort])
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError('Ports must be integers from 1 to 65535.');
   const ports = [websocketPort, ...(tcpBridge ? [tcpPort] : []), ...(devServer ? [httpPort] : [])];
   if (new Set(ports).size !== ports.length) throw new Error('Enabled listeners need distinct ports.');
   const module = image instanceof WebAssembly.Module ? image : await WebAssembly.compile(image);
   const [core] = WebAssembly.Module.customSections(module, 'miricl.repl-bridge');
-  if (!core) throw new Error('This image has no REPL bridge. Rebuild miricl-interpreter.wasm.');
-  const memory = new WebAssembly.Memory({initial: 292});
+  if (!core) throw new Error('This image has no REPL bridge. Rebuild miricl.wasm.');
+  const compiler = await Miricl.instantiate(compilerImage ?? module);
+  const memory = new WebAssembly.Memory({initial: 324});
   const handles = new Map();
   const events = new Map();
   const listeners = [];
@@ -136,6 +166,16 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
   }
   const services = {
     memory,
+    compile(p, n, result) {
+      const target = compiler.vm['javascript-buffer'](n);
+      new Uint8Array(compiler.vm.memory.buffer, target, n).set(new Uint8Array(memory.buffer, p, n));
+      const pair = compiler.vm['compiler-request'](target, n);
+      const start = Number(pair & 0xffffffffn), size = Number(pair >> 32n);
+      if (size > 1048562) throw new Error('Compiler response exceeds 1 MiB.');
+      const output = 19 * 1024 * 1024;
+      new Uint8Array(memory.buffer, output, size).set(new Uint8Array(compiler.vm.memory.buffer, start, size));
+      store(result, output); store(result + 4, size);
+    },
     exit() { close(); throw exited; },
     create(_family, p) { result(p, allocate({kind: 'socket'})); },
     bind(...args) {
@@ -304,6 +344,7 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
   const close = () => {
     if (closed) return;
     closed = true;
+    compiler.close();
     events.clear();
     for (const remove of cleanup) remove();
     for (const socket of sockets) socket.destroy();

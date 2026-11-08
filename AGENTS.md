@@ -26,6 +26,10 @@ Use those requirements to guide the implementation and regression tests.
 
 # Performance
 
+Keep compiler optimizations generic: derive them from Common Lisp semantics,
+types, values, and control/data flow. Libraries and applications, including
+FSet and Game of Life, are benchmarks rather than compiler special cases.
+
 Prefer direct WASM implementations for performance-critical functions,
 especially frequently used primitives and allocation or traversal loops.
 Use the interpreter for functions where its performance impact is

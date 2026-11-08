@@ -4,7 +4,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {Miricl} from '../scripts/miricl.mjs';
 import {threadCases} from './thread-cases.mjs';
 
-const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
+const binary = process.argv[2] ?? 'miricl.wasm';
 const errors = [];
 const vm = await Miricl.instantiate(await fs.readFile(binary), {onThreadError: error => errors.push(error)});
 assert.ok(vm.threads, 'The runtime must expose JavaScript Promise Integration.');
@@ -32,6 +32,14 @@ await new Promise(resolve => setTimeout(resolve, 5));
 assert.equal(vm.vm['thread-scratch-memory'].buffer.byteLength, scratch, 'Retired scratch buffers must be reused.');
 assert.deepEqual(errors, [], 'No thread may escape its Lisp error boundary.');
 console.log('PASS repeated thread creation reuses scratch storage');
+
+// A previous large host transfer must not turn every later safepoint into a
+// copy of that memory's full capacity. No Lisp data lives in the unused tail.
+vm.vm.memory.grow(256);
+await vm.evaluateAsync(churn);
+assert.equal(vm.vm['thread-scratch-memory'].buffer.byteLength, scratch,
+  'Thread snapshots must scale with live scratch bytes, not linear memory capacity.');
+console.log('PASS thread snapshots ignore unused transport capacity');
 
 const run = vm.threads.run;
 vm.threads.run = async () => {throw new Error('simulated host trap');};

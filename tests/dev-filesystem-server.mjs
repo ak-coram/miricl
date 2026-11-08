@@ -30,7 +30,7 @@ function request(target, headers = {}) {
 }
 
 try {
-  for (const [runtime, binary] of [['node', process.argv[2] ?? 'miricl-interpreter.wasm'],
+  for (const [runtime, binary] of [['node', process.argv[2] ?? 'miricl.wasm'],
     ...(process.argv[3] ? [['wasmtime', process.argv[3]]] : [])]) {
     const host = await startHost(runtime, path.resolve(binary), 'dev-server', root);
     try {

@@ -1,4 +1,4 @@
-;;;; Each miricl.fasl custom section holds one versioned compilation unit.
+;;;; Each miricl.fasl custom section holds one compilation unit.
 ;;;; Bundles retain the units in load order inside a single WASM module.
 ;;;; Symbol names, rather than bootstrap IDs, keep files independent of images.
 (defvar %fasl-records nil)
@@ -10,6 +10,12 @@
 (defvar %fasl-readtable nil)
 (defvar %file-top-declarations nil)
 (defvar %fasl-work nil)
+(defvar %file-definition nil)
+(defvar %file-definition-id 0)
+(defvar %file-ir nil)
+(defvar %file-object-references nil)
+(defvar %file-object-barriers nil)
+(defvar %file-object-effects nil)
 (define-condition %fasl-not-created (error) ())
 
 (defun %fasl-reference (object)
@@ -28,6 +34,15 @@
         (setf (aref %fasl-records index)
           (cond
             ((and %file-load-values (gethash object %file-load-values))
+             (setq %file-object-effects t)
+             ;; These forms run while reconstructing constants even when the
+             ;; surrounding local function is never called. Their dependencies
+             ;; belong to object creation, independently of code reachability.
+             (when (fboundp 'miricl-compiler::form-references)
+               (multiple-value-bind (references barriers)
+                   (miricl-compiler::form-references (car (gethash object %file-load-values)) %file-load-values)
+                 (setq %file-object-references (union references %file-object-references :test #'equal)
+                       %file-object-barriers (union barriers %file-object-barriers :test #'equal))))
              (list 10 (%fasl-reference (car (gethash object %file-load-values)))))
             ((null object) '(0))
             ((numberp object) (let ((*read-default-float-format* 'single-float))
@@ -39,18 +54,28 @@
                               (if (symbol-package object) 0 (%%compile 9 object))))
             ((consp object) (list 5 (%fasl-reference (car object)) (%fasl-reference (cdr object)) (%%compile 8 object)))
             ((arrayp object)
-             (list 6 (array-dimensions object) (%fasl-reference (array-element-type object))
-               (loop for i below (array-total-size object) collect (%fasl-reference (row-major-aref object i)))))
+             (let ((dimensions (array-dimensions object))
+                   (type (%fasl-reference (array-element-type object))) (elements nil))
+               (dotimes (i (array-total-size object))
+                 (push (%fasl-reference (row-major-aref object i)) elements))
+               (list 6 dimensions type (nreverse elements))))
             ((pathnamep object)
              (list 7 (%fasl-reference (list :host (pathname-host object) :device (pathname-device object)
                :directory (pathname-directory object) :name (pathname-name object) :type (pathname-type object)
                :version (pathname-version object))) (if (typep object 'logical-pathname) 1 0)))
             ((packagep object) (list 8 (package-name object)))
             (t
+             (setq %file-object-effects t)
              (multiple-value-bind (creation initialization) (make-load-form object)
                (let ((%compilation-complete t))
-                 (list 9 (%fasl-reference (%compile-form creation nil))
-                         (%fasl-reference (%compile-form initialization nil))))))))))
+                 (let ((creation (%compile-form creation nil))
+                       (initialization (%compile-form initialization nil)))
+                   (when (fboundp 'miricl-compiler::form-references)
+                     (multiple-value-bind (references barriers)
+                         (miricl-compiler::form-references (list 'progn creation initialization) %file-load-values)
+                       (setq %file-object-references (union references %file-object-references :test #'equal)
+                             %file-object-barriers (union barriers %file-object-barriers :test #'equal))))
+                   (list 9 (%fasl-reference creation) (%fasl-reference initialization))))))))))
     root))
 
 ;; Collect instance references before constructing an initialization form.
@@ -142,7 +167,16 @@
 (defun %compile-top-level (form environment compile-time-too)
   ;; Defining forms establish the compilation environment before later forms
   ;; are read, without making ordinary DEFUN definitions available for use.
-  (let ((operator (and (consp form) (car form))))
+  (let* ((operator (and (consp form) (car form)))
+         (%file-definition
+           (or %file-definition
+               (and (fboundp 'miricl-compiler::definition-info)
+                    (miricl-compiler::definition-info form (incf %file-definition-id))))))
+    ;; Top-level DEFVAR/DEFPARAMETER proclaim their names at compile time,
+    ;; without evaluating the initializer or assigning the variable (CLHS).
+    ;; Lexical canonicalization must see that proclamation in subsequent code.
+    (when (member operator '(defvar defparameter))
+      (proclaim (list 'special (second form))))
     (when (member operator '(in-package defpackage defmacro deftype defclass defstruct define-condition))
       (unless compile-time-too (%%compile 7 environment form)))
     (multiple-value-bind (expansion expanded) (macroexpand-1 form environment)
@@ -171,26 +205,26 @@
         (when compile-time-too (%%compile 7 environment form))
         (let ((%compilation-complete t))
           (let ((compiled (%compile-form form environment)))
-            (push (%fasl-dump (if %file-top-declarations
-              (cons 'locally (append %file-top-declarations (list compiled))) compiled)) %fasl-roots)))))))
+            (let* ((%file-object-references nil) (%file-object-barriers nil) (%file-object-effects nil)
+                   (body (if %file-top-declarations
+                           (cons 'locally (append %file-top-declarations (list compiled))) compiled))
+                   (body (if %compilation-complete (%file-lexical-form body nil nil nil nil) body))
+                   (root (%fasl-dump body)))
+              (push root %fasl-roots)
+              (when (fboundp 'miricl-compiler::form-references)
+                (multiple-value-bind (references barriers)
+                  (miricl-compiler::form-references body %file-load-values)
+                (push (list root (let ((descriptor (copy-list (or %file-definition
+                                           (list (incf %file-definition-id) :effect nil t nil)))))
+                                   (when %file-object-effects (setf (fourth descriptor) t))
+                                   descriptor)
+                            (union references %file-object-references :test #'equal)
+                            (union barriers %file-object-barriers :test #'equal)) %file-ir))))))))))
 
-(defun %fasl-uleb (value bytes)
-  (loop
-    (let ((byte (logand value 127)))
-      (setq value (ash value -7))
-      (vector-push-extend (if (zerop value) byte (logior byte 128)) bytes)
-      (when (zerop value) (return bytes)))))
-(defun %fasl-write (path roots records)
-  (let* ((*readtable* (copy-readtable nil)) (*print-circle* t) (*print-pretty* nil)
-         (*print-level* nil) (*print-length* nil) (*print-array* t)
-         (payload (%%compile 12 (write-to-string (list 1 roots (coerce records 'list)) :readably t :base 10 :radix nil)))
-         (header (make-array 32 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-    (dolist (byte '(0 97 115 109 1 0 0 0 0)) (vector-push-extend byte header))
-    (%fasl-uleb (+ 12 (length payload)) header)
-    (vector-push-extend 11 header)
-    (loop for character across "miricl.fasl" do (vector-push-extend (char-code character) header))
-    (with-open-file (stream path :direction :output :element-type '(unsigned-byte 8) :if-exists :supersede)
-      (write-sequence header stream) (write-sequence payload stream))))
+(defun %fasl-write (path roots records &optional metadata)
+  (with-open-file (stream path :direction :output :element-type '(unsigned-byte 8) :if-exists :supersede)
+    (dolist (byte '(0 97 115 109 1 0 0 0)) (write-byte byte stream))
+    (miricl-compiler::write-indexed-unit stream roots records :metadata metadata)))
 (defun %fasl-read-uleb (stream)
   (let ((value 0) (shift 0))
     (loop for byte = (read-byte stream) do
@@ -206,25 +240,23 @@
   (let* ((size (%fasl-read-uleb stream)) (end (+ (file-position stream) size)))
     (unless (and (> size 12) (<= end (file-length stream)))
       (error "Invalid compiled section size."))
-    (unless (= (%fasl-read-uleb stream) 11) (error "Invalid compiled section name."))
-    (loop for character across "miricl.fasl" do
-      (unless (= (char-code character) (read-byte stream)) (error "Invalid compiled section name.")))
-    (unless (< (file-position stream) end) (error "Invalid compiled section size."))
-    end))
+    (let ((length (%fasl-read-uleb stream)))
+      (unless (and (= length 11) (< (+ (file-position stream) length) end))
+        (error "Invalid compiled section name."))
+      (let ((name (make-string length)))
+        (dotimes (i length) (setf (char name i) (code-char (read-byte stream))))
+        (unless (equal name "miricl.fasl")
+          (error "Invalid compiled section name."))
+        end))))
 (defun %load-compiled-unit (stream end print)
   ;; Bind these afresh for each unit, as if loading its original FASL separately.
   (let* ((*package* *package*) (*readtable* *readtable*)
          (%fasl-readtable (copy-readtable nil))
-         (source (%%compile 14 stream (file-position stream) end))
-         (payload (let ((*readtable* %fasl-readtable) (*read-eval* nil) (*read-base* 10))
-                    (multiple-value-bind (value position) (read-from-string source)
-                      (unless (= position (length source)) (error "Invalid compiled payload size."))
-                      value)))
-         (%fasl-records (coerce (caddr payload) 'vector))
+         (payload (miricl-compiler::read-unit-payload stream end))
+         (%fasl-records (coerce (second payload) 'vector))
          (%fasl-values (make-array (length %fasl-records)))
          (%fasl-states (make-array (length %fasl-records) :initial-element 0)) (%fasl-pending nil))
-    (unless (eql (car payload) 1) (error "Unsupported compiled file version."))
-    (dolist (index (cadr payload))
+    (dolist (index (first payload))
       (let ((form (%fasl-object index)))
         (%fasl-finish-initializations)
         (let ((value (eval form))) (when print (print value)))))))
@@ -240,12 +272,15 @@
     t))
 
 (defun compile-file (input-file &key (output-file nil outputp) (verbose *compile-verbose*) (print *compile-print*) (external-format :default))
+  (miricl-compiler::ensure-compiler)
   (let* ((*package* *package*) (*readtable* *readtable*)
          (*compile-file-pathname* (merge-pathnames input-file)) (*compile-file-truename* (truename input-file))
          (target (if outputp (compile-file-pathname input-file :output-file output-file) (compile-file-pathname input-file)))
          (%file-compiling t) (%file-load-values (make-hash-table :test 'eq))
+         (%file-lexical-names (make-array 16 :adjustable t :fill-pointer 0))
          (%fasl-records (make-array 32 :adjustable t :fill-pointer 0))
          (%fasl-seen (make-hash-table :test 'eq)) (%fasl-roots nil) (%file-top-declarations nil)
+         (%file-definition nil) (%file-definition-id 0) (%file-ir nil)
          (warnings nil) (failure nil))
     (when verbose (format t "~&; Compiling ~A~%" *compile-file-truename*))
     (handler-bind ((warning (lambda (condition) (setq warnings t) (unless (typep condition 'style-warning) (setq failure t)))))
@@ -254,5 +289,7 @@
           (loop for form = (read stream nil eof) until (eq form eof) do
             (when print (format t "~&; ~S~%" (if (consp form) (car form) form)))
             (%compile-top-level form nil nil))))
-      (%fasl-write target (nreverse %fasl-roots) %fasl-records))
+      (%fasl-write target (nreverse %fasl-roots) %fasl-records
+        (when (fboundp 'miricl-compiler::definition-info)
+          (list :miricl-ir (namestring *compile-file-truename*) (nreverse %file-ir)))))
     (values (truename target) warnings failure)))

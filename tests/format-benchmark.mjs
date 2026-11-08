@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 const args = process.argv.slice(2);
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl.wasm';
 const calls = 10000;
 const formatter = !args.includes('--format-only');
 const fixture = `(defparameter *format-result* nil)

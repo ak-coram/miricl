@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm'));
+const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 const quote = text => `"${text.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 for (const count of [0, 1, 10, 11, 21, 22, 31, 32, 33, 63, 64, 65, 129, 4097]) {
   const expected = 'aλ🙂'.repeat(count);

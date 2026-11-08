@@ -1006,6 +1006,7 @@
 ;; Resolve macro and LOAD-TIME-VALUE references into compact executable forms.
 ;; Preserve lexical cells and literal identity when compiling existing closures.
 (defun compile (name &optional (definition nil suppliedp))
+  (when (fboundp 'miricl-compiler::ensure-compiler) (miricl-compiler::ensure-compiler))
   (%%function-name-symbol name)
   (let* ((macro (and (symbolp name) (macro-function name)))
          (function
@@ -1023,6 +1024,16 @@
     (values (or name function) nil nil)))
 
 ;; Show the executable Lisp representation, or a native dispatch entry.
+(defun %disassembly-lisp-size (source)
+  ;; Measure the serialized code graph without compiling or bootstrapping the
+  ;; compiler. This excludes the closure's environment and the FASL container.
+  (let ((%fasl-records (make-array 16 :adjustable t :fill-pointer 0))
+        (%fasl-seen (make-hash-table :test 'eq))
+        (%file-load-values nil) (%file-object-effects nil)
+        (%file-object-references nil) (%file-object-barriers nil))
+    (%fasl-dump source)
+    (length (%%compile 15 (coerce %fasl-records 'simple-vector) 0))))
+
 (defun disassemble (fn)
   (let ((function
           (cond ((functionp fn) fn)
@@ -1036,6 +1047,13 @@
             (*print-level* nil) (*print-length* nil))
         (format t "~&~S~%" (if source (list 'interpret source)
                                 (list 'native-call (or name function))))
+        (let ((size (if source (ignore-errors (%disassembly-lisp-size source))
+                        (%%compile 26 function))))
+          (cond (source
+                 (if size (format t "; Packed Lisp code: ~D bytes (lexical environment excluded).~%" size)
+                     (write-line "; Packed Lisp code size unavailable.")))
+                (size (format t "; Wasm module: ~D bytes (literal data excluded).~%" size))
+                (t (write-line "; Size unavailable for this runtime entry."))))
         (when closure (write-line "; Lexical environment retained."))))
     nil))
 
@@ -1193,7 +1211,8 @@
   (declare (ignore body)) (list 'function form))
 (defmacro return (&optional value) (list 'return-from nil value))
 (defmacro declaim (&rest declarations)
-  (cons 'progn (append (%map (lambda (declaration) (list 'proclaim (%quote declaration))) declarations) (list nil))))
+  (list* 'eval-when '(:compile-toplevel :load-toplevel :execute)
+    (append (%map (lambda (declaration) (list 'proclaim (%quote declaration))) declarations) (list nil))))
 (setf (macro-function 'loop) #'%%loop-expander
       (macro-function 'loop-finish) #'%%loop-expander
       (macro-function 'and) #'%%logical-expander

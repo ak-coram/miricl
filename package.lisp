@@ -30,6 +30,15 @@
   (:use #:cl)
   (:export #:initialize #:dump-system))
 
+(defpackage #:miricl-compiler
+  (:use #:cl)
+  (:export #:analyze-file #:shake-file #:optimize-system
+           #:compile-to-hir #:verify-hir #:hir-unit #:hir-unit-functions
+           #:emit-native-module #:compile-native
+           #:ir-program #:ir-program-nodes #:ir-program-units
+           #:ir-node #:ir-node-kind #:ir-node-name #:ir-node-source
+           #:ir-node-references #:ir-node-reason #:ir-node-retained-p))
+
 (defpackage #:wasmtime
   (:use #:cl #:cffi)
   (:export #:with-engine #:with-store #:with-byte-vec #:with-module

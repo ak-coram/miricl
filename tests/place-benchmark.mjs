@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 const args = process.argv.slice(2);
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl.wasm';
 const calls = 10000;
 const fixtures = '(defparameter *place-plist* (list :left 1 :right 2)) (defparameter *place-list* (list 1 2)) (defparameter *place-left* 1) (defparameter *place-right* 2) (defparameter *place-vector* (vector 1 2))';
 const workloads = [

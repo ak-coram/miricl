@@ -20,7 +20,8 @@
     %%setf-expander %%loop-expander %%logical-expander %%typed-structure-p %%structure-function
     %%package-symbol-list %check-keys %%storage-state %%package-documentation %%check-generic-arity
     %%generic-discriminator %ensure-layout %%property-method %%property-effective %%values-expander %%condition-method %%proclaim-variable
-    %find-slot %%slot-operation %%builtin-macro %%define-constant %%define-package))
+    %find-slot %%slot-operation %%builtin-macro %%define-constant %%define-package
+    %invoke-method %invoke-method-without-next))
 
 (setf *clos-primitives* (append *clos-primitives* '(%%open-file %%filesystem %%pathname-metadata %%pathname-match %%make-logical-path %%host-service %%calendar %%compile %%javascript %%thread)))
 
@@ -30,9 +31,10 @@
 
 (defun clos-primitive-op (name) (position name *clos-primitives*))
 
+(defvar *native-compiler-image* nil)
 (defparameter *clos-library*
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "bundle-library.lisp") append
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "bundle-library.lisp" "fasl-utilities.lisp" "fasl-format.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "remote-compiler-library.lisp") append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let* ((*package* (find-package :miricl))
              (forms (loop for form = (read in nil :eof) until (eq form :eof)
@@ -41,15 +43,19 @@
                       else collect (lower-runtime-library form))))
         ;; Establish the native package and symbol identities before DEFSTRUCT
         ;; generates accessors. Public exports are declared in PACKAGE.LISP.
-        (when (member file '("thread-library.lisp" "bundle-library.lisp") :test #'equal)
-          (let* ((package (find-package (if (equal file "thread-library.lisp") :miricl-threads :miricl-bundle)))
+        (when (member file '("thread-library.lisp" "bundle-library.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "fasl-utilities.lisp" "fasl-format.lisp") :test #'equal)
+          (let* ((package (find-package (cond ((equal file "thread-library.lisp") :miricl-threads)
+                                            ((equal file "bundle-library.lisp") :miricl-bundle)
+                                            (t :miricl-compiler))))
                  (exports (sort (loop for symbol being the external-symbols of package collect symbol)
                                 #'string< :key #'symbol-name))
-                 (symbols (union exports (runtime-library-symbols forms))))
+                 (symbols (union (runtime-library-structure-symbols forms)
+                                 (union exports (runtime-library-symbols forms)))))
             (setf forms (list (lower-runtime-library
               `(let ((*package* (find-package ,(package-name package)))) ,@forms))))
             (push (lower-runtime-library
-              `(let ((package (make-package ,(package-name package) :use '("CL"))))
+              `(let ((package (or (find-package ,(package-name package))
+                                  (make-package ,(package-name package) :use '("CL")))))
                  (shadowing-import ',(remove-if-not
                    (lambda (symbol) (eq (symbol-package symbol) package)) symbols) package)
                  (export ',exports package))) forms)))
@@ -72,7 +78,7 @@
                                    (error "Unknown object library symbol ~S" symbol)))))))
 
 (defun clos-library-bytes ()
-  (runtime-library-bytes *clos-library* *clos-library-symbols* 24 *loop-library-symbols*))
+  (runtime-library-bytes (compiler-image-library-forms) *clos-library-symbols* 24 *loop-library-symbols*))
 
 (defun clos-library-data ()
   (runtime-library-data (clos-library-bytes)))

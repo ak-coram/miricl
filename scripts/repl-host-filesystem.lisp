@@ -11,7 +11,8 @@
     (global $fs-directories (mut i32) (i32.const 0))
     (global $fs-count (mut i32) (i32.const 0))
     (elem (table $filesystem) (i32.const 0) func $filesystem-service)
-    (data (i32.const 384) ".")
+    ;; Keep this away from the command driver's option strings at 128..522.
+    (data (i32.const 3584) ".")
     (func $fs-wait (param $handle i32) (result i32)
       (global.set $fs-handle (local.get $handle)) (global.set $fs-ready (i32.const 0))
       (call $join (local.get $handle) (global.get $set))
@@ -90,7 +91,7 @@
           (local.set $n (i32.sub (local.get $n) (local.get $best)))
           (if (local.get $n) (then (local.set $p (i32.add (local.get $p) (i32.const 1)))
                                 (local.set $n (i32.sub (local.get $n) (i32.const 1)))))))
-      (if (i32.eqz (local.get $n)) (then (local.set $p (i32.const 384)) (local.set $n (i32.const 1))))
+      (if (i32.eqz (local.get $n)) (then (local.set $p (i32.const 3584)) (local.set $n (i32.const 1))))
       (i32.store (i32.const 544) (local.get $fd)) (i32.store (i32.const 548) (local.get $p))
       (i32.store (i32.const 552) (local.get $n)))
     (func $filesystem-service (param $op i32) (param $path externref) (param externref) (result externref i32)

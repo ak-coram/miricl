@@ -1,40 +1,25 @@
-node := env('NODE', 'node')
 wasmtime := env('WASMTIME', 'wasmtime')
+
+# Resolve dependency symlinks with just and preopen their targets for WASI.
+preopens := '--dir .::. --dir ' + quote(canonicalize('runtime') + '::runtime') \
+  + ' --dir ' + quote(canonicalize('images') + '::images') \
+  + ' --dir ' + quote(canonicalize('quicklisp/alexandria') + '::quicklisp/alexandria') \
+  + ' --dir ' + quote(canonicalize('quicklisp/fset') + '::quicklisp/fset') \
+  + ' --dir ' + quote(canonicalize('quicklisp/mgl-pax-bootstrap') + '::quicklisp/mgl-pax-bootstrap') \
+  + ' --dir ' + quote(canonicalize('quicklisp/misc-extensions') + '::quicklisp/misc-extensions') \
+  + ' --dir ' + quote(canonicalize('quicklisp/mt19937') + '::quicklisp/mt19937') \
+  + ' --dir ' + quote(canonicalize('quicklisp/named-readtables') + '::quicklisp/named-readtables')
+repl := quote(wasmtime) + ' run -W stack-switching=y -W max-wasm-stack=16777216 -W async-stack-size=33554432 -S p3=y ' + preopens
 
 # List application commands. Run `just setup-game-of-life` in the parent first.
 default:
     @just --list
 
 # Open http://127.0.0.1:8000/dev.html; optional extra REPL flags follow the ports.
-[positional-arguments]
-dev-node http='8000' websocket='4006' *options:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    shift 2
-    exec {{ quote(node) }} runtime/miricl.js miricl-interpreter.wasm --dev-server --http-port={{quote(http)}} --websocket-port={{quote(websocket)}} "$@"
+dev http='8000' websocket='4006' *options:
+    {{repl}} -S inherit-network=y miricl-repl.wasm --dev-server --http-port={{quote(http)}} --websocket-port={{quote(websocket)}} {{options}}
 
-# Preopen the symlink targets under the same names seen by the browser.
-[positional-arguments]
-dev-wasi http='8000' websocket='4006' *options:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    preopens=(--dir .::.)
-    for link in runtime images quicklisp/*; do
-      preopens+=(--dir "$(realpath "$link")::$link")
-    done
-    shift 2
-    exec {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y -S inherit-network=y "${preopens[@]}" miricl-repl.wasm --dev-server --http-port={{quote(http)}} --websocket-port={{quote(websocket)}} "$@"
-
-# Compile the application and dependencies into one FASL; assets stay separate.
+# Compile with the precompiled compiler; publish four separate production files.
 build:
-    {{ quote(node) }} runtime/miricl.js miricl-interpreter.wasm --bundle game-of-life --output build/game-of-life.wasm
-
-# Run the same browser-free bundle operation using WASI.
-build-wasi:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    preopens=(--dir .::.)
-    for link in runtime images quicklisp/*; do
-      preopens+=(--dir "$(realpath "$link")::$link")
-    done
-    exec {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y "${preopens[@]}" miricl-repl.wasm --bundle game-of-life --output build/game-of-life.wasm
+    {{repl}} miricl-repl.wasm --optimize game-of-life --entry LIFE:START --output build/game-of-life.wasm --report build/retention.txt
+    cp index.html runtime/miricl.js images/miricl.wasm build/

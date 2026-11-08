@@ -68,6 +68,10 @@
       (then (local.set $name (call $fdefinition (local.get $name)))))
   #@(if (i32.ne (call $tag (local.get $name)) (i32.const 8))
       (then (global.set $undefined-name (local.get $name)) ,(wat-fail :undefined-function)))
+  #@(if (ref.test (ref $native-function) (local.get $name))
+    (then (return (ref.cast (ref null $obj) (any.convert_extern
+      (call_ref $native-entry (extern.convert_any (local.get $name)) (extern.convert_any (local.get $args))
+        (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $name)))))))))
   #@(if (i32.eq (struct.get $obj $n (local.get $name)) (i32.const 2147483642))
     (then ,(wat-arity 1 2147483647)
       (return (call $formatter-call (call $car (local.get $args))

@@ -6,7 +6,7 @@ import {Miricl} from '../scripts/miricl.mjs';
 const args = process.argv.slice(2);
 const host = args.includes('--sbcl-source');
 const suppressed = args.includes('--suppressed');
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl.wasm';
 const iterations = 20;
 const samples = 5;
 const quote = text => `"${text.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;

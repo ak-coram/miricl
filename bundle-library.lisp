@@ -6,7 +6,10 @@
   (apply (fdefinition (or (find-symbol name "ASDF") (error "Unknown ASDF operation: ~A" name))) arguments))
 
 (defun asdf-artifact ()
-  (find-if #'probe-file '("miricl-asdf.wasm" "runtime/miricl-asdf.wasm" "images/miricl-asdf.wasm")))
+  ;; A symlink beside the application can be outside a WASI preopen even
+  ;; though the same artifact is accessible through the images/ preopen.
+  (find-if (lambda (path) (ignore-errors (probe-file path)))
+    '("miricl-asdf.wasm" "runtime/miricl-asdf.wasm" "images/miricl-asdf.wasm")))
 
 (defun initialize ()
   (unless (find-package "ASDF")

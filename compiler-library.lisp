@@ -1,8 +1,214 @@
 ;;;; Compact compilation resolves macro references and load-time values.
 ;;;; Calls use native dispatch directly; literal objects retain their identity.
 (defvar %compilation-complete t)
+(defvar %remote-literals nil)
+(defun %compile-literal (object)
+  ;; Remote compilation retains constants in the target heap, including JS
+  ;; objects and circular graphs. Only an opaque symbol crosses to the host.
+  (if %remote-literals
+      (let ((marker (gensym)))
+        (vector-push-extend (cons marker object) %remote-literals) marker)
+      object))
 (defvar %file-compiling nil)
 (defvar %file-load-values nil)
+(defvar %file-lexical-names nil)
+
+(defun %file-lexical-name (index)
+  (loop while (>= index (length %file-lexical-names)) do
+    (vector-push-extend (make-symbol (format nil "L~D" (length %file-lexical-names))) %file-lexical-names))
+  (aref %file-lexical-names index))
+
+(defun %file-lexical-specials (body)
+  (let ((result nil))
+    (dolist (form body)
+      (when (and (consp form) (eq (car form) 'declare))
+        (dolist (declaration (cdr form))
+          (when (eq (car declaration) 'special) (setq result (append (cdr declaration) result))))))
+    result))
+
+(defun %file-lexical-bind (name environment specials)
+  (acons name (if (or (member name specials) (%%compile 18 name)) name
+                 (%file-lexical-name (length environment))) environment))
+
+(defun %file-lexical-reference (name environment)
+  (let ((binding (assoc name environment :test #'equal))) (if binding (cdr binding) name)))
+
+(defun %file-code-cons (original operator args)
+  (let ((flags (%%compile 8 original)))
+    (if (plusp flags) (%%compile flags operator args) (cons operator args))))
+
+(defun %file-lexical-forms (forms variables functions blocks tags)
+  (dolist (name (%file-lexical-specials forms)) (push (cons name name) variables))
+  (mapcar (lambda (form) (%file-lexical-form form variables functions blocks tags)) forms))
+
+(defun %file-lexical-function (form name variables functions blocks tags)
+  (let* ((body (cddr form)) (specials (%file-lexical-specials body)) (parameters nil))
+    ;; Local functions acquire an implicit block when the loader creates their
+    ;; closures. Keep RETURN-FROM paired with that block after renaming the
+    ;; function. Explicit nested blocks establish their own shadowing scope.
+    (unless (equal name (car form))
+      (push (cons (if (consp (car form)) (second (car form)) (car form)) name) blocks))
+    (dolist (parameter (second form))
+      (if (eq parameter '&rest) (push parameter parameters)
+          (progn
+            ;; The file frontend has already normalized optional/key/aux
+            ;; arguments. Their initialization code is ordinary lexical code.
+            (unless (symbolp parameter) (error "Unnormalized compiled lambda list."))
+            (setq variables (%file-lexical-bind parameter variables specials))
+            (push (cdar variables) parameters))))
+    (%file-code-cons form name
+      (cons (nreverse parameters) (%file-lexical-forms body variables functions blocks tags)))))
+
+(defun %file-lexical-form (form variables functions blocks tags)
+  ;; Alpha-convert only executable binding syntax. Quoted objects keep their
+  ;; original identities, including quoted symbols which also name bindings.
+  ;; Canonical names are private uninterned symbols shared within this file;
+  ;; distinct scopes can consequently share immutable code after hash-consing.
+  (unless (consp form)
+    (return-from %file-lexical-form
+      (if (symbolp form) (%file-lexical-reference form variables) form)))
+  (let ((operator (car form)) (args (cdr form)))
+    (case operator
+      (quote form)
+      (lambda (%file-lexical-function form operator variables functions blocks tags))
+      ((let let*)
+       (let* ((outer variables) (specials (%file-lexical-specials (cdr args))) (bindings nil))
+         (dolist (binding (car args))
+           (let* ((name (if (consp binding) (car binding) binding))
+                  (init (%file-lexical-form (if (consp binding) (second binding) nil)
+                          (if (eq operator 'let*) variables outer) functions blocks tags)))
+             (setq variables (%file-lexical-bind name variables specials))
+             (push (list (cdar variables) init) bindings)))
+         (%file-code-cons form operator
+           (cons (nreverse bindings) (%file-lexical-forms (cdr args) variables functions blocks tags)))))
+      ((flet labels)
+       (let ((outer functions) (definitions nil))
+         (dolist (definition (car args))
+           (push (cons (car definition) (%file-lexical-name (+ (length variables) (length functions)))) functions))
+         (dolist (definition (car args))
+           (push (%file-lexical-function definition (%file-lexical-reference (car definition) functions)
+                   variables (if (eq operator 'labels) functions outer) blocks tags) definitions))
+         (%file-code-cons form operator
+           (cons (nreverse definitions) (%file-lexical-forms (cdr args) variables functions blocks tags)))))
+      (locally
+       (%file-code-cons form operator (%file-lexical-forms args variables functions blocks tags)))
+      (function
+       (%file-code-cons form operator
+         (list (if (or (symbolp (car args)) (eq (caar args) 'setf))
+                   (%file-lexical-reference (car args) functions)
+                   (%file-lexical-form (car args) variables functions blocks tags)))))
+      (block
+       (push (cons (car args) (car args)) blocks)
+       (%file-code-cons form operator
+         (cons (car args) (%file-lexical-forms (cdr args) variables functions blocks tags))))
+      (return-from
+       (%file-code-cons form operator
+         (cons (%file-lexical-reference (car args) blocks)
+           (%file-lexical-forms (cdr args) variables functions blocks tags))))
+      (tagbody
+       (%file-code-cons form operator
+         (mapcar (lambda (item) (if (atom item) item
+                                   (%file-lexical-form item variables functions blocks tags))) args)))
+      (go form)
+      (the (%file-code-cons form operator
+             (cons (car args) (%file-lexical-forms (cdr args) variables functions blocks tags))))
+      ((defvar defparameter defconstant)
+       ;; The name is a global definition, even inside a lexical binding of
+       ;; the same symbol. Only its initializer is executable lexical code.
+       (%file-code-cons form operator
+         (cons (car args) (%file-lexical-forms (cdr args) variables functions blocks tags))))
+      (declare
+       (%file-code-cons form operator
+         (mapcar (lambda (declaration)
+           (case (car declaration)
+             ((special optimize declaration) declaration)
+             ((inline notinline)
+              (cons (car declaration) (mapcar (lambda (name) (%file-lexical-reference name functions)) (cdr declaration))))
+             (ftype (list* 'ftype (second declaration)
+                      (mapcar (lambda (name) (%file-lexical-reference name functions)) (cddr declaration))))
+             (type (list* 'type (second declaration)
+                     (mapcar (lambda (name) (%file-lexical-reference name variables)) (cddr declaration))))
+             (otherwise (cons (car declaration)
+                          (mapcar (lambda (name) (%file-lexical-reference name variables)) (cdr declaration)))))) args)))
+      (%%case-form
+       (%file-code-cons form operator
+         (list* (car args) (%file-lexical-form (second args) variables functions blocks tags)
+           (mapcar (lambda (clause) (cons (car clause)
+                     (%file-lexical-forms (cdr clause) variables functions blocks tags))) (cddr args)))))
+      ((%%list-test %%list-accumulate %%numeric-collect)
+       (let* ((local (%file-lexical-bind (second args) variables nil))
+              (size (length args)) (index 0) (result nil))
+         (dolist (item args)
+           (push (cond ((= index 1) (cdar local))
+                       ((and (eq operator '%%list-accumulate) (= size 8) (= index (1- size))
+                             (symbolp item) (string-equal (symbol-name item) "IT")) item)
+                       ((or (= index 3) (= index (1- size)) (and (= size 8) (= index 5)))
+                        (%file-lexical-form item
+                          (if (or (= index 3) (and (eq operator '%%numeric-collect) (= size 8) (= index 5))) variables local)
+                          functions blocks tags))
+                       (t item)) result)
+           (incf index))
+         (%file-code-cons form operator (nreverse result))))
+      (%%arithmetic-step
+       (%file-code-cons form operator
+         (list (%file-lexical-reference (car args) variables)
+           (%file-lexical-form (second args) variables functions blocks tags)
+           (%file-lexical-form (third args) variables functions blocks tags)
+           (fourth args) (fifth args))))
+      (%%symbol-iterate
+       ;; DO-SYMBOLS already binds this variable in its enclosing LET. This
+       ;; instruction assigns that binding; it does not introduce a new one.
+       (%file-code-cons form operator
+         (list* (%file-lexical-reference (car args) variables)
+           (%file-lexical-form (second args) variables functions blocks tags)
+           (%file-lexical-forms (cddr args) variables functions blocks tags))))
+      (%%parallel-place-form
+       (%file-code-cons form operator
+         (if (= (car args) 3)
+             ;; MULTIPLE-VALUE-SETQ carries a list of variable names, rather
+             ;; than an executable call. Rename every target, including CAR.
+             (list 3 (mapcar (lambda (name) (%file-lexical-reference name variables)) (second args))
+               (%file-lexical-form (third args) variables functions blocks tags))
+             (%file-lexical-forms args variables functions blocks tags))))
+      (%%condition-form
+       (let ((kind (car args)) (forms (cdr args)))
+         (%file-code-cons form operator
+           (cons kind
+             (case kind
+               (handler-case
+                (cons (%file-lexical-form (car forms) variables functions blocks tags)
+                  (mapcar (lambda (clause) (%file-lexical-function clause (car clause) variables functions blocks tags))
+                    (cdr forms))))
+               (restart-case
+                (cons (%file-lexical-form (car forms) variables functions blocks tags)
+                  (mapcar (lambda (clause)
+                    ;; Restart options are evaluated in the enclosing scope,
+                    ;; before the restart's parameters are bound. Bare symbols
+                    ;; here are function designators, not variable references.
+                    (let ((body (cddr clause)) (options nil))
+                      (loop while (member (car body) '(:report :interactive :test)) do
+                        (push (pop body) options)
+                        (let ((value (pop body)))
+                          (push (if (symbolp value) (%file-lexical-reference value functions)
+                                    (%file-lexical-form value variables functions blocks tags)) options)))
+                      (let ((normalized (%file-lexical-function
+                              (%file-code-cons clause (car clause) (cons (second clause) body))
+                              (car clause) variables functions blocks tags)))
+                        (%file-code-cons clause (car clause)
+                          (cons (second normalized) (append (nreverse options) (cddr normalized)))))))
+                    (cdr forms))))
+               ((handler-bind restart-bind)
+                (cons (mapcar (lambda (binding) (cons (car binding)
+                                 (%file-lexical-forms (cdr binding) variables functions blocks tags))) (car forms))
+                  (%file-lexical-forms (cdr forms) variables functions blocks tags)))
+               (with-simple-restart
+                (cons (cons (caar forms) (%file-lexical-forms (cdar forms) variables functions blocks tags))
+                  (%file-lexical-forms (cdr forms) variables functions blocks tags)))
+               (otherwise (%file-lexical-forms forms variables functions blocks tags)))))))
+      (otherwise
+       (%file-code-cons form (if (symbolp operator) (%file-lexical-reference operator functions)
+                                (%file-lexical-form operator variables functions blocks tags))
+         (%file-lexical-forms args variables functions blocks tags))))))
 (defun %compile-place-form (place environment)
   (let ((expanded (macroexpand place environment)))
     (if (consp expanded) (cons (car expanded) (%compile-forms (cdr expanded) environment)) expanded)))
@@ -174,20 +380,24 @@
 (defun %compile-form (form environment)
   (multiple-value-bind (expansion expanded) (macroexpand form environment)
     (when expanded (return-from %compile-form (%compile-form expansion environment))))
-  (unless (consp form) (return-from %compile-form form))
+  (unless (consp form)
+    (return-from %compile-form
+      (if (and %remote-literals (not (symbolp form)))
+          (list 'quote (%compile-literal form)) form)))
   (let ((operator (car form)) (args (cdr form)))
     (case operator
-      ((quote go declare) form)
+      ((go declare) form)
+      (quote (if %remote-literals (list 'quote (%compile-literal (cadr form))) form))
       (quasiquote (%compile-backquote (car args) environment 1))
       (function
         (if (and (consp (car args)) (eq (caar args) 'lambda))
             (%compile-lambda-form (cadar args) (cddar args) environment) form))
       (load-time-value
         (list 'quote
-          (if %file-compiling
+          (%compile-literal (if %file-compiling
               (let ((marker (gensym)))
                 (setf (gethash marker %file-load-values) (list (%compile-form (car args) nil))) marker)
-              (eval (car args)))))
+              (eval (car args))))))
       ((let let*) (%compile-bindings operator (car args) (cdr args) environment))
       ((flet labels) (%compile-local-functions operator (car args) (cdr args) environment))
       (macrolet
@@ -214,7 +424,12 @@
       ((block return-from the)
         (list* operator (car args) (%compile-forms (cdr args) environment)))
       (tagbody
-        (cons operator (mapcar (lambda (item) (if (consp item) (%compile-form item environment) item)) args)))
+        (cons operator (mapcar (lambda (item)
+          (if (consp item)
+              (let ((statement (%compile-form item environment)))
+                ;; Macro expansion must not turn a statement into a GO tag.
+                (if (consp statement) statement (list 'progn statement)))
+              item)) args)))
       (eval-when
         (if (intersection (car args) '(:execute eval))
             (cons 'progn (%compile-body (cdr args) environment)) nil))

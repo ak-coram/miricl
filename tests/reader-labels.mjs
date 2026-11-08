@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
+const binary = process.argv[2] ?? 'miricl.wasm';
 const vm = await Miricl.instantiate(fs.readFileSync(binary));
 const fixtures = [
   ["((lambda (#1=#:foo) #1#) 17)", '17'],

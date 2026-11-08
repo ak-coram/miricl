@@ -1,4 +1,4 @@
-// CHROMIUM=chromium node tests/browser-game-of-life.mjs [game-of-life/index.html]
+// CHROMIUM=chromium node tests/browser-game-of-life.mjs [game-of-life/build/index.html]
 // Exercise production HTML and its separate runtime and FASL assets.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -7,7 +7,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawn} from 'node:child_process';
 
-const html = path.resolve(process.argv[2] ?? 'game-of-life/index.html');
+const html = path.resolve(process.argv[2] ?? 'game-of-life/build/index.html');
 await fs.access(html, fs.constants.R_OK);
 const root = path.dirname(html);
 const server = http.createServer(async (request, response) => {
@@ -56,6 +56,7 @@ browser.stdio[4].on('data', chunk => {
     if (message.method === 'Network.requestWillBeSent') requests.push(message.params.request.url);
     if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
     if (message.method === 'Log.entryAdded') browserLogs.push(message.params.entry);
+    if (message.method === 'Runtime.consoleAPICalled') browserLogs.push(message.params);
     const request = pending.get(message.id);
     if (!request) continue;
     pending.delete(message.id);
@@ -89,16 +90,63 @@ try {
     const deadline = Date.now() + 600000;
     while (Date.now() < deadline) {
       if (await js(expression)) return;
-      if (await js('document.getElementById("status")?.classList.contains("error")'))
-        throw new Error(await js('document.getElementById("status").textContent'));
+      if (await js('document.getElementById("status")?.classList.contains("error")')) {
+        const details = [];
+        for (const entry of browserLogs) for (const arg of entry.args ?? []) {
+          if (!arg.objectId) continue;
+          const properties = await command('Runtime.getProperties', {objectId: arg.objectId, ownProperties: true});
+          details.push(...properties.result.filter(p => ['message', 'output', 'backtrace'].includes(p.name))
+            .map(p => `${p.name}: ${p.value?.value ?? p.value?.description}`));
+        }
+        if (await js('!!globalThis.miriclInterpreter')) {
+          try {
+            details.push('Lisp diagnostic: ' + await js(`miriclInterpreter.evaluate(
+              '(handler-case (life:start) (type-error (c) (list (type-error-datum c) (type-error-expected-type c))))',
+              {eof: true}).output`));
+          } catch (error) {details.push('Diagnostic failed: ' + error.message);}
+        }
+        throw new Error([await js('document.getElementById("status").textContent'), ...details].join('\n'));
+      }
       await new Promise(resolve => setTimeout(resolve, 40));
     }
     throw new Error(`Timed out: ${expression}: ${await js('document.body.innerText')}`);
   }
   const evaluate = code => js(`miriclInterpreter.evaluate(${JSON.stringify(code)}, {eof: true}).output`);
   await command('Page.enable'); await command('Runtime.enable'); await command('Network.enable');
+  // Optional V8 profiles keep the production application free of benchmark code.
+  // MIRICL_LIFE_PROFILE=/tmp/life writes startup, simulation and rendering data.
+  const profilePrefix = process.env.MIRICL_LIFE_PROFILE;
+  const timings = {};
+  async function startProfile() {
+    if (profilePrefix) await command('Profiler.start');
+    return performance.now();
+  }
+  async function endProfile(name, start) {
+    timings[name] = Math.round(performance.now() - start);
+    if (profilePrefix) {
+      const {profile} = await command('Profiler.stop');
+      await fs.writeFile(`${profilePrefix}-${name}.cpuprofile`, JSON.stringify(profile));
+    }
+  }
+  if (profilePrefix) await command('Profiler.enable');
+  const startupStarted = await startProfile();
   await command('Page.navigate', {url: origin + '/' + path.basename(html)});
   await waitFor('globalThis.lifeReady === true && document.getElementById("population").textContent === "005"');
+  await endProfile('startupMs', startupStarted);
+  if (profilePrefix) {
+    const simulationStarted = await startProfile();
+    assert.equal(await evaluate(`
+      (loop with world = (life:seed :r-pentomino)
+            repeat 10 do (setq world (life:next-generation world))
+            finally (return (list (life:world-generation world)
+                                  (fset2:size (life:world-cells world)))))`), '(10 11)\n');
+    await endProfile('tenGenerationsMs', simulationStarted);
+    const asciiStarted = await startProfile();
+    assert.equal(await evaluate('(loop repeat 10 always (= (length (life:ascii-grid)) 400))'), 'T\n');
+    await endProfile('tenAsciiGridsMs', asciiStarted);
+    await fs.writeFile(`${profilePrefix}.json`, JSON.stringify(timings, null, 2) + '\n');
+    console.log('Browser timings (ms):', timings);
+  }
   assert.equal(await evaluate(`(and (fset2:set? (life:world-cells life:*world*))
     (notany #'find-package '("ASDF" "UIOP" "MGL-PAX")))`), 'T\n');
   await evaluate('(defparameter *before* life:*world*)');
@@ -141,8 +189,12 @@ try {
     await fs.writeFile(process.env.MIRICL_LIFE_SCREENSHOT, Buffer.from(data, 'base64'));
   }
   assert.deepEqual(exceptions, []);
-  assert.equal(requests.some(url => /^wss?:/.test(url) || /asdf|quicklisp|dev-repl|dev-filesystem/.test(url)), false, 'Production must not fetch development dependencies.');
-  console.log('Game of Life: separate FSet 2 bundle, immutable generations, mouse drawing, ASCII REPL state, playback and mobile layout pass.');
+  assert.equal(requests.some(url => /^wss?:/.test(url) ||
+    (/^https?:/.test(url) && /asdf|quicklisp|dev-repl|dev-filesystem/.test(new URL(url).pathname))),
+    false, 'Production must not fetch development dependencies.');
+  for (const file of ['miricl.js', 'miricl.wasm', 'game-of-life.wasm'])
+    assert.ok(requests.includes(`${origin}/${file}`), `Production must load its separate ${file} asset.`);
+  console.log('Game of Life: separate HTML, adapter, interpreter and FSet 2 bundle, immutable generations, mouse drawing, ASCII REPL state, playback and mobile layout pass.');
 } catch (error) { console.error(error); throw error; } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));

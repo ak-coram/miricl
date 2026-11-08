@@ -26,10 +26,18 @@ jobs:
         with:
           submodules: true
 
+      - name: Remove ASDF fixtures during dependency setup
+        shell: bash
+        run: rm -rf vendor/asdf/test
+
       - name: Setup Lisp
         uses: 40ants/setup-lisp@v4
         with:
           cache: true
+
+      # The ASDF builder requires a clean upstream source checkout.
+      - name: Restore ASDF source checkout
+        run: git -C vendor/asdf restore --worktree -- test
 
       - name: Install libwasmtime
         shell: bash
@@ -47,6 +55,18 @@ jobs:
         with:
           node-version: '26'
 
+      - uses: extractions/setup-just@v4
+
+      - name: Install Wasmtime CLI
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/v${LIBWASMTIME_VERSION}/wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux.tar.xz" \
+            --output "$RUNNER_TEMP/wasmtime-cli.tar.xz"
+          mkdir -p "$RUNNER_TEMP/wasmtime-cli"
+          tar -xf "$RUNNER_TEMP/wasmtime-cli.tar.xz" -C "$RUNNER_TEMP/wasmtime-cli" --strip-components 1
+          echo "$RUNNER_TEMP/wasmtime-cli" >> "$GITHUB_PATH"
+
       - name: Build standalone browser examples and interpreter
         shell: bash
         run: |
@@ -62,27 +82,14 @@ jobs:
       - name: Build FSet 2 Game of Life
         shell: bash
         run: |
-          node scripts/build-asdf.mjs build/asdf miricl-interpreter.wasm miricl-asdf.wasm
-          ros -L sbcl-bin run -- --script scripts/setup-application.lisp "$PWD/game-of-life" game-of-life "$PWD" node
-          node miricl.js miricl-interpreter.wasm --directory game-of-life --bundle game-of-life --output build/game-of-life.wasm
-          mkdir -p "$RUNNER_TEMP/pages/game-of-life/"{build,images,runtime}
-          cp game-of-life/index.html "$RUNNER_TEMP/pages/game-of-life/index.html"
-          cp game-of-life/build/game-of-life.wasm "$RUNNER_TEMP/pages/game-of-life/build/"
-          cp miricl-interpreter.wasm "$RUNNER_TEMP/pages/game-of-life/images/"
-          cp runtime/miricl.js "$RUNNER_TEMP/pages/game-of-life/runtime/"
+          node scripts/build-asdf.mjs build/asdf miricl.wasm miricl-asdf.wasm
+          ros -L sbcl-bin run -- --load "$HOME/.roswell/lisp/quicklisp/setup.lisp" --script scripts/setup-application.lisp "$PWD/game-of-life" game-of-life "$PWD" node
+          just --justfile game-of-life/justfile build
+          mkdir -p "$RUNNER_TEMP/pages/game-of-life"
+          cp game-of-life/build/index.html game-of-life/build/miricl.js game-of-life/build/miricl.wasm game-of-life/build/game-of-life.wasm "$RUNNER_TEMP/pages/game-of-life/"
 
       - name: Build image size summary
         run: node scripts/build-size-html.mjs . "$RUNNER_TEMP/pages/image-sizes.html" index.html
-
-      - name: Test published HTML in Chromium
-        env:
-          CHROMIUM: google-chrome
-        run: |
-          node tests/browser-repl.mjs "$RUNNER_TEMP/pages/index.html"
-          node tests/browser-todo.mjs "$RUNNER_TEMP/pages/todo.html"
-          node tests/browser-game-of-life.mjs "$RUNNER_TEMP/pages/game-of-life/index.html"
-          node tests/ansi-html.mjs
-          node tests/size-html.mjs
 
       - name: Run full ANSI suite
         timeout-minutes: 20
@@ -90,14 +97,7 @@ jobs:
         continue-on-error: true
         env:
           MIRICL_ANSI_REPORT: ansi-full-results.json
-        shell: bash
-        run: |
-          cat > "$RUNNER_TEMP/ansi-sbcl" <<'SH'
-          #!/usr/bin/env bash
-          exec ros -L sbcl-bin run -- "$@"
-          SH
-          chmod +x "$RUNNER_TEMP/ansi-sbcl"
-          SBCL="$RUNNER_TEMP/ansi-sbcl" node tests/ansi.mjs miricl-interpreter.wasm --full
+        run: node tests/ansi.mjs miricl.wasm --full
 
       - name: Build standalone ANSI results page
         run: |

@@ -29,7 +29,7 @@ export function measureWasm(file) {
   assert.ok(component || bytes.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])),
     `${file}: expected a WASM module or component`);
   let position = 8;
-  const sections = [{name: 'header', bytes: 8}];
+  const sections = new Map([['header', {name: 'header', bytes: 8, count: 1}]]);
   const u32 = limit => {
     let value = 0;
     for (let shift = 0; shift < 35; shift += 7) {
@@ -53,16 +53,19 @@ export function measureWasm(file) {
       assert.ok(position + nameLength <= end, `${file}: truncated custom section name`);
       name += `:${bytes.toString('utf8', position, position + nameLength)}`;
     }
-    sections.push({name, bytes: end - start});
+    const section = sections.get(name) ?? {name, bytes: 0, count: 0};
+    section.bytes += end - start;
+    section.count++;
+    sections.set(name, section);
     position = end;
   }
-  return {...measureBytes(file, bytes), sections};
+  return {...measureBytes(file, bytes), sections: [...sections.values()]};
 }
 
 // Preserve distribution measurements with results, independently of the images.
 export function measureWasmImages(binary) {
-  const companion = path.join(path.dirname(binary), 'miricl-repl.wasm');
   const files = [binary];
+  const companion = path.join(path.dirname(binary), 'miricl-repl.wasm');
   if (path.resolve(companion) !== path.resolve(binary) && fs.existsSync(companion)) files.push(companion);
   return files.map(file => {
     const {sections, ...sizes} = measureWasm(file);
@@ -71,7 +74,7 @@ export function measureWasmImages(binary) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  for (const file of process.argv.length > 2 ? process.argv.slice(2) : ['miricl-interpreter.wasm']) {
+  for (const file of process.argv.length > 2 ? process.argv.slice(2) : ['miricl.wasm']) {
     console.log(JSON.stringify(measureWasm(file), null, 2));
   }
 }

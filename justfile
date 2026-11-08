@@ -4,7 +4,7 @@ node := env('NODE', 'node')
 wasmtime := env('WASMTIME', 'wasmtime')
 quicklisp := env('QUICKLISP_SETUP', env('HOME') / 'quicklisp/setup.lisp')
 build_dir := env('MIRICL_BUILD_DIR', '.')
-interpreter := build_dir / 'miricl-interpreter.wasm'
+interpreter := build_dir / 'miricl.wasm'
 wasi_repl := build_dir / 'miricl-repl.wasm'
 
 # List available commands.
@@ -31,13 +31,17 @@ build-todo:
 setup-game-of-life: build asdf-init build-asdf
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/setup-application.lisp {{ quote(absolute_path("game-of-life")) }} game-of-life {{ quote(absolute_path(build_dir)) }} {{ quote(node) }}
 
-# Build the FSet 2 example application FASL for its production HTML page.
+# Build Game of Life with separate HTML, adapter, runtime and application files.
 build-game-of-life: setup-game-of-life
-    just --justfile game-of-life/justfile build
+    {{quote(just_executable())}} --justfile game-of-life/justfile wasmtime={{quote(wasmtime)}} build
+
+# Benchmark real application and runtime sizes, including a fresh optimized load.
+benchmark-game-of-life: build-game-of-life
+    {{ quote(node) }} scripts/benchmark-game-of-life.mjs game-of-life
 
 # Build raw, gzip and Brotli size reports for the Wasm images and HTML pages.
-build-sizes: build build-html build-todo
-    {{ quote(node) }} scripts/build-size-html.mjs {{ quote(build_dir) }}
+build-sizes: build build-html build-todo build-game-of-life
+    {{ quote(node) }} scripts/build-size-html.mjs {{ quote(build_dir) }} {{ quote(build_dir / 'image-sizes.html') }} miricl.html {{ quote(absolute_path('game-of-life')) }}
 
 # Check size accounting and the standalone report in a browser.
 test-size-html:
@@ -99,7 +103,7 @@ test:
     {{ quote(sbcl) }} --noinform --non-interactive --load {{ quote(quicklisp) }} --eval '(require :asdf)' --eval '(asdf:load-asd (truename "miricl.asd"))' --eval '(ql:quickload :miricl/test)' --eval '(asdf:test-system :miricl)'
 
 # Run all Node integration tests, including the WASI REPL.
-test-js: test-threads test-standalone test-text test-repl-bridge test-development test-compilation test-asdf test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
+test-js: test-threads test-standalone test-text test-repl-bridge test-development test-compilation test-hash test-asdf test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
 
 # Check the shared green-thread scheduler in Node.
 test-threads: build
@@ -134,17 +138,31 @@ test-development: build
     {{ quote(node) }} tests/development.mjs {{ quote(interpreter) }}
 
 test-compilation: build
+    {{ quote(node) }} tests/compiler-runtime.mjs {{ quote(interpreter) }}
     {{ quote(node) }} tests/compilation.mjs {{ quote(interpreter) }}
     {{ quote(node) }} tests/file-compilation.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/file-code-sharing.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/fasl-format.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/whole-program.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/class-reachability.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/hir.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/native-compilation.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/native-size.mjs {{ quote(interpreter) }}
     {{ quote(node) }} tests/nested-backquote.mjs {{ quote(interpreter) }}
     {{ quote(node) }} tests/structure-printers.mjs {{ quote(interpreter) }}
     {{ quote(node) }} tests/readtable-iteration.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/nested-backquote.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/structure-printers.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/whole-program.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/class-reachability.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/hir.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/native-compilation.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/native-size.mjs {{ quote(interpreter) }}
 
-# Exercise the FSet 2 application and its separate production assets in Chromium.
+test-hash: build
+    {{ quote(node) }} tests/hash-structural.mjs {{ quote(interpreter) }}
+
+# Exercise both standalone production variants in Chromium, offline.
 test-game-of-life: build-game-of-life
-    {{ quote(node) }} tests/browser-game-of-life.mjs game-of-life/index.html
+    {{ quote(node) }} tests/browser-game-of-life.mjs game-of-life/build/index.html
 
 test-environment: build
     {{ quote(node) }} tests/environment.mjs {{ quote(interpreter) }}
@@ -216,6 +234,7 @@ test-backtrace: build
 test-ansi-runner: build
     {{ quote(node) }} tests/ansi-runner.mjs {{ quote(interpreter) }}
     {{ quote(node) }} tests/ansi-upstream-runner.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/ansi-compiler-runner.mjs {{ quote(interpreter) }}
 
 # Initialize the pinned upstream ANSI test submodule.
 ansi-init:
@@ -240,10 +259,22 @@ test-asdf: build build-asdf
 ansi *files: build
     {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter) }} "$@"
 
+# Run ANSI bodies through the native compiler; unsupported forms fail.
+[positional-arguments]
+ansi-compiler *files: build
+    MIRICL_ANSI_REPORT={{ quote(env('MIRICL_ANSI_REPORT', build_dir / 'ansi-compiler-results.json')) }} {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter) }} --compiler "$@"
+
+# Run the full upstream ANSI suite through the native compiler.
+[positional-arguments]
+full-ansi-compiler *options: build
+    SBCL={{ quote(sbcl) }} MIRICL_ANSI_REPORT={{ quote(env('MIRICL_ANSI_REPORT', build_dir / 'ansi-compiler-results.json')) }} {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter) }} --full --compiler "$@"
+
 # Load the upstream ANSI driver and run every test in one WASM interpreter.
 [positional-arguments]
 ansi-full *options: build
     SBCL={{ quote(sbcl) }} {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter) }} --full "$@"
+
+alias full-ansi := ansi-full
 
 # Build a standalone HTML page from an existing full ANSI JSON report.
 ansi-html report=(env('MIRICL_ANSI_REPORT', 'ansi-results.json')):
@@ -264,3 +295,7 @@ check: test test-js ansi
 # Build ASDF FASL bundles through both terminal hosts, without a browser.
 test-bundle: build build-asdf
     {{ quote(node) }} tests/bundle-command.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }} {{ quote(build_dir / 'miricl-asdf.wasm') }}
+
+# Compile and execute Lisp in Chromium using the built-in compiler.
+test-browser-compiler: build
+    {{ quote(node) }} tests/browser-compiler.mjs {{ quote(interpreter) }} {{ quote(build_dir / "miricl.js") }}

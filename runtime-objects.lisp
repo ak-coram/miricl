@@ -94,24 +94,26 @@
     (array.new_default $object-pages (i32.const 0)))))
 
 (define-runtime-section object-runtime-wat (&key wasi)
-  #@(rec
-      (type $digits (array (mut i32)))
-      (type $obj (sub (struct
+  ;; Minimal recursive groups are part of the compiled-code ABI. A module
+  ;; defining DIGITS and OBJ alone gets the same canonical WasmGC types; it
+  ;; must not reproduce every unrelated runtime subtype to access a cons.
+  #@(type $digits (array (mut i32)))
+  #@(rec (type $obj (sub (struct
                   (field $tag i32) (field $n (mut i32)) (field $f f64)
                   (field $digits (ref null $digits))
                   (field $a (mut (ref null $obj)))
                   (field $b (mut (ref null $obj)))
-                  (field $c (mut (ref null $obj))))))
-      (type $objects (array (mut (ref null $obj))))
-      (type $source-entry (sub final $obj (struct
+                  (field $c (mut (ref null $obj)))))))
+  #@(type $objects (array (mut (ref null $obj))))
+  #@(type $source-entry (sub final $obj (struct
         (field $tag i32) (field $n (mut i32)) (field $f f64)
         (field $digits (ref null $digits))
         (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj)))
         (field $c (mut (ref null $obj))) (field $modified (mut f64)))))
-      (type $object-pages (array (mut (ref null $objects))))
-      (type $symbol-index (struct (field $dense (ref $objects)) (field $pages (mut (ref $object-pages)))))
+  #@(type $object-pages (array (mut (ref null $objects))))
+  #@(type $symbol-index (struct (field $dense (ref $objects)) (field $pages (mut (ref $object-pages)))))
       ;; Public tables retain constructor hints without changing the trie fields.
-      (type $hash-table (sub final $obj (struct
+  #@(type $hash-table (sub final $obj (struct
         (field $tag i32) (field $n (mut i32)) (field $f f64)
         (field $digits (ref null $digits))
         (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj)))
@@ -119,18 +121,18 @@
         (field $size-hint (ref null $obj)) (field $rehash-size (ref null $obj))
         (field $rehash-threshold (ref null $obj)))))
       ;; Only vectors carry a reference array; ordinary objects keep their layout.
-      (type $vector (sub final $obj (struct
+  #@(type $vector (sub final $obj (struct
         (field $tag i32) (field $n (mut i32)) (field $f f64)
         (field $digits (ref null $digits))
         (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj)))
         (field $c (mut (ref null $obj))) (field $data (ref $objects)))))
       ;; General arrays own mutable shape/view metadata, not extra fields in OBJ.
-      (type $array (sub final $obj (struct
+  #@(type $array (sub final $obj (struct
         (field $tag i32) (field $n (mut i32)) (field $f f64)
         (field $digits (ref null $digits))
         (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj)))
         (field $c (mut (ref null $obj)))
-        (field $shape (mut (ref $digits))) (field $offset (mut i32)) (field $fill (mut i32))))))
+        (field $shape (mut (ref $digits))) (field $offset (mut i32)) (field $fill (mut i32)))))
   #@(type $text-stream (sub final $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64)
     (field $digits (ref null $digits))

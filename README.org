@@ -36,6 +36,14 @@ where size can be an issue (such as [[https://ak-coram.github.io/miricl/todo.htm
 I've set up a cage fighting match between an LLM and [[https://gitlab.common-lisp.net/ansi-test/ansi-test][ansi-test]] which
 lasted for days. You can view the results [[https://ak-coram.github.io/miricl/ansi-results.html][here]].
 
+Run the full interpreter suite with =just full-ansi=.
+The native compiler has a separate ANSI mode: =just ansi-compiler=, or
+=just full-ansi-compiler= for the full upstream suite. The runner first triggers
+compiler self-compilation and verifies the native frontend and backend. Setup and helper
+definitions currently use the interpreter; test bodies run as native Wasm.
+Unsupported compilation counts as failure, with no interpreted fallback.
+Results go to =ansi-compiler-results.json=, including bootstrap details and per-test compilation counts.
+
 *** Don't you care how the sausage is made?
 
 I prefer an unethical sausage to no sausage.
@@ -52,8 +60,8 @@ on.
 The =miricl-runtime= build artifact contains four files:
 
 - =miricl.js=: browser adapter and Node terminal command.
-- =miricl-interpreter.wasm=: interpreter for browsers and Node.
-- =miricl-repl.wasm=: Wasmtime terminal command.
+- =miricl.wasm=: interpreter and compiler for browsers and Node.
+- =miricl-repl.wasm=: Wasmtime terminal command and precompiled compiler for Node.
 - =miricl-asdf.wasm=: optional ASDF/UIOP library.
 
 Keep these files together. Node and Wasmtime commands below work without a
@@ -88,9 +96,9 @@ cd miricl
 just build-asdf
 #+end_src
 
-This produces =miricl-interpreter.wasm=, the import-free interpreter, and
+This produces =miricl.wasm=, the import-free interpreter, and
 =miricl-repl.wasm=, the WASI 0.3 terminal REPL and development command. Both include the
-REPL bridge. It also writes =miricl.js= and the optional =miricl-asdf.wasm=.
+REPL bridge and the compiler. It also writes =miricl.js= and the optional =miricl-asdf.wasm=.
 Quicklisp loads the Lisp dependencies automatically. If your Quicklisp
 setup file is elsewhere, set =QUICKLISP_SETUP= when building:
 
@@ -103,7 +111,7 @@ QUICKLISP_SETUP=/path/to/quicklisp/setup.lisp just build
 Start a local terminal REPL with either command:
 
 #+begin_src sh
-node miricl.js miricl-interpreter.wasm
+node miricl.js miricl.wasm
 wasmtime run -W stack-switching=y -S p3=y miricl-repl.wasm
 #+end_src
 
@@ -125,7 +133,7 @@ Save this as =hello.html= beside the distribution files:
 <script type="module">
   import {Miricl} from "./miricl.js";
 
-  const bytes = await (await fetch("./miricl-interpreter.wasm")).arrayBuffer();
+  const bytes = await (await fetch("./miricl.wasm")).arrayBuffer();
   const lisp = await Miricl.instantiate(bytes);
   for (const script of document.querySelectorAll('script[type="text/x-common-lisp"]')) {
     lisp.evaluate(script.textContent, {eof: true});
@@ -141,7 +149,7 @@ Serve the current directory so the browser can load the JavaScript
 module and Wasm file:
 
 #+begin_src sh
-node miricl.js miricl-interpreter.wasm --dev-server
+node miricl.js miricl.wasm --dev-server
 #+end_src
 
 Open [[http://127.0.0.1:8000/hello.html][hello.html]] and check the browser's developer console for =Hello,
@@ -159,7 +167,7 @@ Save this as =dev.html= beside the distribution files:
 <script type="module">
   import {Miricl} from "./miricl.js";
 
-  const bytes = await (await fetch("./miricl-interpreter.wasm")).arrayBuffer();
+  const bytes = await (await fetch("./miricl.wasm")).arrayBuffer();
   const lisp = await Miricl.instantiate(bytes, {dev: true});
 </script>
 #+end_src
@@ -169,7 +177,7 @@ either Node or Wasmtime. These commands enable HTTP and WebSocket;
 the TCP REPL listener is disabled unless =--repl-bridge= is also supplied:
 
 #+begin_src sh
-node miricl.js miricl-interpreter.wasm --dev-server
+node miricl.js miricl.wasm --dev-server
 
 wasmtime run -W stack-switching=y -S p3=y -S inherit-network=y \
   --dir .::. miricl-repl.wasm --dev-server
@@ -264,7 +272,7 @@ dependencies in one loadable file:
 The shipped terminal REPLs can build the system without a browser:
 
 #+begin_src sh
-node miricl.js miricl-interpreter.wasm --bundle app --output dist/app.wasm
+node miricl.js miricl.wasm --bundle app --output dist/app.wasm
 wasmtime run -W stack-switching=y -S p3=y --dir . miricl-repl.wasm --bundle app --output dist/app.wasm
 #+end_src
 
@@ -301,12 +309,70 @@ they are not standalone executables or whole-program optimized Wasm.
 Declare and supply non-Lisp resources separately. =compile-bundle-op= bundles
 only one system; =monolithic-compile-bundle-op= includes its dependencies.
 
+**** Compiler
+
+The compiler is built into both images and shares the interpreter's Lisp objects:
+
+#+begin_src javascript
+const lisp = await Miricl.instantiate(interpreterBytes);
+lisp.evaluate("(defparameter *f* (miricl-compiler:compile-native '(lambda (x) (+ x 2))))");
+lisp.evaluate('(funcall *f* 40)'); // 42
+#+end_src
+
+The browser image carries compact compiler source; the first compilation
+self-compiles the frontend and emitter once and reuses their native functions.
+The REPL deliverable includes the self-compiled compiler for Node and Wasmtime.
+Development REPL expressions and =defun= bodies compile on that host and execute
+in the browser, preserving its macros, objects and REPL history. Forms that establish
+packages, macros, classes and methods still use the browser evaluator.
+The native
+backend currently supports a subset of Common Lisp. Browser and Node adapters
+can instantiate generated Wasm; the WASI compiler can emit and optimize files.
+ASDF remains a separate, explicitly loaded library.
+
+**** Whole-program optimization
+
+The initial compiler backend removes unreachable definitions and constants
+while still emitting an interpreted FASL. Specify the production entry points:
+
+#+begin_src sh
+node miricl.js --optimize app --entry APP:START --output dist/app.wasm --report dist/retention.txt
+wasmtime run -W stack-switching=y -S p3=y --dir . miricl-repl.wasm --optimize app --entry APP:START --output dist/app.wasm
+#+end_src
+
+Repeat =--entry= for other public functions and =--keep PACKAGE:NAME= for
+definitions accessed dynamically. JavaScript callbacks referenced by Lisp are
+retained automatically. Package exports alone do not retain definitions.
+Initialization effects and potentially applicable methods are preserved;
+unbounded reflective lookup conservatively retains the supplied program.
+The report explains each retained or removed definition. FASL units without
+compiler metadata prevent pruning. No entry point is invoked by the optimizer.
+
+Pass =--no-strip= with =--optimize= to retain all definitions while compacting
+the FASL. Entry points are optional in this mode:
+
+#+begin_src sh
+node miricl.js --optimize app --no-strip --output dist/app.wasm
+wasmtime run -W stack-switching=y -S p3=y --dir . miricl-repl.wasm --optimize app --no-strip --output dist/app.wasm
+#+end_src
+
+The corresponding Lisp API is =miricl-compiler:optimize-system= with
+=:entry-points=, =:keep=, =:output=, =:report= and =:save= options. Use =:strip nil=
+to disable definition stripping.
+=miricl-compiler:shake-file= operates on an existing bundle without executing it
+and is also available to the host Common Lisp system. See [[./compiler.org][compiler architecture]].
+
 *** Game of Life
 
 The [[./game-of-life/README.org][Game of Life example]] uses the FSet 2 API, an ASDF application bundle,
 and a browser/terminal development REPL. Run =just setup-game-of-life=, then
-=cd game-of-life && just dev-node= (or =just dev-wasi=). Its independent
-=just build= writes the application FASL; =index.html= loads it with the separate runtime. [[https://ak-coram.github.io/miricl/game-of-life/][Play the production build]].
+=cd game-of-life && just dev=. Both development and production builds use
+the WASI REPL with its precompiled compiler. =just build= writes =build/index.html=,
+=miricl.js=, =miricl.wasm= and =game-of-life.wasm= as separate files.
+[[https://ak-coram.github.io/miricl/game-of-life/][Play the production build]].
+Run =just benchmark-game-of-life= from the repository root to measure production
+sizes and fresh application loading;
+results are in =game-of-life/build/sizes.json=.
 
 The [[./scripts/todo.html][TODO source]] demonstrates DOM access, events, callbacks and
 persistence through JS interop. See the [[./justfile][justfile]] for more build and

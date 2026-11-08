@@ -1,7 +1,7 @@
 /runtime
 /images
 /miricl-asdf.wasm
-/miricl-interpreter.wasm
+/miricl.wasm
 /miricl-repl.wasm
 /quicklisp/
 /systems.lisp

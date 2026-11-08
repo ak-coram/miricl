@@ -47,6 +47,7 @@
   #@(global.set $derived-type-environment (ref.null $obj))
   #@(global.set $dynamic-package (ref.null $obj))
   #@(global.set $dynamic-variables (ref.null $obj))
+  #@(global.set $native-environment-cache (ref.null $native-context))
   #@(global.set $format-base (i32.const 0))
   #@(global.set $format-column (i32.const 0))
   #@(global.set $format-stream (ref.null $obj))

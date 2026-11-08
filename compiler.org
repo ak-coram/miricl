@@ -1,0 +1,247 @@
+* Whole-program compiler
+
+The bundle backend emits interpreted FASL units with unreachable definitions
+and object records removed. An initial function backend emits native Wasm for
+a subset of Common Lisp. Neither backend yet infers interprocedural types,
+specializes calls, or removes runtime primitives. Native ASDF bundles and
+compiled development support for every defining form are still pending.
+
+** Deployment and compiler bootstrap
+
+The browser interpreter includes compact compiler source. It does not compile
+anything at startup. The first compilation self-compiles the frontend and emitter
+once; subsequent compilations reuse those native functions. A bootstrap failure
+is reported and remembered rather than silently using an interpreted compiler.
+
+For the REPL deliverable, Host Common Lisp assembles a temporary seed containing
+the compiler's Lisp source. The build runs that seed in Node, compiles the compiler,
+then uses the native frontend and emitter to compile its core functions again,
+including the optimizer's graph traversal kernels.
+The generated Wasm functions are linked into the REPL runtime with their literal graphs.
+There is no separate compiler artifact or compiler fetch on startup. ASDF remains
+an explicitly loaded, separate artifact.
+
+REPL startup restores the precompiled functions and their shared literals. It does
+not compile the compiler again. This image omits the corresponding compiler
+source definitions where bootstrap initialization does not need them. Macro
+expanders, other library helpers, and parts of the analysis layer still use the
+shared evaluator. This is not yet a completely compiled Common Lisp library.
+
+Compiler-mode ANSI runs require the frontend and backend to be native before
+installing the RT compiler hook. Reports record that the self-compiled compiler
+was initialized on first use. Browser regressions run offline using only the adapter and
+interpreter, including mutable closures, multiple values, dynamic state and
+JavaScript callbacks. Node and browser adapters can instantiate generated Wasm;
+the WASI image runs the linked compiler and can emit code without an external
+compiler file, but still lacks dynamic Wasm instantiation.
+
+The REPL component also contains a precompiled core without WASI or native stack
+switching for Node. The Node command uses it when =miricl-repl.wasm= is beside the
+interpreter; with only the interpreter available, its host compiler self-compiles
+on first use. This extra code is confined to the REPL deliverable.
+
+In development mode binary WebSocket messages remain the terminal byte stream;
+text messages carry compiler requests and responses. Browser macro expansion
+uses its actual environment. Quoted objects and load-time values stay in that
+heap and travel as opaque references. The host emits code without executing the
+application, and the browser installs and runs it using its ordinary native ABI.
+Ordinary expressions, =defun= bodies and =defvar=/=defparameter= initializers use
+this path. Package, macro, class and method definitions retain the evaluator's
+existing behavior. Unsupported native lowering reports a compiler error. The
+browser's compiler stays cold unless the application explicitly requests local
+compilation. Synchronous adapter evaluation and JS callbacks retain their existing
+execution path; asynchronous development evaluation uses the host compiler.
+
+The target execution model uses native application code in development and
+production. Development compilation preserves global indirection and
+redefinition; production compilation performs whole-program analysis and
+specialization. The evaluator remains necessary for dynamic evaluation and
+uncompiled library support. Once those functions are compiled, the reader and
+evaluator can become optional production extensions. Object storage, allocation,
+numeric operations, closures and conditions remain part of the runtime.
+
+** Frontend and definition IR
+
+=compile-file= records a =:miricl-ir= extension
+in a separate indexed FASL chunk. Each compilation unit
+records its target source pathname and a descriptor for every emitted root:
+
+#+begin_src lisp
+(root (group kind name effect-p details) references reflection-barriers)
+#+end_src
+
+Definition names contain target package/name strings rather than host or
+bootstrap symbol IDs. SETF function names have their own keys. The frontend
+recognizes standard defining forms before macroexpansion, groups all residual
+registration forms belonging to a definition, and collects dependencies from
+the resulting code. Compile-time evaluation and source reading retain their
+existing ordering. MAKE-LOAD-FORM creation and initialization code also
+contribute dependencies.
+Details describe generated class/structure bindings, structure slots and
+inheritance, and method specializers. They retain target names and syntax;
+analysis does not execute initializers or inspect a previously loaded app.
+
+=analyze-file= reconstructs portable =ir-program=, =ir-unit= and =ir-node=
+objects without loading the application. The same implementation runs in the
+host Common Lisp system and the target interpreter. Nodes reference the FASL
+object graph, preserving literal identities, cycles and compiled-form flags.
+
+** Reachability and effects
+
+Entry points and explicitly retained definitions establish the public surface
+of a fixed production program. A package's export list is not a set of roots.
+Applications must expose additional dynamically selected APIs explicitly.
+
+Calls, function values, symbol designators, globals and class/type references
+form dependency edges. A reachable generic function retains all its supplied
+methods. Methods extending runtime generics wait for their supplied class
+specializers to become reachable; native and unknown specializers stay
+conservative. Method registration retains its generic binding without
+automatically retaining sibling methods. Generated constructors, predicates,
+copiers, readers and writers retain their owning defining form, including
+inherited structure accessors across compilation units. Unused ordinary
+class/structure registrations may be removed. Shared-slot initialization,
+custom metaclasses, EQL-specializer evaluation and observable metaclass
+initialization stay live. Registration and other unknown initialization
+effects remain ordered roots. Dead bindings with literal initializers may be
+removed; initializers with unknown effects remain live.
+Unbounded type designators and class/method introspection preserve the input.
+Unknown callbacks and escaped type factories preserve supplied classes until
+interprocedural value flow can bound their inputs. These are conservative
+semantic guards, not library-specific reachability rules.
+Definitions containing load-time values or MAKE-LOAD-FORM objects also remain
+roots until their load-time evaluation effects can be proved removable.
+
+An unbounded reflective operation or a compilation unit without metadata
+retains the supplied program. This is intentionally conservative. The report
+records root and dependency reasons rather than silently assuming reflective
+operations cannot observe removed definitions.
+
+Local function bindings are tracked lexically: FLET definitions see the outer
+function environment, LABELS definitions see their recursive bindings, and
+uncalled local bodies do not create global dependencies or reflection barriers.
+Taking a local function as a value retains its body. Constant IF tests select
+only the executable branch for dependency analysis. Compilation policy names
+in INLINE/NOTINLINE proclamations do not retain executable definitions.
+Load-time object creation dependencies are recorded separately from call edges.
+
+The FASL backend traces record edges from retained roots and coalesces repeated
+immutable code and similar file constants within each compilation unit, as
+permitted by [[https://www.lispworks.com/documentation/HyperSpec/Body/03_bdd.htm][CLHS 3.2.4.4]]. Uninterned symbols, cyclic subgraphs,
+MAKE-LOAD-FORM objects and LOAD-TIME-VALUE creation records retain their identities.
+Mutable load-time values are never merged. Repeated top-level roots remain
+ordered evaluations even when their code is shared. Production output omits
+analysis metadata; the definition directory is optional. Pass =:strip nil= to
+=shake-file= or =optimize-system= (=--no-strip= on the terminal command) to
+retain every definition while compacting its representation. All graphs are
+compacted before replacing the output.
+
+** Indexed FASL format
+
+Each =miricl.fasl= custom section contains one independent unit, identified by
+the =MIRF= magic, followed by flags, record/chunk counts, a block size and a
+directory. There is one current format, with no version field or compatibility
+reader.
+All directory fields are little-endian unsigned 32-bit integers. Directory
+entries contain kind, key, payload-relative offset and byte length:
+
+- kind 1: ordered top-level root IDs;
+- kind 2: optional analysis metadata, skipped by normal LOAD;
+- kind 3: object record blocks, keyed by block index (256 records per block);
+- kind 4: optional definition names, initialization classification and root IDs.
+
+Production output omits kind 4 by default. Pass =:index-definitions t= to
+=write-program=, =shake-file= or =optimize-system= to keep this index. The block
+directory and ordered roots remain present in either form.
+
+Chunks encode integers with ULEB128 and strings with UTF-8, using a private
+string pool per chunk. Lists and vectors have explicit lengths. Object records
+use a dedicated record-block tag (10), a base record ID and a record count.
+Strings use minimal UTF-8 lengths, whole-string references, or a previously
+decoded string's prefix plus a UTF-8 suffix. Prefix lengths count characters,
+preserving Unicode boundaries; each chunk has its own dictionary.
+Nil, number, character, string and symbol records have compact opcodes.
+Symbol opcode 12 reuses the preceding symbol's package and namespace within
+the block. Cons opcodes 6--8 carry the first cell's instruction flags and a
+list-run length, followed by CAR references and the final CDR. Opcodes 9--11
+omit a final CDR of record ID zero. Internal CDRs point to consecutive record
+IDs; subsequent cells have zero flags. Opcodes 16--201 pack lengths 1--5,
+flags and per-CAR absolute/delta choices into one byte; 202--234 pack lengths
+6--16 and flags. These packets also end at record ID zero. Other explicit
+edges choose a tagged absolute ID or zigzag delta, whichever is shorter.
+Other records use opcode 0 followed by the generic description grammar. Object edges
+remain unit-local record IDs, preserving sharing and cycles across blocks.
+Native Wasm codecs handle the traversal loops; host Common Lisp uses a portable
+implementation of the same grammar. Compiler and runtime artifacts are rebuilt
+together when this format changes.
+
+The native emitter imports only the runtime operations used by the module,
+keeps uncaptured variables in Wasm locals and omits closure declarations when
+there are no closures. Acyclic control flow uses nested Wasm blocks and forward
+branches without a dispatcher; cyclic graphs use BR_TABLE dispatch. Immutable
+captures store values directly; captured mutable variables retain shared heap
+cells. Global calls remain indirect so redefinition continues to work in development.
+
+=just benchmark-game-of-life= builds and optimizes the FSet 2 application,
+validates a fresh production load and writes =game-of-life/build/sizes.json=.
+The report includes raw, gzip and Brotli sizes for the application payload,
+adapter, interpreter (including its compiler), HTML and development REPL.
+Production totals sum the four separately served application files.
+Definition reachability and input/output object-record counts are reported
+separately, so graph sharing is not mistaken for definition elimination.
+The graph layout puts common atoms in a small pool and visits list spines before
+their CAR subgraphs. This makes the run encoding effective while preserving
+individual record IDs, literal sharing, cycles and ordered initializer roots.
+File compilation canonicalizes lexical variable and local function bindings
+before serializing resolved code. Equivalent macro expansions can consequently
+share immutable subgraphs even when they originally used different gensyms.
+Special bindings, lexical scopes, local function blocks and quoted objects
+retain their semantics; this pass does not depend on application packages or
+library names. =tests/file-code-sharing.mjs= checks independent programs and a
+size comparison retaining all functions, separately from tree shaking.
+Production totals exclude the REPL. This currently benchmarks the interpreted FASL backend; native ASDF
+application bundles remain a later compiler stage.
+
+Loading currently decodes all object blocks eagerly. The directory permits
+independent lookup and later decoding, but deferred bodies, external archives
+and dependency fetching are not implemented yet. Initializers remain ordered
+roots; an eventual deferred body must reuse already initialized literal cells.
+
+** Next compiler stages
+
+The ANSI harness accepts =--compiler= in its selected-file, full upstream and
+diagnostic modes. It adapts RT's compilation hook to =compile-native= and forces
+compiled test-body execution. Upstream sources and RT result comparison remain
+unchanged. Setup and helper definitions currently use the interpreter. Reports
+record the mandatory compiler bootstrap, execution mode, per-test compilation
+counts, compilation failures and timeouts; unsupported compilation fails without evaluating the body. Runner
+regressions exercise both loading modes and prove that fallback does not occur.
+
+Native ANSI compliance remains incomplete. Cross-function RETURN-FROM and GO,
+some condition/restart forms, correctable CASE forms and additional special
+operators still lack lowering. Compiler conformance reports must remain
+separate from the interpreter's results.
+
+1. Lower retained function bodies into an explicit expression/control-flow IR,
+   preserving lexical identities, declaration scopes, multiple values, dynamic
+   bindings, closures and nonlocal exits. Keep source provenance throughout.
+2. Add SSA and conservative type, value and effect propagation. Track possible
+   function values across calls before narrowing indirect calls and reflection.
+   Use Common Lisp types and integer ranges without changing overflow behavior.
+3. Iterate specialization, size-limited inlining, constant/branch elimination,
+   generic dispatch analysis and definition reachability to a fixed point.
+4. Define the compiled-code ABI for the existing WasmGC runtime: boxed entry
+   convention, closures, multiple values, dynamic state, transfers and callback
+   lifetime. Establish interpreter/compiled-function interoperability first.
+5. Emit native Wasm functions using existing WAT generators and runtime
+   primitives. Start with boxed values; add unboxed specialized signatures
+   where proven safe. Keep the adapter and interpreter separate assets.
+6. Make runtime primitive definitions and their dependencies linkable so an
+   optional minimal runtime can be generated from the same implementation.
+
+Native code should be tested against interpreted execution, including numeric
+boundaries, aliasing, CLOS method combinations, dynamic state, callbacks and
+conditions. Track compressed bytes, load time, allocations and execution time.
+Game of Life/FSet provides an end-to-end workload, not a substitute for semantic
+regressions. The initial reachability tests also load results in fresh images;
+definitions left in the build image must never conceal missing dependencies.

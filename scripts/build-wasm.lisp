@@ -5,7 +5,7 @@
   (asdf:load-asd (merge-pathnames "miricl.asd" root))
   (if (find-package :ql) (uiop:symbol-call :ql :quickload :miricl) (asdf:load-system :miricl))
   (ensure-directories-exist output)
-  (dolist (entry '(("miricl-interpreter.wasm" nil) ("miricl-repl.wasm" t)))
+  (dolist (entry '(("miricl.wasm" nil) ("miricl-repl.wasm" t)))
     (let ((path (merge-pathnames (first entry) output)))
       (uiop:symbol-call :miricl :write-interpreter-wasm path :wasi (second entry))
       (format t "Wrote ~A~%" path))))

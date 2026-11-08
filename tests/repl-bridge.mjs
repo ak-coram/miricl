@@ -1,4 +1,4 @@
-// node tests/repl-bridge.mjs miricl-interpreter.wasm [miricl-repl.wasm]
+// node tests/repl-bridge.mjs miricl.wasm [miricl-repl.wasm]
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import net from 'node:net';
@@ -6,7 +6,7 @@ import path from 'node:path';
 import {Miricl} from '../scripts/miricl.mjs';
 import {connectTerminal, createWebapp, startHost, testPorts, waitFor} from './repl-bridge-fixture.mjs';
 
-const binary = path.resolve(process.argv[2] ?? 'miricl-interpreter.wasm');
+const binary = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
 const bytes = await fs.readFile(binary);
 const devOptions = {url: `ws://127.0.0.1:${testPorts.websocket}/repl`};
@@ -70,6 +70,45 @@ try {
       assert.equal(await terminal.send('(defun remote-add (x)', '...> '), '...> ');
       assert.equal(await terminal.send('  (+ x *app-count*))'), 'REMOTE-ADD\nmiricl> ');
       assert.equal(await terminal.send('(remote-add 1)'), '43\nmiricl> ');
+      const compiled = source => terminal.send(source.replace(/\s+/gu, ' '));
+      assert.equal(await compiled(`(and (compiled-function-p #'remote-add)
+        (null (function-lambda-expression #'remote-add)))`), 'T\nmiricl> ');
+      assert.equal(await compiled('miricl-compiler::*compiler-state*'), ':COLD\nmiricl> ',
+        'Remote evaluation must not bootstrap the browser compiler.');
+      vm.evaluate(`(defparameter *target-literal* (list :original))
+        (defmacro target-literal () (list 'quote *target-literal*))
+        (defparameter *target-js* (js:global "Math"))
+        (defmacro target-js () (list 'quote *target-js*))
+        (defparameter *target-load-values* 0)
+        (defparameter *target-special* :outer)`);
+      assert.equal(await compiled('(eq (target-literal) *target-literal*)'), 'T\nmiricl> ');
+      vm.evaluate('(progn (setf (cdr *target-literal*) *target-literal*) (values))');
+      assert.equal(await compiled('(eq (target-literal) (cdr *target-literal*))'), 'T\nmiricl> ');
+      vm.evaluate('(progn (setf (cdr *target-literal*) nil) (values))');
+      assert.equal(await compiled(`(eq (load-time-value
+        (progn (incf *target-load-values*) *target-literal*)) *target-literal*)`), 'T\nmiricl> ');
+      assert.equal(await compiled('*target-load-values*'), '1\nmiricl> ');
+      assert.match(await compiled('(progv nil nil (incf *target-load-values*))'), /Error: Remote compiler:/);
+      assert.equal(await compiled('*target-load-values*'), '1\nmiricl> ', 'Rejected compilation must not execute the form.');
+      assert.equal(await compiled('(= (js:from-js (js:invoke (target-js) "sqrt" 81)) 9)'), 'T\nmiricl> ');
+      assert.equal(await compiled(`(let ((*target-special* :inner))
+        (flet ((read-special () *target-special*)) (read-special)))`), ':INNER\nmiricl> ');
+      assert.equal(await compiled(`(defun remote-return (x) "Remote documentation."
+        (declare (ignore x)) (return-from remote-return (values 10 20)))`), 'REMOTE-RETURN\nmiricl> ');
+      assert.equal(await compiled('(remote-return nil)'), '10\n20\nmiricl> ');
+      assert.equal(await compiled(`(equal (documentation 'remote-return 'function)
+        "Remote documentation.")`), 'T\nmiricl> ');
+      assert.equal(await compiled(`(progn (defparameter *remote-closure*
+        (let ((x 40)) (lambda () (incf x)))) (funcall *remote-closure*))`), '41\nmiricl> ');
+      assert.equal(await compiled('(funcall *remote-closure*)'), '42\nmiricl> ');
+      assert.equal(await compiled('(null (function-lambda-expression *remote-closure*))'), 'T\nmiricl> ');
+      assert.equal(await compiled(`(funcall (miricl-compiler:compile-native
+        '(lambda () (target-literal))))`), '(:ORIGINAL)\nmiricl> ');
+      assert.equal(await compiled('miricl-compiler::*compiler-state*'), ':COLD\nmiricl> ');
+      assert.equal(await compiled('(values 17 23)'), '17\n23\nmiricl> ');
+      assert.equal(await compiled(`(and (= * 17) (equal / '(17 23))
+        (equal + '(values 17 23)))`), 'T\nmiricl> ');
+      console.log(`PASS ${runtime} host-compiled browser functions, target macros/literals/JS objects, dynamic state and multiple values`);
       assert.equal(await terminal.send('(values 1 2 nil)'), '1\n2\nNIL\nmiricl> ');
       assert.equal(await terminal.send('(format t "hello~%")'), 'hello\nNIL\nmiricl> ');
       const start = terminal.output.length;
@@ -93,6 +132,16 @@ try {
       assert.match(terminal.output, /\[Browser connected\]\nmiricl> /);
       assert.equal(await terminal.send('*app-count*'), '42\nmiricl> ');
       const beforeClose = terminal.output.length;
+      // Closing while compilation is parked must wake the Lisp thread before
+      // detaching its service table; otherwise its poll calls a null entry.
+      vm.dev.sendCompilation = () => {};
+      const pendingCompilation = vm.evaluateAsync('(+ 1 2)');
+      const rejectedCompilation = assert.rejects(pendingCompilation, /not supported/);
+      await waitFor(() => vm.dev.compilerRequests.size === 1, 'parked compiler request');
+      vm.dev.close();
+      await rejectedCompilation;
+      assert.equal(vm.vm['compiler-services'].get(0), null);
+      assert.equal((await vm.evaluateAsync('(+ 1 2)')).output, '3\n');
       vm.close(); vm = undefined;
       await waitFor(() => terminal.output.slice(beforeClose).includes('[Browser disconnected; waiting for a browser]'), 'TCP disconnected status');
       assert.equal(terminal.ended, false, 'TCP must survive a browser disconnect.');
@@ -122,7 +171,7 @@ try {
       assert.match(await response.text(), /User webapp/);
       response = await get('/scripts/miricl.mjs');
       assert.match(response.headers.get('content-type'), /javascript/); await response.arrayBuffer();
-      response = await get('/miricl-interpreter.wasm');
+      response = await get('/miricl.wasm');
       assert.equal(response.headers.get('content-type'), 'application/wasm');
       assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
       response = await get('/large.bin');

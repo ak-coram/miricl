@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl, MiriclError} from '../scripts/miricl.mjs';
 
-const binary = fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm');
+const binary = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
 const asdf = fs.readFileSync(process.argv[3] ?? 'build/asdf/asdf.lisp', 'utf8');
 const vm = await Miricl.instantiate(binary);
 const machines = [vm];
@@ -118,7 +118,7 @@ try {
   nested.mountFile('/empty.wasm', empty);
   await check(nested, '(load "/empty.wasm")');
 
-  // A single empty unit isolates bad framing/version tests from application code.
+  // A single empty unit isolates bad framing/magic tests from application code.
   vm.mountFile('/unit.lisp', '');
   await check(vm, '(pathnamep (compile-file "/unit.lisp"))');
   const unit = await vm.readFile('/unit.wasm');
@@ -129,12 +129,11 @@ try {
     Uint8Array.from(unit, (byte, i) => i === 8 ? 1 : byte),
     Uint8Array.from(unit, (byte, i) => i === 11 ? 120 : byte),
   ];
-  // Replace the unit version while keeping valid Wasm framing.
-  const unsupported = unit.slice();
-  const version = unsupported.indexOf(40, 12) + 1; // first '(' starts (1 roots records)
-  assert.equal(unsupported[version], 49);
-  unsupported[version] = 50;
-  invalid.push(unsupported);
+  // Corrupt the format magic while keeping valid Wasm framing.
+  const badMagic = unit.slice();
+  assert.deepEqual([...badMagic.subarray(26, 30)], [77, 73, 82, 70]);
+  badMagic[26] = 0;
+  invalid.push(badMagic);
   for (const [i, bytes] of invalid.entries()) {
     nested.mountFile(`/invalid-${i}.wasm`, bytes);
     await assert.rejects(nested.evaluateAsync(`(load "/invalid-${i}.wasm")`), MiriclError);

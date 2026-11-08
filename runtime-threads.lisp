@@ -68,7 +68,7 @@
         (struct.get $green-thread $memory-offset (local.get $thread))
         (struct.get $green-thread $capacity (local.get $thread)) (global.get $thread-free-blocks)))
       (struct.set $green-thread $capacity (local.get $thread) (i32.const 0))
-      (struct.set $green-thread $memory-pages (local.get $thread) (i32.const 0)))))
+      (struct.set $green-thread $memory-bytes (local.get $thread) (i32.const 0)))))
 
 (define-runtime-function $thread-allocate-scratch (($thread (ref $green-thread)) ($pages i32)) ()
   (:locals ($scan (ref null $thread-scratch-block)) ($previous (ref null $thread-scratch-block)) ($offset i32))
@@ -95,17 +95,21 @@
 
 (define-runtime-function $thread-save () ()
   (:export-raw "thread-save")
-  (:locals ($thread (ref $green-thread)) ($pages i32))
+  (:locals ($thread (ref $green-thread)) ($pages i32) ($bytes i32))
   #@(local.set $thread (call $thread-current))
   #@(struct.set $green-thread $context (local.get $thread) ,(thread-context-constructor nil))
-  ;; A second linear memory stores scratch snapshots. Bulk memory.copy keeps
-  ;; native traversal fast, and live printer/reader pointers keep their offsets.
-  #@(local.set $pages (memory.size))
+  ;; Linear memory is transport/reader/printer scratch, not the Lisp heap.
+  ;; Capacity can remain huge after mounting a file. Only the output prefix
+  ;; and the current binary input extent are live across a Lisp safepoint.
+  ;; Keep their offsets, but never copy unused capacity on a context switch.
+  #@(local.set $bytes (select (global.get $cursor) (global.get $limit)
+    (i32.gt_u (global.get $cursor) (global.get $limit))))
+  #@(local.set $pages (i32.shr_u (i32.add (local.get $bytes) (i32.const 65535)) (i32.const 16)))
   #@(if (i32.gt_u (local.get $pages) (struct.get $green-thread $capacity (local.get $thread)))
     (then (call $thread-allocate-scratch (local.get $thread) (local.get $pages))))
-  #@(struct.set $green-thread $memory-pages (local.get $thread) (local.get $pages))
+  #@(struct.set $green-thread $memory-bytes (local.get $thread) (local.get $bytes))
   #@(memory.copy $thread-memory 0 (struct.get $green-thread $memory-offset (local.get $thread))
-    (i32.const 0) (i32.shl (local.get $pages) (i32.const 16))))
+    (i32.const 0) (local.get $bytes)))
 
 (define-runtime-function $thread-enter (($id i32)) ()
   (:export-raw "thread-enter")
@@ -118,7 +122,7 @@
       `(global.set ,name (struct.get $thread-context ,i (local.get $context)))))
   #@(memory.copy 0 $thread-memory (i32.const 0)
     (struct.get $green-thread $memory-offset (local.get $thread))
-    (i32.shl (struct.get $green-thread $memory-pages (local.get $thread)) (i32.const 16)))
+    (struct.get $green-thread $memory-bytes (local.get $thread)))
   #@(global.set $thread-budget (i32.const 2048)))
 
 (define-runtime-function $thread-switch () ()
@@ -313,7 +317,7 @@
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
     (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
     (field $state (mut i32)) (field $context (mut (ref null $thread-context)))
-    (field $memory-offset (mut i32)) (field $capacity (mut i32)) (field $memory-pages (mut i32))
+    (field $memory-offset (mut i32)) (field $capacity (mut i32)) (field $memory-bytes (mut i32))
     (field $public (mut (ref null $obj))) (field $interrupts (mut (ref null $obj))) (field $deadline (mut f64)) (field $started (mut i32)))))
   #@(type $thread-scratch-block (struct (field $offset i32) (field $capacity i32)
     (field $next (mut (ref null $thread-scratch-block)))))

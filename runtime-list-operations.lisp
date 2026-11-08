@@ -828,6 +828,8 @@
         (%%fresh-line 1 $fresh-line-native (0))
         (%%check-generic-arity 2 $check-generic-arity (0 1))
         (%%generic-discriminator 2 $generic-discriminator (0 1))
+        (%invoke-method 5 $invoke-method (0 1 2 3 4 (:constant 0)))
+        (%invoke-method-without-next 3 $invoke-method (0 1 (:null) 2 (:null) (:constant 1)))
         (%ensure-layout 1 $ensure-instance-layout (0))
         (%%property-method 2 $direct-function (0 (:null) 1 (:constant 3)))
         (%%property-effective 2 $property-effective (0 1))

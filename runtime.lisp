@@ -51,6 +51,8 @@
       ,(clos-runtime-wat)
       ,(generic-functions-runtime-wat)
       ,(development-runtime-wat)
+      ,(fasl-codec-runtime-wat)
+      ,(native-code-runtime-wat)
       ,(sequence-runtime-wat)
       ,(list-operations-runtime-wat)
       ,(sequence-construction-runtime-wat)
@@ -84,4 +86,5 @@
       ;; Use the same layout in both images, leaving room for the two raw
       ;; function declarations and the five optional WASI imports.
       ,(runtime-function-layout *runtime-function-definitions*
-                                :reserved-functions 7))))
+                                :reserved-functions 7)
+      ,(wat-fragment (if *native-compiler-image* (first *native-compiler-image*) "")))))

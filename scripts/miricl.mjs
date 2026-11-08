@@ -14,6 +14,12 @@ const javascriptBridge = new WebAssembly.Module(new Uint8Array([
   2,16,1,4,104,111,115,116,...serviceName,0,0,
   7,11,1,...serviceName,0,0,
 ]));
+const nativeCompilerBridge = new WebAssembly.Module(new Uint8Array([
+  0,97,115,109,1,0,0,0,
+  1,8,1,96,3,111,111,111,1,111,
+  2,16,1,4,104,111,115,116,...serviceName,0,0,
+  7,11,1,...serviceName,0,0,
+]));
 
 // JSPI preserves the evaluator's native Wasm stack while the common scheduler
 // runs another Lisp thread. No Lisp objects leave this WebAssembly instance.
@@ -415,6 +421,15 @@ export class Miricl {
       this.vm['host-services'].set(0, bridge.exports.service);
     }
     this.vm.initialize();
+    if (this.vm['native-services']) {
+      const bridge = new WebAssembly.Instance(nativeCompilerBridge, {host: {service: (code, literals, name) => {
+        const [start, length] = this.vm['native-code-bytes'](code);
+        const module = new WebAssembly.Module(new Uint8Array(this.vm.memory.buffer, start, length));
+        const compiled = new WebAssembly.Instance(module, {'miricl.runtime': this.vm});
+        return this.vm['native-function'](compiled.exports.entry, literals, name, length);
+      }}});
+      this.vm['native-services'].set(0, bridge.exports.service);
+    }
     if (this.vm['javascript-services']) this.javascript = new JavaScriptHost(this, imports);
     if (this.vm['thread-services'] && typeof WebAssembly.Suspending === 'function')
       this.threads = new GreenThreads(this);

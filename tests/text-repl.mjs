@@ -1,4 +1,4 @@
-// node --experimental-wasm-wasmfx tests/text-repl.mjs miricl-interpreter.wasm [miricl-repl.wasm] [--in-process]
+// node --experimental-wasm-wasmfx tests/text-repl.mjs miricl.wasm [miricl-repl.wasm] [--in-process]
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -9,7 +9,7 @@ import {terminalCore, terminalFixture} from './component-core.mjs';
 const options = process.argv.slice(2);
 const inProcess = options.includes('--in-process');
 const paths = options.filter(option => !option.startsWith('--'));
-const binary = paths[0] ?? 'miricl-interpreter.wasm';
+const binary = paths[0] ?? 'miricl.wasm';
 const wasiBinary = paths[1];
 const module = await WebAssembly.compile(fs.readFileSync(binary));
 assert.deepEqual(WebAssembly.Module.imports(module), []);
@@ -258,6 +258,20 @@ if (wasiBinary) {
     exports['terminal-start']();
     return new TextDecoder().decode(Uint8Array.from(written));
   };
+  const compilerProbe = `(and
+    (eq miricl-compiler::*compiler-origin* :image)
+    (every (lambda (name) (null (function-lambda-expression (symbol-function name))))
+      miricl-compiler::*native-compiler-seeds*)
+    (multiple-value-bind (code literals)
+        (miricl-compiler:emit-native-module (miricl-compiler:compile-to-hir '(lambda (x) (+ x 2))))
+      (declare (ignore literals)) (> (length code) 8)))`.replace(/\s+/gu, ' ') + '\n:quit\n';
+  assert.equal(await runInProcess(compilerProbe), 'miricl> T\nmiricl> ');
+  if (!inProcess) {
+    const nodeCompiler = spawnSync(process.execPath, [repl, binary], {input: compilerProbe, encoding: 'utf8'});
+    assert.ifError(nodeCompiler.error);
+    assert.equal(nodeCompiler.status, 0, nodeCompiler.stderr);
+    assert.equal(nodeCompiler.stdout, 'T\n', 'The Node REPL must use its precompiled compiler image.');
+  }
   assert.equal(await runInProcess(`"${'λ🙂'.repeat(300)}"\n:quit\n`), `miricl> "${'λ🙂'.repeat(300)}"\nmiricl> `);
   assert.equal(await runInProcess(session), `miricl> ...> F\nmiricl> 42\nmiricl> Error: Division by zero.\n${traceHeader}  COMMON-LISP:/\nmiricl> 7\nmiricl> `);
   assert.match(await runInProcess('('), /Error: Incomplete input\./);
@@ -296,6 +310,10 @@ if (wasiBinary) {
       [process.env.WASMTIME ?? 'wasmtime', ['run', '-W', 'stack-switching=y', '-S', 'p3=y', wasiBinary]]
     ];
     for (const [command, args] of runtimes) {
+      const compiler = spawnSync(command, args, {input: compilerProbe, encoding: 'utf8'});
+      assert.ifError(compiler.error);
+      assert.equal(compiler.status, 0, compiler.stderr);
+      assert.equal(compiler.stdout, 'miricl> T\nmiricl> ');
       const wasi = spawnSync(command, args, {input: session, encoding: 'utf8'});
       assert.ifError(wasi.error);
       assert.equal(wasi.status, 0, wasi.stderr);

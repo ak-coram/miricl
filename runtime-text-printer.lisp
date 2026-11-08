@@ -565,7 +565,13 @@
                   (then (global.set $text-status (i32.const 2)) (br $done)))))
     (local.set $form (local.get $value))
     (drop (call $set-symbol-value (call $symbol (i32.const ,(runtime-symbol-id '-))) (local.get $form)))
-    (local.set $value (call $eval (local.get $form) (ref.null $obj)))
+    (local.set $value
+      (if (result (ref null $obj)) (i32.or
+            (ref.is_null (table.get $compiler-services (i32.const 0)))
+            (i32.or (i32.eqz (global.get $thread-active)) (global.get $javascript-depth)))
+        (then (call $eval (local.get $form) (ref.null $obj)))
+        (else (call $apply ,(clos-library-reference '%remote-evaluate)
+          (call $cons (local.get $form) (ref.null $obj))))))
     (local.set $values (call $value-list (local.get $value)))
     (call $record-repl-history (local.get $form) (local.get $values))
     (call $flush-output)

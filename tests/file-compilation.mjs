@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const binary = fs.readFileSync(process.argv[2] ?? 'miricl-interpreter.wasm');
+const binary = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
 const vm = await Miricl.instantiate(binary);
 vm.mountFile('portable.lisp', `
   (defpackage :compiled-package (:use :cl))

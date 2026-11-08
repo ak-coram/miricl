@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 
 const args = process.argv.slice(2);
-const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl-interpreter.wasm';
+const binary = args.find(arg => !arg.startsWith('--')) ?? 'miricl.wasm';
 const entries = 1000, traversals = 10;
 const source = `(defparameter *iteration-table* (make-hash-table))
   (dotimes (i ${entries}) (setf (gethash i *iteration-table*) i))`;

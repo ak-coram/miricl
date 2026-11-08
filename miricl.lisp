@@ -120,12 +120,15 @@
 
 (defparameter *interpreter-wasm* nil)
 (defparameter *interpreter-wasm-compact* nil)
-(defun interpreter-wasm (&key wasi debug-names)
+(defun interpreter-wasm (&key wasi native-compiler debug-names)
   "Return the interpreter binary. DEBUG-NAMES retains native debugging names."
-  (if wasi
-      (let ((bytes (wt:wat-to-wasm (interpreter-wat :wasi t))))
+  (if (or wasi native-compiler)
+      (let* ((image (ensure-native-compiler-image))
+             (*native-compiler-image* image)
+             (bytes (wt:wat-to-wasm (interpreter-wat :wasi wasi))))
         (if debug-names bytes (wasm-without-debug-names bytes)))
-      (let ((raw (or *interpreter-wasm* (setf *interpreter-wasm* (wt:wat-to-wasm (interpreter-wat))))))
+      (let* ((*native-compiler-image* nil)
+             (raw (or *interpreter-wasm* (setf *interpreter-wasm* (wt:wat-to-wasm (interpreter-wat))))))
         (copy-seq (if debug-names raw
           (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
             (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw))))))))))
@@ -134,7 +137,9 @@
   (with-open-file (stream pathname :direction :output :if-exists :supersede
                                   :element-type '(unsigned-byte 8))
     (write-sequence (if wasi
-                       (repl-command-wasm (interpreter-wasm :wasi t :debug-names debug-names))
+                       (wasm-with-custom-section
+                         (repl-command-wasm (interpreter-wasm :wasi t :debug-names debug-names))
+                         "miricl.node-compiler" (interpreter-wasm :native-compiler t :debug-names debug-names))
                        (wasm-with-custom-section (interpreter-wasm :debug-names debug-names)
                          "miricl.repl-bridge" (repl-bridge-core-wasm))) stream))
   pathname)

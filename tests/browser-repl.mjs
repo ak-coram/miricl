@@ -78,8 +78,8 @@ try {
     assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
     return result.result.value;
   }
-  async function waitFor(expression) {
-    const deadline = Date.now() + 10000;
+  async function waitFor(expression, timeout = 10000) {
+    const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       if (await js(expression)) return;
       await new Promise(resolve => setTimeout(resolve, 25));
@@ -107,6 +107,16 @@ try {
   await command('Page.navigate', {url: pathToFileURL(html).href});
   await waitFor(`document.getElementById('run') && ${ready}`);
   assert.equal(await input('(+ 1 2)'), '3\n');
+  assert.equal(await input('miricl-compiler::*compiler-state*'), ':COLD\n');
+  await js("document.getElementById('examples').value = 'compilation'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
+  await waitFor(completed, 60000);
+  const compilation = await output();
+  assert.equal((compilation.match(/Packed Lisp code: [1-9][0-9]* bytes/g) ?? []).length, 2);
+  assert.equal((compilation.match(/Wasm module: [1-9][0-9]* bytes/g) ?? []).length, 2);
+  assert.equal((compilation.match(/\d+ ms real time, \d+ ms run time/g) ?? []).length, 2);
+  assert.match(compilation, /First compilation \(includes compiler bootstrap\):[\s\S]*Second compilation \(compiler already bootstrapped\):/);
+  assert.match(compilation, /144\n25\n$/);
+  assert.equal(await input('miricl-compiler::*compiler-origin*'), ':FIRST-USE\n');
   for (const [name, source] of threadCases)
     assert.equal(await input(source), 'T\n', `Browser green threads: ${name}`);
   assert.match(await input('(progn (miricl-threads:make-thread (lambda () (sleep 0.02) (format t "background-thread-output~%"))) (values))'), /^(?:background-thread-output\n)?$/);

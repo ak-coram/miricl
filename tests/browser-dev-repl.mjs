@@ -6,7 +6,7 @@ import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {connectTerminal, createWebapp, startHost, testPorts, waitFor} from './repl-bridge-fixture.mjs';
 
-const binary = path.resolve(process.argv[2] ?? 'miricl-interpreter.wasm');
+const binary = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
 const httpOrigin = `http://127.0.0.1:${testPorts.http}`;
 const directory = await createWebapp(binary);
@@ -27,7 +27,7 @@ await fs.writeFile(path.join(directory, 'project/raw data λ.bin'), Uint8Array.o
 await fs.writeFile(path.join(directory, 'production.html'), `<!doctype html>
 <script type="module">
   import {Miricl} from './scripts/miricl.mjs';
-  const bytes = await (await fetch('./miricl-interpreter.wasm')).arrayBuffer();
+  const bytes = await (await fetch('./miricl.wasm')).arrayBuffer();
   globalThis.app = await Miricl.instantiate(bytes);
   app.mountFile('/app.wasm', await (await fetch('./app.wasm')).arrayBuffer());
   await app.evaluateAsync('(load "/app.wasm")');
@@ -109,6 +109,10 @@ try {
       await waitFor(() => js('location.search === "?dev" && globalThis.ready === true && app.dev?.state === "connected"'), 'development attachment');
       terminal = await connectTerminal(); await terminal.ready();
       assert.equal(await terminal.send('(incf *app-count*)'), '42\nmiricl> ');
+      assert.equal(await terminal.send('(defun remote-browser-answer () *app-count*)'), 'REMOTE-BROWSER-ANSWER\nmiricl> ');
+      assert.equal(await terminal.send('(remote-browser-answer)'), '42\nmiricl> ');
+      assert.equal(await js(`app.evaluate("(null (function-lambda-expression #'remote-browser-answer))").output`), 'T\n');
+      assert.equal(await js('app.evaluate("miricl-compiler::*compiler-state*").output'), ':COLD\n');
       await js('document.getElementById("counter").click()');
       await waitFor(() => js('document.getElementById("value").value === "43"'), 'shared Lisp state');
       assert.equal(await terminal.send('*app-count*'), '43\nmiricl> ');

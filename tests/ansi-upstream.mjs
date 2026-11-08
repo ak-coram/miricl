@@ -1,17 +1,20 @@
 import {Worker} from 'node:worker_threads';
 import {measureWasmImages} from '../scripts/wasm-size.mjs';
+import {validateExecution, summarizeCompilation} from './ansi-compiler.mjs';
 
 export async function runUpstream({binary, sources, timeout = 10000, loadTimeout = 120000,
   heapLimitMb = 512, expectedTests = null,
+  execution = 'interpreter',
   seed = Array.from(crypto.getRandomValues(new Uint32Array(4))), onProgress = () => {}}) {
   for (const [name, value] of Object.entries({timeout, loadTimeout}))
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer.`);
+  validateExecution(execution);
   if (!Number.isSafeInteger(heapLimitMb) || heapLimitMb < 16) throw new Error('Heap limit must be an integer of at least 16 MiB.');
   if (!Array.isArray(seed) || seed.length !== 4 || seed.some(word => !Number.isInteger(word) || word < 0 || word > 0xffffffff))
     throw new Error('Seed must contain four unsigned 32-bit integers.');
   const imageSizes = measureWasmImages(binary);
   const startedAt = Date.now();
-  const report = {binary, profile: 'full', runner: 'upstream', timeout, loadTimeout, heapLimitMb,
+  const report = {binary, profile: 'full', runner: 'upstream', execution, timeout, loadTimeout, heapLimitMb,
     seed: [...seed], performanceBudgetMs: 2000, imageSizes,
     inventory: 'Unmodified upstream init.lsp and guest RT registration (no host Lisp)',
     startedAt: new Date(startedAt).toISOString(), tests: [], loadErrors: [], recoveries: 0, error: null};
@@ -56,7 +59,7 @@ export async function runUpstream({binary, sources, timeout = 10000, loadTimeout
         timer = setTimeout(() => failed(`Worker exceeded ${limit} ms.`, true), limit);
       };
       worker = new Worker(new URL('./ansi-upstream-worker.mjs', import.meta.url), {
-        workerData: {binary, sources, seed: report.seed, timeout, loadTimeout},
+        workerData: {binary, sources, seed: report.seed, timeout, loadTimeout, execution},
         resourceLimits: {maxOldGenerationSizeMb: heapLimitMb},
       });
       worker.on('error', error => failed(error.message));
@@ -83,6 +86,7 @@ export async function runUpstream({binary, sources, timeout = 10000, loadTimeout
           ready = true;
           report.files = [...new Set(plan.map(record => record.file))];
           report.loadElapsedMs ??= message.loadElapsedMs;
+          if (message.compilerBootstrap) report.compilerBootstrap = message.compilerBootstrap;
           if (message.output) report.initializationOutput = message.output.slice(0, 4000);
           progress({phase: 'test', totalTests: plan.length, file: plan[resumeAt].file, test: plan[resumeAt].name});
           worker.postMessage({start: resumeAt});
@@ -124,5 +128,6 @@ export async function runUpstream({binary, sources, timeout = 10000, loadTimeout
   report.summary.complete = !report.error && report.summary.total > 0 && report.summary.total === report.summary.expected;
   progress({phase: report.error ? 'aborted' : 'finished', test: undefined});
   report.elapsedMs = report.progress.elapsedMs;
+  summarizeCompilation(report);
   return report;
 }

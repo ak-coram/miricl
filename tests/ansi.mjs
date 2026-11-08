@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Run the unmodified upstream RT harness inside the standalone interpreter.
-// node tests/ansi.mjs [miricl-interpreter.wasm] [--helpers=cons] [upstream-file.lsp ...]
+// node tests/ansi.mjs [miricl.wasm] [--helpers=cons] [upstream-file.lsp ...]
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
 import {Miricl} from '../scripts/miricl.mjs';
+import {installCompiler, compiledTest, compilerCounters, compilerPhase, summarizeCompilation} from './ansi-compiler.mjs';
 
-const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
+const binary = process.argv[2] ?? 'miricl.wasm';
 if (process.argv.slice(3).includes('--full')) {
   const {main} = await import('./ansi-full.mjs');
   await main(binary, process.argv.slice(3).filter(arg => arg !== '--full'));
@@ -15,14 +16,18 @@ if (process.argv.slice(3).includes('--full')) {
 }
 const root = fileURLToPath(new URL('./ansi-test/', import.meta.url));
 const helpers = process.argv.slice(3).includes('--helpers=cons') ? 'cons' : null;
-const files = process.argv.slice(3).filter(arg => arg !== '--helpers=cons');
+const compiler = process.argv.slice(3).includes('--compiler');
+const files = process.argv.slice(3).filter(arg => !['--helpers=cons', '--compiler'].includes(arg));
 if (!files.length) files.push(
   'eval-and-compile/declaim.lsp',
   'eval-and-compile/ignore.lsp',
   'eval-and-compile/ignorable.lsp',
 );
 const reportPath = process.env.MIRICL_ANSI_REPORT ?? 'ansi-results.json';
-const report = {binary, files, ...(helpers ? {helpers} : {}), tests: [], error: null};
+fs.mkdirSync(path.dirname(reportPath), {recursive: true});
+const report = {binary, files, execution: compiler ? 'compiler' : 'interpreter',
+  ...(helpers ? {helpers} : {}), tests: [], error: null};
+let vm;
 const string = value => `"${value.replace(/["\\]/g, '\\$&')}"`;
 try {
   if (!fs.existsSync(path.join(root, 'rt.lsp'))) {
@@ -30,7 +35,7 @@ try {
   }
   const module = await WebAssembly.compile(fs.readFileSync(binary));
   assert.deepEqual(WebAssembly.Module.imports(module), []);
-  const vm = new Miricl(await WebAssembly.instantiate(module));
+  vm = new Miricl(await WebAssembly.instantiate(module));
   const evaluate = source => {
     const result = vm.evaluate(source, {eof: true});
     assert.equal(result.quit, false, source);
@@ -65,6 +70,7 @@ try {
     evaluate('(load "auxiliary/cons-aux.lsp")');
   }
   for (const file of files) evaluate(`(load ${string(file)})`);
+  if (compiler) report.compilerBootstrap = installCompiler(vm);
   const pending = evaluate('(progn (format t "~{~S~%~}" (rt:pending-tests)) (values))').trim();
   const names = pending ? pending.split('\n') : [];
   assert.ok(names.length, 'No ANSI tests were registered.');
@@ -73,10 +79,18 @@ try {
   for (const name of names) {
     let entry;
     try {
-      const output = evaluate(`(if (rt:do-test '${name}) :pass :fail)`);
+      const source = `(if (rt:do-test '${name}) :pass :fail)`;
+      const output = evaluate(compiler ? compiledTest(source) : source);
       entry = {name, passed: output.endsWith(':PASS\n'), output};
     } catch (error) {
       entry = {name, passed: false, error: error.message, code: error.code, output: error.output ?? ''};
+    }
+    if (compiler) {
+      entry.compilation = compilerCounters(vm);
+      entry.phase = compilerPhase(entry.compilation);
+      if (entry.passed && entry.compilation.compiled < 1) {
+        entry.passed = false; entry.error = 'Test passed without native compilation.';
+      }
     }
     report.tests.push(entry);
     console.log(`${entry.passed ? 'PASS' : 'FAIL'} ${name}`);
@@ -87,10 +101,12 @@ try {
   console.error(report.error);
   if (error.output) process.stderr.write(error.output);
 } finally {
+  vm?.close();
   const passed = report.tests.filter(test => test.passed).length;
   const failed = report.tests.length - passed;
   report.summary = {passed, failed, total: report.tests.length};
+  summarizeCompilation(report);
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
-  console.log(`ANSI standalone: ${passed} passed, ${failed} failed (${report.tests.length} tests).`);
+  console.log(`ANSI standalone (${report.execution}): ${passed} passed, ${failed} failed (${report.tests.length} tests).`);
   process.exitCode = report.error || failed || !report.tests.length ? 1 : 0;
 }

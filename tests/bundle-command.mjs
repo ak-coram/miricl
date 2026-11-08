@@ -6,7 +6,7 @@ import os from 'node:os';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {Miricl} from '../scripts/miricl.mjs';
-const image = path.resolve(process.argv[2] ?? 'miricl-interpreter.wasm');
+const image = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
 const asdf = path.resolve(process.argv[4] ?? 'miricl-asdf.wasm');
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-bundle-command-'));
@@ -25,12 +25,16 @@ async function run(program, args, input) {
 try {
   await fs.copyFile(asdf, path.join(directory, 'miricl-asdf.wasm'));
   await fs.copyFile(new URL('../miricl.js', import.meta.url), path.join(directory, 'miricl.js'));
-  await fs.copyFile(image, path.join(directory, 'miricl-interpreter.wasm'));
-  if (wasi) await fs.copyFile(wasi, path.join(directory, 'miricl-repl.wasm'));
+  await fs.copyFile(image, path.join(directory, 'miricl.wasm'));
+  await fs.copyFile(wasi ?? path.join(path.dirname(image), 'miricl-repl.wasm'), path.join(directory, 'miricl-repl.wasm'));
   await fs.mkdir(path.join(directory, 'tools'));
   await fs.symlink('../miricl.js', path.join(directory, 'tools', 'miricl.js'));
   await fs.writeFile(path.join(directory, 'demo.asd'), `(asdf:defsystem "demo" :serial t :build-pathname "existing.wasm"
-    :components ((:file "macros") (:file "application")))`);
+    :components ((:file "macros") (:file "application"))
+    :perform (asdf:monolithic-compile-bundle-op :after (operation system)
+      (declare (ignore operation system))
+      (assert (find "demo.asd" (directory "*.asd") :test #'equal :key #'file-namestring))
+      (assert (find "probe.lisp" (directory "named/*.lisp") :test #'equal :key #'file-namestring))))`);
   await fs.writeFile(path.join(directory, 'macros.lisp'), `(defpackage :demo (:use :cl) (:export :answer))
     (in-package :demo) (defmacro twice (x) \`(+ ,x ,x))`);
   await fs.writeFile(path.join(directory, 'application.lisp'), `(in-package :demo)
@@ -44,12 +48,15 @@ try {
     :depends-on ("uiop") :components ((:file "with-uiop")))`);
   await fs.writeFile(path.join(directory, 'with-uiop.lisp'),
     '(defun join-words () (uiop:strcat "portable" " bundle"))');
+  await fs.mkdir(path.join(directory, 'named'));
+  await fs.writeFile(path.join(directory, 'named/probe.lisp'), '; Directory lookup through an exact named preopen.');
   for (const host of ['node', ...(wasi ? ['wasi'] : [])]) {
     const target = `${host}/app λ.wasm`;
     const program = host === 'node' ? process.execPath : process.env.WASMTIME ?? 'wasmtime';
     const args = host === 'node'
-      ? [path.join(directory, 'tools', 'miricl.js'), path.join(directory, 'miricl-interpreter.wasm'), '--directory', directory]
-      : ['run', '-W', 'stack-switching=y', '-S', 'p3=y', '--dir', `${directory}::.`, path.join(directory, 'miricl-repl.wasm')];
+      ? [path.join(directory, 'tools', 'miricl.js'), path.join(directory, 'miricl.wasm'), '--directory', directory]
+      : ['run', '-W', 'stack-switching=y', '-S', 'p3=y', '--dir', `${directory}::.`,
+          '--dir', `${directory}/named::named`, path.join(directory, 'miricl-repl.wasm')];
     const result = await run(program, [...args, '--bundle', 'demo', '--output', target]);
     assert.equal(result.code, 0, result.output + result.errors);
     const bytes = await fs.readFile(path.join(directory, target));
@@ -67,6 +74,37 @@ try {
     assert.notEqual(missing.code, 0, missing.output + missing.errors);
     await assert.rejects(fs.access(path.join(directory, host, 'missing.wasm')));
     console.log(`PASS ${host}: browser-free ASDF bundling, separate assets, Unicode paths, fresh LOAD and failure status`);
+    const optimized = await run(program, [...args, '--optimize', 'demo', '--entry', 'DEMO:ANSWER',
+      '--output', `${host}/optimized.wasm`, '--report', `${host}/retention.txt`]);
+    assert.equal(optimized.code, 0, optimized.output + optimized.errors);
+    const optimizedBytes = await fs.readFile(path.join(directory, host, 'optimized.wasm'));
+    const optimizedVM = await Miricl.instantiate(await fs.readFile(image));
+    try {
+      optimizedVM.mountFile('/optimized.wasm', optimizedBytes);
+      assert.equal(optimizedVM.evaluate('(load "/optimized.wasm")').output, 'T\n');
+      assert.equal(optimizedVM.evaluate(`(and (= (demo:answer) 42)
+        (not (fboundp 'demo::browser-start)) (not (boundp 'demo::*deep*))
+        (null (macro-function 'demo::twice)))`).output, 'T\n');
+      assert.ok(optimizedBytes.length < bytes.length);
+      assert.match(await fs.readFile(path.join(directory, host, 'retention.txt'), 'utf8'), /DROP :FUNCTION \("BROWSER-START"/);
+    } finally { optimizedVM.close(); }
+    console.log(`PASS ${host}: whole-program entry points, dead definitions and retention report`);
+    const unstripped = await run(program, [...args, '--optimize', 'demo', '--no-strip',
+      '--output', `${host}/unstripped.wasm`, '--report', `${host}/unstripped.txt`]);
+    assert.equal(unstripped.code, 0, unstripped.output + unstripped.errors);
+    const unstrippedVM = await Miricl.instantiate(await fs.readFile(image));
+    try {
+      unstrippedVM.mountFile('/unstripped.wasm', await fs.readFile(path.join(directory, host, 'unstripped.wasm')));
+      assert.equal(unstrippedVM.evaluate('(load "/unstripped.wasm")').output, 'T\n');
+      assert.equal(unstrippedVM.evaluate(`(and (= (demo:answer) 42) (fboundp 'demo::browser-start)
+        (boundp 'demo::*deep*) (macro-function 'demo::twice) t)`).output, 'T\n');
+      assert.doesNotMatch(await fs.readFile(path.join(directory, host, 'unstripped.txt'), 'utf8'), /^DROP /m);
+    } finally { unstrippedVM.close(); }
+    const invalid = await run(program, [...args, '--bundle', 'demo', '--no-strip']);
+    assert.notEqual(invalid.code, 0, '--no-strip requires --optimize');
+    const noEntry = await run(program, [...args, '--optimize', 'demo']);
+    assert.notEqual(noEntry.code, 0, 'Stripping requires explicit entry points');
+    console.log(`PASS ${host}: --no-strip retains unused definitions, macros and constants without entry points`);
     const dependency = await run(program, [...args, '--bundle', 'with-uiop', '--output', `${host}/with-uiop.wasm`]);
     assert.equal(dependency.code, 0, dependency.output + dependency.errors);
     const runtime = await Miricl.instantiate(await fs.readFile(image));
