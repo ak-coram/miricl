@@ -40,7 +40,7 @@ benchmark-game-of-life: build-game-of-life
     {{ quote(node) }} scripts/benchmark-game-of-life.mjs game-of-life
 
 # Build raw, gzip and Brotli size reports for the Wasm images and HTML pages.
-build-sizes: build build-html build-todo build-game-of-life
+build-sizes: build build-html build-todo build-game-of-life build-maxima
     {{ quote(node) }} scripts/build-size-html.mjs {{ quote(build_dir) }} {{ quote(build_dir / 'image-sizes.html') }} miricl.html {{ quote(absolute_path('game-of-life')) }}
 
 # Check size accounting and the standalone report in a browser.
@@ -243,6 +243,35 @@ ansi-init:
 # Initialize the pinned upstream ASDF/UIOP sources.
 asdf-init:
     git submodule update --init vendor/asdf
+
+# Initialize the pinned canonical Maxima sources.
+maxima-init:
+    git submodule update --init vendor/maxima
+
+# Load Maxima from source and check representative algebra; upstream/compile probe build paths.
+probe-maxima mode='source': build maxima-init
+    {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima' / (mode + '.json')) }} {{ quote(mode) }}
+
+# Exercise the same Maxima core offline inside a Chromium worker.
+test-maxima-browser: build-maxima
+    {{ quote(node) }} tests/browser-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/browser.json') }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
+    {{ quote(node) }} tests/browser-maxima-app.mjs {{ quote(build_dir / 'build/maxima/site') }}
+
+# Check documented mathematics and representative upstream regressions.
+test-maxima-examples: build-maxima
+    MIRICL_MAXIMA_DOCS={{ quote(build_dir / 'build/maxima/doc/info') }} {{ quote(node) }} tests/maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
+    MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/core-tests.json') }} suite rtest13s
+    MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/share-tests.json') }} share rtest_stringproc rtest_grobner rtest_distrib
+
+# Compile Maxima, build its help manuals, and assemble a static browser REPL.
+build-maxima: (probe-maxima 'compile')
+    {{ quote(node) }} scripts/optimize-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima.wasm') }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
+    {{ quote(node) }} scripts/build-maxima-docs.mjs {{ quote(build_dir / 'build/maxima/doc/info') }}
+    {{ quote(node) }} scripts/build-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(build_dir / 'build/maxima/site') }} {{ quote(build_dir / 'build/maxima/doc/info') }}
+
+# Includes upstream's known-failure accounting; failures produce a JSON report.
+test-maxima: build-maxima
+    MIRICL_MAXIMA_DOCS={{ quote(build_dir / 'build/maxima/doc/info') }} MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} MIRICL_MAXIMA_TIMEOUT_MS=7200000 {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/suite.json') }} suite
 
 # Assemble the optional guest ASDF library from a patched source copy.
 build-asdf: build

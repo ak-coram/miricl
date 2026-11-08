@@ -7,7 +7,8 @@
 (defparameter *extension-symbols*
   '(register-source-file return-values quasiquote unquote unquote-splicing unquote-nsplicing *editor-function*
     unicode-char-upcase unicode-char-downcase unicode-string-upcase unicode-string-downcase
-    unicode-string-capitalize unicode-nstring-upcase unicode-nstring-downcase unicode-nstring-capitalize))
+    unicode-string-capitalize unicode-nstring-upcase unicode-nstring-downcase unicode-nstring-capitalize
+    *trap-floating-point-underflow*))
 
 ;; IDs are part of the bootstrap wire protocol, not host function addresses.
 (defparameter *runtime-symbols*
@@ -514,3 +515,4 @@
 (push 'readtable-macro-characters *extension-symbols*)
 (setf *runtime-symbols* (append *runtime-symbols* '(readtable-macro-characters)))
 (push 'readtable-macro-characters *runtime-functions*)
+(setf *runtime-symbols* (append *runtime-symbols* '(*trap-floating-point-underflow*)))

@@ -23,6 +23,26 @@
 (define-runtime-function $node
     (($tag i32) ($n i32) ($a :nullable-object) ($b :nullable-object) ($c :nullable-object))
     (:object)
+  (:locals ($page (ref null $objects)) ($cached :nullable-object) ($character :object))
+  ;; Character identities are canonical across readers, strings, CODE-CHAR and
+  ;; compiled constants. Lazy pages avoid rooting an entire Unicode table.
+  #@(if (i32.eq (local.get $tag) (i32.const 16))
+    (then
+      (local.set $page (array.get $object-pages (global.get $character-pages)
+        (i32.shr_u (local.get $n) (i32.const 8))))
+      (if (ref.is_null (local.get $page))
+        (then
+          (local.set $page (array.new_default $objects (i32.const 256)))
+          (array.set $object-pages (global.get $character-pages)
+            (i32.shr_u (local.get $n) (i32.const 8)) (local.get $page))))
+      (local.set $cached (array.get $objects (ref.as_non_null (local.get $page))
+        (i32.and (local.get $n) (i32.const 255))))
+      (if (i32.eqz (ref.is_null (local.get $cached)))
+        (then (return (ref.as_non_null (local.get $cached)))))
+      (local.set $character ,(wat-new-object :character :n #@(local.get $n)))
+      (array.set $objects (ref.as_non_null (local.get $page))
+        (i32.and (local.get $n) (i32.const 255)) (local.get $character))
+      (return (local.get $character))))
   (wat-new-object #@(local.get $tag)
                   :n #@(local.get $n)
                   :a #@(local.get $a)
@@ -152,6 +172,8 @@
     (field $owner (ref null $obj)))))
   #@(memory (export "memory") 2)
   #@(global $object-serial (mut i32) (i32.const 0))
+  #@(global $character-pages (ref $object-pages)
+    (array.new_default $object-pages (i32.const 4352)))
   #@(global $error (export "error") (mut i32) (i32.const 0))
   #@(tag $transfer (export "native-transfer"))
   #@(func $trap

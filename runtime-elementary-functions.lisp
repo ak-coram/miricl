@@ -233,10 +233,12 @@
         (else (local.set $r (call $exp-f64 (local.get $x) (i32.const 0)))))
       ;; EXP has no mathematical zero. Diagnose loss to zero in the result
       ;; format, while allowing an exactly zero complex component.
-      #@(if (if (result i32) (i32.eq (local.get $kind) (i32.const 3))
+      #@(if (i32.and (i32.eqz (ref.is_null (call $symbol-value
+          (call $symbol (i32.const ,(runtime-symbol-id '*trap-floating-point-underflow*))))))
+        (if (result i32) (i32.eq (local.get $kind) (i32.const 3))
         (then (i32.and (f64.le (f64.abs (local.get $r)) (f64.const 7.006492321624085e-46))
           (f64.le (f64.abs (local.get $i)) (f64.const 7.006492321624085e-46))))
-        (else (i32.and (f64.eq (local.get $r) (f64.const 0)) (f64.eq (local.get $i) (f64.const 0)))))
+        (else (i32.and (f64.eq (local.get $r) (f64.const 0)) (f64.eq (local.get $i) (f64.const 0))))))
         (then (call $elementary-error (i32.const ,(runtime-symbol-id 'floating-point-underflow))
           (local.get $id) (local.get $args)))))
     ((sinh cosh tanh)
@@ -278,8 +280,10 @@
         (then (call $elementary-error (i32.const ,(runtime-symbol-id 'floating-point-overflow))
           (i32.const ,(runtime-symbol-id 'expt)) (local.get $args))))
       (local.set $product (f64.promote_f32 (f32.demote_f64 (local.get $product))))))
-  #@(if (i32.and (f64.eq (local.get $product) (f64.const 0))
-    (i32.and (f64.ne (local.get $x) (f64.const 0)) (f64.ne (local.get $y) (f64.const 0))))
+  #@(if (i32.and (i32.eqz (ref.is_null (call $symbol-value
+      (call $symbol (i32.const ,(runtime-symbol-id '*trap-floating-point-underflow*))))))
+    (i32.and (f64.eq (local.get $product) (f64.const 0))
+      (i32.and (f64.ne (local.get $x) (f64.const 0)) (f64.ne (local.get $y) (f64.const 0)))))
     (then (call $elementary-error (i32.const ,(runtime-symbol-id 'floating-point-underflow))
       (i32.const ,(runtime-symbol-id 'expt)) (local.get $args))))
   #@(local.get $product))

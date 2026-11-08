@@ -17,7 +17,7 @@ jobs:
   build:
     name: Build browser examples, sizes and ANSI results
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 55
     env:
       LISP: sbcl-bin
       LIBWASMTIME_VERSION: 50.0.1
@@ -87,6 +87,22 @@ jobs:
           just --justfile game-of-life/justfile build
           mkdir -p "$RUNNER_TEMP/pages/game-of-life"
           cp game-of-life/build/index.html game-of-life/build/miricl.js game-of-life/build/miricl.wasm game-of-life/build/game-of-life.wasm "$RUNNER_TEMP/pages/game-of-life/"
+
+      - name: Build and test optimized Maxima workbench
+        timeout-minutes: 15
+        env:
+          CHROMIUM: google-chrome
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl texinfo m4
+          node scripts/probe-maxima.mjs miricl.wasm build/maxima/compile.json compile
+          node scripts/optimize-maxima.mjs miricl.wasm build/maxima/maxima.wasm build/maxima/maxima-optimized.wasm
+          node scripts/build-maxima-docs.mjs build/maxima/doc/info
+          node scripts/build-maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm build/maxima/site build/maxima/doc/info
+          node tests/maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm
+          node tests/browser-maxima-app.mjs build/maxima/site
+          cp -R build/maxima/site "$RUNNER_TEMP/pages/maxima"
 
       - name: Build image size summary
         run: node scripts/build-size-html.mjs . "$RUNNER_TEMP/pages/image-sizes.html" index.html

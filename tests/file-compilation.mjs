@@ -15,6 +15,17 @@ vm.mountFile('portable.lisp', `
   (defparameter *encoding-probe* #.(map 'string #'code-char '(0 233 20013 119070)))
   (defstruct persisted-structure (value 42))
   (defparameter *loads* 0)
+  (defun aux-captures (x &aux (before (lambda () x)) (x (1+ x))
+                            (between (lambda () x)) (x (1+ x)))
+    (list (funcall before) (funcall between) x))
+  (eval-when (:compile-toplevel)
+    (proclaim '(special compile-only-special)))
+  (defun compile-only-reader () compile-only-special)
+  (defun compile-only-parameter (compile-only-special)
+    "Keep the documentation before the preserved declaration."
+    (list (compile-only-reader)
+      (let ((compile-only-special (+ compile-only-special 1))) (compile-only-reader))
+      (let* ((compile-only-special (+ compile-only-special 2))) (compile-only-reader))))
   (defun persisted (x &key (y 2)) (values (increment x) y *literal*))
   (defun loaded-once () (load-time-value (incf *loads*)))
   (defun loaded-nil () (load-time-value nil))
@@ -70,6 +81,7 @@ fresh.mountFile('portable.wasm', bytes);
 check(fresh, `(let ((*read-eval* nil) (*read-base* 16) (*readtable* (copy-readtable nil)))
   (set-macro-character (code-char 40) (lambda (stream character) (declare (ignore stream character)) (error "User reader called.")))
   (load "portable.wasm" :verbose nil :print nil))`);
+check(fresh, `(equal (compiled-package::aux-captures 40) '(40 41 42))`);
 check(fresh, `(and (compiled-function-p #'compiled-package::persisted)
   (not (fboundp 'compiled-package::increment))
   (multiple-value-bind (x y object) (compiled-package::persisted 3 :y 5)
@@ -93,6 +105,7 @@ check(fresh, `(and (compiled-function-p #'compiled-package::persisted)
   (compiled-function-p #'compiled-package::bounded-loop)
   (equal (multiple-value-list (compiled-package::bounded-loop 5)) '(4 10)))`);
 check(fresh, `(and
+  (equal (compiled-package::compile-only-parameter 40) '(40 41 42))
   (compiled-function-p #'compiled-package::checked-symbol)
   (equal (multiple-value-list (compiled-package::checked-symbol 'ok)) '(nil ok))
   (eq (compiled-package::checked-member 'symbol :ignored) 'symbol)

@@ -791,7 +791,8 @@
                  (unless (and (<= 1 (length spec) (case mode (:required 1) (:optional 3) (otherwise 2)))
                               (or (not (eq mode :required)) (symbolp parameter)))
                    (error "Malformed parameter ~S." parameter))
-                 (when (or (member variable names) (and supplied (or (eq variable supplied) (member supplied names))))
+                 (when (and (not (eq mode :aux))
+                            (or (member variable names) (and supplied (or (eq variable supplied) (member supplied names)))))
                    (error "Duplicate parameter ~S." parameter))
                  (case mode
                    (:required (setq value (hir-emit :argument nil :single (list index))))

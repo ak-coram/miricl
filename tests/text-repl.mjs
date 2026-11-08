@@ -32,6 +32,16 @@ fails('(error "History abort")', 18);
 assert.equal(output('(list * ** *** / // ///)'), '(107 103 101 (107) (103) (101))\n');
 assert.equal(output('(values)'), '');
 assert.equal(output('(list * /)'), '(NIL NIL)\n');
+// Deep conditional/body chains preserve values and dynamic scope without
+// exhausting the host stack on control operators that add no scope.
+assert.equal(output(`(let ((form '(values 7 11)))
+  (dotimes (i 5000) (setq form (list 'if t form '(error "Unselected branch"))))
+  (multiple-value-list (eval form)))`), '(7 11)\n');
+assert.equal(output(`(progn
+  (defparameter *deep-eval-scope* 1)
+  (let ((form '(let ((*deep-eval-scope* 2)) (throw 'deep-exit *deep-eval-scope*))))
+    (dotimes (i 5000) (setq form (list 'progn nil form)))
+    (list (catch 'deep-exit (eval form)) *deep-eval-scope*)))`), '(2 1)\n');
 vm.mountFile('history-input.lisp', '(values 1 2) (values 3 4)');
 assert.equal(output('101 103 107 (load "history-input.lisp" :verbose nil)'), '101\n103\n107\nT\n');
 assert.equal(output('(list * ** *** + ++ +++)'),

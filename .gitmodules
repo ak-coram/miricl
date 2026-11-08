@@ -4,3 +4,6 @@
 [submodule "vendor/asdf"]
 	path = vendor/asdf
 	url = https://gitlab.common-lisp.net/asdf/asdf.git
+[submodule "vendor/maxima"]
+	path = vendor/maxima
+	url = https://git.code.sf.net/p/maxima/code

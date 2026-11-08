@@ -169,7 +169,29 @@ jobs:
           test -s todo.html
           ros -L sbcl-bin run -- --load "$HOME/.roswell/lisp/quicklisp/setup.lisp" --script scripts/setup-application.lisp "$PWD/game-of-life" game-of-life "$PWD" node
           just --justfile game-of-life/justfile build
+
+      - name: Build optimized Maxima workbench
+        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl texinfo m4
+          node scripts/probe-maxima.mjs miricl.wasm build/maxima/compile.json compile
+          node scripts/optimize-maxima.mjs miricl.wasm build/maxima/maxima.wasm build/maxima/maxima-optimized.wasm
+          node scripts/build-maxima-docs.mjs build/maxima/doc/info
+          node scripts/build-maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm build/maxima/site build/maxima/doc/info
           node scripts/build-size-html.mjs
+
+      - name: Maxima algebra, manual examples and upstream regressions
+        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
+        timeout-minutes: 15
+        env:
+          MIRICL_MAXIMA_CORE: build/maxima/maxima-optimized.wasm
+        run: |
+          node tests/maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm
+          node scripts/probe-maxima.mjs miricl.wasm build/maxima/core-tests.json suite rtest13s
+          node scripts/probe-maxima.mjs miricl.wasm build/maxima/share-tests.json share rtest_stringproc rtest_grobner rtest_distrib
 
       - name: Test standalone browser REPL
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -183,6 +205,7 @@ jobs:
           node tests/browser-dev-repl.mjs miricl.wasm miricl-repl.wasm
           node tests/ansi-html.mjs
           node tests/size-html.mjs
+          node tests/browser-maxima-app.mjs build/maxima/site
 
       - name: Upload standalone browser examples and size report
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -198,6 +221,11 @@ jobs:
             game-of-life/build/miricl.js
             game-of-life/build/miricl.wasm
             game-of-life/build/game-of-life.wasm
+            build/maxima/site/
+            build/maxima/optimization.json
+            build/maxima/retention.txt
+            build/maxima/core-tests.json
+            build/maxima/share-tests.json
           if-no-files-found: error
 
       - name: ANSI tests in the standalone interpreter

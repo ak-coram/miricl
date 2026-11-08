@@ -61,7 +61,9 @@
 (defconstant boole-andc2 4)
 (defconstant boole-orc1 11)
 (defconstant boole-orc2 13)
-(defparameter *features* '(:miricl :common-lisp :ansi-cl :ieee-floating-point))
+(defparameter *features* '(:miricl :common-lisp :ansi-cl :ieee-floating-point :unicode))
+(defvar *trap-floating-point-underflow* t
+  "When NIL, floating-point underflow returns the rounded IEEE result.")
 (defparameter *load-pathname* nil)
 (defparameter *load-truename* nil)
 (defparameter *compile-file-pathname* nil)

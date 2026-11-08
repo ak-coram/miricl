@@ -11,6 +11,39 @@ const check = source => {
   assert.equal(evaluate.runInContext(context, {timeout: 2000}), 'T\n', source);
 };
 for (const source of [
+  `(and (handler-case (exp -1000d0) (floating-point-underflow () t))
+    (let ((miricl:*trap-floating-point-underflow* nil))
+      (and (eql (exp -1000d0) 0d0) (eql (expt 1d-300 2) 0d0)
+        (handler-case (exp 1000d0) (floating-point-overflow () t))))
+    (handler-case (exp -1000d0) (floating-point-underflow () t)))`,
+  `(progn (deftype coerced-flonum () '(double-float * *))
+    (let ((value 5d0))
+      (and (eql (coerce 5 'coerced-flonum) 5d0)
+        (eq value (coerce value '(double-float 0 10)))
+        (eql (coerce 1/2 '(single-float (0) (1))) 0.5)
+        (eql (coerce 1/2 '(float * *)) 0.5)
+        (handler-case (coerce 5 '(double-float 0 4)) (type-error () t))
+        (handler-case (coerce #C(1 2) 'coerced-flonum) (type-error () t)))))`,
+  `(let ((*read-default-float-format* 'double-float))
+    (and (string-equal (write-to-string 2d-7) "2.0e-7")
+      (string-equal (write-to-string 17.29d0) "17.29")
+      (string-equal (format nil "~A" 0.1d0) "0.1")))`,
+  `(let ((*read-default-float-format* 'double-float))
+    (every (lambda (x) (let ((y (read-from-string (write-to-string x))))
+      (and (eql x y) (= (float-sign x) (float-sign y)))))
+      (list 0d0 -0d0 0.1d0 17.29d0 2d-7 1d7 1d-3
+        least-positive-single-float least-positive-double-float
+        least-positive-normalized-single-float least-positive-normalized-double-float
+        most-positive-single-float most-positive-double-float)))`,
+  `(let ((*read-default-float-format* 'double-float) (seed 1729))
+    (loop for type in '(single-float double-float)
+      for bits in '(24 53) for low in '(-149 -1074) for high in '(104 970) always
+      (loop repeat 64
+        for significand = (progn (setq seed (mod (+ (* seed 6364136223846793005) 1) (expt 2 64)))
+          (1+ (mod seed (1- (expt 2 bits)))))
+        for exponent = (+ low (mod (ash seed -32) (1+ (- high low))))
+        for x = (scale-float (coerce significand type) exponent)
+        always (eql x (read-from-string (write-to-string x))))))`,
   `(and (= (float-radix 1.0) 2) (= (float-digits 1.0) 24) (= (float-digits 1d0) 53)
     (= (float-precision 0.0) 0) (= (float-precision least-positive-single-float) 1)
     (= (float-precision least-positive-double-float) 1))`,

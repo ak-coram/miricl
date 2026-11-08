@@ -12,11 +12,13 @@ import {collectImageSizes, renderImageSizes} from '../scripts/build-size-html.mj
 function checkMeasurements(report, directory) {
   assert.deepEqual(report.artifacts.map(artifact => artifact.file),
     ['miricl.wasm', 'miricl-repl.wasm', 'miricl.html', 'todo.html',
-      'game-of-life/', 'game-of-life/build/game-of-life.wasm']);
+      'game-of-life/', 'game-of-life/build/game-of-life.wasm', 'maxima/', 'build/maxima/site/maxima.wasm']);
   for (const artifact of report.artifacts) {
     if (artifact.kind === 'application') {
-      assert.deepEqual(artifact.files.map(file => file.file), ['game-of-life/build/index.html',
-        'game-of-life/build/miricl.js', 'game-of-life/build/miricl.wasm', 'game-of-life/build/game-of-life.wasm']);
+      assert.deepEqual(artifact.files.map(file => file.file), artifact.file === 'game-of-life/'
+        ? ['game-of-life/build/index.html', 'game-of-life/build/miricl.js', 'game-of-life/build/miricl.wasm', 'game-of-life/build/game-of-life.wasm']
+        : ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs', 'miricl.mjs', 'maxima.mjs',
+          'miricl.wasm', 'maxima.wasm', 'files.json.gz'].map(file => `build/maxima/site/${file}`));
       const sizes = {rawBytes: 0, gzipBytes: 0, brotliBytes: 0};
       for (const file of artifact.files) {
         const bytes = fs.readFileSync(path.join(directory, file.file));
@@ -49,8 +51,8 @@ function browserChecks(expected) {
   output.id = 'browser-test-result';
   try {
     check(!globalThis.injected, 'Metadata executed as HTML or JavaScript');
-    check(document.querySelectorAll('#artifact-sizes [data-artifact]').length === 6, 'All six artifact rows are required');
-    check(document.querySelectorAll('#artifact-sizes .group').length === 3, 'Runtime, pages and payload groups are required');
+    check(document.querySelectorAll('#artifact-sizes [data-artifact]').length === 8, 'All eight artifact rows are required');
+    check(document.querySelectorAll('#artifact-sizes .group').length === 4, 'Runtime, pages, Life and Maxima groups are required');
     for (const artifact of expected) {
       const row = document.querySelector(`[data-artifact="${artifact.file}"]`);
       for (const key of ['rawBytes', 'gzipBytes', 'brotliBytes']) {
@@ -60,7 +62,7 @@ function browserChecks(expected) {
       }
     }
     const sections = document.querySelectorAll('.sections');
-    check(sections.length === 3, 'Runtime and application section breakdowns are required');
+    check(sections.length === 4, 'Runtime and application section breakdowns are required');
     for (const section of sections) {
       const names = [...section.querySelectorAll('tbody th')].map(cell => cell.firstChild.textContent);
       check(new Set(names).size === names.length, 'Section chart has repeated names');
@@ -89,6 +91,12 @@ try {
   fs.writeFileSync(path.join(directory, 'game-of-life/build/miricl.js'), 'export class Miricl {}');
   for (const file of ['miricl.wasm', 'game-of-life.wasm'])
     fs.writeFileSync(path.join(directory, 'game-of-life/build', file), repeatedSections);
+  fs.mkdirSync(path.join(directory, 'build/maxima/site'), {recursive: true});
+  for (const file of ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
+    'miricl.mjs', 'maxima.mjs', 'files.json.gz'])
+    fs.writeFileSync(path.join(directory, 'build/maxima/site', file), 'Maxima fixture λ🙂'.repeat(20));
+  for (const file of ['miricl.wasm', 'maxima.wasm'])
+    fs.writeFileSync(path.join(directory, 'build/maxima/site', file), repeatedSections);
   const hostile = '</dd><script>globalThis.injected=true</script><img src=x onerror="globalThis.injected=true"> & λ🙂';
   const report = collectImageSizes(directory, {generatedAt: '2026-11-05T12:00:00.000Z',
     commit: hostile, runURL: 'https://example.com/run?a=1&b=2'});

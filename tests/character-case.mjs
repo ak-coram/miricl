@@ -3,6 +3,26 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source, {eof: true}).output, 'T\n', source);
+check(`(and (eql (name-char "u+fEff") (code-char 65279))
+  (eql #\\U+FEFF (name-char 'ufeff))
+  (eql (name-char "U+01F642") (code-char 128578))
+  (eql #\\U10FFFF (code-char 1114111))
+  (every #'null (mapcar #'name-char '("U+123" "U+110000" "U+0000000" "U+FEFG" "U+")))
+  (handler-case (name-char 65) (type-error () t)))`);
+// MIRICL uses one identity per character, including values reconstructed by
+// readers and FASLs. EQ hash tables, property indicators and control tags must
+// observe that same choice across character construction paths.
+check(`(loop for code in '(0 61 945 128578 1114111) for c = (code-char code) always
+  (let ((table (make-hash-table :test 'eq)) (text (string c)))
+    (setf (gethash c table) :found)
+    (and (eq c (code-char code)) (eq c (char text 0))
+      (eq c (read-char (make-string-input-stream text)))
+      (eq c (read-from-string (write-to-string c)))
+      (eq (gethash (char text 0) table) :found)
+      (eq (getf (list c :found) (code-char code)) :found)
+      (eq (catch c (throw (char text 0) :found)) :found))))`);
+check(`(let ((function (miricl-compiler:compile-native '(lambda (value) (eq value #\\=)))))
+  (and (funcall function (code-char 61)) (not (funcall function #\\:))))`);
 check(`(loop for code in '(453 456 459 498) for c = (code-char code) always
   (and (eql c (char-upcase c)) (eql c (char-downcase c))
     (not (upper-case-p c)) (not (lower-case-p c)) (not (both-case-p c))

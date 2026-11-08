@@ -344,7 +344,7 @@
 (define-runtime-function $coerce-native
     (($object :nullable-object) ($type :nullable-object)) (:nullable-object)
   (:locals ($kind i32) ($expanded :nullable-object) ($args :nullable-object)
-           ($real :object) ($imaginary :object))
+           ($real :object) ($imaginary :object) ($result :nullable-object))
   ;; Numeric loops should reach the existing correctly rounded conversion
   ;; directly, without interpreting the general sequence/type dispatch.
   (wat-symbol-case #@(call $id (local.get $type))
@@ -370,6 +370,16 @@
       (then (return (call $coerce-native (local.get $object)
         (call $car (call $property-cell (struct.get $obj $b (local.get $expanded))
           ,(clos-library-reference :name)))))))))
+  ;; Expanded DEFTYPEs may spell a float format with interval bounds rather
+  ;; than its atomic name. Convert in that format and retain the bounds check.
+  (wat-symbol-case #@(call $operator (local.get $type))
+    ((float short-float single-float double-float long-float)
+      #@(if (call $typep (local.get $object) (local.get $type)) (then (return (local.get $object))))
+      #@(local.set $result (call $coerce-native (local.get $object) (call $car (local.get $type))))
+      #@(if (i32.eqz (call $typep (local.get $result) (local.get $type)))
+        (then (call $type-fail (local.get $object) (local.get $type)
+          (i32.const ,(runtime-error-code :expected-designator)))))
+      #@(return (local.get $result))))
   #@(if (i32.eq (call $operator (local.get $type)) (i32.const ,(runtime-symbol-id 'complex)))
     (then
       (local.set $args (call $cdr (local.get $type)))

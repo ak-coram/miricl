@@ -35,6 +35,11 @@ try {
       (= (miricl-compiler::compiler-primitive 26 maker)
          (miricl-compiler::compiler-primitive 26 closure))))`);
   check(`(let ((function (miricl-compiler:compile-native
+    '(lambda (x &aux (before (lambda () x)) (x (1+ x))
+                    (between (lambda () x)) (x (1+ x)))
+       (list (funcall before) (funcall between) x)))))
+    (equal (funcall function 40) '(40 41 42)))`);
+  check(`(let ((function (miricl-compiler:compile-native
     '(lambda (x &rest tail) (values (car tail) (cdr tail) x)))))
     (and (equal (multiple-value-list (funcall function 1 2 3)) '(2 (3) 1))
          (equal (multiple-value-list (funcall function 1)) '(nil nil 1))

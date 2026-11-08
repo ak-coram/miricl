@@ -231,7 +231,8 @@
     (else (ref.null $obj))))
 
 (define-runtime-function $character-name-code (($name :nullable-object)) (i32)
-  (:locals ($names :nullable-object) ($entry :nullable-object))
+  (:locals ($names :nullable-object) ($entry :nullable-object)
+           ($data :digits) ($length i32) ($position i32) ($code i32) ($digit i32))
   #@(local.set $names (global.get $character-names))
   (wat-list-loop ($names)
     #@(local.set $entry (call $car (local.get $names)))
@@ -242,6 +243,30 @@
     (then (return (i32.const 10))))
   #@(if (call $string-fold-equal (local.get $name) ,(wat-text-literal "Nul"))
     (then (return (i32.const 0))))
+  ;; Accept the common Unicode character names U+HHHH and UHHHH, with four
+  ;; to six hexadecimal digits. The reader and NAME-CHAR share this lookup.
+  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (local.get $name))))
+  #@(local.set $length (array.len (local.get $data)))
+  #@(if (i32.ge_u (local.get $length) (i32.const 5))
+    (then
+      (if (i32.eq (i32.or (array.get $digits (local.get $data) (i32.const 0)) (i32.const 32)) (i32.const 117))
+        (then
+          (local.set $position (i32.const 1))
+          (if (i32.eq (array.get $digits (local.get $data) (i32.const 1)) (i32.const 43))
+            (then (local.set $position (i32.const 2))))
+          (if (i32.or
+                (i32.lt_u (i32.sub (local.get $length) (local.get $position)) (i32.const 4))
+                (i32.gt_u (i32.sub (local.get $length) (local.get $position)) (i32.const 6)))
+            (then (return (i32.const -1))))
+          (block $done (loop $next
+            (br_if $done (i32.eq (local.get $position) (local.get $length)))
+            (local.set $digit (call $digit-value (array.get $digits (local.get $data) (local.get $position))))
+            (if (i32.ge_u (local.get $digit) (i32.const 16)) (then (return (i32.const -1))))
+            (local.set $code (i32.add (i32.shl (local.get $code) (i32.const 4)) (local.get $digit)))
+            (local.set $position (i32.add (local.get $position) (i32.const 1)))
+            (br $next)))
+          (if (i32.lt_u (local.get $code) (i32.const 1114112))
+            (then (return (local.get $code))))))))
   #@(i32.const -1))
 
 (define-runtime-function $character-name-apply (($id i32) ($x :nullable-object)) (:nullable-object)

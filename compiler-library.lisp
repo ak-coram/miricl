@@ -259,7 +259,16 @@
       (setq params (car normalized) body (cadr normalized))))
   (dolist (name params)
     (unless (eq name '&rest) (setq environment (%%compile 3 environment name))))
-  (cons params (%compile-body body environment)))
+  ;; A proclamation may exist only in the compilation environment. Preserve
+  ;; its binding semantics in the code rather than depending on the loader's
+  ;; symbol flags (EVAL-WHEN need not repeat a proclamation at load time).
+  (let ((specials (remove-if-not (lambda (name) (and (not (eq name '&rest)) (%%compile 18 name))) params)))
+    (when specials
+      (let ((declaration (list 'declare (cons 'special specials))))
+        (setq body (if (and (stringp (car body)) (cdr body))
+                       (list* (car body) declaration (cdr body))
+                       (cons declaration body)))))
+    (cons params (%compile-body body environment))))
 (defun %compile-lambda-form (params body environment)
   (let ((parts (%compile-lambda-parts params body environment)))
     (if %compilation-complete (%%compile 2 'lambda parts)
@@ -270,12 +279,14 @@
       ;; Existing closures have already normalized their parameter lists.
       (cons %compilation-complete (cdr parts)))))
 (defun %compile-bindings (operator bindings body environment)
-  (let ((new-environment environment) (compiled nil))
+  (let ((new-environment environment) (compiled nil) (specials nil))
     (dolist (binding bindings)
       (let ((name (if (consp binding) (car binding) binding))
             (init (if (consp binding) (cadr binding) nil)))
         (push (list name (%compile-form init (if (eq operator 'let*) new-environment environment))) compiled)
+        (when (%%compile 18 name) (push name specials))
         (setq new-environment (%%compile 3 new-environment name))))
+    (when specials (push (list 'declare (cons 'special (nreverse specials))) body))
     (list* operator (nreverse compiled) (%compile-body body new-environment))))
 (defun %compile-local-functions (operator definitions body environment)
   (let ((new-environment environment) (compiled nil))

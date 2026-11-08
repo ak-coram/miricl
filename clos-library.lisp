@@ -68,7 +68,10 @@
                (if (symbolp var) (setq key (%keyword var))
                    (setq key (car var) var (cadr var)))
                (push key keys))
-             (unless (and var (symbolp var) (not (%member var names))) (error 'program-error))
+             ;; &AUX is sequential LET* binding, so it may shadow parameters
+             ;; and earlier auxiliaries. Actual parameters remain unique.
+             (unless (and var (symbolp var) (or (eq mode '&aux) (not (%member var names))))
+               (error 'program-error))
              (push var names)
              (when supplied
                (when (%member supplied names) (error 'program-error)) (push supplied names))

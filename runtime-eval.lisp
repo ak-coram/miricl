@@ -20,6 +20,10 @@
     (local.set $body (call $cdr (local.get $body))) (br $declarations)))
   #@(block $done (loop $next
     (br_if $done (ref.is_null (local.get $body)))
+    ;; No work remains after the final body form. Keep the evaluator's
+    ;; dispatch frames off the native stack; the caller still owns unwinding.
+    (if (ref.is_null (call $cdr (local.get $body)))
+      (then (return_call $eval (call $car (local.get $body)) (local.get $env))))
     (local.set $value (call $eval (call $car (local.get $body)) (local.get $env)))
     (local.set $body (call $cdr (local.get $body))) (br $next)))
   #@(local.get $value))
@@ -168,10 +172,20 @@
           (return (call $lookup (local.get $env) (local.get $form)))))
       (return (local.get $form))))
   #@(local.set $operator (struct.get $obj $a (local.get $form)))
+  ;; These operators establish no dynamic scope of their own. Their evaluated
+  ;; subforms own any bindings and transfers, so another unwind frame here
+  ;; only consumes stack during nested conditionals and function bodies.
+  #@(local.set $kind (call $id (local.get $operator)))
+  #@(if (i32.or
+      (i32.or (i32.eq (local.get $kind) (i32.const ,(runtime-symbol-id 'if)))
+              (i32.eq (local.get $kind) (i32.const ,(runtime-symbol-id 'progn))))
+      (i32.or (i32.eq (local.get $kind) (i32.const ,(runtime-symbol-id 'quote)))
+              (i32.eq (local.get $kind) (i32.const ,(runtime-symbol-id 'function)))))
+    (then (return_call $eval1 (local.get $form) (local.get $env))))
   #@(if (if (result i32) (i32.eq (call $tag (local.get $operator)) (i32.const 6))
           (then (f64.eq (struct.get $obj $f (local.get $operator)) (f64.const 0)))
           (else (i32.const 1)))
-    (then (return (call $eval1 (local.get $form) (local.get $env)))))
+    (then (return_call $eval1 (local.get $form) (local.get $env))))
   (wat-dynamic-call #@(call $eval1 (local.get $form) (local.get $env))))
 
 (define-runtime-function $eval1
@@ -190,7 +204,7 @@
   #@(local.set $id (call $id (local.get $name)))
   #@(local.set $args (struct.get $obj $b (local.get $form)))
   #@(if (f64.ne (struct.get $obj $f (local.get $form)) (f64.const 0))
-    (then (return (call $eval-compiled (local.get $form) (local.get $env)))))
+    (then (return_call $eval-compiled (local.get $form) (local.get $env))))
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'quasiquote)))
     (then ,(wat-arity 1)
       (return (call $eval-backquote (call $car (local.get $args)) (local.get $env) (i32.const 1)))))
@@ -223,7 +237,7 @@
                   (i32.and (i32.ne (local.get $id) (i32.const ,(runtime-symbol-id 'multiple-value-list)))
                     (i32.ne (local.get $id) (i32.const ,(runtime-symbol-id 'nth-value)))))))))
         (then (local.set $value (call $macroexpand-1 (local.get $form) (local.get $env)))
-          (return (call $eval (local.get $value) (local.get $env)))))))
+          (return_call $eval (local.get $value) (local.get $env))))))
   ;; Public condition macros expand to one internal special form. This keeps
   ;; their lexical environment and the native unwind/restart implementation.
   #@(if (if (result i32) (array.len (global.get $clos-library-symbols))
@@ -349,10 +363,12 @@
       #@(local.set $value (call $eval (call $car (local.get $args)) (local.get $env)))
       #@(local.set $args (call $cdr (local.get $args)))
       #@(if (ref.is_null (local.get $value)) (then (local.set $args (call $cdr (local.get $args)))))
-      #@(return (call $eval (call $car (local.get $args)) (local.get $env)))))
+      #@(return_call $eval (call $car (local.get $args)) (local.get $env))))
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'progn)))
       (then
         (block $done (loop $next (br_if $done (ref.is_null (local.get $args)))
+          (if (ref.is_null (call $cdr (local.get $args)))
+            (then (return_call $eval (call $car (local.get $args)) (local.get $env))))
           (local.set $value (call $eval (call $car (local.get $args)) (local.get $env)))
           (local.set $args (call $cdr (local.get $args))) (br $next))) (return (local.get $value))))
   #@(if (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'let)))
@@ -491,7 +507,7 @@
               (then (i32.eq (struct.get $obj $n (local.get $name)) (i32.const ,(1+ (runtime-symbol-id 'values)))))
               (else (i32.const 0)))
         (then (return (call $return-values (local.get $args)))))))
-  #@(call $apply (local.get $name) (local.get $args)))
+  #@(return_call $apply (local.get $name) (local.get $args)))
 
 (define-runtime-function $eval-setf
     (($place :nullable-object) ($form :nullable-object) ($env :nullable-object))

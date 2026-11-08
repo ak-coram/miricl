@@ -44,7 +44,7 @@
       (i32.const ,(runtime-error-code :expected-designator)))))
   #@(if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $last)))
     (else (struct.set $obj $b (local.get $tail) (local.get $last))))
-  #@(call $apply (local.get $function) (local.get $head)))
+  #@(return_call $apply (local.get $function) (local.get $head)))
 
 (define-runtime-function $apply1
     (($name :nullable-object) ($args :nullable-object))
@@ -172,7 +172,7 @@
         ,(wat-fail-when #@(i32.eqz (ref.is_null (local.get $args))) :wrong-arity)
         (call $activate-bindings (local.get $env) (struct.get $obj $c (local.get $name)))
         (local.set $args (struct.get $obj $b (local.get $name)))
-        (return (call $body (local.get $args) (local.get $env) (struct.get $obj $c (local.get $name))))))
+        (return_call $body (local.get $args) (local.get $env) (struct.get $obj $c (local.get $name)))))
   #@(if (i32.and (i32.ge_u (local.get $id) (i32.const ,(runtime-symbol-id 'make-package)))
                (i32.le_u (local.get $id) (i32.const ,(runtime-symbol-id 'values))))
       (then (return (call $package-apply (local.get $id) (local.get $args)))))
@@ -309,7 +309,7 @@
       #@(return (local.get $args)))
     (funcall
       (wat-arity 1 2147483647)
-      #@(return (call $apply (local.get $a) (local.get $rest))))
+      #@(return_call $apply (local.get $a) (local.get $rest)))
     (gcd
       #@(local.set $power (call $int (i32.const 0)))
       #@(block $done (loop $next (br_if $done (ref.is_null (local.get $args)))

@@ -1128,7 +1128,7 @@
   #@(local.set $binding (call $lexical-function (local.get $name) (local.get $env)))
   #@(local.set $name (if (result (ref null $obj)) (ref.is_null (local.get $binding))
     (then (call $fdefinition (local.get $name))) (else (struct.get $obj $a (local.get $binding)))))
-  #@(call $apply (local.get $name) (call $eval-list (local.get $args) (local.get $env))))
+  #@(return_call $apply (local.get $name) (call $eval-list (local.get $args) (local.get $env))))
 
 (define-runtime-function $fasl-cons-new
     (($index i32) ($records (ref $objects)) ($values (ref $objects)) ($states (ref $objects))) ()

@@ -63,7 +63,7 @@
 <body>
 <main>
   <header><strong>miricl / Image sizes</strong><nav aria-label="Related pages">
-    <a href="@@REPL@@">REPL</a><a href="todo.html">TODO</a><a href="game-of-life/">Game of Life</a><a href="ansi-results.html">ANSI results</a>
+    <a href="@@REPL@@">REPL</a><a href="todo.html">TODO</a><a href="game-of-life/">Game of Life</a><a href="maxima/">Maxima</a><a href="ansi-results.html">ANSI results</a>
   </nav></header>
   <div class="workspace">
     <h1>Image sizes</h1>
@@ -77,11 +77,15 @@
     <p class="note">The REPL and TODO HTML pages are standalone files, including their interpreter and adapter.
       Game of Life serves four separate files: HTML, JavaScript adapter, interpreter and application FASL.
       Its total sums those files, compressing each separately. The Lisp payload row is already included in that total.
+      Maxima's total includes its ten startup files, including the optimized Lisp image and virtual filesystem.
+      Its separately served HTML manual is loaded on demand and excluded from the startup total.
       On GitHub Pages, the REPL is named <code>index.html</code>.</p>
     <p class="note"><code>miricl.wasm</code> contains the interpreter and compiler source, compiled on first use.
       <code>miricl-repl.wasm</code> includes the precompiled compiler for Node and WASI.
       Game of Life currently retains all definitions because dynamic function lookup triggers
       conservative retention. Its size reduction comes from compaction and sharing.</p>
+    <p class="note">Maxima retains its complete dynamic environment for arbitrary REPL expressions and package loading.
+      The optimizer compacts constants and code and removes compiler indexes; it does not restrict the available mathematics.</p>
     <h2>How these sizes are measured</h2>
     <p>Raw sizes are exact file lengths. Gzip uses level 9; Brotli uses quality 11.
       The web server chooses which compression to serve. 1 KiB = 1,024 bytes.</p>
