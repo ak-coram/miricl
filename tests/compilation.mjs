@@ -47,4 +47,15 @@ check(`(let ((function (compile nil '(lambda ()
   (handler-bind ((error (lambda (condition) (declare (ignore condition)) (invoke-restart 'use-value 17))))
     (restart-case (error "Expected") (use-value (value) :report "Use a value." value)))))))
   (and (compiled-function-p function) (= (funcall function) 17)))`);
+check(`(let ((function (compile nil '(lambda ()
+  (macrolet ((answer () 42))
+    (define-condition compiled-lexical-condition (error)
+      ((value :initform (answer) :reader compiled-lexical-condition-value)
+       (default :initarg :default))
+      (:default-initargs :default (answer))
+      (:report (lambda (condition stream) (declare (ignore condition)) (princ (answer) stream))))
+    (let ((condition (make-condition 'compiled-lexical-condition)))
+      (list (compiled-lexical-condition-value condition)
+            (slot-value condition 'default) (format nil "~A" condition))))))))
+  (equal (funcall function) '(42 42 "42")))`);
 console.log('Compilation: frozen macro expansions, single load-time evaluation, literals, closures, lexical scopes, defaults, recursion, and multiple values pass.');

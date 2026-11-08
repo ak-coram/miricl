@@ -153,7 +153,7 @@
   #@(memory (export "memory") 2)
   #@(global $object-serial (mut i32) (i32.const 0))
   #@(global $error (export "error") (mut i32) (i32.const 0))
-  #@(tag $transfer)
+  #@(tag $transfer (export "native-transfer"))
   #@(func $trap
       ,(if wasi '(throw $guest-error) '(unreachable)))
   ($error-code)

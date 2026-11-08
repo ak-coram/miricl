@@ -11,14 +11,14 @@ const forms = [
   '(defparameter cl-test::*compiler-fallback-probe* 0)',
   '(rt:deftest cl-test::native-pass (+ 20 22) 42)',
   '(rt:deftest cl-test::wrong-value (+ 1 1) 3)',
-  '(rt:deftest cl-test::unsupported (progv nil nil (incf cl-test::*compiler-fallback-probe*)) 1)',
+  '(rt:deftest cl-test::invalid-exit (progn (incf cl-test::*compiler-fallback-probe*) (go missing-tag)) 1)',
   '(rt:deftest cl-test::no-fallback cl-test::*compiler-fallback-probe* 0)',
   '(rt:deftest cl-test::native-closure (flet ((twice (x) (+ x x))) (twice 21)) 42)',
 ];
 const sources = ['rt-package.lsp', 'rt.lsp'].map(file => [file,
   fs.readFileSync(new URL(`./ansi-test/${file}`, import.meta.url), 'utf8')]);
 const records = forms.map((source, index) => ({file: 'compiler-fixture.lsp', package: 'CL-USER', source,
-  tests: index < 2 ? [] : [`CL-TEST::${['NATIVE-PASS', 'WRONG-VALUE', 'UNSUPPORTED', 'NO-FALLBACK', 'NATIVE-CLOSURE'][index - 2]}`]}));
+  tests: index < 2 ? [] : [`CL-TEST::${['NATIVE-PASS', 'WRONG-VALUE', 'INVALID-EXIT', 'NO-FALLBACK', 'NATIVE-CLOSURE'][index - 2]}`]}));
 // Upstream setup can use COMPILE before the harness installs its test hook.
 const upstreamSources = [...sources, ['init.lsp', '(load "rt-package.lsp") (load "rt.lsp") (load "compiler-fixture.lsp") (compile nil \'(lambda () nil))'],
   ['compiler-fixture.lsp', forms.join('\n')]];
@@ -38,14 +38,14 @@ for (const [name, run, options] of [['diagnostic', runFull, {records, sources}],
   assert.equal(report.tests[1].phase, 'execute');
   assert.deepEqual(report.tests[2].compilation, {attempted: 1, compiled: 0, failed: 1});
   assert.ok(report.tests.filter(test => test.status === 'pass').every(test => test.compilation.compiled === 1));
-  assert.equal(report.summary.failed, 2, 'Unsupported compilation must count as a failure.');
-  console.log(`ANSI compiler ${name}: self-compiled frontend/backend, native bodies, result failures, unsupported compilation and no interpreter fallback pass.`);
+  assert.equal(report.summary.failed, 2, 'Rejected compilation must count as a failure.');
+  console.log(`ANSI compiler ${name}: self-compiled frontend/backend, native bodies, result failures, rejected compilation and no interpreter fallback pass.`);
 }
-// An unsupported bootstrap replacement must fail before RT hooks are installed.
+// An invalid bootstrap replacement must fail before RT hooks are installed.
 const vm = await Miricl.instantiate(fs.readFileSync(binary));
 try {
   vm.evaluate(`(setf (symbol-function 'miricl-compiler::compile-linker)
-    (lambda (&rest arguments) (declare (ignore arguments)) (progv nil nil nil)))`);
+    (lambda (&rest arguments) (declare (ignore arguments)) (go missing-bootstrap-tag)))`);
   assert.throws(() => installCompiler(vm), /Compiler bootstrap failed/);
   assert.equal(vm.evaluate('miricl-compiler::*compiler-state*').output, ':FAILED\n');
   assert.throws(() => installCompiler(vm), /Compiler bootstrap previously failed/);

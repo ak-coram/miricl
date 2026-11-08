@@ -40,6 +40,12 @@
         (call $cons (local.get $key) (call $cons (local.get $value) (struct.get $obj $b (local.get $condition))))))
       (else (struct.set $obj $a (local.get $cell) (local.get $value)))))
 
+(define-runtime-function $condition-init-value (($form :nullable-object) ($env :nullable-object)) (:nullable-object)
+  #@(if (i32.eq (call $tag (local.get $form)) (i32.const 7))
+    (then (if (ref.eq (call $car (local.get $form)) ,(clos-library-reference '%compiled-condition-init))
+      (then (return (call $apply (call $car (call $cdr (call $cdr (local.get $form)))) (ref.null $obj)))))))
+  #@(call $eval (local.get $form) (local.get $env)))
+
 (define-runtime-function $condition-defaults (($class :nullable-object) ($condition :nullable-object)) ()
   (:locals ($scan :nullable-object) ($key :nullable-object) ($form :nullable-object))
   #@(local.set $scan (call $car (call $cdr (struct.get $obj $c (local.get $class)))))
@@ -50,7 +56,7 @@
         (then (struct.set $obj $b (local.get $condition)
           (call $prepend-list (struct.get $obj $b (local.get $condition))
             (call $cons (local.get $key) (call $cons
-              (call $eval (local.get $form) (call $car (struct.get $obj $c (local.get $class)))) (ref.null $obj)))))))
+              (call $condition-init-value (local.get $form) (call $car (struct.get $obj $c (local.get $class)))) (ref.null $obj)))))))
     (local.set $scan (call $cdr (call $cdr (local.get $scan)))) (br $next)))
   #@(local.set $scan (struct.get $obj $a (local.get $class)))
   (wat-list-loop ($scan)
@@ -104,7 +110,7 @@
             (local.set $key (call $property-cell (local.get $options) (call $symbol (i32.const ,(runtime-symbol-id :initform)))))
             (if (i32.eqz (ref.is_null (local.get $key)))
               (then (local.set $found (i32.const 1))
-                (local.set $value (call $eval (call $car (local.get $key)) (call $car (struct.get $obj $c (local.get $class)))))))))
+                (local.set $value (call $condition-init-value (call $car (local.get $key)) (call $car (struct.get $obj $c (local.get $class)))))))))
         (if (local.get $found) (then (call $put-condition-slot (local.get $condition) (local.get $name) (local.get $value))))))
     (local.set $scan (call $cdr (local.get $scan))) (br $next)))
   #@(local.set $scan (struct.get $obj $a (local.get $class)))
@@ -408,7 +414,8 @@
       (:report
         #@(call $arity (local.get $spec) (i32.const 2) (i32.const 2))
         #@(local.set $report (call $car (call $cdr (local.get $spec))))
-        #@(if (i32.ne (call $tag (local.get $report)) (i32.const 10))
+        #@(if (i32.and (i32.ne (call $tag (local.get $report)) (i32.const 10))
+                      (i32.eqz (ref.test (ref $native-function) (local.get $report))))
             (then (local.set $report (call $eval
               (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'function)))
                 (call $cons (local.get $report) (ref.null $obj))) (local.get $env))))))
@@ -1021,7 +1028,7 @@
                        $transfer-target $transfer-values $transfer-function $last-condition $undefined-name)
       collect `(global ,name (mut (ref null $obj)) (ref.null $obj))))
   ($condition-class) ($condition-subtype-p) ($condition-slot) ($put-condition-slot)
-  ($condition-defaults) ($slot-initarg-p) ($slot-initarg-value) ($condition-init-slots) ($make-condition) ($coerce-condition)
+  ($condition-init-value) ($condition-defaults) ($slot-initarg-p) ($slot-initarg-value) ($condition-init-slots) ($make-condition) ($coerce-condition)
   ($transfer-to) ($signal-condition) ($debug-condition) ($fail) ($type-fail) ($division-error) ($condition-access) ($condition-reader)
   ($function-body-documentation) ($function-block-body) ($closure) ($marked-closure) ($validate-condition-slots) ($define-condition) ($new-restart) ($restart-visible-p) ($compute-restarts)
   ($find-restart) ($invoke-restart) ($system-restart) ($unbound-value) ($condition-apply)

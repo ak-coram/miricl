@@ -21,7 +21,7 @@
     %%package-symbol-list %check-keys %%storage-state %%package-documentation %%check-generic-arity
     %%generic-discriminator %ensure-layout %%property-method %%property-effective %%values-expander %%condition-method %%proclaim-variable
     %find-slot %%slot-operation %%builtin-macro %%define-constant %%define-package
-    %invoke-method %invoke-method-without-next))
+    %invoke-method %invoke-method-without-next %%define-condition))
 
 (setf *clos-primitives* (append *clos-primitives* '(%%open-file %%filesystem %%pathname-metadata %%pathname-match %%make-logical-path %%host-service %%calendar %%compile %%javascript %%thread)))
 
@@ -398,6 +398,9 @@
     (then ,(wat-arity 2) (call $set-named-class (local.get $a) (local.get $b)) (return (local.get $b))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%condition-init)))
     (then ,(wat-arity 2)
+      (if (i32.eq (call $tag (local.get $b)) (i32.const 7))
+        (then (if (ref.eq (call $car (local.get $b)) ,(clos-library-reference '%compiled-condition-init))
+          (then (return (call $car (call $cdr (call $cdr (local.get $b)))))))))
       (return (call $closure (ref.null $obj) (call $cons (local.get $b) (ref.null $obj))
         (call $car (struct.get $obj $c (local.get $a)))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%default-print)))

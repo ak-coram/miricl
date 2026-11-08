@@ -103,6 +103,141 @@ export const compilerCases = [
                                  (setq ready t) (invoke-restart 'continue))))
            (assert ready)) ready)))))
     (funcall function))`],
+  ['nonlocal lexical block values and shadowing', `(let ((function (miricl-compiler:compile-native
+      '(lambda (many)
+         (block done
+           (flet ((exit () (return-from done (if many (values 17 23) (values)))))
+             (block done (mapcar (lambda (x) (declare (ignore x)) (exit)) '(1 2)))
+             :unreachable))))))
+    (and (equal (multiple-value-list (funcall function t)) '(17 23))
+         (null (multiple-value-list (funcall function nil)))))`],
+  ['nonlocal block primary value', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (list (block done
+                         (funcall (lambda () (return-from done (values 17 23)))))
+                       (block done (funcall (lambda () (return-from done (values))))))))))
+    (equal (funcall function) '(17 nil)))`],
+  ['nonlocal GO keeps all tags live through cleanup', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((n 0) (events nil))
+         (tagbody again
+           (incf n)
+           (unwind-protect
+             (when (< n 3) (funcall (lambda () (go again))))
+             (push n events))
+           (funcall (lambda () (go 17)))
+           (setq n :bad)
+          17)
+         (and (= n 3) (equal (reverse events) '(1 2 3))))))))
+    (funcall function))`],
+  ['nonlocal GO replaces a pending error', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((escaped nil))
+         (tagbody (unwind-protect (error "replaced") (go done)) done (setq escaped t))
+         escaped)))))
+    (funcall function))`],
+  ['local exit expires nested captured block', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((exit nil))
+         (block outer (block inner
+           (setq exit (lambda () (return-from inner 17)))
+           (return-from outer 23)))
+         (handler-case (progn (funcall exit) nil) (control-error () t)))))))
+    (funcall function))`],
+  ['nonlocal block unwinding and replacement exit', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((x :outer) (seen nil)) (declare (special x))
+         (list (block done (let ((x :inner)) (declare (special x))
+                  (unwind-protect (return-from done (values 17 23))
+                    (setq seen x) (return-from done (values 31 37)))))
+               seen x))))))
+    (equal (funcall function) '(31 :inner :outer)))`],
+  ['native assertion skips places on success', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((calls 0) (data (vector 1)))
+         (and (null (assert t ((aref data (progn (incf calls) 0)))
+                           (progn (incf calls) "unused")))
+              (= calls 0)))))))
+    (funcall function))`],
+  ['native assertion place correction', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((data (vector 0 0)) (calls 0))
+         (handler-bind ((error (lambda (condition) (continue condition))))
+           (assert (= (+ (aref data 0) (aref data 1)) 5)
+             ((values (aref data (progn (incf calls) 0)) (aref data 1)))))
+         (and (= calls 1) (equalp data #(2 3))))))))
+    (let ((*query-io* (make-two-way-stream
+            (make-string-input-stream (format nil "y~%(values 2 3)~%"))
+            (make-string-output-stream))))
+      (funcall function)))`],
+  ['restart case associates and unwinds native clauses', `(let ((function (miricl-compiler:compile-native
+      '(lambda ()
+         (let ((other (make-condition 'simple-error)))
+           (handler-bind ((error (lambda (condition)
+             (assert (find-restart 'use-values condition))
+             (assert (null (find-restart 'use-values other)))
+             (invoke-restart 'use-values 17 23))))
+             (restart-case (error "Restart me")
+               (use-values (a b) (values a b (null (find-restart 'use-values)))))))))))
+    (equal (multiple-value-list (funcall function)) '(17 23 t)))`],
+  ['restart binding options and interactive native callback', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((prefix "Use") (n 0))
+         (restart-bind ((supply (lambda (a b) (values (+ a b) n))
+                           :report-function (progn (incf n) (lambda (s) (write-string prefix s)))
+                           :interactive-function (lambda () '(17 23))))
+           (list (format nil "~A" (find-restart 'supply))
+                 (multiple-value-list (invoke-restart-interactively 'supply)))))))))
+    (equal (funcall function) '("Use" (40 1))))`],
+  ['simple restart preserves normal and restarted values', `(let ((function (miricl-compiler:compile-native
+      '(lambda (abortp)
+         (with-simple-restart (stop "Stop ~D" 17)
+           (if abortp (invoke-restart 'stop) (values 23 31)))))))
+    (and (equal (multiple-value-list (funcall function nil)) '(23 31))
+         (equal (multiple-value-list (funcall function t)) '(nil t))))`],
+  ['local function initializers use enclosing block scope', `(let ((function (miricl-compiler:compile-native
+      '(lambda ()
+         (list (block f (flet ((f (&key (x (return-from f :keyword))) x)) (f) :bad))
+               (block g (labels ((g (&aux (x (return-from g :aux))) x)) (g) :bad)))))))
+    (equal (funcall function) '(:keyword :aux)))`],
+  ['terminated value expressions preserve GO and cleanup', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((result nil))
+         (tagbody
+           (unwind-protect (prog1 (progn (go done)) (error "Unreachable"))
+             (push :cleaned result))
+           (error "Unreachable")
+           done)
+         (values result (typecase 42 (t :default) (integer :unreachable))))))))
+    (equal (multiple-value-list (funcall function)) '((:cleaned) :default)))`],
+  ['correctable places preserve selection and values', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((data (vector :bad)) (selected 0))
+         (handler-bind ((type-error (lambda (c) (store-value :ok c))))
+           (let ((result (multiple-value-list
+                   (ccase (aref data (progn (incf selected) 0)) (:ok (values 17 23))))))
+             (and (= selected 1) (eq (aref data 0) :ok) (equal result '(17 23))))))))))
+    (funcall function))`],
+  ['native check-type retries and evaluates description once', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((value :bad) (attempts 0) (described 0))
+         (handler-bind ((type-error (lambda (c) (incf attempts)
+                                      (store-value (if (= attempts 1) :still-bad 42) c))))
+           (check-type value integer (progn (incf described) "an integer")))
+         (and (= value 42) (= attempts 2) (= described 1)))))))
+    (funcall function))`],
+  ['native PROGV preserves lexical bindings and restores unbound variables', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((x :lexical))
+         (and (equal (progv '(x missing-progv-value) '(23)
+                       (list x (symbol-value 'x) (boundp 'missing-progv-value)))
+                     '(:lexical 23 nil))
+              (not (boundp 'missing-progv-value))))))))
+    (funcall function))`],
+  ['native condition initializers and reports capture lexical state', `(let ((function (miricl-compiler:compile-native
+      '(lambda () (let ((n 17) (initialized 0))
+         (define-condition compiler-native-condition (error)
+           ((a :initform (progn (incf initialized) n) :reader compiler-native-condition-a)
+            (b :initarg :b))
+           (:default-initargs :b (1+ n))
+           (:report (lambda (condition stream)
+                      (format stream "~D/~D" (compiler-native-condition-a condition) (slot-value condition 'b)))))
+         (setq n 23)
+         (let* ((object (make-condition 'compiler-native-condition))
+                (slot (find 'a (mop:class-slots (find-class 'compiler-native-condition))
+                            :key #'mop:slot-definition-name)))
+           (and (= initialized 1) (= (compiler-native-condition-a object) 23)
+                (= (slot-value object 'b) 24) (string= (format nil "~A" object) "23/24")
+                (compiled-function-p (mop:slot-definition-initfunction slot)))))))))
+    (funcall function))`],
   ['no-error handler scope', `(let ((function (miricl-compiler:compile-native
       '(lambda () (handler-case
           (handler-case 42 (simple-error () :wrong)

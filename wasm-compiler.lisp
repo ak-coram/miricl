@@ -19,6 +19,7 @@
 (defvar *wasm-dispatch-depth*)
 (defvar *wasm-dynamic-bindings*)
 (defvar *wasm-entry-environment*)
+(defvar *wasm-exceptions*)
 (defparameter *native-imports*
   '(("native-literal" (:object :i32) :object)
     ("native-argument" (:object :i32) :object)
@@ -48,7 +49,13 @@
     ("native-bind" (:object :object :object) :object)
     ("native-restore-environment" (:object) nil)
     ("native-control" (:object :i32 :object :object :object) :object)
-    ("native-throw" (:object :object :object) nil)))
+    ("native-throw" (:object :object :object) nil)
+    ("native-block-enter" (:object) :object)
+    ("native-block-environment" (:object) :object)
+    ("native-block-return" (:object :object) nil)
+    ("native-block-match" (:object) :i32)
+    ("native-block-values" nil :object)
+    ("native-restart-signal" (:object :i32 :object :object) :object)))
 
 (defun wasm-byte (byte) (vector-push-extend byte *wasm-bytes*))
 (defun wasm-u32 (number)
@@ -120,7 +127,7 @@
   ;; These operations cannot signal or change observable state in valid HIR.
   ;; Global lookups and calls stay live even when their result is discarded.
   (member (hir-instruction-opcode instruction)
-    '(:constant :primary :value-ref :values :capture :cell-new :cell-read :block-enter)))
+    '(:constant :primary :value-ref :values :list :capture :cell-new :cell-read :block-enter)))
 
 (defun native-direct-cells (function)
   ;; Uncaptured bindings use mutable Wasm locals. Unassigned captured
@@ -231,6 +238,9 @@
           (push (if (eq opcode :jump) (first (hir-instruction-inputs terminator))
                     (third (hir-instruction-inputs terminator)))
                 (gethash target incoming)))))
+    ;; A captured block also has incoming value groups from other functions.
+    (dolist (target (native-block-targets function))
+      (push nil (gethash (hir-target-block target) incoming)))
     (loop while changed do
       (setq changed nil)
       (dolist (block (hir-function-blocks function))
@@ -280,6 +290,10 @@
         (output (hir-instruction-output instruction)))
     (when (and (native-removable-p instruction) (not (gethash output *wasm-live-values*)))
       (return-from emit-native-instruction nil))
+    (when (and (member (hir-instruction-opcode instruction) '(:block-enter :block-environment))
+               (not (hir-target-captured-p (first attributes))))
+      ;; Uncaptured blocks introduce no runtime scope or value copy.
+      (return-from emit-native-instruction nil))
     (case (hir-instruction-opcode instruction)
       (:constant (wasm-literal (first attributes)))
       ((:argument :rest-argument)
@@ -292,7 +306,12 @@
        (wasm-get (first inputs)) (wasm-byte #xd1)
        (wasm-byte #x04) (wasm-type :object) (wasm-null)
        (wasm-byte #x05) (wasm-literal t) (wasm-byte #x0b))
-      (:block-enter (wasm-get (first inputs)))
+      (:block-enter
+       (wasm-get (first inputs))
+       (when (hir-target-captured-p (first attributes)) (wasm-call "native-block-enter")))
+      (:block-environment
+       (wasm-get (first inputs))
+       (when (hir-target-captured-p (first attributes)) (wasm-call "native-block-environment")))
       (:function-reference (wasm-literal (first attributes)) (wasm-call "native-function-reference"))
       (:global-read (wasm-get (first inputs)) (wasm-literal (first attributes)) (wasm-call "native-global-read"))
       (:global-write
@@ -305,6 +324,7 @@
        (wasm-get (first inputs)) (wasm-call "native-restore-environment"))
       (:values (if (gethash output *wasm-scalar-groups*)
                    (if inputs (wasm-get (first inputs)) (wasm-null)) (wasm-list inputs)))
+      (:list (wasm-list inputs))
       (:value-ref
        (if (gethash (first inputs) *wasm-scalar-groups*) (wasm-null)
            (progn (wasm-get (first inputs)) (wasm-integer (first attributes)) (wasm-call "native-argument"))))
@@ -335,8 +355,12 @@
                   (when (gethash output *wasm-scalar-groups*) (wasm-call "native-primary")))))
       (:control-call
        (wasm-get (first inputs)) (wasm-integer (first attributes)) (wasm-get (second inputs))
-       (if (member (first attributes) '(1 2)) (wasm-list (nthcdr 4 inputs)) (wasm-get (fourth inputs)))
+       (if (member (first attributes) '(1 2 4 5 6 7)) (wasm-list (nthcdr 4 inputs)) (wasm-get (fourth inputs)))
        (wasm-get (third inputs)) (wasm-call "native-control")
+       (when (gethash output *wasm-scalar-groups*) (wasm-call "native-primary")))
+      (:restart-signal
+       (wasm-get (first inputs)) (wasm-integer (first attributes))
+       (wasm-list (cddr inputs)) (wasm-get (second inputs)) (wasm-call "native-restart-signal")
        (when (gethash output *wasm-scalar-groups*) (wasm-call "native-primary")))
       (:multiple-value-call
        (wasm-get (first inputs)) (wasm-get (second inputs))
@@ -385,6 +409,20 @@
   (when (gethash (third inputs) *wasm-scalar-groups*) (wasm-null) (wasm-call "native-cons"))
   (wasm-call "native-throw") (wasm-byte #x00))
 
+(defun native-block-targets (function)
+  (let ((targets nil))
+    (dolist (block (hir-function-blocks function))
+      (dolist (instruction (hir-block-instructions block))
+        (when (and (eq (hir-instruction-opcode instruction) :block-enter)
+                   (hir-target-captured-p (first (hir-instruction-attributes instruction))))
+          (push (first (hir-instruction-attributes instruction)) targets))))
+    (nreverse targets)))
+
+(defun emit-native-block-return (inputs)
+  (wasm-get (second inputs)) (wasm-get (third inputs))
+  (when (gethash (third inputs) *wasm-scalar-groups*) (wasm-null) (wasm-call "native-cons"))
+  (wasm-call "native-block-return") (wasm-byte #x00))
+
 (defun emit-native-forward (blocks)
   (let ((positions (make-hash-table :test 'eq)) (position 0))
     (dolist (block blocks) (setf (gethash block positions) position) (incf position))
@@ -406,10 +444,13 @@
            (emit-native-return (first inputs))
            (when next (wasm-byte #x0f)))
           ((:jump :block-return)
-           (emit-native-jump-value target (if (eq (hir-instruction-opcode terminator) :jump)
-                                            (first inputs) (third inputs)))
-           (unless (eq target next)
-             (wasm-byte #x0c) (wasm-u32 (- (gethash target positions) position 1))))
+           (if (and (eq (hir-instruction-opcode terminator) :block-return) (not target))
+               (emit-native-block-return inputs)
+               (progn
+                 (emit-native-jump-value target (if (eq (hir-instruction-opcode terminator) :jump)
+                                                  (first inputs) (third inputs)))
+                 (unless (eq target next)
+                   (wasm-byte #x0c) (wasm-u32 (- (gethash target positions) position 1))))))
           (:branch
            (let ((no (second successors)))
              (wasm-get (first inputs)) (wasm-byte #xd1)
@@ -424,12 +465,13 @@
 (defun emit-native-function (function)
   ;; Boxed SSA values are externref locals. A dispatcher is a first correct
   ;; lowering of arbitrary CFG edges; structured regions replace it later.
-  (let* ((forward (native-forward-blocks function))
+  (let* ((targets (native-block-targets function))
+        (forward (unless targets (native-forward-blocks function)))
         (blocks (or forward (hir-function-blocks function)))
         (*wasm-local-cells* (native-direct-cells function))
-        (*wasm-dynamic-bindings* (some (lambda (block)
+        (*wasm-dynamic-bindings* (or targets (some (lambda (block)
           (some (lambda (instruction) (eq (hir-instruction-opcode instruction) :dynamic-bind))
-            (hir-block-instructions block))) blocks))
+            (hir-block-instructions block))) blocks)))
         (*wasm-entry-environment* (hir-function-environment function))
         (*wasm-live-values* (native-live-values function *wasm-dynamic-bindings* blocks))
         (*wasm-scalar-groups* (native-scalar-groups function))
@@ -437,7 +479,13 @@
         (*wasm-locals* (make-hash-table :test 'eq)) (count 0))
    (dolist (value (hir-function-values function))
      (when (gethash value *wasm-live-values*)
-       (setf (gethash value *wasm-locals*) (+ (if forward 2 3) count)) (incf count)))
+       (let* ((producer (hir-value-producer value))
+              (alias (and (hir-instruction-p producer)
+                       (member (hir-instruction-opcode producer) '(:block-enter :block-environment))
+                       (not (hir-target-captured-p (first (hir-instruction-attributes producer))))
+                       (first (hir-instruction-inputs producer)))))
+         (if alias (setf (gethash value *wasm-locals*) (gethash alias *wasm-locals*))
+             (progn (setf (gethash value *wasm-locals*) (+ (if forward 2 3) count)) (incf count))))))
    (with-wasm-bytes
     (wasm-u32 (if forward 1 2))
     (unless forward (wasm-u32 1) (wasm-type :i32))
@@ -448,6 +496,12 @@
       (emit-native-forward blocks)
       (return-from emit-native-function *wasm-bytes*))
     (wasm-integer (hir-block-id (hir-function-entry function))) (wasm-byte #x21) (wasm-u32 2)
+    (when targets
+      (setq *wasm-exceptions* t)
+      (wasm-byte #x03) (wasm-byte #x40) ; resume after a caught lexical exit
+      (wasm-byte #x02) (wasm-byte #x40) ; exception landing pad
+      ;; TRY_TABLE catches the existing payload-free runtime transfer tag.
+      (dolist (byte '(#x1f #x40 1 0 0 0)) (wasm-byte byte)))
     (wasm-byte #x03) (wasm-byte #x40) ; dispatch loop
     (wasm-byte #x02) (wasm-byte #x40) ; invalid program counter
     (dotimes (i (length (hir-function-blocks function))) (wasm-byte #x02) (wasm-byte #x40))
@@ -470,8 +524,8 @@
           (:return (emit-native-return (first inputs)) (wasm-byte #x0f))
           (:jump (emit-native-jump (first successors) (first inputs) block))
           (:block-return
-           (unless successors (error "Native nonlocal block exits are not implemented."))
-           (emit-native-jump (first successors) (third inputs) block))
+           (if successors (emit-native-jump (first successors) (third inputs) block)
+               (emit-native-block-return inputs)))
           (:branch
            (when (some (lambda (successor) (<= (hir-block-id successor) (hir-block-id block))) successors)
              (wasm-call "native-poll"))
@@ -485,22 +539,34 @@
            (wasm-byte #x0c) (wasm-u32 *wasm-dispatch-depth*))))
       (decf *wasm-dispatch-depth*)))
     (wasm-byte #x0b) (wasm-byte #x00) ; invalid program counter traps
-    (wasm-byte #x0b) (wasm-byte #x00) (wasm-byte #x0b))))
+    (wasm-byte #x0b) (wasm-byte #x00)
+    (when targets
+      (wasm-byte #x0b) (wasm-byte #x0b) ; try and landing pad
+      (dolist (target targets)
+        (wasm-get (hir-target-token target)) (wasm-call "native-block-match")
+        (wasm-byte #x04) (wasm-byte #x40)
+        (wasm-call "native-block-values")
+        (let ((parameter (first (hir-block-parameters (hir-target-block target)))))
+          (if parameter
+              (progn (when (gethash parameter *wasm-scalar-groups*) (wasm-call "native-primary"))
+                     (wasm-set parameter))
+              (wasm-byte #x1a)))
+        (wasm-integer (hir-block-id (hir-target-block target)))
+        (wasm-byte #x21) (wasm-u32 2)
+        (wasm-byte #x0c) (wasm-u32 1) (wasm-byte #x0b))
+      (wasm-byte #x08) (wasm-u32 0) ; propagate foreign transfers unchanged
+      (wasm-byte #x0b) (wasm-byte #x00))
+    (wasm-byte #x0b))))
 
 (defun emit-native-module (unit)
   "Return Wasm bytes and literal objects; do not instantiate or run application code."
   (ensure-compiler)
   (verify-hir unit)
-  ;; A local block is just CFG edges. Captured targets need a runtime unwind
-  ;; protocol; reject them before emitting code rather than miscompile an exit.
-  (dolist (function (hir-unit-functions unit))
-    (when (some #'hir-target-p (hir-function-captures function))
-      (error "Native nonlocal block exits are not implemented.")))
   (let* ((*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
          (*wasm-literal-index* (make-hash-table :test 'eq))
          (*native-functions* (hir-unit-functions unit))
          (*wasm-used-imports* nil) (*wasm-referenced-functions* nil)
-         (*wasm-object-types* nil) (*wasm-builtin-codes* (make-hash-table :test 'eq)))
+         (*wasm-object-types* nil) (*wasm-exceptions* nil) (*wasm-builtin-codes* (make-hash-table :test 'eq)))
     ;; Collect imports using the emitter itself. Regenerate after assigning the
     ;; compact function indices, including REF.FUNC indices in closures.
     (mapc #'emit-native-function *native-functions*)
@@ -511,7 +577,8 @@
          (*wasm-literal-index* (make-hash-table :test 'eq))
          (bodies (mapcar #'emit-native-function *native-functions*))
          (signatures (remove-duplicates
-                       (append (mapcar #'cdr *native-imports*) (list '((:object :object) :object))) :test #'equal))
+                       (append (mapcar #'cdr *native-imports*) (list '((:object :object) :object))
+                         (when *wasm-exceptions* (list '(nil nil)))) :test #'equal))
          (bytes (with-wasm-bytes
            (dolist (byte '(0 97 115 109 1 0 0 0)) (wasm-byte byte))
            (wasm-section 1 (with-wasm-bytes
@@ -522,10 +589,13 @@
                (dolist (type (first signature)) (wasm-type type))
                (wasm-u32 (if (second signature) 1 0)) (when (second signature) (wasm-type (second signature))))))
            (wasm-section 2 (with-wasm-bytes
-             (wasm-u32 (length *native-imports*))
+             (wasm-u32 (+ (length *native-imports*) (if *wasm-exceptions* 1 0)))
              (dolist (import *native-imports*)
                (wasm-name "miricl.runtime") (wasm-name (first import)) (wasm-byte 0)
-               (wasm-u32 (+ type-prefix (position (cdr import) signatures :test #'equal))))))
+               (wasm-u32 (+ type-prefix (position (cdr import) signatures :test #'equal))))
+             (when *wasm-exceptions*
+               (wasm-name "miricl.runtime") (wasm-name "native-transfer") (wasm-byte 4) (wasm-byte 0)
+               (wasm-u32 (+ type-prefix (position '(nil nil) signatures :test #'equal))))))
            (wasm-section 3 (with-wasm-bytes
              (wasm-u32 (length bodies))
              (dolist (body bodies) (declare (ignore body))
@@ -556,13 +626,14 @@
                    wasm-byte wasm-u32 wasm-s32 wasm-name wasm-type wasm-section wasm-call
                    wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
                    native-builtin-code emit-native-object-types wasm-literal wasm-list
-                   native-removable-p native-direct-cells native-forward-blocks native-live-values native-single-calls native-full-groups native-scalar-groups
-                   emit-native-fixed-call emit-native-cons-access emit-native-instruction emit-native-jump-value emit-native-jump emit-native-return emit-native-throw emit-native-forward
+                   native-removable-p native-direct-cells native-forward-blocks native-live-values native-single-calls native-full-groups native-scalar-groups native-block-targets
+                   emit-native-fixed-call emit-native-cons-access emit-native-instruction emit-native-jump-value emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant
                    hir-capture hir-cell-for-binding hir-special-p hir-declarations hir-shadow-specials
                    hir-bind-value hir-read-variable hir-write-variable hir-function-reference
-                   hir-small-membership hir-call-arguments hir-case-form hir-macro-environment
-                   hir-expand-parallel-places hir-expand-arithmetic-step hir-control-form verify-hir
+                   hir-small-membership hir-call-arguments hir-case-form hir-macro-environment hir-assert-form
+                   hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
+                   hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir
                    emit-native-function emit-native-module
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
                    definition-info namespace form-references

@@ -13,6 +13,18 @@
 (defun y-or-n-p (&optional control &rest arguments) (%query-boolean nil control arguments))
 (defun yes-or-no-p (&optional control &rest arguments) (%query-boolean t control arguments))
 
+(defun %assert-prompt (place values)
+  (when (y-or-n-p "The value of ~S is ~S. Supply a new value?" place
+          (if (cdr values) values (car values)))
+    (format *query-io* "~&New value form for ~S: " place)
+    (force-output *query-io*)
+    (values (multiple-value-list (eval (read *query-io*))) t)))
+
+(defun %read-store-value ()
+  (format *query-io* "~&New value form: ")
+  (force-output *query-io*)
+  (list (eval (read *query-io*))))
+
 ;; The standard explicitly permits normal execution as the minimal stepper.
 (defmacro step (form) (list 'locally form))
 

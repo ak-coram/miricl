@@ -218,9 +218,8 @@ try {
     '(lambda () (let ((x 0)) (macrolet ((local-tag () 'tag))
       (tagbody (tagbody (go tag) (local-tag) (setq x 1)) tag)) x)))))
     (= (funcall function) 0))`);
-  check(`(handler-case (progn (miricl-compiler:compile-native
-    '(lambda () (block escaped (funcall (lambda () (return-from escaped 1)))))) nil)
-    (error () t))`);
+  check(`(= (funcall (miricl-compiler:compile-native
+    '(lambda () (block escaped (funcall (lambda () (return-from escaped 1))))))) 1)`);
   check(`(handler-case (progn (funcall *native* 1 2) nil) (program-error () t))`);
   check(`(progn
     (defparameter *native-error* (miricl-compiler:compile-native '(lambda () (/ 1 0)) :name 'native-error))

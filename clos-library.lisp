@@ -107,7 +107,11 @@
             (cons (if (eq (car scan) :accessor) (list 'setf (cadr scan)) (cadr scan))
                   (car (%cell plist :writers)))))
         (setq scan (cddr scan)))
-      (when init (setq plist (append (list :initform (car init) :initfunction (%%condition-init info (car init))) plist)))
+      (when init
+        (let ((form (car init)))
+          (setq plist (append (list :initform
+            (if (and (consp form) (eq (car form) '%compiled-condition-init)) (cadr form) form)
+            :initfunction (%%condition-init info form)) plist))))
       (%make-slot class plist t))) (%%raw-slots info)))
 (defun find-class (name &optional (errorp t) environment)
   (let ((class (%%named-class name)))

@@ -175,6 +175,11 @@
          (%file-code-cons form operator
            (cons kind
              (case kind
+               (check-type
+                ;; The place and optional description contain executable code;
+                ;; the type is literal syntax, even when it names a binding.
+                (list* (%file-lexical-form (car forms) variables functions blocks tags)
+                  (second forms) (%file-lexical-forms (cddr forms) variables functions blocks tags)))
                (handler-case
                 (cons (%file-lexical-form (car forms) variables functions blocks tags)
                   (mapcar (lambda (clause) (%file-lexical-function clause (car clause) variables functions blocks tags))
@@ -344,6 +349,30 @@
 (defun %compile-condition (operator args environment)
   (let ((compiled nil))
     (case operator
+      (define-condition
+       (let ((slots nil) (options nil))
+         (dolist (slot (third args))
+           (if (symbolp slot) (push slot slots)
+               (let ((tail (cdr slot)) (parts nil))
+                 (loop while tail do
+                   (let ((key (pop tail)))
+                     (unless tail (error 'program-error))
+                     (push key parts)
+                     (push (if (eq key :initform) (%compile-form (pop tail) environment) (pop tail)) parts)))
+                 (push (cons (car slot) (nreverse parts)) slots))))
+         (dolist (option (cdddr args))
+           (push (case (car option)
+                   (:report (list :report (if (stringp (second option)) (second option)
+                                              (%compile-option-function (second option) environment))))
+                   (:default-initargs
+                    (let ((tail (cdr option)) (parts nil))
+                      (loop while tail do
+                        (push (pop tail) parts)
+                        (unless tail (error 'program-error))
+                        (push (%compile-form (pop tail) environment) parts))
+                      (cons :default-initargs (nreverse parts))))
+                   (otherwise option)) options))
+         (setq compiled (list* (first args) (second args) (nreverse slots) (nreverse options)))))
       ((handler-case restart-case)
        (let ((primary (%compile-form (car args) environment)))
          (dolist (clause (cdr args))
@@ -371,6 +400,13 @@
        (setq compiled (cons (cons (caar args) (%compile-forms (cdar args) environment))
                             (%compile-body (cdr args) environment))))
       (ignore-errors (setq compiled (%compile-body args environment)))
+      (assert
+       (setq compiled (cons (%compile-form (car args) environment)
+         (cons (mapcar (lambda (place) (%compile-place-form place environment)) (cadr args))
+               (%compile-forms (cddr args) environment)))))
+      (check-type
+       (setq compiled (list* (%compile-place-form (car args) environment) (cadr args)
+                        (%compile-forms (cddr args) environment))))
       (with-condition-restarts (setq compiled (%compile-forms args environment)))
       (return (return-from %compile-condition (%compile-form (list* 'return-from nil args) environment)))
       ((block return-from catch throw unwind-protect tagbody go)
@@ -399,6 +435,9 @@
                 (setf (gethash marker %file-load-values) (list (%compile-form (car args) nil))) marker)
               (eval (car args))))))
       ((let let*) (%compile-bindings operator (car args) (cdr args) environment))
+      (progv
+       (list* operator (%compile-form (car args) environment) (%compile-form (cadr args) environment)
+         (%compile-body (cddr args) environment)))
       ((flet labels) (%compile-local-functions operator (car args) (cdr args) environment))
       (macrolet
         (let ((new-environment environment))
@@ -411,6 +450,14 @@
       (symbol-macrolet
         (let ((new-environment environment))
           (dolist (binding (car args))
+            (unless (and (consp binding) (= (length binding) 2) (symbolp (car binding))
+                         (not (constantp (car binding) environment)) (not (%%compile 18 (car binding))))
+              (error 'program-error))
+            (let ((body (cdr args)))
+              (loop while (and (consp (car body)) (eq (caar body) 'declare)) do
+                (dolist (declaration (cdr (pop body)))
+                  (when (and (eq (car declaration) 'special) (member (car binding) (cdr declaration)))
+                    (error 'program-error)))))
             (setq new-environment (%%compile 6 new-environment (car binding) (cadr binding))))
           (cons 'locally (%compile-body (cdr args) new-environment))))
       (setq

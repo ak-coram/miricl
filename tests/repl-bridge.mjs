@@ -88,7 +88,8 @@ try {
       assert.equal(await compiled(`(eq (load-time-value
         (progn (incf *target-load-values*) *target-literal*)) *target-literal*)`), 'T\nmiricl> ');
       assert.equal(await compiled('*target-load-values*'), '1\nmiricl> ');
-      assert.match(await compiled('(progv nil nil (incf *target-load-values*))'), /Error: Remote compiler:/);
+      assert.equal(await compiled('(progv nil nil (+ 20 22))'), '42\nmiricl> ');
+      assert.match(await compiled('(let () (incf *target-load-values*) (go missing-tag))'), /Error: Remote compiler:/);
       assert.equal(await compiled('*target-load-values*'), '1\nmiricl> ', 'Rejected compilation must not execute the form.');
       assert.equal(await compiled('(= (js:from-js (js:invoke (target-js) "sqrt" 81)) 9)'), 'T\nmiricl> ');
       assert.equal(await compiled(`(let ((*target-special* :inner))
@@ -96,6 +97,8 @@ try {
       assert.equal(await compiled(`(defun remote-return (x) "Remote documentation."
         (declare (ignore x)) (return-from remote-return (values 10 20)))`), 'REMOTE-RETURN\nmiricl> ');
       assert.equal(await compiled('(remote-return nil)'), '10\n20\nmiricl> ');
+      assert.equal(await compiled(`(block remote-exit
+        (funcall (lambda () (return-from remote-exit (values 11 22)))))`), '11\n22\nmiricl> ');
       assert.equal(await compiled(`(equal (documentation 'remote-return 'function)
         "Remote documentation.")`), 'T\nmiricl> ');
       assert.equal(await compiled(`(progn (defparameter *remote-closure*

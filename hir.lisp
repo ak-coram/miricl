@@ -8,7 +8,7 @@
 (defstruct hir-value id kind owner producer (type t))
 (defstruct hir-instruction opcode inputs output attributes origin effect)
 (defstruct hir-binding name owner cell special-p captured-p assigned-p)
-(defstruct hir-target name owner block token)
+(defstruct hir-target name owner block token captured-p)
 (defvar *hir-unit*)
 (defvar *hir-function*)
 (defvar *hir-block*)
@@ -65,6 +65,7 @@
 (defun hir-constant (value) (hir-emit :constant nil :single (list value)))
 
 (defun hir-capture (identity kind)
+  (when (hir-target-p identity) (setf (hir-target-captured-p identity) t))
   (unless (member identity (hir-function-captures *hir-function*))
     (setf (hir-function-captures *hir-function*)
       (append (hir-function-captures *hir-function*) (list identity))))
@@ -126,7 +127,8 @@
     (dolist (form forms)
       (unless (hir-block-terminator *hir-block*)
         (setq result (catch 'hir-path-ended (hir-form form variables functions targets)))))
-    (or result (unless (hir-block-terminator *hir-block*) (hir-constant nil)))))
+    (when (hir-block-terminator *hir-block*) (throw 'hir-path-ended nil))
+    (or result (hir-constant nil))))
 
 (defun hir-function-reference (name functions)
   (let ((binding (cdr (assoc name functions :test #'equal))))
@@ -183,7 +185,8 @@
       (let* ((head (car clause))
              (otherwise (and (member (car form) '(case typecase)) (member head '(t otherwise))))
              (keys (if (and (not typed) (listp head)) head (list head))))
-        (when default (error "CASE default must be last."))
+        (when default
+          (if typed (return) (error "CASE default must be last.")))
         (unless otherwise
           (dolist (item keys) (push item expected))
           (let ((test (hir-single (if typed
@@ -193,13 +196,13 @@
                 (yes (hir-new-block)) (no (hir-new-block)))
             (hir-terminate :branch (list test) (list yes no))
             (setq *hir-block* yes)
-            (let ((value (hir-body (cdr clause) variables functions targets)))
+            (let ((value (catch 'hir-path-ended (hir-body (cdr clause) variables functions targets))))
               (unless (hir-block-terminator *hir-block*)
                 (hir-terminate :jump (list (hir-multiple value)) (list join))))
             (setq *hir-block* no)))
         (when otherwise
           (setq default t)
-          (let ((value (hir-body (cdr clause) variables functions targets)))
+          (let ((value (catch 'hir-path-ended (hir-body (cdr clause) variables functions targets))))
             (unless (hir-block-terminator *hir-block*)
               (hir-terminate :jump (list (hir-multiple value)) (list join)))))))
     (unless default
@@ -257,8 +260,128 @@
         (list 'return-from (or (compiler-primitive 10 2 "%FINISH") 'miricl::%finish) nil)
         (list 'setq (second form) (list 'the (or (sixth form) t) next))))))
 
+(defun hir-assert-form (form variables functions)
+  (unless (cdr form) (error 'program-error))
+  (let ((bindings nil) (updates nil)
+        (prompt (or (compiler-primitive 10 1 "%ASSERT-PROMPT") 'miricl::%assert-prompt)))
+    (dolist (place (third form))
+      (multiple-value-bind (temps values stores writer reader)
+          (get-setf-expansion place (hir-macro-environment variables functions))
+        (setq bindings (append bindings (mapcar #'list temps values)))
+        (let ((new (gensym)) (supplied (gensym)))
+          (push (list 'multiple-value-bind (list new supplied)
+                  (list prompt (list 'quote place) (list 'multiple-value-list reader))
+                  (list 'when supplied
+                    (list 'multiple-value-bind stores (list 'values-list new) writer))) updates))))
+    ;; Place subforms and error arguments stay on the failure path. Each place
+    ;; is selected once per failed test; its writer accepts the full value group.
+    (list 'loop (list 'if (second form) '(return nil))
+      (list* 'let* bindings
+        (list* 'cerror "Retry assertion."
+          (or (cdddr form) (list "Assertion ~S failed." (list 'quote (second form)))))
+        (nreverse updates)))))
+
+(defun hir-restart-options (options casep variables functions targets)
+  (let ((values nil))
+    (loop while options do
+      (let ((key (pop options)))
+        (unless options (error 'program-error))
+        (let ((value (pop options)))
+          (when casep
+            (setq key (case key (:report :report-function) (:interactive :interactive-function)
+                              (:test :test-function) (otherwise (error 'program-error))))
+            (unless (and (eq key :report-function) (stringp value))
+              (unless (and (consp value) (eq (car value) 'function))
+                (setq value (list 'function value)))))
+          (unless (member key '(:report-function :interactive-function :test-function)) (error 'program-error))
+          (push (hir-constant key) values)
+          (push (hir-single (hir-form value variables functions targets)) values))))
+    (hir-emit :list (nreverse values) :single nil :allocation)))
+
+(defun hir-correctable-place-form (form variables functions)
+  (let* ((checkp (eq (car form) 'check-type)) (typed (or checkp (eq (car form) 'ctypecase)))
+         (key (gensym)) (new (gensym)) (done (gensym)) (description (gensym))
+         (expected nil) (clauses nil)
+         (interactive (or (compiler-primitive 10 1 "%READ-STORE-VALUE") 'miricl::%read-store-value)))
+    (unless (and (cdr form) (or (not checkp) (<= 3 (length form) 4))) (error 'program-error))
+    (multiple-value-bind (temps values stores writer reader)
+        (get-setf-expansion (second form) (hir-macro-environment variables functions))
+      (if checkp
+          (setq expected (third form)
+                clauses (list (list (list 'typep key (list 'quote expected)) (list 'return-from done nil))))
+          (dolist (clause (cddr form))
+            (unless (consp clause) (error 'program-error))
+            (let* ((head (car clause)) (keys (if (and (not typed) (listp head)) head (list head))))
+              (setq expected (append expected keys))
+              (push (list (if typed (list 'typep key (list 'quote head))
+                              (list 'member key (list 'quote keys)))
+                      (list 'return-from done (cons 'progn (cdr clause)))) clauses))))
+      (unless checkp (setq clauses (nreverse clauses) expected (cons (if typed 'or 'member) expected)))
+      (let ((error-form (list 'error (list 'quote (if (and checkp (cdddr form)) 'simple-type-error 'type-error))
+                         :datum key :expected-type (list 'quote expected))))
+        (when (and checkp (cdddr form))
+          (setq error-form (append error-form (list :format-control "The value ~S is not ~A."
+                             :format-arguments (list 'list key description)))))
+        (list 'let* (append (mapcar #'list temps values) (list (list key reader))
+                      (when (and checkp (cdddr form)) (list (list description (fourth form)))))
+          (list 'block done
+            (list 'loop (cons 'cond clauses)
+              (list 'restart-case error-form
+                (list 'store-value (list new) :report "Supply a new value." :interactive interactive
+                  (list 'multiple-value-bind stores (list 'values new) writer)
+                  (list 'setq key new))))))))))
+
+(defun hir-condition-initializer (form variables functions targets)
+  (hir-emit :list (list (hir-constant 'miricl::%compiled-condition-init) (hir-constant form)
+                       (hir-close (list 'lambda nil form) variables functions targets)) :single nil :allocation))
+
+(defun hir-define-condition (form variables functions targets)
+  (unless (<= 4 (length form)) (error 'program-error))
+  (let ((slots nil) (arguments nil))
+    (dolist (slot (fourth form))
+      (if (symbolp slot) (push (hir-constant slot) slots)
+          (let ((options (cdr slot)) (values (list (hir-constant (car slot)))))
+            (loop while options do
+              (let ((key (pop options)))
+                (unless options (error 'program-error))
+                (push (hir-constant key) values)
+                (let ((value (pop options)))
+                  (push (if (eq key :initform) (hir-condition-initializer value variables functions targets)
+                            (hir-constant value)) values))))
+            (push (hir-emit :list (nreverse values) :single nil :allocation) slots))))
+    (push (hir-constant (second form)) arguments) (push (hir-constant (third form)) arguments)
+    (push (hir-emit :list (nreverse slots) :single nil :allocation) arguments)
+    (dolist (option (cddddr form))
+      (unless (consp option) (error 'program-error))
+      (let ((values (list (hir-constant (car option)))))
+        (case (car option)
+          (:report
+           (unless (= (length option) 2) (error 'program-error))
+           (push (if (stringp (second option)) (hir-constant (second option))
+                     (hir-single (hir-form
+                       (if (and (consp (second option)) (eq (car (second option)) 'function)) (second option)
+                           (list 'function (second option))) variables functions targets))) values))
+          (:default-initargs
+           (let ((defaults (cdr option)))
+             (loop while defaults do
+               (push (hir-constant (pop defaults)) values)
+               (unless defaults (error 'program-error))
+               (push (hir-condition-initializer (pop defaults) variables functions targets) values))))
+          (otherwise (dolist (value (cdr option)) (push (hir-constant value) values))))
+        (push (hir-emit :list (nreverse values) :single nil :allocation) arguments)))
+    (hir-emit :call (list *hir-dynamic*
+                     (hir-function-reference (or (compiler-primitive 10 1 "%%DEFINE-CONDITION") 'miricl::%%define-condition) nil)
+                     (hir-emit :list (nreverse arguments) :single nil :allocation)) :multiple nil :call)))
+
+(defun hir-restart-expression (form restarts variables functions)
+  (let* ((expanded (macroexpand form (hir-macro-environment variables functions)))
+         (operator (and (consp expanded) (car expanded)))
+         (mode (and (not (assoc operator functions)) (position operator '(signal error warn cerror)))))
+    (if mode (list* 'miricl::%%native-restart-signal mode restarts (cdr expanded)) expanded)))
+
 (defun hir-control-form (form variables functions targets)
-  (let ((operator (car form)) (bindings nil) (no-error (hir-constant nil)) (payload nil) (body nil) (mode nil))
+  (let ((operator (car form)) (bindings nil) (no-error (hir-constant nil)) (payload nil)
+        (body nil) (mode nil) (parameters nil))
     (case operator
       (catch
        (unless (cdr form) (error 'program-error))
@@ -291,8 +414,36 @@
        (let ((cleanup (remove nil (cddr form))))
          (unless cleanup (return-from hir-control-form (hir-form (second form) variables functions targets)))
          (setq payload (hir-close (list* 'lambda nil cleanup) variables functions targets)
-               body (list (second form)) mode 3))))
-    (let ((function (hir-close (list* 'lambda nil body) variables functions targets)))
+               body (list (second form)) mode 3)))
+      ((restart-bind restart-case)
+       (unless (cdr form) (error 'program-error))
+       (let ((casep (eq operator 'restart-case)))
+         (setq mode (if casep 5 4))
+         (dolist (clause (if casep (cddr form) (second form)))
+           (unless (and (consp clause) (symbolp (car clause)) (cdr clause)) (error 'program-error))
+           (let ((options (cddr clause)) (function nil))
+             (if casep
+                 (let ((pairs nil))
+                   (loop while (member (car options) '(:report :interactive :test)) do
+                     (push (pop options) pairs)
+                     (unless options (error 'program-error))
+                     (push (pop options) pairs))
+                   (setq function (hir-close (list* 'lambda (second clause) options) variables functions targets)
+                         options (nreverse pairs)))
+                 (setq function (hir-single (hir-form (second clause) variables functions targets))))
+             (push (hir-constant (car clause)) bindings) (push function bindings)
+             (push (hir-restart-options options casep variables functions targets) bindings)))
+         (if casep
+             (let ((restarts (gensym)))
+               (setq parameters (list restarts)
+                     body (list (hir-restart-expression (second form) restarts variables functions))))
+             (setq body (cddr form)))))
+      ((with-condition-restarts progv)
+       (unless (cddr form) (error 'program-error))
+       (push (hir-single (hir-form (second form) variables functions targets)) bindings)
+       (push (hir-single (hir-form (third form) variables functions targets)) bindings)
+       (setq body (cdddr form) mode (if (eq operator 'progv) 7 6))))
+    (let ((function (hir-close (list* 'lambda parameters body) variables functions targets)))
       (hir-emit :control-call
         (list* *hir-dynamic* function no-error (or payload (hir-constant nil)) (nreverse bindings))
         :multiple (list mode) :call))))
@@ -310,24 +461,39 @@
        (case (car form)
          (quote (unless (= (length form) 2) (error "Malformed QUOTE.")) (hir-constant (second form)))
          (progn (hir-body (cdr form) variables functions targets))
-         ((catch handler-bind handler-case unwind-protect)
+         ((catch handler-bind handler-case unwind-protect restart-bind restart-case with-condition-restarts progv)
           (hir-control-form form variables functions targets))
          (miricl::%%condition-form
           (unless (member (second form) '(catch throw handler-bind handler-case unwind-protect
-                                          block return-from return tagbody go ignore-errors assert))
+                                          restart-bind restart-case with-condition-restarts with-simple-restart
+                                          block return-from return tagbody go ignore-errors assert check-type define-condition))
             (error "Native condition lowering is not implemented for ~S." (second form)))
           (hir-form (cdr form) variables functions targets))
+         (define-condition (hir-define-condition form variables functions targets))
+         (miricl::%%native-restart-signal
+          (let ((restarts (hir-single (hir-form (third form) variables functions targets))) (arguments nil))
+            (dolist (argument (cdddr form))
+              (push (hir-single (hir-form argument variables functions targets)) arguments))
+            (hir-emit :restart-signal (list* *hir-dynamic* restarts (nreverse arguments)) :multiple
+              (list (second form)) :call)))
+         (with-simple-restart
+          (let* ((specification (second form)) (control (gensym)) (arguments (gensym)) (stream (gensym)))
+            (unless (and (consp specification) (cdr specification)) (error 'program-error))
+            (hir-form
+              (list 'let (list (list control (second specification))
+                              (list arguments (cons 'list (cddr specification))))
+                (list 'restart-case (cons 'progn (cddr form))
+                  (list (first specification) nil :report
+                    (list 'lambda (list stream) (list 'apply '(function format) stream control arguments))
+                    '(values nil t)))) variables functions targets)))
          (ignore-errors
           (let ((condition (gensym)))
             (hir-form (list 'handler-case (cons 'progn (cdr form))
                         (list 'error (list condition) (list 'values nil condition))) variables functions targets)))
          (assert
-          (unless (cdr form) (error 'program-error))
-          (when (third form) (error "Native ASSERT places are not implemented."))
-          (hir-form (list 'loop (list 'if (second form) '(return nil))
-                      (list* 'cerror "Retry assertion."
-                        (or (cdddr form) (list "Assertion ~S failed." (list 'quote (second form))))))
-            variables functions targets))
+          (hir-form (hir-assert-form form variables functions) variables functions targets))
+         (check-type
+          (hir-form (hir-correctable-place-form form variables functions) variables functions targets))
          (throw
           (unless (= (length form) 3) (error 'program-error))
           (let* ((tag (hir-single (hir-form (second form) variables functions targets)))
@@ -351,10 +517,10 @@
               (hir-call-arguments (hir-function-reference (car form) functions) (cdr form) variables functions targets)
               (hir-case-form form variables functions targets)))
          (miricl::%%case-form
-          (unless (and (integerp (second form)) (<= 0 (second form) 3))
-            (error "Native correctable CASE forms are not implemented."))
-          (hir-form (cons (nth (second form) '(case typecase ecase etypecase)) (cddr form))
-            variables functions targets))
+          (unless (and (integerp (second form)) (<= 0 (second form) 5)) (error 'program-error))
+          (let ((expanded (cons (nth (second form) '(case typecase ecase etypecase ccase ctypecase)) (cddr form))))
+            (hir-form (if (< (second form) 4) expanded
+                          (hir-correctable-place-form expanded variables functions)) variables functions targets)))
          (the
           (unless (= (length form) 3) (error "Malformed THE."))
           (let ((value (hir-form (third form) variables functions targets)))
@@ -365,6 +531,14 @@
           (if (intersection (second form) '(:execute eval))
               (hir-body (cddr form) variables functions targets) (hir-constant nil)))
          ((macrolet symbol-macrolet)
+          (when (eq (car form) 'symbol-macrolet)
+            (multiple-value-bind (body specials) (hir-declarations (cddr form))
+              (declare (ignore body))
+              (dolist (binding (second form))
+                (let ((name (first binding)))
+                  (unless (and (= (length binding) 2) (symbolp name)
+                               (not (constantp name)) (not (hir-special-p name specials)))
+                    (error 'program-error))))))
           (hir-form (hir-expand-local-macros form variables functions) variables functions targets))
          (miricl::%%symbol-iterate
           ;; The public macro already establishes the iteration variable,
@@ -385,11 +559,11 @@
                   (body (hir-new-block)) (exit (hir-new-block)))
               (hir-terminate :branch (list test) (list body exit))
               (setq *hir-block* body)
-              (hir-body (cddr form) variables functions targets)
+              (catch 'hir-path-ended (hir-body (cddr form) variables functions targets))
               (unless (hir-block-terminator *hir-block*) (hir-terminate :jump nil (list header)))
               (setq *hir-block* exit) (hir-constant nil))))
          (tagbody
-          (let ((local targets) (tags nil) (exit (hir-new-block)))
+          (let ((local targets) (tags nil) (exit (hir-new-block)) (*hir-dynamic* *hir-dynamic*))
             ;; Classify tags before macro expansion. An atomic macro expansion
             ;; remains a statement, and tag names have their own namespace.
             (dolist (item (cdr form))
@@ -398,6 +572,14 @@
                 (when (assoc item tags :test #'eql) (error "Duplicate TAGBODY tag ~S." item))
                 (let ((target (make-hir-target :name item :owner *hir-function* :block (hir-new-block))))
                   (push (cons item target) tags) (push (cons (list :tag item) target) local))))
+            ;; Captured tags share TAGBODY's dynamic extent. Only the tags
+            ;; actually captured allocate runtime tokens in the emitter.
+            (dolist (entry (reverse tags))
+              (let* ((target (cdr entry))
+                     (token (hir-emit :block-enter (list *hir-dynamic*) :dynamic (list target) :control)))
+                (setf (hir-target-token target) token)
+                (setq *hir-dynamic* (hir-emit :block-environment (list token) :dynamic (list target) :control))))
+            (dolist (entry tags) (setf (hir-block-environment (hir-target-block (cdr entry))) *hir-dynamic*))
             (dolist (item (cdr form))
               (if (atom item)
                   (let ((block (hir-target-block (cdr (assoc item tags :test #'eql)))))
@@ -411,8 +593,10 @@
           (unless (= (length form) 2) (error "Malformed GO."))
           (let ((target (cdr (assoc (list :tag (second form)) targets :test #'equal))))
             (unless target (error "No lexical tag named ~S." (second form)))
-            (unless (eq (hir-target-owner target) *hir-function*) (error "Native nonlocal GO is not implemented."))
-            (hir-terminate :jump nil (list (hir-target-block target)))
+            (if (eq (hir-target-owner target) *hir-function*)
+                (hir-terminate :jump nil (list (hir-target-block target)))
+                (hir-terminate :block-return
+                  (list *hir-dynamic* (hir-capture target :dynamic) (hir-multiple (hir-constant nil))) nil))
             (throw 'hir-path-ended nil)))
          ((let let*)
           (multiple-value-bind (body specials) (hir-declarations (cddr form))
@@ -505,8 +689,9 @@
                  (target (make-hir-target :name (second form) :owner *hir-function* :block join))
                  (token (hir-emit :block-enter (list *hir-dynamic*) :dynamic (list target) :control)))
             (setf (hir-target-token target) token)
-            (let ((*hir-dynamic* token))
-              (let ((value (hir-body (cddr form) variables functions (acons (second form) target targets))))
+            (let ((*hir-dynamic* (hir-emit :block-environment (list token) :dynamic (list target) :control)))
+              (let ((value (catch 'hir-path-ended
+                             (hir-body (cddr form) variables functions (acons (second form) target targets)))))
                 (unless (hir-block-terminator *hir-block*)
                   (hir-terminate :block-return (list *hir-dynamic* token (hir-multiple value)) (list join)))))
             (setq *hir-block* join) (first (hir-block-parameters join))))
@@ -555,6 +740,15 @@
     ;; through HIR; application bodies do not fall back to interpretation.
     (unless (fboundp 'miricl::%normalize-lambda)
       (error "Keyword normalization requires the host's lambda-list adapter."))
+    (when implicit-block
+      ;; The local function's named block covers its body, not keyword
+      ;; initializers. Insert it before normalization moves those into LET*.
+      (let ((body (cddr form)) (prefix nil))
+        (when (and (stringp (car body)) (cdr body)) (push (pop body) prefix))
+        (loop while (and (consp (car body)) (eq (caar body) 'declare)) do (push (pop body) prefix))
+        (setq form (list* 'lambda (second form)
+                     (append (nreverse prefix) (list (list* 'block (first implicit-block) body))))
+              implicit-block nil)))
     (let ((normalized (miricl::%normalize-lambda (second form) (cddr form))))
       (setq form (list* 'lambda (first normalized) (second normalized)))))
   (let* ((*hir-function* (make-hir-function :name name :parent parent :parameters (second form)))
@@ -571,6 +765,7 @@
              (end (or (position-if (lambda (p) (member p '(&rest &key &aux))) parameters) (length parameters)))
              (maximum (if (member '&rest parameters) -1 (- end (if (member '&optional parameters) 1 0))))
              (names nil))
+        (catch 'hir-path-ended
         (hir-emit :check-arguments nil nil (list required maximum) :check)
         (loop while parameters do
           (let ((parameter (pop parameters)))
@@ -620,7 +815,7 @@
         (when implicit-block (setq body (list (list* 'block (first implicit-block) body))))
         (let ((value (hir-body body (hir-shadow-specials local specials) functions targets)))
           (unless (hir-block-terminator *hir-block*)
-            (hir-terminate :return (list (hir-multiple value)) nil)))))
+            (hir-terminate :return (list (hir-multiple value)) nil))))))
     (dolist (block (hir-function-blocks *hir-function*))
       (setf (hir-block-instructions block) (nreverse (hir-block-instructions block))))
     (setf (hir-function-blocks *hir-function*) (nreverse (hir-function-blocks *hir-function*))

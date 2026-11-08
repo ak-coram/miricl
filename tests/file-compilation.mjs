@@ -23,6 +23,21 @@ vm.mountFile('portable.lisp', `
   (defun package-contents (package)
     (with-package-iterator (next package :external)
       (loop for more = (nth-value 0 (next)) while more count more)))
+  ;; UIOP uses (CHECK-TYPE SYMBOL SYMBOL). Alpha conversion must rename
+  ;; the place while retaining atomic and compound type syntax literally.
+  (defun checked-symbol (symbol)
+    (values (check-type symbol symbol) symbol))
+  (defun checked-member (member symbol)
+    (declare (ignore symbol))
+    (check-type member (member symbol))
+    member)
+  (defun repaired-symbol (symbol)
+    (handler-bind ((type-error (lambda (condition)
+                    (unless (and (eq (type-error-datum condition) (car symbol))
+                                 (eq (type-error-expected-type condition) 'symbol))
+                      (error "Incorrect CHECK-TYPE condition."))
+                    (store-value :repaired condition))))
+      (list (check-type (car symbol) symbol) symbol)))
   (macrolet ((constant-macro () '42)) (defparameter *constant-expansion* (constant-macro)))
   (defun checked-pathname (value &key required)
     (macrolet ((check (condition) \`(unless ,condition (error "Expected a pathname."))))
@@ -77,6 +92,18 @@ check(fresh, `(and (compiled-function-p #'compiled-package::persisted)
      (let ((count 0)) (do-external-symbols (symbol :keyword count) (incf count))))
   (compiled-function-p #'compiled-package::bounded-loop)
   (equal (multiple-value-list (compiled-package::bounded-loop 5)) '(4 10)))`);
+check(fresh, `(and
+  (compiled-function-p #'compiled-package::checked-symbol)
+  (equal (multiple-value-list (compiled-package::checked-symbol 'ok)) '(nil ok))
+  (eq (compiled-package::checked-member 'symbol :ignored) 'symbol)
+  (handler-case (progn (compiled-package::checked-symbol 42) nil)
+    (type-error (condition)
+      (and (= (type-error-datum condition) 42)
+           (eq (type-error-expected-type condition) 'symbol))))
+  (handler-case (progn (compiled-package::checked-member :bad :ignored) nil)
+    (type-error (condition)
+      (equal (type-error-expected-type condition) '(member symbol))))
+  (equal (compiled-package::repaired-symbol (list 42)) '(nil (:repaired))))`);
 vm.evaluate('(defvar *file-events* nil)', {eof: true});
 vm.mountFile('phases.lisp', `
   (macrolet ((phase (situation &body body) (list* 'eval-when (list situation) body)))
