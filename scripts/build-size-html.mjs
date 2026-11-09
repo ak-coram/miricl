@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// node scripts/build-size-html.mjs [build-directory] [output.html] [repl-page] [life-directory] [maxima-directory]
+// node scripts/build-size-html.mjs [build-directory] [output.html] [repl-page] [life-directory] [maxima-directory] [fricas-directory]
 import fs from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -14,10 +14,14 @@ const artifacts = [
     kind: 'application', files: ['game-of-life/build/index.html', 'game-of-life/build/miricl.js',
       'game-of-life/build/miricl.wasm', 'game-of-life/build/game-of-life.wasm']},
   {file: 'game-of-life/build/game-of-life.wasm', description: 'Game of Life — Lisp payload only (included in total above)', kind: 'wasm'},
-  {file: 'maxima/', description: 'Maxima — initial HTML, scripts, interpreter, optimized image and filesystem (10 files)',
+  {file: 'maxima/', description: 'Maxima — HTML, scripts, interpreter and optimized core (9 files)',
     kind: 'application', files: ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-      'miricl.mjs', 'maxima.mjs', 'miricl.wasm', 'maxima.wasm', 'files.json.gz'].map(file => `build/maxima/site/${file}`)},
-  {file: 'build/maxima/site/maxima.wasm', description: 'Maxima — optimized Lisp payload (included in total above)', kind: 'wasm'},
+      'miricl.mjs', 'maxima.mjs', 'miricl.wasm', 'maxima.core'].map(file => `build/maxima/site/${file}`)},
+  {file: 'build/maxima/site/maxima.core', description: 'Maxima — optimized Lisp core (included in total above)', kind: 'wasm'},
+  {file: 'fricas/', description: 'FriCAS — initial HTML, scripts, interpreter, optimized image and algebra filesystem (11 files)',
+    kind: 'application', files: ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
+      'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`)},
+  {file: 'build/fricas/site/fricas.wasm', description: 'FriCAS — optimized Lisp payload (included in total above)', kind: 'wasm'},
 ];
 const escape = value => String(value ?? '').replace(/[&<>"']/g,
   char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
@@ -28,10 +32,12 @@ const webURL = value => /^https?:\/\//.test(value ?? '');
 
 export function collectImageSizes(directory, {commit = '', runURL = '', generatedAt = new Date().toISOString(),
   applicationDirectory = path.join(directory, 'game-of-life'),
-  maximaDirectory = path.join(directory, 'build/maxima/site')} = {}) {
+  maximaDirectory = path.join(directory, 'build/maxima/site'),
+  fricasDirectory = path.join(directory, 'build/fricas/site')} = {}) {
   const measure = (name, kind) => {
     const file = name.startsWith('game-of-life/')
       ? path.join(applicationDirectory, name.slice('game-of-life/'.length))
+      : name.startsWith('build/fricas/site/') ? path.join(fricasDirectory, name.slice('build/fricas/site/'.length))
       : name.startsWith('build/maxima/site/') ? path.join(maximaDirectory, name.slice('build/maxima/site/'.length)) : path.join(directory, name);
     return {...(kind === 'wasm' ? measureWasm(file) : measureFile(file)), file: name};
   };
@@ -49,7 +55,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
 
 export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = 'image-sizes.json'} = {}) {
   if (report.schemaVersion !== 1 || !Array.isArray(report.artifacts) || report.artifacts.length !== artifacts.length)
-    throw new Error('Expected measurements for the runtime, REPL, standalone pages, Game of Life and Maxima.');
+    throw new Error('Expected measurements for the runtime, REPL, standalone pages, Game of Life, Maxima and FriCAS.');
   for (const artifact of report.artifacts) {
     for (const key of ['rawBytes', 'gzipBytes', 'brotliBytes']) {
       if (!Number.isSafeInteger(artifact[key]) || artifact[key] < 0) throw new Error(`Invalid ${key}.`);
@@ -69,9 +75,10 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
     <td data-size="brotliBytes">${size(artifact.brotliBytes)}</td>
   </tr>`;
   const rows = [
-    ['Runtime files', artifact => artifact.kind === 'wasm' && !/^(game-of-life|build\/maxima)\//.test(artifact.file)],
+    ['Runtime files', artifact => artifact.kind === 'wasm' && !/^(game-of-life|build\/(?:maxima|fricas))\//.test(artifact.file)],
     ['Standalone applications', artifact => artifact.kind === 'html'],
     ['Game of Life', artifact => artifact.file.startsWith('game-of-life/')],
+    ['FriCAS', artifact => artifact.file === 'fricas/' || artifact.file.startsWith('build/fricas/')],
     ['Maxima', artifact => artifact.file === 'maxima/' || artifact.file.startsWith('build/maxima/')],
   ].map(([title, matches]) => `<tbody><tr class="group"><th colspan="4" scope="rowgroup">${title}</th></tr>\n` +
     report.artifacts.filter(matches).map(row).join('\n') + '</tbody>').join('\n');
@@ -111,7 +118,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     ? `${process.env.GITHUB_SERVER_URL ?? 'https://github.com'}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}` : '';
   const report = collectImageSizes(directory, {commit: process.env.GITHUB_SHA, runURL,
     ...(process.argv[5] ? {applicationDirectory: process.argv[5]} : {}),
-    ...(process.argv[6] ? {maximaDirectory: process.argv[6]} : {})});
+    ...(process.argv[6] ? {maximaDirectory: process.argv[6]} : {}),
+    ...(process.argv[7] ? {fricasDirectory: process.argv[7]} : {})});
   const html = renderImageSizes(report, {replPage: process.argv[4] ?? 'miricl.html', jsonPage: path.basename(json)});
   fs.mkdirSync(path.dirname(path.resolve(output)), {recursive: true});
   fs.writeFileSync(json, JSON.stringify(report, null, 2) + '\n');

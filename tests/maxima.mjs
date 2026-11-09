@@ -2,11 +2,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {createMaxima} from '../scripts/maxima.mjs';
-import {maximaProbeFiles} from '../scripts/probe-maxima.mjs';
 import {examples} from '../maxima/examples.mjs';
 const image = process.argv[2] ?? 'miricl.wasm';
 const core = process.argv[3] ?? 'build/maxima/maxima-optimized.wasm';
-const session = await createMaxima(fs.readFileSync(image), fs.readFileSync(core), maximaProbeFiles(true));
+const session = await createMaxima(fs.readFileSync(image), fs.readFileSync(core));
 try {
   assert.equal(session.vm.evaluate(`(and (compiled-function-p #'maxima::meval)
     (boundp 'cl-user::*maxima-build-time*))`).output, 'T\n');
@@ -21,5 +20,6 @@ try {
   const result = await session.evaluate('f(x):=x^2$ f(7);');
   assert.equal(result.results.at(-1).text, '49');
   assert.equal((await session.evaluate('%+1;')).results.at(-1).text, '50');
-  console.log('Maxima optimized image: manual examples, share autoloading, definitions and session state pass.');
+  assert.equal(session.vm.evaluate('(probe-file "/maxima/share/lapack/lapack.mac")').output, 'NIL\n');
+  console.log('Maxima core: manual examples, definitions and session state pass without a source filesystem.');
 } finally {session.close();}

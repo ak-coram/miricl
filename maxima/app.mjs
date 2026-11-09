@@ -1,4 +1,4 @@
-import {examples} from './examples.mjs';
+import {examples, config} from './examples.mjs';
 import {newSession, sessionStore} from './session-store.mjs';
 const $ = selector => document.querySelector(selector);
 const source = $('#source'), answers = $('#answers'), status = $('#status'), evaluate = $('#evaluate');
@@ -8,7 +8,7 @@ try {storage = localStorage;} catch (error) {storageError = error;}
 const store = sessionStore(storage ?? {getItem: () => null, setItem: () => {throw storageError;}}, error => {
   storageError = error;
   $('#save-status').textContent = 'Browser storage is unavailable. Export to keep this session.';
-});
+}, config.storageKey);
 let current = structuredClone(store.current() ?? newSession());
 for (const entry of current.entries) if (entry.state === 'running') entry.state = 'cancelled';
 let worker, active, activeNode, ready = false, busy = false, viewing = current.entries.length > 0;
@@ -97,7 +97,14 @@ function start(onReady) {
   running.onerror = event => {ready = false; busy = false; setStatus(event.message); controls();};
   running.postMessage({type: 'start'});
 }
-function recordOutput(text, className = '') {active.outputs.push({text, className}); append(text, className); save();}
+function recordOutput(text, className = '') {
+  const previous = active.outputs.at(-1);
+  if (className === '' && previous?.className === className && activeNode.lastElementChild?.tagName === 'PRE') {
+    previous.text += text; activeNode.lastElementChild.textContent = previous.text;
+    history.scrollTop = history.scrollHeight;
+  } else {active.outputs.push({text, className}); append(text, className);}
+  save();
+}
 function openSession(id) {
   cancel(); const session = store.select(id); if (!session) return;
   current = structuredClone(session); viewing = current.entries.length > 0; render(); start();
@@ -128,7 +135,7 @@ $('#session-name').oninput = () => {current.name = $('#session-name').value.trim
 $('#remove').onclick = () => {store.remove(current.id); fresh();};
 $('#export').onclick = () => {
   const url = URL.createObjectURL(new Blob([JSON.stringify({version: 1, session: current}, null, 2)], {type: 'application/json'}));
-  const link = document.createElement('a'); link.href = url; link.download = `${current.name.replace(/[^\p{L}\p{N}_-]+/gu, '-').slice(0, 80) || 'maxima-session'}.json`;
+  const link = document.createElement('a'); link.href = url; link.download = `${current.name.replace(/[^\p{L}\p{N}_-]+/gu, '-').slice(0, 80) || `${config.name.toLowerCase()}-session`}.json`;
   link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 function answer() {
@@ -144,7 +151,7 @@ for (const example of examples) {
   const category = document.createElement('span'); category.textContent = example.category; button.append(category, example.title);
   button.onclick = () => {
     source.value = example.code; answers.value = ''; $('#example-note').replaceChildren(document.createTextNode(example.note + ' '));
-    const link = document.createElement('a'); link.href = `doc/html/${example.manual}`; link.target = '_blank'; link.rel = 'noopener'; link.textContent = `Manual: ${example.source} ↗`;
+    const link = document.createElement('a'); link.href = `${config.manualBase}${example.manual}`; link.target = '_blank'; link.rel = 'noopener'; link.textContent = `Manual: ${example.source} ↗`;
     $('#example-note').append(link); $('#example-note').hidden = false; source.focus();
   };
   $('#examples').append(button);

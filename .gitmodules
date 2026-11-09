@@ -7,3 +7,6 @@
 [submodule "vendor/maxima"]
 	path = vendor/maxima
 	url = https://git.code.sf.net/p/maxima/code
+[submodule "vendor/fricas"]
+	path = vendor/fricas
+	url = https://github.com/fricas/fricas.git

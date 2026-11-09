@@ -40,7 +40,7 @@ benchmark-game-of-life: build-game-of-life
     {{ quote(node) }} scripts/benchmark-game-of-life.mjs game-of-life
 
 # Build raw, gzip and Brotli size reports for the Wasm images and HTML pages.
-build-sizes: build build-html build-todo build-game-of-life build-maxima
+build-sizes: build build-html build-todo build-game-of-life build-maxima build-fricas
     {{ quote(node) }} scripts/build-size-html.mjs {{ quote(build_dir) }} {{ quote(build_dir / 'image-sizes.html') }} miricl.html {{ quote(absolute_path('game-of-life')) }}
 
 # Check size accounting and the standalone report in a browser.
@@ -261,17 +261,36 @@ test-maxima-browser: build-maxima
 test-maxima-examples: build-maxima
     MIRICL_MAXIMA_DOCS={{ quote(build_dir / 'build/maxima/doc/info') }} {{ quote(node) }} tests/maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
     MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/core-tests.json') }} suite rtest13s
-    MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/share-tests.json') }} share rtest_stringproc rtest_grobner rtest_distrib
 
-# Compile Maxima, build its help manuals, and assemble a static browser REPL.
+# Compile Maxima and assemble a static browser REPL without docs or tests.
 build-maxima: (probe-maxima 'compile')
     {{ quote(node) }} scripts/optimize-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima.wasm') }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
-    {{ quote(node) }} scripts/build-maxima-docs.mjs {{ quote(build_dir / 'build/maxima/doc/info') }}
-    {{ quote(node) }} scripts/build-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(build_dir / 'build/maxima/site') }} {{ quote(build_dir / 'build/maxima/doc/info') }}
+    {{ quote(node) }} scripts/build-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(build_dir / 'build/maxima/site') }}
 
 # Includes upstream's known-failure accounting; failures produce a JSON report.
 test-maxima: build-maxima
     MIRICL_MAXIMA_DOCS={{ quote(build_dir / 'build/maxima/doc/info') }} MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} MIRICL_MAXIMA_TIMEOUT_MS=7200000 {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/suite.json') }} suite
+
+# Initialize and prepare canonical FriCAS Lisp and algebra databases with SBCL.
+fricas-init:
+    git submodule update --init vendor/fricas
+
+prepare-fricas: fricas-init
+    {{ quote(node) }} scripts/prepare-fricas.mjs {{ quote(build_dir / 'build/fricas/native') }}
+
+# Compile FriCAS in MIRICL and validate a fresh load.
+probe-fricas: build prepare-fricas
+    {{ quote(node) }} scripts/probe-fricas.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/fricas/native') }} {{ quote(build_dir / 'build/fricas/compile.json') }}
+
+# Optimize the dynamic interpreter and assemble the browser workbench.
+build-fricas: probe-fricas
+    {{ quote(node) }} scripts/optimize-fricas.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/fricas/fricas.wasm') }} {{ quote(build_dir / 'build/fricas/fricas-optimized.wasm') }}
+    {{ quote(node) }} scripts/build-fricas.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/fricas/fricas-optimized.wasm') }} {{ quote(build_dir / 'build/fricas/native') }} {{ quote(build_dir / 'build/fricas/site') }}
+
+# Documented examples, complete selected upstream suites, persistence and offline UI.
+test-fricas: build-fricas
+    {{ quote(node) }} tests/fricas.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/fricas/fricas-optimized.wasm') }} {{ quote(build_dir / 'build/fricas/native') }} {{ quote(build_dir / 'build/fricas/tests.json') }}
+    {{ quote(node) }} tests/browser-fricas-app.mjs {{ quote(build_dir / 'build/fricas/site') }}
 
 # Assemble the optional guest ASDF library from a patched source copy.
 build-asdf: build

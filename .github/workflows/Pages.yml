@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 # Let an active deployment finish before publishing the latest build.
 concurrency:
@@ -17,7 +18,7 @@ jobs:
   build:
     name: Build browser examples, sizes and ANSI results
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 45
     env:
       LISP: sbcl-bin
       LIBWASMTIME_VERSION: 50.0.1
@@ -88,63 +89,50 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pages/game-of-life"
           cp game-of-life/build/index.html game-of-life/build/miricl.js game-of-life/build/miricl.wasm game-of-life/build/game-of-life.wasm "$RUNNER_TEMP/pages/game-of-life/"
 
-      - name: Build and test optimized Maxima workbench
+      - name: Build optimized Maxima workbench
         timeout-minutes: 15
-        env:
-          CHROMIUM: google-chrome
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y sbcl texinfo m4
-          node scripts/probe-maxima.mjs miricl.wasm build/maxima/compile.json compile
+          sudo apt-get install -y sbcl build-essential
+          # Compile only; algebra and browser checks run in regular CI.
+          node scripts/probe-maxima.mjs miricl.wasm build/maxima/compile.json compile --build-only
           node scripts/optimize-maxima.mjs miricl.wasm build/maxima/maxima.wasm build/maxima/maxima-optimized.wasm
-          node scripts/build-maxima-docs.mjs build/maxima/doc/info
-          node scripts/build-maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm build/maxima/site build/maxima/doc/info
-          node tests/maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm
-          node tests/browser-maxima-app.mjs build/maxima/site
+          node scripts/build-maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm build/maxima/site
           cp -R build/maxima/site "$RUNNER_TEMP/pages/maxima"
+
+      - name: Build optimized FriCAS workbench
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          node scripts/prepare-fricas.mjs build/fricas/native
+          # Compile only; no fresh-session smoke tests in Pages.
+          node scripts/probe-fricas.mjs miricl.wasm build/fricas/native build/fricas/compile.json --build-only
+          node scripts/optimize-fricas.mjs miricl.wasm build/fricas/fricas.wasm build/fricas/fricas-optimized.wasm
+          node scripts/build-fricas.mjs miricl.wasm build/fricas/fricas-optimized.wasm build/fricas/native build/fricas/site
+          cp -R build/fricas/site "$RUNNER_TEMP/pages/fricas"
 
       - name: Build image size summary
         run: node scripts/build-size-html.mjs . "$RUNNER_TEMP/pages/image-sizes.html" index.html
 
-      - name: Run full ANSI suite
-        timeout-minutes: 20
-        # Conformance failures are report content; incomplete runs must not deploy.
-        continue-on-error: true
-        env:
-          MIRICL_ANSI_REPORT: ansi-full-results.json
-        run: node tests/ansi.mjs miricl.wasm --full
-
-      - name: Build standalone ANSI results page
-        run: |
-          node scripts/build-ansi-html.mjs ansi-full-results.json ansi-results.html
-          cp ansi-results.html "$RUNNER_TEMP/pages/ansi-results.html"
-
-      - name: Check full ANSI suite completion
-        shell: bash
-        run: |
-          node --input-type=module <<'JS'
-          import fs from 'node:fs';
-          import assert from 'node:assert/strict';
-          const report = JSON.parse(fs.readFileSync('ansi-full-results.json', 'utf8'));
-          const s = report.summary;
-          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-            `### Full ANSI suite\n\n${s.passed} passed, ${s.failed} failed, ${s.blocked} blocked, ${s.timedOut} timed out; ${s.total}/${s.expected} tests accounted for, ${s.loadErrors} load errors.\n`);
-          assert.equal(report.error, null, report.error);
-          assert.equal(s.complete, true, 'Full ANSI suite did not finish');
-          assert.ok(s.total > 0);
-          assert.equal(s.total, s.expected);
-          JS
-
-      - name: Upload full ANSI report
-        if: always()
-        uses: actions/upload-artifact@v4
+      # Conformance runs in CI. Publish its latest recorded report separately
+      # from the application build, retaining the report's own commit metadata.
+      - name: Download latest saved ANSI results
+        uses: actions/github-script@v7
         with:
-          name: ansi-full-results
-          path: |
-            ansi-full-results.json
-            ansi-results.html
-          if-no-files-found: ignore
+          script: |
+            const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo,
+              {...context.repo, per_page: 100});
+            const artifact = artifacts.find(item => !item.expired && ['ansi-results', 'ansi-full-results'].includes(item.name) && item.workflow_run?.head_branch === 'main');
+            if (!artifact) throw new Error('No ANSI report artifact is available.');
+            const zip = await github.rest.actions.downloadArtifact(
+              {...context.repo, artifact_id: artifact.id, archive_format: 'zip'});
+            require('fs').writeFileSync(process.env.RUNNER_TEMP + '/ansi-results.zip', Buffer.from(zip.data));
+            core.info(`ANSI report from ${artifact.workflow_run.head_sha}`);
+
+      - name: Copy saved ANSI results page
+        shell: bash
+        run: unzip -p "$RUNNER_TEMP/ansi-results.zip" ansi-results.html > "$RUNNER_TEMP/pages/ansi-results.html"
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v4

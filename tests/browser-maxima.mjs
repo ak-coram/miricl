@@ -13,7 +13,7 @@ const image = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const output = path.resolve(process.argv[3] ?? 'build/maxima/browser.json');
 const revision = maximaProbeRevision();
 const bytes = await fs.readFile(image);
-const files = maximaProbeFiles(true);
+const files = maximaProbeFiles();
 const core = process.argv[4] && await fs.readFile(process.argv[4]);
 if (core) files.push(['/maxima-core.wasm', core]);
 const sources = files.map(([name, bytes]) => [name, bytes.toString('base64')]);

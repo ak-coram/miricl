@@ -1,0 +1,47 @@
+* FriCAS on MIRICL
+
+[[https://github.com/fricas/fricas][Canonical FriCAS]] is pinned in =vendor/fricas=. The [[https://ak-coram.github.io/miricl/fricas/][browser workbench]]
+uses MIRICL for parsing, type inference, algebra and compilation. Calculations
+run locally in a worker. The Plan 9 interface shares Maxima's recording,
+export, replay and cancellation controls; saved sessions use a separate key.
+
+** Build and run
+
+Install SBCL, GNU make and a C compiler, plus the usual MIRICL prerequisites.
+Then run from the repository root:
+
+#+begin_src sh
+just build-fricas
+node scripts/repl.mjs miricl.wasm --dev-server --directory=build/fricas/site
+just test-fricas
+#+end_src
+
+The native FriCAS build is only a bootstrap: upstream =configure=, =make= and
+=make dist-lisp= generate portable Common Lisp and four algebra databases.
+MIRICL compiles the interpreter into =build/fricas/fricas.wasm=. The generic
+optimizer compacts it with =:strip nil=, preserving its dynamic interface.
+Algebra libraries are compiled and loaded on demand in the guest filesystem.
+The browser ships all generated algebra Lisp, command help and databases in
+=filesystem.bin.gz=. SBCL and native FriCAS are not needed by the browser.
+
+=build/fricas/site= is the static distribution. =build.json= records the
+upstream revision and image hashes; =optimization.json= and =retention.txt=
+record optimizer measurements. The size page counts the entire initial
+application, including the compressed algebra filesystem.
+
+** Examples and tests
+
+The shelf examples come from the pinned upstream HyperDoc source: symbolic
+integration with a real parameter, differentiation, lazy power series,
+series arithmetic, limits and block matrices. Each links to its source.
+Command help, for example =)help clear=, is available offline.
+
+=tests/fricas.mjs= checks the optimized image, examples, session state, and
+complete upstream =array.input=, =table.input= and =ord.input= suites. The
+browser test checks offline evaluation, Unicode, recording, saved transcripts,
+replay, mobile layout and cancellation. These run in the regular Linux/SBCL
+CI job. Pages only builds and publishes. They are selected regression coverage,
+not a claim that the entire upstream FriCAS test suite passes.
+
+Native socket, shell, X/HyperDoc and graphics front ends are not part of this
+browser port. The included algebra and text interface do not require them.

@@ -2,7 +2,7 @@
 import {Miricl} from './miricl.mjs';
 const lispString = text => '"' + text.replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"';
 
-export async function createMaxima(image, core, files, {progress = () => {}, onPrompt, ...host} = {}) {
+export async function createMaxima(image, core, {progress = () => {}, onPrompt, ...host} = {}) {
   const results = [];
   let answer;
   const vm = await Miricl.instantiate(image, {...host, imports: {...host.imports,
@@ -13,18 +13,20 @@ export async function createMaxima(image, core, files, {progress = () => {}, onP
       takeAnswer() {const text = answer; answer = undefined; return text;},
     }}});
   try {
-    for (const [name, bytes] of files) vm.mountFile(name, bytes);
-    vm.mountFile('/maxima-core.wasm', core);
+    vm.mountFile('/maxima.core', core);
     const evaluate = source => vm.evaluateAsync(source, {eof: true});
     progress('Loading Maxima');
     await evaluate(`
-      (load "/maxima-probe-port.lisp")
-      (setq *default-pathname-defaults* #P"/maxima/src/")
-      (load "maxima-build.lisp")
-      (load "/maxima-core.wasm")
+      (setq miricl:*trap-floating-point-underflow* nil)
+      (load "/maxima.core")
       (values)`);
     progress('Initializing Maxima');
     const startup = await evaluate(`
+      (setf (symbol-function 'cl-info::load-primary-index) (lambda () nil))
+      (let ((help (lambda (&rest topics) (declare (ignore topics))
+                    (format t "The manual is not bundled. See https://maxima.sourceforge.io/docs/manual/~%") nil)))
+        (setf (symbol-function 'cl-info::info-exact) help
+              (symbol-function 'cl-info::info-inexact) help))
       (let ((*package* (find-package :maxima)))
         (maxima::initialize-runtime-globals)
         (maxima::setup-search-lists))

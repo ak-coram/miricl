@@ -7,9 +7,11 @@ import http from 'node:http';
 import {spawn} from 'node:child_process';
 import {examples} from '../maxima/examples.mjs';
 const root = path.resolve(process.argv[2] ?? 'build/maxima/site');
+const requested = new Set();
 const server = http.createServer(async (request, response) => {
   try {
     const pathname = new URL(request.url, 'http://localhost').pathname;
+    requested.add(pathname);
     const file = path.resolve(root, '.' + decodeURIComponent(pathname === '/' ? '/index.html' : pathname));
     if (!file.startsWith(root + path.sep)) {response.writeHead(403).end(); return;}
     response.setHeader('Content-Type', file.endsWith('.mjs') ? 'text/javascript' :
@@ -73,6 +75,10 @@ try {
   await command('Emulation.setDeviceMetricsOverride', {width: 1200, height: 900, deviceScaleFactor: 1, mobile: false});
   await command('Page.navigate', {url: `http://127.0.0.1:${server.address().port}/`});
   await waitFor('!document.querySelector("#evaluate").disabled');
+  assert.ok(requested.has('/maxima.core'));
+  assert.ok(![...requested].some(name => /filesystem|files\.json|\.lisp$/.test(name)), 'Startup must only load the compiled core.');
+  for (const name of ['filesystem.bin.gz', 'filesystem-archive.mjs', 'maxima.wasm', 'doc'])
+    await assert.rejects(fs.access(path.join(root, name)), {code: 'ENOENT'});
   await js('globalThis.ticks = 0; setInterval(() => ticks++, 20)');
   await command('Network.emulateNetworkConditions', {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
   const run = async (source, expected, answers = '', interactiveAnswer) => {
@@ -92,20 +98,20 @@ try {
     assert.equal(await js('!!document.querySelector("#history li:last-child .error")'), false, output);
     console.log(`Browser Maxima app: ${source.split('\n')[0]}`);
   };
+  assert.equal(await js('document.querySelector("h1").innerText'), 'Wir müssen wissen,\nWir werden wissen.');
   await run('factor(x^4-1);', /\(x-1\)\*\(x\+1\)\*\(x\^2\+1\)/);
   await run('a:7$\nf(x):=x^2; f(a);', /49/);
   await run('%+1;', /50/);
-  await run('load("stringproc")$ sconcat("λ", "🙂");', /λ🙂/);
-  await run('parse_string("ex: ​23;");', /ex:23/);
+  await run('"λ🙂";', /λ🙂/);
   await run('kill(a)$ integrate(x^a,x);', /x\^\(a\+1\)\/\(a\+1\)/, '', 'no');
   await run('read("Enter a number");', /42/, '', '42');
-  await run('? integrate;', /Attempts to symbolically compute the integral/);
+  await run('? integrate;', /manual is not bundled/);
   await run('1+;', /incorrect syntax/);
   await run('2+2;', /4/);
   for (const example of examples) {
     await js(`document.querySelector('[data-example="${example.id}"]').click()`);
     assert.equal(await js('document.querySelector("#source").value'), example.code);
-    assert.ok(await js('document.querySelector("#example-note a").getAttribute("href").startsWith("doc/html/")'));
+    assert.ok(await js('document.querySelector("#example-note a").getAttribute("href").startsWith("https://maxima.sourceforge.io/docs/manual/")'));
     await run(example.code, new RegExp(example.expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   await run('persist_value:13$ persisted(x):=x+persist_value$ persisted(29);', /42/);

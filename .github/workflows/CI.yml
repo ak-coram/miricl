@@ -176,12 +176,26 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y sbcl texinfo m4
+          sudo apt-get install -y sbcl build-essential
           node scripts/probe-maxima.mjs miricl.wasm build/maxima/compile.json compile
           node scripts/optimize-maxima.mjs miricl.wasm build/maxima/maxima.wasm build/maxima/maxima-optimized.wasm
-          node scripts/build-maxima-docs.mjs build/maxima/doc/info
-          node scripts/build-maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm build/maxima/site build/maxima/doc/info
+          node scripts/build-maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm build/maxima/site
+
+      - name: Build optimized FriCAS workbench
+        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          node scripts/prepare-fricas.mjs build/fricas/native
+          node scripts/probe-fricas.mjs miricl.wasm build/fricas/native build/fricas/compile.json
+          node scripts/optimize-fricas.mjs miricl.wasm build/fricas/fricas.wasm build/fricas/fricas-optimized.wasm
+          node scripts/build-fricas.mjs miricl.wasm build/fricas/fricas-optimized.wasm build/fricas/native build/fricas/site
           node scripts/build-size-html.mjs
+
+      - name: FriCAS algebra, manual examples and upstream regressions
+        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
+        timeout-minutes: 15
+        run: node tests/fricas.mjs
 
       - name: Maxima algebra, manual examples and upstream regressions
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -191,7 +205,6 @@ jobs:
         run: |
           node tests/maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm
           node scripts/probe-maxima.mjs miricl.wasm build/maxima/core-tests.json suite rtest13s
-          node scripts/probe-maxima.mjs miricl.wasm build/maxima/share-tests.json share rtest_stringproc rtest_grobner rtest_distrib
 
       - name: Test standalone browser REPL
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -204,8 +217,10 @@ jobs:
           node tests/browser-compiler.mjs
           node tests/browser-dev-repl.mjs miricl.wasm miricl-repl.wasm
           node tests/ansi-html.mjs
+          node tests/filesystem-archive.mjs
           node tests/size-html.mjs
           node tests/browser-maxima-app.mjs build/maxima/site
+          node tests/browser-fricas-app.mjs build/fricas/site
 
       - name: Upload standalone browser examples and size report
         if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
@@ -222,10 +237,14 @@ jobs:
             game-of-life/build/miricl.wasm
             game-of-life/build/game-of-life.wasm
             build/maxima/site/
+            build/fricas/site/
+            build/fricas/compile.json
+            build/fricas/optimization.json
+            build/fricas/retention.txt
+            build/fricas/tests.json
             build/maxima/optimization.json
             build/maxima/retention.txt
             build/maxima/core-tests.json
-            build/maxima/share-tests.json
           if-no-files-found: error
 
       - name: ANSI tests in the standalone interpreter

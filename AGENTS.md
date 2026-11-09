@@ -56,6 +56,15 @@ not permit other unstable WASM or WASI features.
 
 # Other
 
+Never perform remote Git operations, including push, pull, fetch, clone,
+or submodule commands that access a remote.
+
+Local Git operations that change repository state require the user's
+explicit approval for the specific action. This includes staging, commits,
+amends, rebases, merges, cherry-picks, resets, restores, branch changes,
+and worktree changes. Read-only local inspection is allowed. Requests to
+implement, integrate, publish, or deploy work do not imply Git approval.
+
 When you're told to keep working, don't stop at arbitrary points: keep
 working indefinitely as long there are any parts of the task
 remaining.

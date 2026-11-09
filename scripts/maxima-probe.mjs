@@ -124,6 +124,11 @@ export async function probeMaxima(image, files, emit = () => {}, mode = 'source'
         throw new Error('Invalid Maxima bundle.');
       report.bundleBytes = bundle.length;
       compiledBundle = bundle;
+      if (options.buildOnly) {
+        await options.saveBundle?.(bundle);
+        report.passed = true; report.validation = 'not-run';
+        return report;
+      }
       vm.close();
       vm = await createVM();
       for (const [name, bytes] of files) vm.mountFile(name, bytes);

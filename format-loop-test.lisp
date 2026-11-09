@@ -779,3 +779,17 @@
                     (if (char= (char printed (1+ marker)) #\-) "" "+")
                     (subseq printed (1+ marker))))
                 (string= (format nil "~f" x) printed))))))))))
+
+(test format-subnormal-default-precision
+  (m:with-interpreter (vm)
+    ;; A required fractional zero does not request another significant digit.
+    ;; Explicit precision must still round the exact binary value to that many
+    ;; decimal places, rather than reuse the shortest round-tripping decimal.
+    (is (equal '("1.0e-45" "-1.0e-45" "8.0e-45" "5.0d-324" "1.4e-45" "10.0e-46")
+      (m:evaluate vm
+        '(list (format nil "~E" least-positive-single-float)
+               (format nil "~E" (- least-positive-single-float))
+               (format nil "~E" (* 6 least-positive-single-float))
+               (format nil "~E" least-positive-double-float)
+               (format nil "~,1E" least-positive-single-float)
+               (format nil "~,,,2E" least-positive-single-float)))))))

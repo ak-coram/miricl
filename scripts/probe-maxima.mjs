@@ -51,7 +51,7 @@ if (!isMainThread) {
   if (compiled) files.push(['/maxima-core.wasm', fs.readFileSync(bundleFile)]);
   const report = await probeMaxima(fs.readFileSync(workerData.image), files,
     event => parentPort.postMessage({event}), workerData.mode, {compiled, tests: workerData.tests,
-      listOnly: workerData.listOnly,
+      listOnly: workerData.listOnly, buildOnly: workerData.buildOnly,
       saveBundle(bytes) {
         fs.mkdirSync(path.dirname(bundleFile), {recursive: true});
         fs.writeFileSync(bundleFile + '.tmp', bytes);
@@ -77,7 +77,7 @@ if (!isMainThread) {
   const persist = report => fs.writeFileSync(output + '.progress.json',
     JSON.stringify({...report, revision, suiteFiles}, null, 2) + '\n');
   const runWorker = (tests, listOnly = false) => {
-    const worker = new Worker(new URL(import.meta.url), {workerData: {image, mode, output, tests, listOnly}});
+    const worker = new Worker(new URL(import.meta.url), {workerData: {image, mode, output, tests, listOnly, buildOnly: process.argv.includes('--build-only')}});
     const partial = {mode, stages: [], loads: [], compilations: [], tests: [], suiteProgress: []};
     let lastEvent, failure, problemStarted;
     const remaining = Math.max(1, timeout - (Date.now() - started));
@@ -120,7 +120,7 @@ if (!isMainThread) {
         failure: failure ?? {message: `Worker exited (${code}).`}}));
     }).finally(() => {clearTimeout(timer); clearTimeout(problemTimer); clearInterval(checkpoint);});
   };
-  const selected = process.argv.slice(5);
+  const selected = process.argv.slice(5).filter(name => name !== '--build-only');
   let report;
   if (['suite', 'share'].includes(mode)) {
     // A host Wasm trap can leave the guest's dynamic state partially unwound.

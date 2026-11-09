@@ -1,5 +1,21 @@
 // These forms run unchanged in Node and in the browser's Lisp environment.
 export const compilerCases = [
+  ['subnormal exponential formatting', `(let* ((source
+      '(lambda (x)
+         (let ((*read-default-float-format* (type-of x)))
+           (and (string= (format nil "~E" x) (prin1-to-string x))
+                (string= (with-output-to-string (stream)
+                           (funcall (formatter "~E") stream x))
+                         (prin1-to-string x))))))
+      (interpreted (eval source)) (compiled (miricl-compiler:compile-native source)))
+    (and (compiled-function-p compiled)
+      (loop for least in (list least-positive-single-float least-positive-double-float)
+        always (loop for n from 1 to 64 always
+          (loop for sign in '(1 -1) for x = (* n sign least)
+            always (and (funcall interpreted x) (funcall compiled x)))))
+      (equal (list (format nil "~,1E" least-positive-single-float)
+                   (format nil "~,,,2E" least-positive-single-float))
+             '("1.4e-45" "10.0e-46"))))`],
   ['arithmetic and branches', `(progn
     (defparameter *compiler-test-function* (miricl-compiler:compile-native
       '(lambda (x) (if x (+ x 2) 0))))

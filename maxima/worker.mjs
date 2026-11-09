@@ -9,14 +9,10 @@ const bytes = async name => {
 onmessage = async ({data}) => {
   try {
     if (data.type === 'start') {
-      const [image, core, encoded] = await Promise.all([
-        bytes('miricl.wasm'), bytes('maxima.wasm'), bytes('files.json.gz'),
+      const [image, core] = await Promise.all([
+        bytes('miricl.wasm'), bytes('maxima.core'),
       ]);
-      const decoded = await new Response(new Blob([encoded]).stream()
-        .pipeThrough(new DecompressionStream('gzip'))).text();
-      const files = JSON.parse(decoded).map(([name, base64]) =>
-        [name, Uint8Array.from(atob(base64), character => character.charCodeAt(0))]);
-      session = await createMaxima(image, core, files, {
+      session = await createMaxima(image, core, {
         progress: message => postMessage({type: 'status', message}),
         onPrompt: question => postMessage({type: 'prompt', question}),
         onOutput: output => postMessage({type: 'output', output}),

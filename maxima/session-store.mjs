@@ -1,5 +1,4 @@
-const key = 'miricl.maxima.sessions.v1';
-export function sessionStore(storage, onError = () => {}) {
+export function sessionStore(storage, onError = () => {}, key = 'miricl.maxima.sessions.v1') {
   let sessions = [], active;
   try {
     const saved = JSON.parse(storage.getItem(key) ?? 'null');
