@@ -11,7 +11,7 @@ const file = name => path.join(directory, name);
 const application = file('build/game-of-life.wasm');
 const reportPath = file('build/sizes.json');
 const interpreter = await fs.readFile(file('build/miricl.wasm'));
-const report = {application: 'game-of-life', backend: 'interpreted-fasl',
+const report = {application: 'game-of-life', backend: 'native-wasm',
   entryPoints: ['LIFE:START'], measurements: [], timings: {}};
 const retention = await fs.readFile(file('build/retention.txt'), 'utf8');
 const nodes = /Retained (\d+) of (\d+) definition/.exec(retention);

@@ -706,7 +706,7 @@
   (write-indexed-unit stream roots records :definitions definitions))
 
 (defun write-report (program stream before after &optional output-records)
-  (format stream "MIRICL whole-program reachability (interpreted FASL backend)~%")
+  (format stream "MIRICL whole-program reachability (FASL graph)~%")
   (format stream "Input: ~D bytes; output: ~D bytes.~%" before after)
   (format stream "Retained ~D of ~D definition/initialization nodes.~%"
     (count-if #'ir-node-retained-p (ir-program-nodes program)) (length (ir-program-nodes program)))
@@ -757,13 +757,74 @@ With STRIP NIL, retain every definition and compact only the representation."
   (when (and strip (null entry-points)) (error "Whole-program optimization requires explicit entry points."))
   (write-program (mark-program (analyze-file input) entry-points keep strip) output :report report :index-definitions index-definitions))
 
-(defun optimize-system (system &key output entry-points keep report index-definitions (strip t) (save t))
-  "Build an ASDF system, then emit a conservatively shaken interpreted FASL."
+(defun optimize-system (system &key output entry-points keep report index-definitions ((:native native)) (strip t) (save t))
+  "Build and prune an ASDF system; NATIVE compiles its retained code to Wasm."
   (when (and strip (null entry-points)) (error "Whole-program optimization requires explicit entry points."))
   (let* ((bundle (miricl-bundle:dump-system system :save nil))
          (target (or output bundle)))
     (shake-file bundle target :entry-points entry-points :keep keep :report report :index-definitions index-definitions :strip strip)
+    (when native
+      (compile-native-bundle target target)
+      (when report
+        (with-open-file (stream report :direction :output :if-exists :append)
+          (with-open-file (bundle target :element-type '(unsigned-byte 8))
+            (format stream "Native WASM bundle: ~D bytes.~%" (file-length bundle))))))
     (when save
       (miricl::%%filesystem 7 (miricl::%source-path target) nil)
       (when report (miricl::%%filesystem 7 (miricl::%source-path report) nil)))
     (pathname target)))
+
+(defun compile-native-bundle (input output &key progress)
+  "Compile a loaded application's FASL initializers and functions to Wasm.
+Run after dependency pruning, in the build environment that loaded the system.
+The result loads without invoking the Lisp compiler."
+  (let ((program (analyze-file input)) (units nil) (count 0))
+    (dolist (unit (ir-program-units program))
+      (let ((forms nil))
+        (let* ((miricl::%fasl-records (coerce (ir-unit-records unit) 'vector))
+               (miricl::%fasl-values (make-array (length miricl::%fasl-records)))
+               (miricl::%fasl-states (make-array (length miricl::%fasl-records) :initial-element 0))
+               (miricl::%fasl-readtable (copy-readtable nil)) (miricl::%fasl-pending nil))
+          (declare (special miricl::%fasl-records miricl::%fasl-values miricl::%fasl-states
+                            miricl::%fasl-readtable miricl::%fasl-pending))
+          (dolist (root (ir-unit-roots unit))
+            (push (miricl::%fasl-object root) forms)
+            (miricl::%fasl-finish-initializations)))
+        (let ((miricl::%fasl-records (make-array 32 :adjustable t :fill-pointer 0))
+              (miricl::%fasl-seen (make-hash-table :test 'eq))
+              (miricl::%file-load-values nil) (roots nil))
+          (declare (special miricl::%fasl-records miricl::%fasl-seen miricl::%file-load-values))
+          (let ((functions nil) (entries nil))
+            (dolist (form (nreverse forms))
+              (incf count)
+              (when progress (funcall progress (ir-unit-source unit) count))
+              (let ((hir (compile-to-hir (list 'lambda nil form))))
+                (push (first (hir-unit-functions hir)) entries)
+                (push (hir-unit-functions hir) functions)))
+            (setq entries (nreverse entries))
+            (when entries
+              (multiple-value-bind (code literals)
+                  (emit-native-module (make-hir-unit :functions (apply #'append (nreverse functions)))
+                                      :entries entries)
+                ;; Share one module across initializers, but reconstruct each
+                ;; entry's literals only after preceding initializers ran.
+                (setq code (map 'string #'code-char code))
+                (loop for literal-vector in literals for index from 0 do
+                  (push (miricl::%fasl-dump
+                          (list 'funcall
+                            (list 'miricl::%%compile 17
+                              (list 'quote (cons code index))
+                              (list 'quote literal-vector) nil))) roots)))))
+          ;; Native emission creates new literal vectors and initializer forms.
+          ;; Pool their immutable records and lay out their graph just as for
+          ;; interpreted units; generated module bytes and entry order stay intact.
+          (setq roots (nreverse roots))
+          (multiple-value-bind (compacted-roots records)
+              (compact-unit (make-ir-unit :roots roots :records (coerce miricl::%fasl-records 'simple-vector)
+                              :nodes (list (make-ir-node :roots roots :retained-p t))))
+            (push (list compacted-roots records) units)))))
+    (ensure-directories-exist output)
+    (with-open-file (stream output :direction :output :if-exists :supersede :element-type '(unsigned-byte 8))
+      (dolist (byte '(0 97 115 109 1 0 0 0)) (write-byte byte stream))
+      (dolist (unit (nreverse units)) (write-unit stream (first unit) (second unit) nil)))
+    (pathname output)))

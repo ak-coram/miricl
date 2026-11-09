@@ -3,7 +3,8 @@
 (named-readtables:in-readtable :miricl-wat)
 
 (defun interpreter-wat (&key wasi)
-  (let ((*runtime-function-definitions*
+  (let ((*compile-evaluations-default* (and *native-compiler-image* (not wasi) t))
+        (*runtime-function-definitions*
           (make-array 0 :adjustable t :fill-pointer 0))
         (*runtime-output-literals* (make-hash-table :test 'equal))
         (*runtime-output-bytes* (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))

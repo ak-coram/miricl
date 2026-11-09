@@ -9,7 +9,8 @@ import {connectTerminal, createWebapp, startHost, testPorts, waitFor} from './re
 const binary = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
 const httpOrigin = `http://127.0.0.1:${testPorts.http}`;
-const directory = await createWebapp(binary);
+const browserImage = path.join(path.dirname(binary), 'miricl-precompiled.wasm');
+const directory = await createWebapp(browserImage);
 await fs.copyFile(process.argv[4] ?? 'build/asdf/asdf.lisp', path.join(directory, 'asdf.lisp'));
 await fs.mkdir(path.join(directory, 'project/dependency'), {recursive: true});
 const sources = [
@@ -39,7 +40,7 @@ const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-app-chromium-'))
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run',
   '--no-default-browser-check', '--disable-background-networking',
-  `--user-data-dir=${profile}`, '--remote-debugging-pipe'
+  `--user-data-dir=${profile}`, '--no-startup-window', '--remote-debugging-pipe'
 ], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
 const browserExited = new Promise(resolve => browser.once('exit', resolve));
 let diagnostics = '', received = '', nextId = 0;
@@ -77,6 +78,8 @@ function send(method, params = {}, sessionId) {
 }
 
 try {
+  const version = await send('Browser.getVersion');
+  console.log(`Chromium: ${version.product}`);
   const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
   const {sessionId} = await send('Target.attachToTarget', {targetId, flatten: true});
   const command = (method, params) => send(method, params, sessionId);
@@ -112,7 +115,12 @@ try {
       assert.equal(await terminal.send('(defun remote-browser-answer () *app-count*)'), 'REMOTE-BROWSER-ANSWER\nmiricl> ');
       assert.equal(await terminal.send('(remote-browser-answer)'), '42\nmiricl> ');
       assert.equal(await js(`app.evaluate("(null (function-lambda-expression #'remote-browser-answer))").output`), 'T\n');
-      assert.equal(await js('app.evaluate("miricl-compiler::*compiler-state*").output'), ':COLD\n');
+      assert.equal(await js('app.evaluate("miricl-compiler::*compiler-state*").output'), ':READY\n');
+      assert.equal(await js('!("compiler-services" in app.vm)'), true);
+      assert.equal(await terminal.send('(setq miricl-compiler:*compile-evaluations* nil)'), 'NIL\nmiricl> ');
+      assert.equal(await terminal.send('(defun remote-browser-interpreted () 42)'), 'REMOTE-BROWSER-INTERPRETED\nmiricl> ');
+      assert.equal(await js(`app.evaluate("(not (null (function-lambda-expression #'remote-browser-interpreted)))").output`), 'T\n');
+      assert.equal(await terminal.send('(setq miricl-compiler:*compile-evaluations* t)'), 'T\nmiricl> ');
       await js('document.getElementById("counter").click()');
       await waitFor(() => js('document.getElementById("value").value === "43"'), 'shared Lisp state');
       assert.equal(await terminal.send('*app-count*'), '43\nmiricl> ');

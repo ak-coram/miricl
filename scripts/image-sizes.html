@@ -77,12 +77,14 @@
     <p class="note">The REPL and TODO HTML pages are standalone files, including their interpreter and adapter.
       Game of Life serves four separate files: HTML, JavaScript adapter, interpreter and application FASL.
       Its total sums those files, compressing each separately. The Lisp payload row is already included in that total.
-      Maxima's total includes its eleven startup files, including the optimized Lisp image and virtual filesystem.
+      Maxima's total includes its nine startup files, including the optimized Lisp core.
       FriCAS's total likewise counts eleven startup files, with the complete on-demand algebra library and command help.
       Maxima documentation and test suites are excluded from its distribution.
       On GitHub Pages, the REPL is named <code>index.html</code>.</p>
     <p class="note"><code>miricl.wasm</code> contains the interpreter and compiler source, compiled on first use.
+      <code>miricl-precompiled.wasm</code> includes the size-optimized native compiler and defaults to compiled evaluation in browsers and Node.
       <code>miricl-repl.wasm</code> includes the precompiled compiler for Node and WASI.
+      <code>miricl-asdf.wasm</code> is the optional ASDF and UIOP library, with its complete interface retained.
       Game of Life currently retains all definitions because dynamic function lookup triggers
       conservative retention. Its size reduction comes from compaction and sharing.</p>
     <p class="note">Maxima retains its complete dynamic environment for arbitrary REPL expressions and package loading.

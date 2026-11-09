@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import path from 'node:path';
 import {Miricl, MiriclError} from '../scripts/miricl.mjs';
 import {terminalCore, terminalFixture} from './component-core.mjs';
 
@@ -277,10 +278,11 @@ if (wasiBinary) {
       (declare (ignore literals)) (> (length code) 8)))`.replace(/\s+/gu, ' ') + '\n:quit\n';
   assert.equal(await runInProcess(compilerProbe), 'miricl> T\nmiricl> ');
   if (!inProcess) {
-    const nodeCompiler = spawnSync(process.execPath, [repl, binary], {input: compilerProbe, encoding: 'utf8'});
+    const nodeCompiler = spawnSync(process.execPath,
+      [repl, path.join(path.dirname(binary), 'miricl-precompiled.wasm')], {input: compilerProbe, encoding: 'utf8'});
     assert.ifError(nodeCompiler.error);
     assert.equal(nodeCompiler.status, 0, nodeCompiler.stderr);
-    assert.equal(nodeCompiler.stdout, 'T\n', 'The Node REPL must use its precompiled compiler image.');
+    assert.equal(nodeCompiler.stdout, 'T\n', 'The Node REPL must use the explicitly selected precompiled image.');
   }
   assert.equal(await runInProcess(`"${'λ🙂'.repeat(300)}"\n:quit\n`), `miricl> "${'λ🙂'.repeat(300)}"\nmiricl> `);
   assert.equal(await runInProcess(session), `miricl> ...> F\nmiricl> 42\nmiricl> Error: Division by zero.\n${traceHeader}  COMMON-LISP:/\nmiricl> 7\nmiricl> `);

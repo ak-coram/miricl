@@ -2,7 +2,9 @@
 (in-package #:miricl)
 
 ;; Shared with evaluator shortcuts that recognize captured native expanders.
-(defconstant +clos-primitive-base+ 2147483500)
+;; Reserve room for native private services below the special function tags.
+;; FASLs identify these services by symbol name, independently of their IDs.
+(defconstant +clos-primitive-base+ 2147482624)
 
 (defparameter *extension-symbols*
   '(register-source-file return-values quasiquote unquote unquote-splicing unquote-nsplicing *editor-function*

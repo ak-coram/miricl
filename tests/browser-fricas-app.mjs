@@ -21,7 +21,7 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-fricas-browser-'));
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-  '--disable-background-networking', `--user-data-dir=${profile}`, '--remote-debugging-pipe',
+  '--disable-background-networking', `--user-data-dir=${profile}`, '--no-startup-window', '--remote-debugging-pipe',
 ], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
 const stopped = new Promise(resolve => browser.once('exit', resolve));
 let diagnostics = '', received = '', nextId = 0;
@@ -48,12 +48,14 @@ browser.stdio[4].on('data', bytes => {
 function send(method, params = {}, sessionId) {
   return new Promise((resolve, reject) => {
     const id = ++nextId;
-    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`Timed out: ${method}`));}, 15000);
+    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`Timed out: ${method}`));}, ['Browser.getVersion', 'Target.createTarget'].includes(method) ? 45000 : 15000);
     pending.set(id, {resolve, reject, timer});
     browser.stdio[3].write(JSON.stringify({id, method, params, sessionId}) + '\0');
   });
 }
 try {
+  const version = await send('Browser.getVersion');
+  console.log(`Chromium: ${version.product}`);
   const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
   const {sessionId} = await send('Target.attachToTarget', {targetId, flatten: true});
   const command = (method, params) => send(method, params, sessionId);
@@ -71,8 +73,10 @@ try {
   };
   await command('Page.enable'); await command('Network.enable');
   await command('Emulation.setDeviceMetricsOverride', {width: 1200, height: 900, deviceScaleFactor: 1, mobile: false});
+  const startupStarted = performance.now();
   await command('Page.navigate', {url: `http://127.0.0.1:${server.address().port}/`});
-  await waitFor('!document.querySelector("#evaluate").disabled');
+  await waitFor('document.querySelector("#evaluate")?.disabled === false');
+  console.log(`Browser fricas startup: ${Math.round(performance.now() - startupStarted)} ms`);
   await js('globalThis.ticks = 0; setInterval(() => ticks++, 20)');
   await command('Network.emulateNetworkConditions', {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
   const run = async (source, expected, answers = '', interactiveAnswer) => {
@@ -125,7 +129,7 @@ try {
   assert.equal(await js('document.querySelectorAll("#history li").length'), savedCount);
   assert.equal(await js('document.querySelector("#evaluate").disabled'), true);
   await js('document.querySelector("#resume").click()');
-  await waitFor('!document.querySelector("#evaluate").disabled');
+  await waitFor('document.querySelector("#evaluate")?.disabled === false');
   await run('persisted(29)', /42/);
   if (process.env.MIRICL_FRICAS_PREVIEW) {
     const desktop = await command('Page.captureScreenshot', {format: 'png'});
@@ -141,7 +145,7 @@ try {
   await js(`document.querySelector('#source').value = 'repeat 1+1'; document.querySelector('#form').requestSubmit()`);
   await new Promise(resolve => setTimeout(resolve, 100));
   await js(`document.querySelector('#restart').click()`);
-  await waitFor('!document.querySelector("#evaluate").disabled');
+  await waitFor('document.querySelector("#evaluate")?.disabled === false');
   await run('2+2', /4/);
   assert.equal(await js('document.querySelectorAll("#history li").length'), 1);
   console.log('Browser FriCAS app: offline algebra, manual examples, Unicode, help, persistence, replay, recording controls, responsive layout, cancellation and restart pass.');

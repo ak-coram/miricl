@@ -1,10 +1,10 @@
 * Whole-program compiler
 
-The bundle backend emits interpreted FASL units with unreachable definitions
-and object records removed. An initial function backend emits native Wasm for
-a subset of Common Lisp. Neither backend yet infers interprocedural types,
-specializes calls, or removes runtime primitives. Native ASDF bundles and
-compiled development support for every defining form are still pending.
+Definition pruning removes unreachable FASL definitions and object records.
+The native backend compiles retained initializers, function bodies and methods
+into shared WASM modules. Interprocedural type inference, specialization of
+arbitrary calls, removal of runtime primitives and compiled development support
+for every defining form remain incomplete.
 
 ** Deployment and compiler bootstrap
 
@@ -35,22 +35,53 @@ JavaScript callbacks. Node and browser adapters can instantiate generated Wasm;
 the WASI image runs the linked compiler and can emit code without an external
 compiler file, but still lacks dynamic Wasm instantiation.
 
-The REPL component also contains a precompiled core without WASI or native stack
-switching for Node. The Node command uses it when =miricl-repl.wasm= is beside the
-interpreter; with only the interpreter available, its host compiler self-compiles
-on first use. This extra code is confined to the REPL deliverable.
+The import-free =miricl-precompiled.wasm= artifact includes the bootstrapped
+native compiler, with compiler state =:ready= and origin =:image= at startup.
+It uses the same adapter and REPL bridge as =miricl.wasm= and works in browsers
+and Node without companion images or experimental flags. Native compilation
+and the shared size passes run during the build rather than on first use.
+At introduction, the artifact measured 702353 bytes raw, 276190 gzip and 233412 Brotli.
+The build caches this core and also embeds it in the REPL component, without
+WASI or native stack-switching instructions, for Node. The Node command uses
+that embedded core when =miricl-repl.wasm= is beside the interpreter; with only
+the ordinary interpreter available, its host compiler self-compiles on first use.
 
-In development mode binary WebSocket messages remain the terminal byte stream;
-text messages carry compiler requests and responses. Browser macro expansion
-uses its actual environment. Quoted objects and load-time values stay in that
-heap and travel as opaque references. The host emits code without executing the
-application, and the browser installs and runs it using its ordinary native ABI.
-Ordinary expressions, =defun= bodies and =defvar=/=defparameter= initializers use
-this path. Package, macro, class and method definitions retain the evaluator's
-existing behavior. Unsupported native lowering reports a compiler error. The
-browser's compiler stays cold unless the application explicitly requests local
-compilation. Synchronous adapter evaluation and JS callbacks retain their existing
-execution path; asynchronous development evaluation uses the host compiler.
+=miricl-compiler:*compile-evaluations*= is a dynamically scoped evaluation
+policy. It defaults to =nil= in the ordinary image and WASI command, and =t=
+in the import-free precompiled image. The setting takes effect at public
+evaluation boundaries: text REPL input, object requests, =eval=, and individual
+source forms read by =load=. Recursive interpreter calls keep their lexical
+environment rather than compiling each subexpression. Development REPL forms
+use this same browser-local policy.
+Compiled-file loading executes its existing FASL code without repeating the
+source compilation pipeline.
+
+Compiler evaluation shares the development path's top-level definition handling.
+It processes =progn= and executing =eval-when= forms sequentially, installs native
+=defun= bodies, compiles variable initializers, and interprets environment
+definitions such as packages, macros and classes. Atomic forms and quoted
+objects use the direct evaluator. A private dynamic guard prevents recursive
+compilation inside compiler helpers, preserving the public policy's value for
+macro expanders and load-time forms. Application code executes under the caller's
+original dynamic bindings. Compilation and execution errors are
+propagated, with no automatic retry that could repeat macro or application
+effects. Bind the policy to =nil= around =eval= or =load= when interpretation
+is desired, including forms without supported native lowering.
+
+Regressions follow the HyperSpec's [[https://www.lispworks.com/documentation/HyperSpec/Body/f_eval.htm][EVAL]] requirements for null lexical scope,
+current dynamic bindings, all return values and literal identity, and [[https://www.lispworks.com/documentation/HyperSpec/Body/f_load.htm][LOAD]]'s
+requirement to execute each top-level form before compiling the next one.
+
+In development mode WebSocket messages carry terminal forms and output. The
+Node and WASI bridges forward bytes and serve files without invoking a compiler.
+The browser's evaluation policy decides whether each submitted form is compiled
+or interpreted. Macro expansion, quoted objects, load-time values and execution
+all remain in that browser heap. Ordinary expressions, =defun= bodies and
+=defvar=/=defparameter= initializers use its native compiler when enabled;
+environment definitions retain their evaluator handling. Compiler errors remain
+visible. Game of Life's development page uses =miricl-precompiled.wasm= so its
+browser compiler is ready immediately. Synchronous and asynchronous evaluation
+share this policy.
 
 The target execution model uses native application code in development and
 production. Development compilation preserves global indirection and
@@ -181,6 +212,38 @@ there are no closures. Acyclic control flow uses nested Wasm blocks and forward
 branches without a dispatcher; cyclic graphs use BR_TABLE dispatch. Immutable
 captures store values directly; captured mutable variables retain shared heap
 cells. Global calls remain indirect so redefinition continues to work in development.
+Native entries with a known fixed arity of at most four accept a private argument
+packet in place of an allocated argument list. Public APPLY and variadic entries
+retain their ordinary list behavior. Required parameters and arity checks read
+packet fields directly; function objects retain their literals and captures.
+Installing an anonymous native initializer closure as a global function retains
+its name for =function-lambda-expression= and backtraces; aliases preserve that
+original name.
+Closures capturing only bindings already retained by their parent are cached
+per parent function and literal environment, including captureless closures.
+Closures over parameters, local bindings or targets of the current invocation
+retain their own capture vectors. The last private capture-vector slot stores
+this bounded cache; captured mutable cells continue to be shared.
+Native checkpoints use a short counter for clock sampling and an 8 ms elapsed
+time slice for preemption. The normal path avoids context snapshots and value
+register updates; pending interrupts still enter the delivery path immediately.
+Explicit yields and blocking waits always switch, independent of that budget.
+Method invocation also packs its private next-method context into one object
+instead of allocating a list. The dynamic binding and closures retain that
+context through nested calls, nonlocal exits and escaped CALL-NEXT-METHOD closures.
+APPLY of a literal lambda with up to four required parameters is inlined into
+checked local bindings. Proper-list and arity checks run before binding; dynamic
+declarations, captured mutable variables, multiple values and lexical exits keep
+their normal semantics.
+The same transformation handles a sole =&rest= parameter, sharing APPLY's
+final list as permitted by the standard; optional/keyword processing inside
+the normalized lambda body retains its existing validation. Other APPLY calls
+retain the ordinary calling path.
+The same inlining handles a literal =MULTIPLE-VALUE-CALL= target with one
+value-producing form. It exposes the complete value group as the checked
+argument list, preserving zero values, arity errors, dynamic bindings and
+escaped captures. This also removes temporary function calls introduced by
+normalized =SETF= and =MULTIPLE-VALUE-BIND= expansions.
 
 =just benchmark-game-of-life= builds and optimizes the FSet 2 application,
 validates a fresh production load and writes =game-of-life/build/sizes.json=.
@@ -199,49 +262,87 @@ Special bindings, lexical scopes, local function blocks and quoted objects
 retain their semantics; this pass does not depend on application packages or
 library names. =tests/file-code-sharing.mjs= checks independent programs and a
 size comparison retaining all functions, separately from tree shaking.
-Production totals exclude the REPL. This currently benchmarks the interpreted FASL backend; native ASDF
-application bundles remain a later compiler stage.
+Production totals exclude the REPL. The application build uses the native
+backend after pruning. Each compilation unit shares one module with separate
+initializer entries and literal vectors. Object reconstruction and initialization
+remain ordered, so packages, classes and cyclic constants retain their load
+semantics. The initial native local layout reuses temporary locals within basic
+blocks and keeps bindings, block arguments, dynamic scopes and values crossing
+blocks separate. A subsequent Wasm pass computes CFG liveness and coalesces
+noninterfering object locals across branches and loops. Parameters and the
+integer dispatch local retain their ABI positions. Handler-bearing functions
+conservatively retain distinct locals, with every call observing their local
+state. This also prevents stackification from hiding stores needed by a handler.
+Single-use stores/loads become operand-stack values without moving or duplicating
+their computations. Dead tees disappear, dead stores become drops, and local
+copies are folded after coloring. Local numbers favor frequently accessed
+values; unused declarations disappear. Runtime imports are ordered by use count,
+and sufficiently large modules similarly order shared function bodies after
+deduplication, updating exports and closure references with their new indices.
+Inputs at their last use can share a local with the instruction's result.
+Adjacent stores and loads become =local.tee=, and copies of a local to itself
+are omitted. Single-use constants are loaded at their use; NIL needs no local
+even when used repeatedly. Literal lookup preserves the original object's
+identity and does not repeat its construction. Newly emitted native units also
+pool and lay out their literal graphs before serialization.
+Equal native bodies share code while retaining distinct function objects,
+literal vectors and captures. The browser instantiates each shared module once;
+loading an application does not bootstrap its Lisp compiler.
+
+The portable pass is implemented in =wasm-optimizer.lisp= and self-compiles with
+the other compiler kernels. The first bootstrap compiles kernels without size
+passes; the shipped compiler image is then recompiled with those compiled
+passes enabled. This avoids running the optimizer in the interpreter on its
+own initial bootstrap. No external Wasm optimizer is required.
+
+=wasm-module-optimizer.lisp= is a host-only adapter to these same passes. It
+decodes core-module types, function signatures and exact instruction stack
+effects, preserves type/function indices, and remaps local and label names.
+Interpreter generation runs it before stripping names and packaging components;
+this covers the ordinary interpreter, WASI core and embedded Node compiler
+core. Unsupported instruction sets retain the original function body. Typed
+non-defaultable reference locals retain their initialization stores and distinct
+slots to respect Wasm's structural definite-initialization validation. GC types
+and externally shared signatures are never rewritten.
+
+Further size passes are shared by native output and distribution cores:
+
+- Integer precomputation uses exact i32 wraparound, signed/unsigned comparisons
+  and masked shifts. Constant reference-null tests and conditions also fold.
+  Division, floating-point conversions and trapping GC operations remain intact.
+- Vacuum removes discarded constants, local/global reads and nontrapping unary
+  operations, turns =local.tee; drop= into =local.set=, and removes self-copies of
+  globals. Operand evaluation order is preserved.
+- Constant conditional arms become a block containing the chosen arm.
+  Straight-line unreachable suffixes disappear. Untargeted void blocks and
+  loops disappear with their branch depths rewritten; exception and reference
+  cast branch scopes are retained conservatively.
+- Local coloring can reuse dead parameter slots of matching types. Parameters
+  keep their original positions, and locals live at entry retain their implicit
+  zero/NIL initialization rather than inheriting argument values.
+- Native module reachability starts at every exported initializer or entry.
+  Unreachable functions and imports disappear after code cleanup. Calls,
+  =ref.func=, exports and declarative element entries follow the new indices.
+  This module format has no externally mutable function tables or hidden roots.
+
+The optional ASDF artifact uses =shake-file :strip nil= to pool its complete
+object graph and remove compiler indexes. Its portable compiled forms work in
+both Node and stable WASI hosts; a native ASDF experiment could not be loaded
+by the WASI host, which cannot dynamically instantiate new Wasm modules.
+The compact artifact measures about 302 KB raw / 126 KB Brotli, compared with
+1276 KB / 225 KB before compaction. ASDF appears in the generated image size
+HTML and JSON reports, including its section accounting.
+
+The liveness solver reuses basic-block topology across passes, summarizes each
+block once per pass, and solves forward-only graphs in one reverse sweep.
+Cyclic graphs iterate summaries to a fixed point. Local allocation stores
+directed interference masks and checks both directions against each color's
+members and outgoing neighbors, avoiding expansion into individual reverse
+edges. Handler-bearing functions skip interference construction and receive
+distinct colors directly. These speed improvements preserve the allocation
+order and emitted application bytes.
 
 Loading currently decodes all object blocks eagerly. The directory permits
 independent lookup and later decoding, but deferred bodies, external archives
 and dependency fetching are not implemented yet. Initializers remain ordered
 roots; an eventual deferred body must reuse already initialized literal cells.
-
-** Next compiler stages
-
-The ANSI harness accepts =--compiler= in its selected-file, full upstream and
-diagnostic modes. It adapts RT's compilation hook to =compile-native= and forces
-compiled test-body execution. Upstream sources and RT result comparison remain
-unchanged. Setup and helper definitions currently use the interpreter. Reports
-record the mandatory compiler bootstrap, execution mode, per-test compilation
-counts, compilation failures and timeouts; unsupported compilation fails without evaluating the body. Runner
-regressions exercise both loading modes and prove that fallback does not occur.
-
-Native ANSI compliance remains incomplete. Cross-function RETURN-FROM and GO,
-some condition/restart forms, correctable CASE forms and additional special
-operators still lack lowering. Compiler conformance reports must remain
-separate from the interpreter's results.
-
-1. Lower retained function bodies into an explicit expression/control-flow IR,
-   preserving lexical identities, declaration scopes, multiple values, dynamic
-   bindings, closures and nonlocal exits. Keep source provenance throughout.
-2. Add SSA and conservative type, value and effect propagation. Track possible
-   function values across calls before narrowing indirect calls and reflection.
-   Use Common Lisp types and integer ranges without changing overflow behavior.
-3. Iterate specialization, size-limited inlining, constant/branch elimination,
-   generic dispatch analysis and definition reachability to a fixed point.
-4. Define the compiled-code ABI for the existing WasmGC runtime: boxed entry
-   convention, closures, multiple values, dynamic state, transfers and callback
-   lifetime. Establish interpreter/compiled-function interoperability first.
-5. Emit native Wasm functions using existing WAT generators and runtime
-   primitives. Start with boxed values; add unboxed specialized signatures
-   where proven safe. Keep the adapter and interpreter separate assets.
-6. Make runtime primitive definitions and their dependencies linkable so an
-   optional minimal runtime can be generated from the same implementation.
-
-Native code should be tested against interpreted execution, including numeric
-boundaries, aliasing, CLOS method combinations, dynamic state, callbacks and
-conditions. Track compressed bytes, load time, allocations and execution time.
-Game of Life/FSet provides an end-to-end workload, not a substitute for semantic
-regressions. The initial reachability tests also load results in fresh images;
-definitions left in the build image must never conceal missing dependencies.

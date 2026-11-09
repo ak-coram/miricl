@@ -3,7 +3,6 @@
 import net from 'node:net';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {Miricl} from './miricl.mjs';
 
 // The REPL deliverable also carries a precompiled core without WASI imports or
 // stack-switching instructions, so Node can use it without experimental flags.
@@ -34,7 +33,7 @@ export async function replCompilerImage(interpreterPath) {
 }
 
 export async function startReplBridge(image, {devServer = false, tcpBridge = false, directory = '.',
-  tcpPort = 4005, websocketPort = 4006, httpPort = 8000, compilerImage} = {}) {
+  tcpPort = 4005, websocketPort = 4006, httpPort = 8000} = {}) {
   for (const port of [tcpPort, websocketPort, httpPort])
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError('Ports must be integers from 1 to 65535.');
   const ports = [websocketPort, ...(tcpBridge ? [tcpPort] : []), ...(devServer ? [httpPort] : [])];
@@ -42,7 +41,6 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
   const module = image instanceof WebAssembly.Module ? image : await WebAssembly.compile(image);
   const [core] = WebAssembly.Module.customSections(module, 'miricl.repl-bridge');
   if (!core) throw new Error('This image has no REPL bridge. Rebuild miricl.wasm.');
-  const compiler = await Miricl.instantiate(compilerImage ?? module);
   const memory = new WebAssembly.Memory({initial: 324});
   const handles = new Map();
   const events = new Map();
@@ -166,16 +164,6 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
   }
   const services = {
     memory,
-    compile(p, n, result) {
-      const target = compiler.vm['javascript-buffer'](n);
-      new Uint8Array(compiler.vm.memory.buffer, target, n).set(new Uint8Array(memory.buffer, p, n));
-      const pair = compiler.vm['compiler-request'](target, n);
-      const start = Number(pair & 0xffffffffn), size = Number(pair >> 32n);
-      if (size > 1048562) throw new Error('Compiler response exceeds 1 MiB.');
-      const output = 19 * 1024 * 1024;
-      new Uint8Array(memory.buffer, output, size).set(new Uint8Array(compiler.vm.memory.buffer, start, size));
-      store(result, output); store(result + 4, size);
-    },
     exit() { close(); throw exited; },
     create(_family, p) { result(p, allocate({kind: 'socket'})); },
     bind(...args) {
@@ -344,7 +332,6 @@ export async function startReplBridge(image, {devServer = false, tcpBridge = fal
   const close = () => {
     if (closed) return;
     closed = true;
-    compiler.close();
     events.clear();
     for (const remove of cleanup) remove();
     for (const socket of sockets) socket.destroy();

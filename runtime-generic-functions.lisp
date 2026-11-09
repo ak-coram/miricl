@@ -15,33 +15,49 @@
     (local.get $key))))
 
 ;; The next-method context has lexical extent through the method's closures.
-;; Keep its ordinary Lisp list representation, but establish the dynamic entry
-;; and invoke the method without interpreting an extra binding/traversal loop.
+;; Pack the private context into one object while retaining the same dynamic
+;; binding and lexical lifetime as the former five/six-element list.
 (define-runtime-function $invoke-method
     (($gf :nullable-object) ($method :nullable-object) ($rest :nullable-object)
      ($args :nullable-object) ($continuation :nullable-object) ($forbidden i32)) (:nullable-object)
-  (:locals ($saved :nullable-object) ($context :nullable-object) ($result :nullable-object) ($thrown i32))
-  #@(local.set $context (call $cons (local.get $gf)
-    (call $cons (local.get $method) (call $cons (local.get $rest)
-      (call $cons (local.get $args) (call $cons (local.get $continuation)
-        (if (result (ref null $obj)) (local.get $forbidden)
-          (then (call $cons (call $symbol (i32.const 1)) (ref.null $obj)))
-          (else (ref.null $obj)))))))))
+  (:locals ($saved :nullable-object) ($context :nullable-object) ($result :nullable-object) ($function :nullable-object) ($thrown i32))
+  #@(local.set $context (struct.new $method-context
+    (call $allocate-object-tag (i32.const 53)) (local.get $forbidden) (f64.const 0) (ref.null $digits)
+    (local.get $gf) (local.get $method) (local.get $rest) (local.get $args) (local.get $continuation)))
   #@(local.set $saved (global.get $dynamic-variables))
   #@(global.set $dynamic-variables (call $bind (local.get $saved)
     ,(clos-library-reference '%next-context) (local.get $context)))
   #@(block $returned
     (block $thrown
       (try_table (catch $transfer $thrown)
-        (local.set $result (call $apply
-          (call $car (call $property-cell (struct.get $obj $b (local.get $method))
-            ,(clos-library-reference :function)))
-          (call $cons (local.get $args) (call $cons (local.get $rest) (ref.null $obj)))))
+        (local.set $function (call $car (call $property-cell (struct.get $obj $b (local.get $method))
+          ,(clos-library-reference :function))))
+        (local.set $result (call $apply (local.get $function)
+          (call $native-two-arguments (local.get $function) (local.get $args) (local.get $rest))))
         (br $returned)))
     (local.set $thrown (i32.const 1)))
   #@(global.set $dynamic-variables (local.get $saved))
   #@(if (local.get $thrown) (then (throw $transfer)))
   #@(local.get $result))
+
+;; %NTH is private to the object system. Ordinary lists remain supported for
+;; callers that construct effective-method contexts themselves.
+(define-runtime-function $method-context-element (($index :nullable-object) ($context :nullable-object)) (:nullable-object)
+  (:locals ($n i32) ($packed (ref null $method-context)))
+  #@(if (ref.test (ref $method-context) (local.get $context))
+    (then
+      (local.set $n (call $natural-count (local.get $index)))
+      (local.set $packed (ref.cast (ref $method-context) (local.get $context)))
+      (if (i32.eqz (local.get $n)) (then (return (struct.get $obj $a (local.get $context)))))
+      (if (i32.eq (local.get $n) (i32.const 1)) (then (return (struct.get $obj $b (local.get $context)))))
+      (if (i32.eq (local.get $n) (i32.const 2)) (then (return (struct.get $obj $c (local.get $context)))))
+      (if (i32.eq (local.get $n) (i32.const 3)) (then (return (struct.get $method-context $args (local.get $packed)))))
+      (if (i32.eq (local.get $n) (i32.const 4)) (then (return (struct.get $method-context $next (local.get $packed)))))
+      (if (i32.eq (local.get $n) (i32.const 5))
+        (then (return (if (result (ref null $obj)) (struct.get $obj $n (local.get $context))
+          (then (call $symbol (i32.const 1))) (else (ref.null $obj))))))
+      (return (ref.null $obj))))
+  #@(call $car (call $nthcdr-native (local.get $index) (local.get $context))))
 
 ;; Shared by CLASS-OF and cache lookup, including lazy condition class creation.
 (define-runtime-function $dispatch-class (($object :nullable-object)) (:nullable-object)
@@ -101,10 +117,22 @@
             (then (local.set $id (i32.const ,(runtime-symbol-id 'fixnum)))))))))
   #@(call $named-class (call $symbol (local.get $id))))
 
+(define-runtime-function $dispatch-eql-key
+    (($object :nullable-object) ($specializers :nullable-object)) (:nullable-object)
+  (:locals ($specializer :nullable-object))
+  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $specializers)))
+    (local.set $specializer (call $car (local.get $specializers)))
+    (if (call $eql (local.get $object)
+      (call $car (call $property-cell (struct.get $obj $b (local.get $specializer)) ,(clos-library-reference :object))))
+      (then (return (local.get $specializer))))
+    (local.set $specializers (call $cdr (local.get $specializers))) (br $next)))
+  #@(ref.null $obj))
+
 (define-runtime-function $generic-key-match
-    (($key :nullable-object) ($a :nullable-object)
+    (($key :nullable-object) ($gf :nullable-object) ($a :nullable-object)
      ($ca :nullable-object) ($cb :nullable-object) ($cc :nullable-object) ($cd :nullable-object) ($mode i32)) (i32)
-  (:locals ($position i32) ($object :nullable-object) ($class :nullable-object) ($scan :nullable-object) ($index i32))
+  (:locals ($position i32) ($object :nullable-object) ($class :nullable-object) ($scan :nullable-object) ($index i32)
+           ($profile :nullable-object))
   ;; Low three bits hold required arity; bit 3 marks the zero-arity native path.
   ;; Bits 4..7 select class tests; bits 8..11 add EQL tests at those positions.
   #@(if (i32.eqz (i32.and (local.get $mode) (i32.const 7)))
@@ -127,7 +155,13 @@
                   (then (local.get $cb)) (else (local.get $ca))))))))
         (if (i32.and (local.get $mode) (i32.shl (i32.const 256) (local.get $position)))
           (then
-            (if (i32.eqz (call $eql (call $car (local.get $key)) (local.get $object)))
+            (local.set $profile (call $generic-property (local.get $gf) ,(clos-library-reference :eql-dispatch-profile)))
+            (local.set $index (local.get $position))
+            (block $profile (loop $step (br_if $profile (i32.eqz (local.get $index)))
+              (local.set $profile (call $cdr (local.get $profile)))
+              (local.set $index (i32.sub (local.get $index) (i32.const 1))) (br $step)))
+            (if (i32.eqz (ref.eq (call $car (local.get $key))
+                  (call $dispatch-eql-key (local.get $object) (call $car (local.get $profile)))))
               (then (return (i32.const 0))))
             (local.set $key (call $cdr (local.get $key)))))
         (if (i32.eqz (ref.eq (call $car (local.get $key)) (local.get $class)))
@@ -175,7 +209,7 @@
                       (then (local.set $cd (call $dispatch-class (call $car (call $cdr (call $cdr (call $cdr (local.get $args)))))))))
                     (local.set $computed (i32.const 1))))
                 (local.set $key (call $car (call $cdr (local.get $entry))))
-                (if (call $generic-key-match (local.get $key) (local.get $args)
+                (if (call $generic-key-match (local.get $key) (local.get $gf) (local.get $args)
                       (local.get $ca) (local.get $cb) (local.get $cc) (local.get $cd) (local.get $mode))
                   (then
                     (drop (call $check-generic-arity
@@ -243,8 +277,9 @@
   #@(if (i32.eq (local.get $mode) (i32.const 4)) (then (return (local.get $object))))
   #@(local.get $result))
 
-(define-runtime-function $property-effective (($function :nullable-object) ($form :nullable-object)) (:nullable-object)
-  (:locals ($method :nullable-object) ($body :nullable-object))
+(define-runtime-function $property-effective
+    (($function :nullable-object) ($form :nullable-object) ($gf :nullable-object)) (:nullable-object)
+  (:locals ($method :nullable-object) ($body :nullable-object) ($scan :nullable-object))
   #@(block $ordinary
     (br_if $ordinary (i32.ne (call $operator (local.get $form)) (i32.const ,(runtime-symbol-id 'call-method))))
     (br_if $ordinary (i32.eqz (ref.is_null (call $cdr (call $cdr (call $cdr (local.get $form)))))))
@@ -253,10 +288,20 @@
     (local.set $method (call $car (call $cdr (local.get $form))))
     (br_if $ordinary (i32.ne (call $tag (local.get $method)) (i32.const 23)))
     (local.set $body (call $car (call $property-cell (struct.get $obj $b (local.get $method)) ,(clos-library-reference :function))))
-    (br_if $ordinary (i32.eqz (ref.test (ref $direct-function) (local.get $body))))
-    (br_if $ordinary (i32.ne (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $body))) (i32.const 3)))
-    (return (call $direct-function (local.get $function) (ref.null $obj)
-      (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $body))) (i32.const 4))))
+    (if (ref.test (ref $direct-function) (local.get $body))
+      (then (if (i32.eq (struct.get $direct-function $mode
+                       (ref.cast (ref $direct-function) (local.get $body))) (i32.const 3))
+        (then (return (call $direct-function (local.get $function) (ref.null $obj)
+          (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $body))) (i32.const 4)))))))
+    ;; A single CALL-METHOD needs no interpreted effective-method closure.
+    ;; Keep keyword validation in its existing general path.
+    (local.set $scan (call $generic-property (local.get $gf) ,(clos-library-reference :lambda-list)))
+    (block $checked (loop $parameter (br_if $checked (ref.is_null (local.get $scan)))
+      (br_if $ordinary (i32.or
+        (ref.eq (call $car (local.get $scan)) (call $symbol (i32.const ,(runtime-symbol-id '&key))))
+        (ref.eq (call $car (local.get $scan)) (call $symbol (i32.const ,(runtime-symbol-id '&rest))))))
+      (local.set $scan (call $cdr (local.get $scan))) (br $parameter)))
+    (return (call $direct-function (local.get $function) (local.get $gf) (local.get $method) (i32.const 8))))
   #@(local.get $function))
 
 (define-runtime-function $ensure-instance-layout (($object :nullable-object)) (:nullable-object)
@@ -297,5 +342,9 @@
   #@(call $apply ,(clos-library-reference '%ensure-layout-general) (call $cons (local.get $object) (ref.null $obj))))
 
 (define-runtime-section generic-functions-runtime-wat ()
-  ($generic-discriminator) ($generic-property) ($invoke-method) ($dispatch-class) ($generic-key-match) ($generic-apply)
+  #@(type $method-context (sub final $obj (struct
+    (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
+    (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
+    (field $args (ref null $obj)) (field $next (ref null $obj)))))
+  ($dispatch-eql-key) ($generic-discriminator) ($generic-property) ($invoke-method) ($method-context-element) ($dispatch-class) ($generic-key-match) ($generic-apply)
   ($find-instance-slot) ($instance-slot-operation) ($property-effective) ($ensure-instance-layout))

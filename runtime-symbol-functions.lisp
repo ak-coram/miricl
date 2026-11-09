@@ -325,6 +325,11 @@
 
 (define-runtime-function $store-function (($name :nullable-object) ($value :nullable-object)) (:nullable-object)
   (:locals ($binding :nullable-object) ($setf i32) ($table (ref $symbol-index)) ($id i32))
+  ;; Initializer closures acquire their global name when installed. Preserve
+  ;; that name when the same function is subsequently installed as an alias.
+  #@(if (ref.test (ref $native-function) (local.get $value))
+    (then (if (ref.is_null (struct.get $obj $c (local.get $value)))
+      (then (struct.set $obj $c (local.get $value) (local.get $name))))))
   #@(local.set $binding (call $function-binding (local.get $name)))
   #@(if (ref.is_null (local.get $binding))
       (then (if (i32.eq (call $tag (local.get $name)) (i32.const 7))

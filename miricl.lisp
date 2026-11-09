@@ -120,28 +120,50 @@
 
 (defparameter *interpreter-wasm* nil)
 (defparameter *interpreter-wasm-compact* nil)
+(defparameter *interpreter-native-compiler-wasm* nil)
 (defun interpreter-wasm (&key wasi native-compiler debug-names)
-  "Return the interpreter binary. DEBUG-NAMES retains native debugging names."
-  (if (or wasi native-compiler)
+  "Return the interpreter binary. NATIVE-COMPILER includes the bootstrapped
+compiler. DEBUG-NAMES retains native debugging names."
+  (cond
+    (wasi
       (let* ((image (ensure-native-compiler-image))
              (*native-compiler-image* image)
-             (bytes (wt:wat-to-wasm (interpreter-wat :wasi wasi))))
-        (if debug-names bytes (wasm-without-debug-names bytes)))
-      (let* ((*native-compiler-image* nil)
-             (raw (or *interpreter-wasm* (setf *interpreter-wasm* (wt:wat-to-wasm (interpreter-wat))))))
+             (bytes (miricl-compiler::optimize-wasm-module
+                      (wt:wat-to-wasm (interpreter-wat :wasi wasi)))))
+        (if debug-names bytes (wasm-without-debug-names bytes))))
+    (native-compiler
+      (let ((image (ensure-native-compiler-image)))
+        ;; The standalone image and the Node core embedded in the REPL share
+        ;; these bytes. Invalidate the cache when the bootstrap image changes.
+        (unless (eq image (car *interpreter-native-compiler-wasm*))
+          (let* ((*native-compiler-image* image)
+                 (raw (miricl-compiler::optimize-wasm-module
+                        (wt:wat-to-wasm (interpreter-wat)))))
+            (setf *interpreter-native-compiler-wasm*
+              (list image raw (wasm-without-debug-names raw)))))
+        (copy-seq (if debug-names (second *interpreter-native-compiler-wasm*)
+                                (third *interpreter-native-compiler-wasm*)))))
+    (t (let* ((*native-compiler-image* nil)
+             (raw (or *interpreter-wasm* (setf *interpreter-wasm*
+                    (miricl-compiler::optimize-wasm-module (wt:wat-to-wasm (interpreter-wat)))))))
         (copy-seq (if debug-names raw
           (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
-            (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw))))))))))
-(defun write-interpreter-wasm (pathname &key wasi debug-names)
-  "Write an interpreter image with the bridge, or the WASI 0.3 development command."
-  (with-open-file (stream pathname :direction :output :if-exists :supersede
-                                  :element-type '(unsigned-byte 8))
-    (write-sequence (if wasi
+            (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw)))))))))))
+(defun write-interpreter-wasm (pathname &key wasi native-compiler debug-names)
+  "Write an interpreter image with the bridge, or the WASI 0.3 development command.
+NATIVE-COMPILER includes the bootstrapped compiler in the import-free image."
+  ;; Complete compilation before opening the destination: a build failure must
+  ;; not truncate an existing working image.
+  (let ((bytes (if wasi
                        (wasm-with-custom-section
                          (repl-command-wasm (interpreter-wasm :wasi t :debug-names debug-names))
                          "miricl.node-compiler" (interpreter-wasm :native-compiler t :debug-names debug-names))
-                       (wasm-with-custom-section (interpreter-wasm :debug-names debug-names)
-                         "miricl.repl-bridge" (repl-bridge-core-wasm))) stream))
+                       (wasm-with-custom-section
+                         (interpreter-wasm :native-compiler native-compiler :debug-names debug-names)
+                         "miricl.repl-bridge" (repl-bridge-core-wasm)))))
+    (with-open-file (stream pathname :direction :output :if-exists :supersede
+                                    :element-type '(unsigned-byte 8))
+      (write-sequence bytes stream)))
   pathname)
 
 (defun close-interpreter (interpreter)

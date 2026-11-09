@@ -199,7 +199,7 @@
   #@(global.set $limit (local.get $length))
   #@(local.set $form (call $read))
   (wat-fail-when #@(i32.ne (global.get $cursor) (global.get $limit)) :malformed-form)
-  #@(local.set $result (call $eval (local.get $form) (ref.null $obj)))
+  #@(local.set $result (call $evaluate-form (local.get $form)))
   #@(global.set $cursor (i32.const 0))
   #@(call $write32 (i32.const 14))
   #@(call $write (call $value-list (local.get $result)))

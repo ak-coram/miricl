@@ -70,18 +70,27 @@ for (const [runtime, image] of [['node', binary], ...(wasi ? [['wasmtime', wasi]
     let received = await browser.readFrame();
     assert.equal(received.opcode, 2); assert.equal(received.payload.toString(), '(+ 1 2)\n');
     const start = terminal.output.length;
-    const frames = Buffer.concat([frame(2, 'λ', false), frame(9, 'ping'), frame(0, '🙂\nmiricl> ')]);
+    const lambda = Buffer.from('λ');
+    const frames = Buffer.concat([
+      frame(2, lambda.subarray(0, 1), false), frame(9, 'ping'),
+      frame(0, lambda.subarray(1), false), frame(10, 'pong'), frame(0, '🙂\nmiricl> ')
+    ]);
     // Split header, mask, payload, and UTF-8 sequences over writes.
     for (let i = 0; i < frames.length; i++) browser.socket.write(frames.subarray(i, i + 1));
     received = await browser.readFrame();
     assert.equal(received.opcode, 10); assert.equal(received.payload.toString(), 'ping');
-    await waitFor(() => terminal.output.slice(start) === 'λ🙂\nmiricl> ', 'fragmented binary message');
+    await waitFor(() => terminal.output.slice(start) === 'λ🙂\nmiricl> ', `${runtime} fragmented binary message`)
+      .catch(error => { throw new Error(`${error.message}; received: ${JSON.stringify(terminal.output.slice(start))}`); });
     for (const length of [126, 65536]) {
       const start = terminal.output.length;
       browser.socket.write(frame(2, Buffer.alloc(length, 97)));
       await waitFor(() => terminal.output.length === start + length, `binary frame length ${length}`);
       assert.equal(terminal.output.slice(start), 'a'.repeat(length));
     }
+    // Text is terminal output as well; it must never be compiled by the host.
+    const textStart = terminal.output.length;
+    browser.socket.write(Buffer.concat([frame(1, 'te', false), frame(0, 'xt')]));
+    await waitFor(() => terminal.output.slice(textStart) === 'text', `${runtime} fragmented text forwarding`);
     browser.socket.write(frame(8, Buffer.from([3, 232])));
     received = await browser.readFrame(); assert.equal(received.opcode, 8); assert.equal(received.payload.readUInt16BE(), 1000);
     await waitFor(() => terminal.output.endsWith('[Browser disconnected; waiting for a browser]\n'), 'normal close status');
@@ -89,7 +98,8 @@ for (const [runtime, image] of [['node', binary], ...(wasi ? [['wasmtime', wasi]
     browser.socket.destroy();
     for (const [bytes, code] of [
       [Buffer.from([130, 0]), 1002], // Unmasked input.
-      [frame(1, 'text'), 1003],
+      [frame(3, 'reserved'), 1002],
+      [frame(1, Buffer.from([255])), 1007], // Invalid UTF-8 text.
       [frame(0, 'unexpected continuation'), 1002],
       [frame(8, Buffer.from([3, 237])), 1002], // Reserved close code 1005.
       [frame(8, Buffer.from([3, 232, 255])), 1007],

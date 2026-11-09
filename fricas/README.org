@@ -12,17 +12,28 @@ Then run from the repository root:
 
 #+begin_src sh
 just build-fricas
-node scripts/repl.mjs miricl.wasm --dev-server --directory=build/fricas/site
+node scripts/repl.mjs miricl-precompiled.wasm --dev-server --directory=build/fricas/site
 just test-fricas
 #+end_src
+
+MIRICL build stages and the browser distribution use =miricl-precompiled.wasm=,
+with its bootstrapped native compiler ready at startup. This avoids repeating
+compiler bootstrapping when the build creates a fresh interpreter. The static
+site keeps the runtime filename =miricl.wasm=.
 
 The native FriCAS build is only a bootstrap: upstream =configure=, =make= and
 =make dist-lisp= generate portable Common Lisp and four algebra databases.
 MIRICL compiles the interpreter into =build/fricas/fricas.wasm=. The generic
-optimizer compacts it with =:strip nil=, preserving its dynamic interface.
-Algebra libraries are compiled and loaded on demand in the guest filesystem.
-The browser ships all generated algebra Lisp, command help and databases in
-=filesystem.bin.gz=. SBCL and native FriCAS are not needed by the browser.
+optimizer preserves its dynamic interface and compiles its retained functions
+and initializers to WASM. All 1,423 portable algebra libraries are compiled
+during packaging, compacted with =shake-file :strip nil=, compiled to native
+WASM functions with =compile-native-bundle=, and loaded on demand
+from the guest filesystem. Compaction retains every algebra definition. First use
+therefore loads compiled libraries without compiling their source.
+The browser ships compiled algebra, command help and databases in
+=filesystem.bin.gz=. Algebra source files, SBCL and native FriCAS are not needed
+by the browser. Build artifacts are cached under a fingerprint of the runtime,
+core and algebra sources; interrupted builds cannot reuse partial files.
 
 =build/fricas/site= is the static distribution. =build.json= records the
 upstream revision and image hashes; =optimization.json= and =retention.txt=

@@ -72,7 +72,12 @@ export async function compileAsdf(source, image, output) {
   const lisp = await Miricl.instantiate(fs.readFileSync(image));
   try {
     lisp.mountFile('/asdf.lisp', fs.readFileSync(source, 'utf8'));
-    await lisp.evaluateAsync('(compile-file "/asdf.lisp" :output-file "/miricl-asdf.wasm")', {eof: true});
+    // Keep the complete dynamic library interface while pooling constants and
+    // removing the optional compiler index. Keep portable compiled forms:
+    // stable WASI hosts cannot dynamically instantiate native Wasm modules.
+    await lisp.evaluateAsync(`
+      (compile-file "/asdf.lisp" :output-file "/asdf-input.wasm")
+      (miricl-compiler:shake-file "/asdf-input.wasm" "/miricl-asdf.wasm" :strip nil)`, {eof: true});
     const bytes = await lisp.readFile('/miricl-asdf.wasm');
     const filename = path.resolve(output);
     fs.mkdirSync(path.dirname(filename), {recursive: true});

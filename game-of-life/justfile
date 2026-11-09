@@ -1,25 +1,30 @@
-wasmtime := env('WASMTIME', 'wasmtime')
+set shell := ['bash', '-euo', 'pipefail', '-c']
 
-# Resolve dependency symlinks with just and preopen their targets for WASI.
-preopens := '--dir .::. --dir ' + quote(canonicalize('runtime') + '::runtime') \
-  + ' --dir ' + quote(canonicalize('images') + '::images') \
-  + ' --dir ' + quote(canonicalize('quicklisp/alexandria') + '::quicklisp/alexandria') \
-  + ' --dir ' + quote(canonicalize('quicklisp/fset') + '::quicklisp/fset') \
-  + ' --dir ' + quote(canonicalize('quicklisp/mgl-pax-bootstrap') + '::quicklisp/mgl-pax-bootstrap') \
-  + ' --dir ' + quote(canonicalize('quicklisp/misc-extensions') + '::quicklisp/misc-extensions') \
-  + ' --dir ' + quote(canonicalize('quicklisp/mt19937') + '::quicklisp/mt19937') \
-  + ' --dir ' + quote(canonicalize('quicklisp/named-readtables') + '::quicklisp/named-readtables')
-repl := quote(wasmtime) + ' run -W stack-switching=y -W max-wasm-stack=16777216 -W async-stack-size=33554432 -S p3=y ' + preopens
+wasmtime := env('WASMTIME', 'wasmtime')
+node := env('NODE', 'node')
+
+repl := quote(wasmtime) + ' run -W stack-switching=y -W max-wasm-stack=16777216 -W async-stack-size=33554432 -S p3=y'
 
 # List application commands. Run `just setup-game-of-life` in the parent first.
 default:
     @just --list
 
 # Open http://127.0.0.1:8000/dev.html; optional extra REPL flags follow the ports.
+[positional-arguments]
+[script('bash', '-euo', 'pipefail')]
 dev http='8000' websocket='4006' *options:
-    {{repl}} -S inherit-network=y miricl-repl.wasm --dev-server --http-port={{quote(http)}} --websocket-port={{quote(websocket)}} {{options}}
+    # Quicklisp distributions have different dependency sets. Resolve only
+    # directories prepared for this application, and only when starting WASI.
+    preopens=(--dir .::.)
+    for directory in runtime images quicklisp/*; do
+        [[ -d "$directory" ]] || continue
+        preopen_target=$({{quote(node)}} -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$directory")
+        preopens+=(--dir "$preopen_target::$directory")
+    done
+    exec {{repl}} "${preopens[@]}" -S inherit-network=y miricl-repl.wasm --dev-server --http-port="$1" --websocket-port="$2" "${@:3}"
 
 # Compile with the precompiled compiler; publish four separate production files.
 build:
-    {{repl}} miricl-repl.wasm --optimize game-of-life --entry LIFE:START --output build/game-of-life.wasm --report build/retention.txt
+    {{ quote(node) }} runtime/miricl.js miricl-repl.wasm --optimize game-of-life --native --entry LIFE:START --output build/game-of-life.wasm --report build/retention.txt
     cp index.html runtime/miricl.js images/miricl.wasm build/
+    {{ quote(node) }} runtime/version-assets.mjs build index.html miricl.js miricl.wasm game-of-life.wasm

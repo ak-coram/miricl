@@ -5,13 +5,17 @@ import {gzipSync} from 'node:zlib';
 import {createHash} from 'node:crypto';
 import {fricasFiles, fricasRevision} from './fricas-files.mjs';
 import {encodeFilesystem} from './filesystem-archive.mjs';
+import {prepareFriCASLibraries} from './prepare-fricas-libraries.mjs';
+import {versionAssets} from './version-assets.mjs';
 const root = path.resolve(import.meta.dirname, '..');
-const [imagePath = 'miricl.wasm', corePath = 'build/fricas/fricas-optimized.wasm',
+const [imagePath = 'miricl-precompiled.wasm', corePath = 'build/fricas/fricas-optimized.wasm',
   native = 'build/fricas/native', output = 'build/fricas/site'] = process.argv.slice(2);
 const [image, core] = await Promise.all([fs.readFile(imagePath), fs.readFile(corePath)]);
 const {files} = fricasFiles(path.resolve(native));
-const shipped = files.filter(([name]) => name.startsWith('/fricas/algebra/') || name.startsWith('/fricas/share/')
-  || name === '/fricas/lisp/fricas-package.lisp' || name === '/fricas-port.lisp');
+const libraries = await prepareFriCASLibraries(image, core, native, path.join(path.dirname(corePath), 'algebra'));
+const shipped = [...files.filter(([name]) => (name.startsWith('/fricas/algebra/') && !name.endsWith('.lsp'))
+  || name.startsWith('/fricas/share/') || name === '/fricas/lisp/fricas-package.lisp' || name === '/fricas-port.lisp'),
+  ...libraries];
 await fs.mkdir(output, {recursive: true});
 await Promise.all([
   fs.writeFile(path.join(output, 'miricl.wasm'), image), fs.writeFile(path.join(output, 'fricas.wasm'), core),
@@ -24,8 +28,10 @@ await Promise.all([
   fs.copyFile(path.join(root, 'LICENSE'), path.join(output, 'MIRICL-LICENSE')),
 ]);
 await fs.rm(path.join(output, 'files.json.gz'), {force: true});
-await fs.writeFile(path.join(output, 'build.json'), JSON.stringify({revision: fricasRevision(),
+const assetVersion = await versionAssets(output, ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs',
+  'worker.mjs', 'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz']);
+await fs.writeFile(path.join(output, 'build.json'), JSON.stringify({revision: fricasRevision(), assetVersion,
   imageSha256: createHash('sha256').update(image).digest('hex'), coreSha256: createHash('sha256').update(core).digest('hex'),
-  algebraFiles: shipped.filter(([name]) => name.endsWith('.lsp')).length,
+  algebraFiles: libraries.length, algebraFormat: 'native-wasm', algebraOptimizer: 'shake-file :strip nil + compile-native-bundle',
 }, null, 2) + '\n');
 console.log(`Built FriCAS browser distribution in ${output}`);

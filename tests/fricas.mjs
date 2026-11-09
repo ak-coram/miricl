@@ -4,15 +4,29 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createFriCAS} from '../scripts/fricas.mjs';
 import {fricasFiles} from '../scripts/fricas-files.mjs';
+import {prepareFriCASLibraries} from '../scripts/prepare-fricas-libraries.mjs';
 import {examples} from '../fricas/examples.mjs';
-const [image = 'miricl.wasm', core = 'build/fricas/fricas-optimized.wasm', native = 'build/fricas/native',
+const [image = 'miricl-precompiled.wasm', core = 'build/fricas/fricas-optimized.wasm', native = 'build/fricas/native',
   output = 'build/fricas/tests.json'] = process.argv.slice(2);
 const report = {passed: false, examples: [], upstream: []};
-const {files} = fricasFiles(path.resolve(native));
+const imageBytes = fs.readFileSync(image), coreBytes = fs.readFileSync(core);
+const libraries = await prepareFriCASLibraries(imageBytes, coreBytes, native, path.join(path.dirname(core), 'algebra'));
+const {files: sources} = fricasFiles(path.resolve(native));
+const files = [...sources.filter(([name]) => !name.startsWith('/fricas/algebra/') || !name.endsWith('.lsp')), ...libraries];
+const start = async () => {
+  const result = await createFriCAS(imageBytes, coreBytes, files);
+  assert.equal(result.vm.evaluate('miricl-compiler::*compiler-state*').output, ':READY\n');
+  assert.equal(result.vm.evaluate('miricl-compiler::*compiler-origin*').output, ':IMAGE\n');
+  // The shipped algebra filesystem must load examples without compiling sources.
+  result.vm.evaluate(`(setf (symbol-function 'compile-file)
+    (lambda (&rest args) (error "Unexpected algebra compilation: ~S" args))) (values)`, {eof: true});
+  return result;
+};
 let session;
 try {
-  session = await createFriCAS(fs.readFileSync(image), fs.readFileSync(core), files);
-  assert.equal(session.vm.evaluate("(compiled-function-p #'boot::|parseAndInterpret|)").output, 'T\n');
+  session = await start();
+  assert.equal(session.vm.evaluate(`(and (compiled-function-p #'boot::|parseAndInterpret|)
+    (plusp (miricl-compiler::compiler-primitive 26 #'boot::|parseAndInterpret|)))`).output, 'T\n');
   for (const example of examples) {
     console.log(`FriCAS example: ${example.title}`);
     const result = await session.evaluate(example.code);
@@ -23,6 +37,8 @@ try {
     assert.doesNotMatch(result.output, /System error|Internal Error|not implemented|cannot find|not available/i);
     console.log(`PASS FriCAS manual example: ${example.title}`);
   }
+  assert.equal(session.vm.evaluate('miricl-compiler::*compiler-origin*').output, ':IMAGE\n');
+  // FriCAS may legitimately compile functions the user defines interactively.
   assert.match((await session.evaluate('persist_value := 13\npersisted(x) == x + persist_value\npersisted(29)')).output, /\)\s+42\s+Type:/);
   assert.match((await session.evaluate('% + 1')).output, /\)\s+43\s+Type:/);
   assert.match((await session.evaluate(')help clear')).output, /clear/i);
@@ -30,7 +46,7 @@ try {
   for (const name of ['array', 'table', 'ord']) {
     console.log(`FriCAS upstream: ${name}.input`);
     // Fresh state prevents an earlier suite's counters from hiding omissions.
-    session = await createFriCAS(fs.readFileSync(image), fs.readFileSync(core), files);
+    session = await start();
     const source = fs.readFileSync(new URL(`../vendor/fricas/src/input/${name}.input`, import.meta.url), 'utf8');
     const result = await session.evaluate(source);
     const failures = Number(result.output.match(/unexpected failures:\s*(\d+)/)?.[1] ?? NaN);

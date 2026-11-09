@@ -42,9 +42,9 @@ assert.match(renderAnsiReport({...report, execution: 'compiler',
   /Compiler bootstrap<\/dt><dd>Self-compiled frontend and backend \(93 functions\)/);
 assert.match(renderAnsiReport({...report, execution: 'compiler'}),
   /Compiler bootstrap<\/dt><dd>Not recorded/);
-assert.match(html, /interpreter\.wasm raw<\/dt><dd>278,479 bytes/);
-assert.match(html, /interpreter\.wasm gzip \(level 9\)<\/dt><dd>128,962 bytes/);
-assert.match(html, /interpreter\.wasm Brotli \(quality 11\)<\/dt><dd>113,743 bytes/);
+assert.match(html, /miricl\.wasm raw<\/dt><dd>278,479 bytes/);
+assert.match(html, /miricl\.wasm gzip \(level 9\)<\/dt><dd>128,962 bytes/);
+assert.match(html, /miricl\.wasm Brotli \(quality 11\)<\/dt><dd>113,743 bytes/);
 assert.match(html, /repl&amp;&quot;λ\.wasm raw<\/dt><dd>279,578 bytes/);
 assert.match(html, /repl&amp;&quot;λ\.wasm gzip \(level 9\)<\/dt><dd>129,646 bytes/);
 assert.match(html, /repl&amp;&quot;λ\.wasm Brotli \(quality 11\)<\/dt><dd>114,337 bytes/);
@@ -160,7 +160,7 @@ try {
   fs.unlinkSync(binary);
   fs.unlinkSync(companion);
   assert.match(renderAnsiReport(JSON.parse(JSON.stringify({...report, imageSizes}))),
-    /interpreter\.wasm raw<\/dt><dd>8 bytes/);
+    /miricl\.wasm raw<\/dt><dd>8 bytes/);
   const file = path.join(directory, 'ansi-results.html');
   fs.writeFileSync(file, html.replace('</body>', `<script>(${browserChecks.toString()})();</script></body>`));
   const browser = spawnSync(process.env.CHROMIUM ?? 'chromium', [

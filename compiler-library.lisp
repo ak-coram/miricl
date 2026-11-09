@@ -1,14 +1,6 @@
 ;;;; Compact compilation resolves macro references and load-time values.
 ;;;; Calls use native dispatch directly; literal objects retain their identity.
 (defvar %compilation-complete t)
-(defvar %remote-literals nil)
-(defun %compile-literal (object)
-  ;; Remote compilation retains constants in the target heap, including JS
-  ;; objects and circular graphs. Only an opaque symbol crosses to the host.
-  (if %remote-literals
-      (let ((marker (gensym)))
-        (vector-push-extend (cons marker object) %remote-literals) marker)
-      object))
 (defvar %file-compiling nil)
 (defvar %file-load-values nil)
 (defvar %file-lexical-names nil)
@@ -58,6 +50,36 @@
             (push (cdar variables) parameters))))
     (%file-code-cons form name
       (cons (nreverse parameters) (%file-lexical-forms body variables functions blocks tags)))))
+
+(defun %file-lexical-call (form variables functions blocks tags)
+  ;; Ordinary expression trees can be arbitrarily deep after macro expansion.
+  ;; Binding constructs recurse through the scope-aware converter; calls and
+  ;; conditionals use an explicit worklist instead of the native control stack.
+  (let* ((result (list nil)) (work (list (list form result variables))))
+    (loop while work do
+      (let* ((task (pop work)) (source (first task)) (destination (second task))
+             (environment (third task)))
+        (cond
+          ((atom source)
+           (rplaca destination (if (symbolp source) (%file-lexical-reference source environment) source)))
+          ((member (car source)
+             '(quote lambda let let* flet labels locally function block return-from tagbody go the
+               defvar defparameter defconstant declare %%case-form %%list-test %%list-accumulate
+               %%numeric-collect %%arithmetic-step %%symbol-iterate %%parallel-place-form %%condition-form))
+           (rplaca destination (%file-lexical-form source environment functions blocks tags)))
+          (t
+           (let* ((operator (car source)) (args (cdr source))
+                  (slots (make-list (length args)))
+                  (copy (%file-code-cons source
+                          (and (symbolp operator) (%file-lexical-reference operator functions)) slots))
+                  (argument-environment environment))
+             (rplaca destination copy)
+             (dolist (name (%file-lexical-specials args))
+               (push (cons name name) argument-environment))
+             (loop for argument in args for slot on slots do
+               (push (list argument slot argument-environment) work))
+             (unless (symbolp operator) (push (list operator copy environment) work)))))))
+    (car result)))
 
 (defun %file-lexical-form (form variables functions blocks tags)
   ;; Alpha-convert only executable binding syntax. Quoted objects keep their
@@ -210,10 +232,7 @@
                 (cons (cons (caar forms) (%file-lexical-forms (cdar forms) variables functions blocks tags))
                   (%file-lexical-forms (cdr forms) variables functions blocks tags)))
                (otherwise (%file-lexical-forms forms variables functions blocks tags)))))))
-      (otherwise
-       (%file-code-cons form (if (symbolp operator) (%file-lexical-reference operator functions)
-                                (%file-lexical-form operator variables functions blocks tags))
-         (%file-lexical-forms args variables functions blocks tags))))))
+      (otherwise (%file-lexical-call form variables functions blocks tags)))))
 (defun %compile-place-form (place environment)
   (let ((expanded (macroexpand place environment)))
     (if (consp expanded) (cons (car expanded) (%compile-forms (cdr expanded) environment)) expanded)))
@@ -427,24 +446,21 @@
 (defun %compile-form (form environment)
   (multiple-value-bind (expansion expanded) (macroexpand form environment)
     (when expanded (return-from %compile-form (%compile-form expansion environment))))
-  (unless (consp form)
-    (return-from %compile-form
-      (if (and %remote-literals (not (symbolp form)))
-          (list 'quote (%compile-literal form)) form)))
+  (unless (consp form) (return-from %compile-form form))
   (let ((operator (car form)) (args (cdr form)))
     (case operator
       ((go declare) form)
-      (quote (if %remote-literals (list 'quote (%compile-literal (cadr form))) form))
+      (quote form)
       (quasiquote (%compile-backquote (car args) environment 1))
       (function
         (if (and (consp (car args)) (eq (caar args) 'lambda))
             (%compile-lambda-form (cadar args) (cddar args) environment) form))
       (load-time-value
         (list 'quote
-          (%compile-literal (if %file-compiling
+          (if %file-compiling
               (let ((marker (gensym)))
                 (setf (gethash marker %file-load-values) (list (%compile-form (car args) nil))) marker)
-              (eval (car args))))))
+              (eval (car args)))))
       ((let let*) (%compile-bindings operator (car args) (cdr args) environment))
       (progv
        (list* operator (%compile-form (car args) environment) (%compile-form (cadr args) environment)

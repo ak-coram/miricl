@@ -1,0 +1,90 @@
+name: Set up MIRICL tools
+description: Shared, pinned build and test tools; install only what a job uses.
+inputs:
+  lisp:
+    description: Install Roswell, Quicklisp and the selected LISP implementation
+    default: 'false'
+  c-api:
+    description: Install the Wasmtime shared library
+    default: 'false'
+  cli:
+    description: Install the Wasmtime CLI (Linux jobs)
+    default: 'false'
+  native-tools:
+    description: Install SBCL and native application build tools (Linux jobs)
+    default: 'false'
+  just:
+    description: Install just
+    default: 'false'
+  node:
+    description: Install Node.js 26
+    default: 'true'
+  wasmtime-version:
+    description: Wasmtime release shared by the C API and CLI
+    default: '50.0.1'
+runs:
+  using: composite
+  steps:
+    # Upstream ASDF fixtures must not participate in Quicklisp discovery.
+    - if: inputs.lisp == 'true'
+      shell: bash
+      run: rm -rf vendor/asdf/test
+    - if: inputs.lisp == 'true'
+      uses: 40ants/setup-lisp@v4
+      with:
+        cache: true
+        # Qlot otherwise reads every .asd below the checkout, including
+        # Maxima's optional F2CL systems. Each build/test loads its own systems
+        # through Quicklisp, which installs their actual dependencies.
+        qlot-no-deps: 'true'
+    - if: inputs.lisp == 'true'
+      shell: ${{ runner.os == 'Windows' && 'msys2 {0}' || 'bash' }}
+      run: |
+        git -C vendor/asdf restore --worktree -- test
+        ros --eval '(ql-dist:install-dist "http://dist.ultralisp.org/" :prompt nil)' --eval '(uiop:quit)'
+    - if: inputs.node == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '26'
+    - if: inputs.just == 'true'
+      uses: extractions/setup-just@v4
+    - if: inputs.native-tools == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y sbcl build-essential
+    - if: inputs.c-api == 'true' && runner.os != 'Windows'
+      shell: bash
+      env:
+        WASMTIME_RELEASE: ${{ inputs.wasmtime-version }}
+      run: |
+        if [[ "$RUNNER_OS" == 'macOS' ]]; then
+          platform=aarch64-macos
+          library=libwasmtime.dylib
+          echo "DYLD_LIBRARY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+        else
+          platform=x86_64-linux
+          library=libwasmtime.so
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+        fi
+        archive="wasmtime-v${WASMTIME_RELEASE}-${platform}-c-api"
+        curl --fail --location --retry 3 "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_RELEASE}/${archive}.tar.xz" --output "$RUNNER_TEMP/c-api.tar.xz"
+        tar -xf "$RUNNER_TEMP/c-api.tar.xz" --strip-components 2 "$archive/lib/$library"
+    - if: inputs.c-api == 'true' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        WASMTIME_RELEASE: ${{ inputs.wasmtime-version }}
+      run: |
+        $archive = "wasmtime-v${env:WASMTIME_RELEASE}-x86_64-windows-c-api"
+        Invoke-WebRequest "https://github.com/bytecodealliance/wasmtime/releases/download/v${env:WASMTIME_RELEASE}/$archive.zip" -OutFile "$env:RUNNER_TEMP/c-api.zip" -MaximumRetryCount 3
+        Expand-Archive "$env:RUNNER_TEMP/c-api.zip" "$env:RUNNER_TEMP/c-api"
+        Copy-Item "$env:RUNNER_TEMP/c-api/$archive/lib/wasmtime.dll" .
+    - if: inputs.cli == 'true'
+      shell: bash
+      env:
+        WASMTIME_RELEASE: ${{ inputs.wasmtime-version }}
+      run: |
+        curl --fail --location --retry 3 "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_RELEASE}/wasmtime-v${WASMTIME_RELEASE}-x86_64-linux.tar.xz" --output "$RUNNER_TEMP/wasmtime-cli.tar.xz"
+        mkdir -p "$RUNNER_TEMP/wasmtime-cli"
+        tar -xf "$RUNNER_TEMP/wasmtime-cli.tar.xz" -C "$RUNNER_TEMP/wasmtime-cli" --strip-components 1
+        echo "$RUNNER_TEMP/wasmtime-cli" >> "$GITHUB_PATH"

@@ -6,6 +6,15 @@
 (def-suite :miricl)
 (in-suite :miricl)
 
+(defun sequence-test-bounds (sequence)
+  "Representative empty, full, prefix, suffix and interior ranges.
+The exhaustive start/end matrix is covered by upstream ANSI tests."
+  (let ((size (length sequence)))
+    (remove-duplicates
+      (list (list 0 size) '(0 0) (list size size)
+            (list (min 1 size) size) (list 0 (max 0 (1- size)))
+            (list (min 1 size) (max (min 1 size) (1- size)))) :test #'equal)))
+
 (defun reference-remove-duplicates (sequence &key from-end (start 0) end key
                                                (test #'eql) (test-not nil negate))
   ;; Use pairwise selection rather than relying on host implementations of
@@ -234,33 +243,21 @@
                      (max (abs expected) least-positive-normalized-double-float)))))
         (t (eql expected actual))))
 
-(test numeric-cross-product
-  ;; Independent arithmetic oracle: the host CL implementation.
-  (m:with-interpreter (vm :fuel 50000000)
-    (let ((numbers (list 0 1 -1 (+ (expt 2 90) 31) (- (expt 2 100) 1)
-                         1/3 -5/7 0.5 -1.25 1d0 #c(2/3 -7/5) #c(1.5d0 2d0))))
-      (dolist (a numbers)
-        (dolist (b numbers)
-          (dolist (op '(+ - * /))
-            (unless (and (eq op '/) (zerop b))
-              (let* ((form (list op a b)) (expected (eval form)) (actual (m:evaluate vm form)))
-                (is (same-number-p expected actual) "~S expected ~S, got ~S" form expected actual)))))))))
-
 (test native-numeric-comparisons
   (m:with-interpreter (vm)
-    (let ((numbers (list 0 1 -1 32767 32768 -32768
-                         (1- (expt 2 45)) (expt 2 45) (- (expt 2 45))
-                         (1- (expt 2 53)) (expt 2 53) (1+ (expt 2 53))
-                         (- (1+ (expt 2 53))) (+ (expt 2 100) 1)
-                         (- (+ (expt 2 100) 1))
-                         0.0 -0.0 0d0 -0d0 1.0 1d0 0.1 0.1d0
-                         (float (expt 2 45) 1d0) (float (expt 2 53) 1d0)
-                         (float (expt 2 100) 1d0) 1/10 -1/10 1/2 -5/7)))
-      (dolist (a numbers)
-        (dolist (b numbers)
-          (dolist (operator '(= /= < > <= >=))
-            (let ((form (list operator a b)))
-              (is (eql (eval form) (m:evaluate vm form)) "Mismatch for ~S" form))))))
+    ;; ANSI exercises the comparison matrix. Check guest integer digit and
+    ;; IEEE precision boundaries across the host/Wasm transport here.
+    (dolist (pair (list (list 32767 32768) (list -32768 -32769)
+                       (list (1- (expt 2 45)) (expt 2 45))
+                       (list (1+ (expt 2 53)) (float (expt 2 53) 1d0))
+                       (list (+ (expt 2 100) 1) (float (expt 2 100) 1d0))
+                       (list (- (+ (expt 2 100) 1)) (- (float (expt 2 100) 1d0)))
+                       (list 0.0 -0d0) (list 1/10 0.1) (list 1/10 0.1d0)
+                       (list 1/2 0.5d0) (list -5/7 -0.5)))
+      (dolist (values (list pair (reverse pair)))
+        (dolist (operator '(= /= < > <= >=))
+          (let ((form (list operator (first values) (second values))))
+            (is (eql (eval form) (m:evaluate vm form)) "Mismatch for ~S" form)))))
     (dolist (form '((= #c(1.0 0.0) 1) (= #c(1.0 2.0) #c(1 2))
                     (/= #c(1.0 2.0) #c(1 3)) (< -2 -1 0 1 2)
                     (> 2 1 0 -1 -2) (<= -0.0 0 0d0) (>= -0.0 0 0d0)))

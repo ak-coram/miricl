@@ -266,3 +266,12 @@ export const compilerCases = [
            (division-by-zero () (values cleaned :original))))))))
     (equal (multiple-value-list (funcall function)) '(t :original)))`],
 ];
+
+// Runtime/browser smoke coverage checks the native ABI. The complete set runs
+// once in FILE-CODE-SHARING through a fresh FASL; ANSI owns broad conformance.
+const smokeNames = new Set([
+  'arithmetic and branches', 'shared mutable captures', 'unassigned transitive captures',
+  'zero and multiple values', 'dynamic bindings', 'literal cycles and identity',
+  'native condition propagation', 'native cleanup on transfers',
+]);
+export const compilerSmokeCases = compilerCases.filter(([name]) => smokeNames.has(name));

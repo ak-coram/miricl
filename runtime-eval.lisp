@@ -145,6 +145,21 @@
   #@(call $clear-values)
   #@(local.get $right))
 
+(define-runtime-function $evaluate-form (($form :nullable-object)) (:nullable-object)
+  ;; Public evaluation boundaries select the policy. Recursive evaluation keeps
+  ;; its lexical environment and does not repeatedly compile subexpressions.
+  #@(if (i32.eq (call $tag (local.get $form)) (i32.const 7))
+    (then
+      ;; Some library initialization calls EVAL before the compiler variables
+      ;; have been defined. Such calls use the bootstrap evaluator.
+      (if (if (result i32) (call $boundp ,(clos-library-reference 'miricl-compiler:*compile-evaluations*))
+            (then (i32.eqz (ref.is_null
+              (call $symbol-value ,(clos-library-reference 'miricl-compiler:*compile-evaluations*)))))
+            (else (i32.const 0)))
+        (then (return (call $apply ,(clos-library-reference '%compiler-evaluate)
+          (call $cons (local.get $form) (ref.null $obj))))))))
+  #@(return_call $eval (local.get $form) (ref.null $obj)))
+
 (define-runtime-function $eval
     (($form :nullable-object) ($env :nullable-object))
     (:nullable-object)
@@ -561,6 +576,7 @@
   #@(call $apply (local.get $setter) (call $cons (local.get $value) (local.get $args))))
 
 (define-runtime-section eval-runtime-wat ()
+  ($evaluate-form)
   ($eval-backquote)
   ($eval-setf)
   ($operator)

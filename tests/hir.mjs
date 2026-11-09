@@ -11,6 +11,12 @@ try {
     (defun hir-operation-p (instruction opcode) (eq (miricl-compiler::hir-instruction-opcode instruction) opcode))
     t)`);
   check(`(let* ((unit (miricl-compiler:compile-to-hir
+    '(lambda (args) (apply (lambda (x y) (+ x y)) args)))))
+    (and (miricl-compiler:verify-hir unit) (= (length (miricl-compiler:hir-unit-functions unit)) 1)))`);
+  check(`(let* ((unit (miricl-compiler:compile-to-hir
+    '(lambda (x) (multiple-value-call (lambda (&rest args) args) (values x 19))))))
+    (and (miricl-compiler:verify-hir unit) (= (length (miricl-compiler:hir-unit-functions unit)) 1)))`);
+  check(`(let* ((unit (miricl-compiler:compile-to-hir
     '(lambda (x) (values (lambda () (incf x)) (lambda () x)))))
     (functions (miricl-compiler:hir-unit-functions unit))
     (binding (first (miricl-compiler::hir-function-bindings (first functions)))))
@@ -28,7 +34,8 @@ try {
   check(`(let* ((unit (miricl-compiler:compile-to-hir
     '(lambda (flag) (if flag (values 1 2) (values)))))
     (function (first (miricl-compiler:hir-unit-functions unit)))
-    (join (find-if #'miricl-compiler::hir-block-parameters (miricl-compiler::hir-function-blocks function))))
+    (join (find-if (lambda (block) (miricl-compiler::hir-block-parameters block))
+            (miricl-compiler::hir-function-blocks function))))
     (and (= (length (miricl-compiler::hir-block-predecessors join)) 2)
       (eq (miricl-compiler::hir-value-kind (first (miricl-compiler::hir-block-parameters join))) :multiple)
       (eq (miricl-compiler::hir-value-kind (miricl-compiler::hir-function-environment function)) :dynamic)))`);

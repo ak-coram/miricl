@@ -1,13 +1,6 @@
 // Opt-in development adapter for an application's existing interpreter.
-// Binary WebSocket messages carry the terminal stream. Text messages carry
-// compiler packets; application objects and execution stay in the browser.
-const compilerServiceName = [7, ...new TextEncoder().encode('service')];
-const compilerBridgeModule = new WebAssembly.Module(new Uint8Array([
-  0,97,115,109,1,0,0,0,
-  1,9,1,96,3,127,111,111,2,111,127,
-  2,16,1,4,104,111,115,116,...compilerServiceName,0,0,
-  7,11,1,...compilerServiceName,0,0,
-]));
+// WebSocket messages carry forms and terminal output. Evaluation policy and
+// compilation belong to the application's browser runtime.
 export class DevRepl {
   constructor(interpreter, options = true) {
     if (options === true) options = {};
@@ -23,14 +16,6 @@ export class DevRepl {
     this.interpreter = interpreter;
     this.encoder = new TextEncoder();
     this.closed = false;
-    this.compilations = [];
-    this.compilerRequests = new Set();
-    this.compilerTable = interpreter.vm['compiler-services'];
-    if (this.compilerTable && interpreter.threads) {
-      this.compilerPrevious = this.compilerTable.get(0);
-      this.compilerService = new WebAssembly.Instance(compilerBridgeModule,
-        {host: {service: (...args) => this.compileService(...args)}}).exports.service;
-    }
     // Serialize remote evaluations with the application's asynchronous calls.
     // JS callbacks still reenter the evaluator through its existing callback API.
     this.evaluate = interpreter.evaluateAsync;
@@ -73,18 +58,11 @@ export class DevRepl {
       lines: '', source: '', queuedBytes: 0, queue: Promise.resolve()};
     socket.onopen = () => {
       if (this.socket !== socket) return;
-      if (this.compilerService) this.compilerTable.set(0, this.compilerService);
       this.status('connected');
     };
     socket.onmessage = ({data}) => {
       if (typeof data === 'string') {
-        const request = this.compilations.shift();
-        if (!request) { socket.close(1002, 'Unexpected compiler response'); return; }
-        if (this.encoder.encode(data).length > 1048562) { socket.close(1009, 'Compiler response too large'); return; }
-        request.result = data; request.ready = true;
-        if (!request.cancelled) this.wakeCompiler(request);
-        this.sendCompilation();
-        return;
+        data = this.encoder.encode(data);
       }
       session.queuedBytes += data.byteLength;
       if (session.queuedBytes > 1024 * 1024) { socket.close(1009, 'Input queue full'); return; }
@@ -122,53 +100,8 @@ export class DevRepl {
     socket.onerror = () => {};
     socket.onclose = () => {
       if (this.socket !== socket) return;
-      this.stopCompiler(); this.retry();
+      this.retry();
     };
-  }
-
-  compileService(op, packet, value) {
-    if (op === -2) {
-      value.cancelled = true; this.compilerRequests.delete(value);
-      if (this.state !== 'connected' && this.compilerRequests.size === 0) this.detachCompiler();
-      return [null, 0];
-    }
-    if (op === -1) {
-      if (!value.ready) return [value, 1];
-      return value.error ? [null, 2] : [this.interpreter.javascript.makeText(value.result), 0];
-    }
-    const text = this.interpreter.javascript.text(packet);
-    if (this.closed || this.socket?.readyState !== WebSocket.OPEN ||
-        this.encoder.encode(text).length > 1048562) return [null, 2];
-    const request = {text, thread: value};
-    this.compilerRequests.add(request);
-    this.compilations.push(request);
-    if (this.compilations.length === 1) this.sendCompilation();
-    return [request, 1];
-  }
-
-  sendCompilation() {
-    const request = this.compilations[0];
-    if (request && !request.sent && this.socket?.readyState === WebSocket.OPEN) {
-      request.sent = true; this.socket.send(request.text);
-    }
-  }
-
-  wakeCompiler(request) {
-    this.interpreter.vm['filesystem-wake'](request.thread);
-    this.interpreter.threads.schedule();
-  }
-
-  stopCompiler() {
-    for (const request of this.compilations.splice(0)) {
-      request.error = true; request.ready = true;
-      if (!request.cancelled) this.wakeCompiler(request);
-    }
-    if (this.compilerRequests.size === 0) this.detachCompiler();
-  }
-
-  detachCompiler() {
-    if (this.compilerService && this.compilerTable.get(0) === this.compilerService)
-      this.compilerTable.set(0, this.compilerPrevious);
   }
 
   retry() {
@@ -194,7 +127,6 @@ export class DevRepl {
   close(code = 1000) {
     if (this.closed) return;
     this.closed = true;
-    this.stopCompiler();
     this.filesystem?.close();
     clearTimeout(this.timer);
     this.socket?.close(code);

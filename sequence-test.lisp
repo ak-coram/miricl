@@ -373,18 +373,10 @@
       (let ((form `(,operator #'oddp (list 1 2 3) :test 42 :test-not 43 :allow-other-keys t)))
         (is (equal (eval form) (m:evaluate vm form)))))))
 
-(test native-sequence-search
+(test native-sequence-find-and-position
   (m:with-interpreter (vm)
-    (dolist (sequence '((1 2 1 3 1) "aBabA"))
-      (loop for start from 0 to (length sequence) do
-        (loop for end from start to (length sequence) do
-          (dolist (from-end '(nil t))
-            (dolist (operator '(find position find-if position-if find-if-not position-if-not))
-              (let* ((item-p (member operator '(find position)))
-                     (argument (if item-p (if (stringp sequence) #\a 1)
-                       (list 'function (if (stringp sequence) 'upper-case-p 'oddp))))
-                     (form `(,operator ,argument ',sequence :start ,start :end ,end :from-end ,from-end)))
-                (is (equal (eval form) (m:evaluate vm form)))))))))
+    ;; FIND/POSITION's full type/range cross product belongs to ANSI. Retain
+    ;; callback, sharing, Unicode and condition regressions here.
     (dolist (form
       '((position nil '(nil 1 2))
         (position nil "abc")

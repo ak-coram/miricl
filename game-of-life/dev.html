@@ -62,7 +62,7 @@
     console.error(error);
   };
   try {
-    const image = await fetch("./images/miricl.wasm");
+    const image = await fetch("./images/miricl-precompiled.wasm");
     const url = new URL(location.href);
     url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     url.port = new URLSearchParams(location.search).get("ws") ?? "4006";

@@ -1,13 +1,15 @@
 // CHROMIUM=chromium node tests/browser-game-of-life.mjs [game-of-life/build/index.html]
-// Exercise production HTML and its separate runtime and FASL assets.
+// Exercise production assets or the source-loading development page (--dev).
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import {spawn} from 'node:child_process';
+import {startHost, testPorts} from './repl-bridge-fixture.mjs';
 
-const html = path.resolve(process.argv[2] ?? 'game-of-life/build/index.html');
+const development = process.argv.includes('--dev');
+const html = path.resolve(process.argv[2] ?? (development ? 'game-of-life/dev.html' : 'game-of-life/build/index.html'));
 await fs.access(html, fs.constants.R_OK);
 const root = path.dirname(html);
 const server = http.createServer(async (request, response) => {
@@ -21,12 +23,13 @@ const server = http.createServer(async (request, response) => {
   } catch { response.writeHead(404).end(); }
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-const origin = `http://127.0.0.1:${server.address().port}`;
+const host = development ? await startHost('node', path.resolve('miricl-precompiled.wasm'), 'dev-server', root) : undefined;
+const origin = `http://127.0.0.1:${host ? testPorts.http : server.address().port}`;
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-life-browser-'));
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run',
   '--no-default-browser-check', '--disable-background-networking',
-  `--user-data-dir=${profile}`, '--remote-debugging-pipe',
+  `--user-data-dir=${profile}`, '--no-startup-window', '--remote-debugging-pipe',
 ], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
 let diagnostics = '';
 browser.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8000); });
@@ -78,6 +81,8 @@ function send(method, params = {}, sessionId) {
 }
 
 try {
+  const version = await send('Browser.getVersion');
+  console.log(`Chromium: ${version.product}`);
   const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
   const {sessionId} = await send('Target.attachToTarget', {targetId, flatten: true});
   const command = (method, params) => send(method, params, sessionId);
@@ -130,9 +135,10 @@ try {
   }
   if (profilePrefix) await command('Profiler.enable');
   const startupStarted = await startProfile();
-  await command('Page.navigate', {url: origin + '/' + path.basename(html)});
+  await command('Page.navigate', {url: origin + '/' + path.basename(html) + (development ? `?ws=${testPorts.websocket}` : '')});
   await waitFor('globalThis.lifeReady === true && document.getElementById("population").textContent === "005"');
   await endProfile('startupMs', startupStarted);
+  if (development) console.log(`Game of Life development startup: ${timings.startupMs} ms`);
   if (profilePrefix) {
     const simulationStarted = await startProfile();
     assert.equal(await evaluate(`
@@ -148,7 +154,8 @@ try {
     console.log('Browser timings (ms):', timings);
   }
   assert.equal(await evaluate(`(and (fset2:set? (life:world-cells life:*world*))
-    (notany #'find-package '("ASDF" "UIOP" "MGL-PAX")))`), 'T\n');
+    ${development ? '(and (find-package "ASDF") miricl-compiler:*compile-evaluations* (eq miricl-compiler::*compiler-origin* :image))'
+      : '(notany #\'find-package \'("ASDF" "UIOP" "MGL-PAX"))'})`), 'T\n');
   await evaluate('(defparameter *before* life:*world*)');
   // A blinker returns to its initial state after two pure generations.
   assert.equal(await evaluate(`(let* ((a (life:seed :blinker)) (b (life:next-generation a)) (c (life:next-generation b)))
@@ -189,12 +196,26 @@ try {
     await fs.writeFile(process.env.MIRICL_LIFE_SCREENSHOT, Buffer.from(data, 'base64'));
   }
   assert.deepEqual(exceptions, []);
-  assert.equal(requests.some(url => /^wss?:/.test(url) ||
-    (/^https?:/.test(url) && /asdf|quicklisp|dev-repl|dev-filesystem/.test(new URL(url).pathname))),
-    false, 'Production must not fetch development dependencies.');
-  for (const file of ['miricl.js', 'miricl.wasm', 'game-of-life.wasm'])
-    assert.ok(requests.includes(`${origin}/${file}`), `Production must load its separate ${file} asset.`);
-  console.log('Game of Life: separate HTML, adapter, interpreter and FSet 2 bundle, immutable generations, mouse drawing, ASCII REPL state, playback and mobile layout pass.');
+  if (development) {
+    assert.ok(requests.some(url => new URL(url).pathname === '/images/miricl-precompiled.wasm'));
+    assert.equal(await js('miriclInterpreter.dev.state'), 'connected');
+    assert.equal(await js('!("compiler-services" in miriclInterpreter.vm)'), true);
+    console.log('Game of Life development: precompiled browser image, forwarding relay, source/ASDF loading, immutable generations, UI interaction and mobile layout pass.');
+  } else {
+    assert.equal(requests.some(url => /^wss?:/.test(url) ||
+      (/^https?:/.test(url) && /asdf|quicklisp|dev-repl|dev-filesystem/.test(new URL(url).pathname))),
+      false, 'Production must not fetch development dependencies.');
+    const versions = new Set();
+    for (const file of ['miricl.js', 'miricl.wasm', 'game-of-life.wasm']) {
+      const request = requests.find(url => new URL(url).origin === origin && new URL(url).pathname === `/${file}`);
+      assert.ok(request, `Production must load its separate ${file} asset.`);
+      const version = new URL(request).searchParams.get('v');
+      assert.match(version, /^[a-f0-9]{16}$/);
+      versions.add(version);
+    }
+    assert.equal(versions.size, 1, 'The native bundle and runtime must use the same asset version.');
+    console.log('Game of Life: separate HTML, adapter, interpreter and FSet 2 bundle, immutable generations, mouse drawing, ASCII REPL state, playback and mobile layout pass.');
+  }
 } catch (error) { console.error(error); throw error; } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
@@ -203,4 +224,5 @@ try {
   browser.kill('SIGTERM');
   await stopped;
   await fs.rm(profile, {recursive: true, force: true, maxRetries: 10, retryDelay: 100});
+  await host?.close();
 }

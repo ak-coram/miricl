@@ -10,7 +10,13 @@
 (defun lower-runtime-library (form)
   (if (atom form) form
       (let ((expanded
-              (case (car form)
+              ;; Resolve private record/index macros before packing sources.
+              ;; Interpreted bootstrap functions then execute direct accesses
+              ;; without expanding an accessor macro on every field read.
+              (if (and (symbolp (car form)) (get (car form) 'runtime-inline-macro)
+                       (macro-function (car form)))
+                  (macroexpand-1 form)
+                  (case (car form)
                 (quote (return-from lower-runtime-library form))
                 (cond (if (cdr form)
                           `(if ,(caadr form) (progn ,@(cdadr form))
@@ -30,7 +36,7 @@
                 (cadr `(car (cdr ,(second form))))
                 (cddr `(cdr (cdr ,(second form))))
                 (caddr `(car (cdr (cdr ,(second form)))))
-                (otherwise form))))
+                (otherwise form)))))
         (if (eq expanded form) (mapcar #'lower-runtime-library form)
             (lower-runtime-library expanded)))))
 
@@ -48,11 +54,15 @@
 (defun runtime-library-structure-symbols (forms)
   ;; Accessors first referenced by another tooling source still need their
   ;; bootstrap identities installed before DEFSTRUCT interns their names.
-  (loop for form in forms when (and (consp form) (eq (car form) 'defstruct) (symbolp (second form))) append
+  (loop for form in forms when (and (consp form)
+                                  (member (car form) '(defstruct miricl-compiler::define-hir-record))
+                                  (symbolp (second form))) append
     (let* ((name (second form)) (package (symbol-package name)) (text (symbol-name name)))
       (append (loop for suffix in '("-P" "") for prefix in '("" "COPY-")
                 collect (intern (concatenate 'string prefix text suffix) package))
         (list (intern (concatenate 'string "MAKE-" text) package))
+        (when (eq (car form) 'miricl-compiler::define-hir-record)
+          (list (intern (concatenate 'string "%" text "-P") package)))
         (loop for slot in (cddr form) for slot-name = (if (consp slot) (car slot) slot)
               collect (intern (concatenate 'string text "-" (symbol-name slot-name)) package))))))
 

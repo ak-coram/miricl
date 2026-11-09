@@ -27,14 +27,17 @@
 
 ;; The remaining high function IDs are reserved for formatters, complements, constant macro expanders,
 ;; generic functions, and condition readers in $APPLY1.
+(setf *clos-primitives* (append *clos-primitives* '(%pop-arg %list-eq %%find-method %%dispatch-eql-key %nth)))
+
 (assert (<= (length *clos-primitives*) (- 2147483642 +clos-primitive-base+)))
 
 (defun clos-primitive-op (name) (position name *clos-primitives*))
 
 (defvar *native-compiler-image* nil)
+(defvar *compile-evaluations-default* nil)
 (defparameter *clos-library*
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "bundle-library.lisp" "fasl-utilities.lisp" "fasl-format.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "remote-compiler-library.lisp") append
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "bundle-library.lisp" "fasl-utilities.lisp" "fasl-format.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "evaluation-library.lisp") append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let* ((*package* (find-package :miricl))
              (forms (loop for form = (read in nil :eof) until (eq form :eof)
@@ -43,7 +46,7 @@
                       else collect (lower-runtime-library form))))
         ;; Establish the native package and symbol identities before DEFSTRUCT
         ;; generates accessors. Public exports are declared in PACKAGE.LISP.
-        (when (member file '("thread-library.lisp" "bundle-library.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "fasl-utilities.lisp" "fasl-format.lisp") :test #'equal)
+        (when (member file '("thread-library.lisp" "bundle-library.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "fasl-utilities.lisp" "fasl-format.lisp") :test #'equal)
           (let* ((package (find-package (cond ((equal file "thread-library.lisp") :miricl-threads)
                                             ((equal file "bundle-library.lisp") :miricl-bundle)
                                             (t :miricl-compiler))))
@@ -99,6 +102,11 @@
   (:locals ($class :nullable-object) ($object :nullable-object) ($value :nullable-object) ($mode i32))
   #@(local.set $class (struct.get $direct-function $owner (local.get $function)))
   #@(local.set $mode (struct.get $direct-function $mode (local.get $function)))
+  #@(if (i32.eq (local.get $mode) (i32.const 8))
+    (then ,(wat-arity 1)
+      (return (call $invoke-method (local.get $class)
+        (struct.get $direct-function $slot (local.get $function)) (ref.null $obj)
+        (call $car (local.get $args)) (ref.null $obj) (i32.const 0)))))
   ;; Native core forms expose their expansion functions without repeating
   ;; expansion during ordinary evaluation. Explicit calls execute the source.
   #@(if (i32.eq (local.get $mode) (i32.const 7))

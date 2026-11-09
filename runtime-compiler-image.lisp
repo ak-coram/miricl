@@ -23,10 +23,13 @@
                  ,@(loop for root in roots for index from 0 collect
                    `(let ((%fasl-work (%fasl-object ,root)))
                       (setf (symbol-function (car %fasl-work))
-                        (%%compile 20 ,index (cadr %fasl-work) (car %fasl-work))
+                        (if (caddr %fasl-work)
+                            (%%compile 30 (%%compile 20 ,index (cadr %fasl-work) (car %fasl-work)) (caddr %fasl-work))
+                            (%%compile 20 ,index (cadr %fasl-work) (car %fasl-work)))
                         (gethash (car %fasl-work) miricl-compiler::*native-compiler-functions*) t)))
                  (setq miricl-compiler::*compiler-state* :ready
-                       miricl-compiler::*compiler-origin* :image)))))))))
+                       miricl-compiler::*compiler-origin* :image
+                       miricl-compiler:*compile-evaluations* ,*compile-evaluations-default*)))))))))
 
 (defun ensure-native-compiler-image ()
   (unless *native-compiler-image*

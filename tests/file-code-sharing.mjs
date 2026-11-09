@@ -8,6 +8,14 @@ const builder = await Miricl.instantiate(binary);
 const fresh = await Miricl.instantiate(binary);
 const check = (vm, form) => assert.equal(vm.evaluate(form, {eof: true}).output, 'T\n', form);
 try {
+  // Generated algebra often expands into deeply nested conditional trees.
+  // Exercise conversion through lexical scopes without a larger Wasm stack.
+  builder.mountFile('/deep.lisp', '(defun deep-file-code (x) (let ((y 17)) ' +
+    '(if x '.repeat(180) + 'y' + ' 23)'.repeat(180) + '))');
+  builder.evaluate('(compile-file "/deep.lisp")', {eof: true});
+  fresh.mountFile('/deep.wasm', await builder.readFile('/deep.wasm'));
+  fresh.evaluate('(load "/deep.wasm")', {eof: true});
+  check(fresh, '(and (= (deep-file-code t) 17) (= (deep-file-code nil) 23))');
   builder.mountFile('/scope.lisp', `
     (defpackage :file-scope-test (:use :cl))
     (in-package :file-scope-test)

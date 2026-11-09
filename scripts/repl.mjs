@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import readline from 'node:readline';
+import path from 'node:path';
 import {Miricl} from './miricl.mjs';
 
 const options = {devServer: false, tcpBridge: false, entryPoints: [], keep: []};
@@ -14,6 +15,7 @@ for (let i = 0; i < args.length; i++) {
   if (arg === '--browser-repl') { browserRepl = true; continue; }
   if (arg === '--repl-bridge') { options.tcpBridge = true; continue; }
   if (arg === '--dev-server') { options.devServer = true; continue; }
+  if (arg === '--native') { options.native = true; continue; }
   if (arg === '--no-strip') { options.noStrip = true; continue; }
   if (arg === '--help' || arg === '-h') { help = true; continue; }
   const name = arg.split('=', 1)[0];
@@ -42,8 +44,8 @@ if ((options.bundle || options.optimize) && (browserRepl || options.devServer ||
 if (options.output && !(options.bundle || options.optimize)) throw new Error('--output requires --bundle or --optimize.');
 if (options.optimize && !options.noStrip && !options.entryPoints.length)
   throw new Error('--optimize requires --entry PACKAGE:FUNCTION or --no-strip.');
-if (!options.optimize && (options.entryPoints.length || options.keep.length || options.report || options.noStrip))
-  throw new Error('--entry, --keep, --report and --no-strip require --optimize.');
+if (!options.optimize && (options.entryPoints.length || options.keep.length || options.report || options.noStrip || options.native))
+  throw new Error('--entry, --keep, --report, --native and --no-strip require --optimize.');
 if (help) {
   console.log(`Usage: node scripts/repl.mjs [miricl.wasm] [options]
 
@@ -56,6 +58,7 @@ if (help) {
   --bundle SYSTEM            Compile one ASDF system and its dependencies, then exit
   --optimize SYSTEM          Remove unreachable definitions from an ASDF FASL bundle
   --entry PACKAGE:FUNCTION   Production entry point (repeatable)
+  --native                   Compile retained application code to WASM
   --no-strip                 Compact all definitions; no entry points required
   --keep PACKAGE:NAME        Retain a dynamically accessed definition (repeatable)
   --report PATH             Explain retained and removed definitions
@@ -66,8 +69,7 @@ if (help) {
   --http-port PORT            HTTP port (8000)
   --directory PATH           Served directory (current directory)`);
 } else if (browserRepl || options.devServer || options.tcpBridge) {
-  const {startReplBridge, replCompilerImage} = await import('./repl-bridge.mjs');
-  options.compilerImage = await replCompilerImage(image ?? 'miricl.wasm');
+  const {startReplBridge} = await import('./repl-bridge.mjs');
   const bridge = await startReplBridge(await fs.readFile(image ?? 'miricl.wasm'), options);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => bridge.close());
 } else {
@@ -77,8 +79,12 @@ if (help) {
     if (error.backtrace) process.stderr.write(error.backtrace);
   }
   const {replCompilerImage} = await import('./repl-bridge.mjs');
-  const interpreter = await Miricl.instantiate(await replCompilerImage(image ?? 'miricl.wasm') ??
-    await fs.readFile(image ?? 'miricl.wasm'), {
+  const selectedImage = image ?? 'miricl.wasm';
+  // Local REPL evaluation honors the selected core image's policy. Build
+  // commands and an explicitly selected WASI component can reuse its Node core.
+  const compilerImage = options.bundle || options.optimize || path.basename(selectedImage) === 'miricl-repl.wasm'
+    ? await replCompilerImage(selectedImage) : undefined;
+  const interpreter = await Miricl.instantiate(compilerImage ?? await fs.readFile(selectedImage), {
     onOutput: output => process.stdout.write(output), onThreadError: report
   });
   const {HostFilesystem} = await import('./host-filesystem.mjs');
@@ -90,6 +96,7 @@ if (help) {
       const optimization = options.optimize
         ? ` :entry-points '(${options.entryPoints.map(lispString).join(' ')}) :keep '(${options.keep.map(lispString).join(' ')})` +
           (options.noStrip ? ' :strip nil' : '') +
+          (options.native ? ' :native t' : '') +
           (options.report ? ` :report ${lispString(options.report)}` : '')
         : '';
       const operation = options.optimize ? 'miricl-compiler:optimize-system' : 'miricl-bundle:dump-system';

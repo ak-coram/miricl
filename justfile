@@ -1,23 +1,28 @@
+# Recipes use Bash quoting and argument forwarding, including on Windows.
+# Git for Windows provides Bash; run just from Git Bash or put it on PATH.
+set shell := ['bash', '-euo', 'pipefail', '-c']
+
 # Override these with environment variables or `just name=value <recipe>`.
 sbcl := env('SBCL', 'sbcl')
 node := env('NODE', 'node')
 wasmtime := env('WASMTIME', 'wasmtime')
-quicklisp := env('QUICKLISP_SETUP', env('HOME') / 'quicklisp/setup.lisp')
+quicklisp := env('QUICKLISP_SETUP', home_directory() / 'quicklisp/setup.lisp')
 build_dir := env('MIRICL_BUILD_DIR', '.')
 interpreter := build_dir / 'miricl.wasm'
 wasi_repl := build_dir / 'miricl-repl.wasm'
+precompiled := build_dir / 'miricl-precompiled.wasm'
 
 # List available commands.
 default:
     @just --list
 
-# Build the import-free interpreter and WASI REPL.
+# Build the import-free interpreter, precompiled compiler image and WASI REPL.
 build:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-wasm.lisp {{ quote(build_dir) }}
 
-# Report raw, gzip, Brotli, and per-section sizes for both images.
+# Report raw, gzip, Brotli, and per-section sizes for all runtime images.
 size: build
-    {{ quote(node) }} scripts/wasm-size.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
+    {{ quote(node) }} scripts/wasm-size.mjs {{ quote(interpreter) }} {{ quote(precompiled) }} {{ quote(wasi_repl) }}
 
 # Build a self-contained browser REPL (miricl.html), including the interpreter.
 build-html:
@@ -39,8 +44,12 @@ build-game-of-life: setup-game-of-life
 benchmark-game-of-life: build-game-of-life
     {{ quote(node) }} scripts/benchmark-game-of-life.mjs game-of-life
 
+# Check source loading and interaction through the browser's precompiled compiler.
+test-game-of-life-dev: setup-game-of-life
+    {{ quote(node) }} tests/browser-game-of-life.mjs game-of-life/dev.html --dev
+
 # Build raw, gzip and Brotli size reports for the Wasm images and HTML pages.
-build-sizes: build build-html build-todo build-game-of-life build-maxima build-fricas
+build-sizes: build build-asdf build-html build-todo build-game-of-life build-maxima build-fricas
     {{ quote(node) }} scripts/build-size-html.mjs {{ quote(build_dir) }} {{ quote(build_dir / 'image-sizes.html') }} miricl.html {{ quote(absolute_path('game-of-life')) }}
 
 # Check size accounting and the standalone report in a browser.
@@ -102,8 +111,18 @@ repl-host:
 test:
     {{ quote(sbcl) }} --noinform --non-interactive --load {{ quote(quicklisp) }} --eval '(require :asdf)' --eval '(asdf:load-asd (truename "miricl.asd"))' --eval '(ql:quickload :miricl/test)' --eval '(asdf:test-system :miricl)'
 
-# Run all Node integration tests, including the WASI REPL.
-test-js: test-threads test-standalone test-text test-repl-bridge test-development test-compilation test-hash test-asdf test-environment test-character-case test-reader-labels test-reader-buffer test-vector-reader test-array-reader test-print-circle test-output-buffer test-input-streams test-filesystem test-composite-streams test-pathnames test-declarations test-time test-float-properties test-derived-types test-sequence-transformations test-random test-javascript test-backtrace test-ansi-runner
+# Use Roswell's SBCL and Quicklisp, including in Windows CI. Disable the
+# debugger before Roswell loads Quicklisp, so startup errors fail the job.
+[script('ros', '-L', 'sbcl-bin', 'run', '--', '--non-interactive', '--load')]
+test-sbcl-roswell:
+    (require :asdf)
+    (asdf:load-asd (truename "miricl.asd"))
+    (ql:quickload :miricl/test)
+    (asdf:test-system :miricl)
+
+# Run integration groups shared with CI; ANSI owns broad language conformance.
+test-js group='all': build build-asdf build-html build-todo
+    {{ quote(node) }} scripts/test-integration.mjs {{ quote(group) }} {{ quote(build_dir) }}
 
 # Check the shared green-thread scheduler in Node.
 test-threads: build
@@ -129,33 +148,15 @@ test-browser: build-html
 test-todo: build-todo
     {{ quote(node) }} tests/browser-todo.mjs {{ quote(build_dir / 'todo.html') }}
 
-# Also check the WASI REPL with the Wasmtime CLI.
-test-wasmtime: build
-    {{ quote(node) }} --experimental-wasm-wasmfx tests/text-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
+# Compatibility name; test-text already exercises both terminal hosts.
+alias test-wasmtime := test-text
 
 # Check macros, source loading, and guest development facilities.
 test-development: build
     {{ quote(node) }} tests/development.mjs {{ quote(interpreter) }}
 
 test-compilation: build
-    {{ quote(node) }} tests/compiler-runtime.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/compilation.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/file-compilation.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/file-code-sharing.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/fasl-format.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/whole-program.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/class-reachability.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/hir.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/native-compilation.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/native-size.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/nested-backquote.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/structure-printers.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/readtable-iteration.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/whole-program.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/class-reachability.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/hir.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/native-compilation.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/native-size.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} scripts/test-integration.mjs compiler {{ quote(build_dir) }}
 
 test-hash: build
     {{ quote(node) }} tests/hash-structural.mjs {{ quote(interpreter) }}
@@ -250,26 +251,25 @@ maxima-init:
 
 # Load Maxima from source and check representative algebra; upstream/compile probe build paths.
 probe-maxima mode='source': build maxima-init
-    {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima' / (mode + '.json')) }} {{ quote(mode) }}
+    {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/maxima' / (mode + '.json')) }} {{ quote(mode) }}
 
 # Exercise the same Maxima core offline inside a Chromium worker.
 test-maxima-browser: build-maxima
-    {{ quote(node) }} tests/browser-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/browser.json') }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
     {{ quote(node) }} tests/browser-maxima-app.mjs {{ quote(build_dir / 'build/maxima/site') }}
 
 # Check documented mathematics and representative upstream regressions.
 test-maxima-examples: build-maxima
-    MIRICL_MAXIMA_DOCS={{ quote(build_dir / 'build/maxima/doc/info') }} {{ quote(node) }} tests/maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
-    MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/core-tests.json') }} suite rtest13s
+    MIRICL_MAXIMA_DOCS={{ quote(build_dir / 'build/maxima/doc/info') }} {{ quote(node) }} tests/maxima.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
+    MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/maxima/core-tests.json') }} suite rtest13s
 
 # Compile Maxima and assemble a static browser REPL without docs or tests.
 build-maxima: (probe-maxima 'compile')
-    {{ quote(node) }} scripts/optimize-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima.wasm') }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
-    {{ quote(node) }} scripts/build-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(build_dir / 'build/maxima/site') }}
+    {{ quote(node) }} scripts/optimize-maxima.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/maxima/maxima.wasm') }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }}
+    {{ quote(node) }} scripts/build-maxima.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} {{ quote(build_dir / 'build/maxima/site') }}
 
 # Includes upstream's known-failure accounting; failures produce a JSON report.
 test-maxima: build-maxima
-    MIRICL_MAXIMA_DOCS={{ quote(build_dir / 'build/maxima/doc/info') }} MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} MIRICL_MAXIMA_TIMEOUT_MS=7200000 {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/maxima/suite.json') }} suite
+    MIRICL_MAXIMA_DOCS={{ quote(build_dir / 'build/maxima/doc/info') }} MIRICL_MAXIMA_CORE={{ quote(build_dir / 'build/maxima/maxima-optimized.wasm') }} MIRICL_MAXIMA_TIMEOUT_MS=7200000 {{ quote(node) }} scripts/probe-maxima.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/maxima/suite.json') }} suite
 
 # Initialize and prepare canonical FriCAS Lisp and algebra databases with SBCL.
 fricas-init:
@@ -280,16 +280,16 @@ prepare-fricas: fricas-init
 
 # Compile FriCAS in MIRICL and validate a fresh load.
 probe-fricas: build prepare-fricas
-    {{ quote(node) }} scripts/probe-fricas.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/fricas/native') }} {{ quote(build_dir / 'build/fricas/compile.json') }}
+    {{ quote(node) }} scripts/probe-fricas.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/fricas/native') }} {{ quote(build_dir / 'build/fricas/compile.json') }}
 
 # Optimize the dynamic interpreter and assemble the browser workbench.
 build-fricas: probe-fricas
-    {{ quote(node) }} scripts/optimize-fricas.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/fricas/fricas.wasm') }} {{ quote(build_dir / 'build/fricas/fricas-optimized.wasm') }}
-    {{ quote(node) }} scripts/build-fricas.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/fricas/fricas-optimized.wasm') }} {{ quote(build_dir / 'build/fricas/native') }} {{ quote(build_dir / 'build/fricas/site') }}
+    {{ quote(node) }} scripts/optimize-fricas.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/fricas/fricas.wasm') }} {{ quote(build_dir / 'build/fricas/fricas-optimized.wasm') }} {{ quote(build_dir / 'build/fricas/native') }}
+    {{ quote(node) }} scripts/build-fricas.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/fricas/fricas-optimized.wasm') }} {{ quote(build_dir / 'build/fricas/native') }} {{ quote(build_dir / 'build/fricas/site') }}
 
 # Documented examples, complete selected upstream suites, persistence and offline UI.
 test-fricas: build-fricas
-    {{ quote(node) }} tests/fricas.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/fricas/fricas-optimized.wasm') }} {{ quote(build_dir / 'build/fricas/native') }} {{ quote(build_dir / 'build/fricas/tests.json') }}
+    {{ quote(node) }} tests/fricas.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/fricas/fricas-optimized.wasm') }} {{ quote(build_dir / 'build/fricas/native') }} {{ quote(build_dir / 'build/fricas/tests.json') }}
     {{ quote(node) }} tests/browser-fricas-app.mjs {{ quote(build_dir / 'build/fricas/site') }}
 
 # Assemble the optional guest ASDF library from a patched source copy.
@@ -347,3 +347,4 @@ test-bundle: build build-asdf
 # Compile and execute Lisp in Chromium using the built-in compiler.
 test-browser-compiler: build
     {{ quote(node) }} tests/browser-compiler.mjs {{ quote(interpreter) }} {{ quote(build_dir / "miricl.js") }}
+    {{ quote(node) }} tests/browser-compiler.mjs {{ quote(precompiled) }} {{ quote(build_dir / "miricl.js") }} --precompiled

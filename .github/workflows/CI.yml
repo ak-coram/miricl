@@ -2,316 +2,366 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
-    paths-ignore:
-      - 'README.org'
+    branches: [main]
+    paths-ignore: ['README.org']
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
   workflow_dispatch:
   schedule:
     - cron: '0 0 1 * *'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: ${{ matrix.lisp }} ${{ matrix.os }} libwasmtime ${{ matrix.libwasmtime }}
+  host:
+    name: Host / ${{ matrix.lisp }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        lisp: [sbcl-bin, ccl-bin/1.13, ecl/26.5.5]
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        libwasmtime: [50.0.1]
-        exclude:
-          - os: windows-latest
-            lisp: ccl-bin/1.13
-          - os: windows-latest
-            lisp: ecl/26.5.5
-          - os: macos-latest
-            lisp: ccl-bin/1.13
+        include:
+          - {os: ubuntu-latest, lisp: sbcl-bin}
+          - {os: ubuntu-latest, lisp: ccl-bin/1.13}
+          - {os: ubuntu-latest, lisp: ecl/26.5.5}
+          - {os: windows-latest, lisp: sbcl-bin}
+          - {os: macos-latest, lisp: sbcl-bin}
     env:
       LISP: ${{ matrix.lisp }}
-      LIBWASMTIME_VERSION: ${{ matrix.libwasmtime }}
+      # Keep Lisp sources LF, including submodules and Roswell dependencies.
+      # CRLF breaks FORMAT's ~<newline> directives on Windows SBCL.
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: 'false'
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-
-      # These are upstream fixtures, not MIRICL's tests or dependencies.
-      - name: Remove ASDF fixtures during dependency setup
-        shell: bash
-        run: rm -rf vendor/asdf/test
-
-      - name: Setup Lisp
-        uses: 40ants/setup-lisp@v4
+      - uses: ./.github/actions/setup-miricl
         with:
-          cache: true
-
-      # The ASDF builder requires a clean upstream source checkout.
-      - name: Restore ASDF source checkout
-        run: git -C vendor/asdf restore --worktree -- test
-
-      - name: Install libwasmtime (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          aria2c "https://github.com/bytecodealliance/wasmtime/releases/download/v${LIBWASMTIME_VERSION}/wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux-c-api.tar.xz"
-          tar -xf wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux-c-api.tar.xz --strip-components 2 wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux-c-api/lib/libwasmtime.so
-
-      - name: Install libwasmtime (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          aria2c "https://github.com/bytecodealliance/wasmtime/releases/download/v${LIBWASMTIME_VERSION}/wasmtime-v${LIBWASMTIME_VERSION}-aarch64-macos-c-api.tar.xz"
-          tar -xf wasmtime-v${LIBWASMTIME_VERSION}-aarch64-macos-c-api.tar.xz --strip-components 2 wasmtime-v${LIBWASMTIME_VERSION}-aarch64-macos-c-api/lib/libwasmtime.dylib
-
-      - name: Install libwasmtime (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          aria2c "https://github.com/bytecodealliance/wasmtime/releases/download/v$env:LIBWASMTIME_VERSION/wasmtime-v$env:LIBWASMTIME_VERSION-x86_64-windows-c-api.zip"
-          7z e wasmtime-v$env:LIBWASMTIME_VERSION-x86_64-windows-c-api.zip ./ wasmtime-v$env:LIBWASMTIME_VERSION-x86_64-windows-c-api/lib/wasmtime.dll
-
-      - name: Run tests (Non-Windows)
+          lisp: 'true'
+          c-api: 'true'
+          node: 'false'
+          just: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+      - name: Host regressions
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          export DYLD_LIBRARY_PATH=./
-          export LD_LIBRARY_PATH=./
-          ros --eval '(ql-dist:install-dist "http://dist.ultralisp.org/" :prompt nil)' --eval '(uiop:quit)'
           ros install neil-lindquist/ci-utils
           asdf-register-project
           run-fiveam -e t -l miricl/test :miricl
-
-      - name: Run tests (Windows)
+      - name: Host regressions (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          ros install neil-lindquist/ci-utils
-          asdf-register-project
-          ros --eval '(ql-dist:install-dist "http://dist.ultralisp.org/" :prompt nil)' --eval '(uiop:quit)'
-          ros --eval "(progn (ql:quickload :miricl/test) (uiop:quit (if (uiop:symbol-call :fiveam '#:run! :miricl) 0 1)))"
+          # Exercise each justfile's Bash shell before the Lisp script recipe.
+          just
+          just --justfile game-of-life/justfile
+          just test-sbcl-roswell
 
-      - uses: actions/setup-node@v4
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
+  runtime:
+    name: Build shared runtime and standalone pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LISP: sbcl-bin
+    steps:
+      - uses: actions/checkout@v4
         with:
-          node-version: '26'
-
-      - name: Install Wasmtime CLI
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        shell: bash
+          submodules: true
+      - uses: ./.github/actions/setup-miricl
+        with:
+          lisp: 'true'
+          c-api: 'true'
+      - name: Build once, reuse the cached core in the same Lisp process
         run: |
-          aria2c "https://github.com/bytecodealliance/wasmtime/releases/download/v${LIBWASMTIME_VERSION}/wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux.tar.xz"
-          mkdir -p wasmtime-cli
-          tar -xf wasmtime-v${LIBWASMTIME_VERSION}-x86_64-linux.tar.xz -C wasmtime-cli --strip-components 1
-          echo "$PWD/wasmtime-cli" >> "$GITHUB_PATH"
-
-      - uses: extractions/setup-just@v4
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-
-      - name: Standalone interpreter and REPLs
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        shell: bash
-        env:
-          LD_LIBRARY_PATH: ./
-        run: |
-          ros -L sbcl-bin run -- --load scripts/build-wasm.lisp --quit
-          node tests/threads.mjs miricl.wasm miricl-repl.wasm
-          node tests/standalone.mjs miricl.wasm
-          node --experimental-wasm-wasmfx tests/text-repl.mjs miricl.wasm miricl-repl.wasm
-          node tests/repl-bridge.mjs miricl.wasm miricl-repl.wasm
-          node tests/repl-websocket.mjs miricl.wasm miricl-repl.wasm
-          node tests/dev-filesystem-server.mjs miricl.wasm miricl-repl.wasm
-          node tests/backtrace.mjs miricl.wasm
-          node tests/development.mjs miricl.wasm
-          node tests/dev-filesystem.mjs miricl.wasm
+          ros -L sbcl-bin run -- --load scripts/build-wasm.lisp --load scripts/build-html.lisp --load scripts/build-todo.lisp --quit
           node scripts/build-asdf.mjs build/asdf miricl.wasm miricl-asdf.wasm
-          node tests/asdf-build.mjs
-          node tests/asdf.mjs miricl.wasm build/asdf/asdf.lisp
-          node tests/asdf-bundle.mjs miricl.wasm build/asdf/asdf.lisp
-          node tests/bundle-command.mjs miricl.wasm miricl-repl.wasm
-          node tests/nested-backquote.mjs miricl.wasm
-          node tests/structure-printers.mjs miricl.wasm
-          node tests/readtable-iteration.mjs miricl.wasm
-          node tests/whole-program.mjs miricl.wasm
-          node tests/fasl-format.mjs miricl.wasm
-          node tests/file-compilation.mjs miricl.wasm
-          node tests/file-code-sharing.mjs miricl.wasm
-          node tests/class-reachability.mjs miricl.wasm
-          node tests/hash-structural.mjs miricl.wasm
-          node tests/compiler-runtime.mjs
-          node tests/hir.mjs miricl.wasm
-          node tests/native-compilation.mjs miricl.wasm
-          node tests/native-size.mjs miricl.wasm
-          node tests/ansi-compiler-runner.mjs miricl.wasm
-          node tests/ansi-runner.mjs miricl.wasm
-
-      - name: Upload MIRICL distribution
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: miricl-runtime
           path: |
             miricl.js
             miricl.wasm
+            miricl-precompiled.wasm
             miricl-repl.wasm
             miricl-asdf.wasm
           if-no-files-found: error
-
-      - name: Build standalone browser examples
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        shell: bash
-        env:
-          LD_LIBRARY_PATH: ./
-        # --script treats Roswell's trailing SBCL options as script arguments.
-        # --load lets SBCL consume those options before the builder reads argv.
-        run: |
-          ros -L sbcl-bin run -- --load scripts/build-html.lisp --load scripts/build-todo.lisp --quit
-          test -s miricl.html
-          test -s todo.html
-          ros -L sbcl-bin run -- --load "$HOME/.roswell/lisp/quicklisp/setup.lisp" --script scripts/setup-application.lisp "$PWD/game-of-life" game-of-life "$PWD" node
-          just --justfile game-of-life/justfile build
-
-      - name: Build optimized Maxima workbench
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        timeout-minutes: 15
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y sbcl build-essential
-          node scripts/probe-maxima.mjs miricl.wasm build/maxima/compile.json compile
-          node scripts/optimize-maxima.mjs miricl.wasm build/maxima/maxima.wasm build/maxima/maxima-optimized.wasm
-          node scripts/build-maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm build/maxima/site
-
-      - name: Build optimized FriCAS workbench
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        timeout-minutes: 20
-        shell: bash
-        run: |
-          node scripts/prepare-fricas.mjs build/fricas/native
-          node scripts/probe-fricas.mjs miricl.wasm build/fricas/native build/fricas/compile.json
-          node scripts/optimize-fricas.mjs miricl.wasm build/fricas/fricas.wasm build/fricas/fricas-optimized.wasm
-          node scripts/build-fricas.mjs miricl.wasm build/fricas/fricas-optimized.wasm build/fricas/native build/fricas/site
-          node scripts/build-size-html.mjs
-
-      - name: FriCAS algebra, manual examples and upstream regressions
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        timeout-minutes: 15
-        run: node tests/fricas.mjs
-
-      - name: Maxima algebra, manual examples and upstream regressions
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        timeout-minutes: 15
-        env:
-          MIRICL_MAXIMA_CORE: build/maxima/maxima-optimized.wasm
-        run: |
-          node tests/maxima.mjs miricl.wasm build/maxima/maxima-optimized.wasm
-          node scripts/probe-maxima.mjs miricl.wasm build/maxima/core-tests.json suite rtest13s
-
-      - name: Test standalone browser REPL
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        env:
-          CHROMIUM: google-chrome
-        run: |
-          node tests/browser-repl.mjs miricl.html
-          node tests/browser-todo.mjs todo.html
-          node tests/browser-game-of-life.mjs game-of-life/build/index.html
-          node tests/browser-compiler.mjs
-          node tests/browser-dev-repl.mjs miricl.wasm miricl-repl.wasm
-          node tests/ansi-html.mjs
-          node tests/filesystem-archive.mjs
-          node tests/size-html.mjs
-          node tests/browser-maxima-app.mjs build/maxima/site
-          node tests/browser-fricas-app.mjs build/fricas/site
-
-      - name: Upload standalone browser examples and size report
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: miricl-browser-examples
+          name: runtime-pages
           path: |
             miricl.html
             todo.html
-            image-sizes.html
-            image-sizes.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-support
+          path: |
+            runtime/miricl.js
+            runtime/version-assets.mjs
+            build/asdf/asdf.lisp
+          if-no-files-found: error
+
+  integration:
+    name: Integration / ${{ matrix.group }}
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [runtime, compiler, asdf, browser]
+    env:
+      CHROMIUM: google-chrome
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/setup-miricl
+        with:
+          cli: 'true'
+          just: 'true'
+      - uses: actions/download-artifact@v4
+        with:
+          name: miricl-runtime
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-support
+      - uses: actions/download-artifact@v4
+        if: matrix.group == 'browser'
+        with:
+          name: runtime-pages
+      # Fixed-port bridge fixtures remain sequential within each isolated runner.
+      - name: Run integration group
+        run: node scripts/test-integration.mjs '${{ matrix.group }}'
+
+  applications:
+    name: Application / ${{ matrix.app }}
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [game-of-life, maxima, fricas]
+    env:
+      LISP: sbcl-bin
+      CHROMIUM: google-chrome
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/setup-miricl
+        with:
+          lisp: ${{ matrix.app == 'game-of-life' && 'true' || 'false' }}
+          native-tools: ${{ matrix.app != 'game-of-life' && 'true' || 'false' }}
+          just: 'true'
+      - uses: actions/download-artifact@v4
+        with:
+          name: miricl-runtime
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-support
+      - name: Build and test Game of Life
+        if: matrix.app == 'game-of-life'
+        run: |
+          ros -L sbcl-bin run -- --load "$HOME/.roswell/lisp/quicklisp/setup.lisp" --script scripts/setup-application.lisp "$PWD/game-of-life" game-of-life "$PWD" node
+          just --justfile game-of-life/justfile build
+          node tests/browser-game-of-life.mjs game-of-life/build/index.html
+          node tests/browser-game-of-life.mjs game-of-life/dev.html --dev
+      - name: Cache native application image and compiled algebra
+        if: matrix.app != 'game-of-life'
+        uses: actions/cache@v4
+        id: native
+        with:
+          path: |
+            build/${{ matrix.app }}/${{ matrix.app }}-optimized.wasm
+            build/${{ matrix.app }}/optimization.json
+            build/${{ matrix.app }}/retention.txt
+            build/${{ matrix.app }}/algebra
+          key: ${{ matrix.app }}-native-v2-${{ runner.os }}-${{ hashFiles('miricl-precompiled.wasm', '*.lisp', '*.asd', 'scripts/*.lisp', 'scripts/*.mjs', 'scripts/ports/*.lisp') }}-${{ hashFiles(format('vendor/{0}/**', matrix.app)) }}
+      - name: Cache upstream FriCAS bootstrap
+        if: matrix.app == 'fricas'
+        uses: actions/cache@v4
+        with:
+          path: build/fricas/native
+          key: fricas-bootstrap-v1-${{ runner.os }}-${{ hashFiles('vendor/fricas/**', 'scripts/prepare-fricas.mjs', 'scripts/fricas-files.mjs') }}
+      - name: Build and test Maxima
+        if: matrix.app == 'maxima'
+        timeout-minutes: 35
+        env:
+          NATIVE_CACHE_HIT: ${{ steps.native.outputs.cache-hit }}
+          MIRICL_MAXIMA_CORE: build/maxima/maxima-optimized.wasm
+        run: |
+          if [ "$NATIVE_CACHE_HIT" != 'true' ]; then
+            node scripts/probe-maxima.mjs miricl-precompiled.wasm build/maxima/compile.json compile
+            node scripts/optimize-maxima.mjs miricl-precompiled.wasm build/maxima/maxima.wasm build/maxima/maxima-optimized.wasm
+          fi
+          node scripts/build-maxima.mjs miricl-precompiled.wasm build/maxima/maxima-optimized.wasm build/maxima/site
+          node tests/maxima.mjs miricl-precompiled.wasm build/maxima/maxima-optimized.wasm
+          node scripts/probe-maxima.mjs miricl-precompiled.wasm build/maxima/core-tests.json suite rtest13s
+          node tests/browser-maxima-app.mjs build/maxima/site
+      - name: Build and test FriCAS
+        if: matrix.app == 'fricas'
+        timeout-minutes: 60
+        env:
+          NATIVE_CACHE_HIT: ${{ steps.native.outputs.cache-hit }}
+        run: |
+          node scripts/prepare-fricas.mjs build/fricas/native
+          if [ "$NATIVE_CACHE_HIT" != 'true' ]; then
+            node scripts/probe-fricas.mjs miricl-precompiled.wasm build/fricas/native build/fricas/compile.json --build-only
+            node scripts/optimize-fricas.mjs miricl-precompiled.wasm build/fricas/fricas.wasm build/fricas/fricas-optimized.wasm
+          fi
+          node scripts/build-fricas.mjs miricl-precompiled.wasm build/fricas/fricas-optimized.wasm build/fricas/native build/fricas/site
+          node tests/fricas.mjs miricl-precompiled.wasm
+          node tests/browser-fricas-app.mjs build/fricas/site
+      - uses: actions/upload-artifact@v4
+        if: matrix.app == 'game-of-life'
+        with:
+          name: application-game-of-life
+          path: |
             game-of-life/build/index.html
             game-of-life/build/miricl.js
             game-of-life/build/miricl.wasm
             game-of-life/build/game-of-life.wasm
-            build/maxima/site/
-            build/fricas/site/
-            build/fricas/compile.json
-            build/fricas/optimization.json
-            build/fricas/retention.txt
-            build/fricas/tests.json
-            build/maxima/optimization.json
-            build/maxima/retention.txt
-            build/maxima/core-tests.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: matrix.app != 'game-of-life'
+        with:
+          name: application-${{ matrix.app }}
+          path: build/${{ matrix.app }}/site/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.app != 'game-of-life'
+        with:
+          name: ${{ matrix.app }}-results
+          path: |
+            build/${{ matrix.app }}/compile.json
+            build/${{ matrix.app }}/optimization.json
+            build/${{ matrix.app }}/retention.txt
+            build/${{ matrix.app }}/tests.json
+            build/${{ matrix.app }}/core-tests.json
+          if-no-files-found: ignore
+
+  ansi:
+    name: ANSI / ${{ matrix.mode }}
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {mode: interpreter, report: ansi-full-results, page: ansi-results}
+          - {mode: compiler, report: ansi-compiler-results, page: ansi-compiler-results}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/setup-miricl
+        with:
+          native-tools: 'true'
+      - uses: actions/download-artifact@v4
+        with:
+          name: miricl-runtime
+      - name: Selected ANSI tests (blocking)
+        if: matrix.mode == 'interpreter'
+        run: node tests/ansi.mjs miricl.wasm
+      - name: Full ANSI suite
+        timeout-minutes: 20
+        # Both execution modes must pass the unmodified upstream suite.
+        # Always render and upload diagnostics, including after a failed run.
+        env:
+          MIRICL_ANSI_REPORT: ${{ matrix.report }}.json
+          ANSI_MODE: ${{ matrix.mode }}
+        run: |
+          if [ "$ANSI_MODE" = compiler ]; then
+            node tests/ansi.mjs miricl.wasm --full --compiler
+          else
+            node tests/ansi.mjs miricl.wasm --full
+          fi
+      - name: Render report and require a complete passing suite
+        if: always()
+        run: |
+          node scripts/build-ansi-html.mjs '${{ matrix.report }}.json' '${{ matrix.page }}.html'
+          node scripts/check-ansi-results.mjs '${{ matrix.report }}.json'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ansi-${{ matrix.mode }}
+          path: |
+            ${{ matrix.report }}.json
+            ${{ matrix.page }}.html
           if-no-files-found: error
 
-      - name: ANSI tests in the standalone interpreter
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        timeout-minutes: 10
-        run: node tests/ansi.mjs miricl.wasm
-
-      - name: Full ANSI conformance suite
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        timeout-minutes: 20
-        # ANSI compliance is still in progress. Keep every failure in the report;
-        # the next step requires the runner to account for the entire suite.
-        continue-on-error: true
-        env:
-          MIRICL_ANSI_REPORT: ansi-full-results.json
-        run: node tests/ansi.mjs miricl.wasm --full
-
-      - name: Full ANSI suite with self-compiled compiler
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        timeout-minutes: 20
-        continue-on-error: true
-        env:
-          MIRICL_ANSI_REPORT: ansi-compiler-results.json
-        run: node tests/ansi.mjs miricl.wasm --full --compiler
-
-      - name: Build standalone ANSI results page
-        if: runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
+  ansi-reports:
+    name: Collect ANSI reports
+    needs: ansi
+    if: always() && !cancelled() && needs.ansi.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ansi-*
+          merge-multiple: true
+          path: reports
+      - name: Require both reports
         run: |
-          node scripts/build-ansi-html.mjs ansi-full-results.json ansi-results.html
-          node scripts/build-ansi-html.mjs ansi-compiler-results.json ansi-compiler-results.html
-
-      - name: Check full ANSI suite completion
-        if: always() && runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        shell: bash
-        run: |
-          node --input-type=module <<'JS'
-          import fs from 'node:fs';
-          import assert from 'node:assert/strict';
-          for (const file of ['ansi-full-results.json', 'ansi-compiler-results.json']) {
-            const report = JSON.parse(fs.readFileSync(file, 'utf8'));
-            const s = report.summary;
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-              `### Full ANSI suite (${report.execution})\n\n${s.passed} passed, ${s.failed} failed, ${s.blocked} blocked, ${s.timedOut} timed out; ${s.total}/${s.expected} tests accounted for, ${s.loadErrors} load errors.\n`);
-            assert.equal(report.error, null, report.error);
-            assert.equal(s.complete, true, 'Full ANSI suite did not finish');
-            assert.ok(s.total > 0);
-            assert.equal(s.total, s.expected);
-            if (report.execution === 'compiler') {
-              assert.equal(report.compilerBootstrap?.mode, 'self-compiled',
-                'The ANSI compiler was not bootstrapped with itself');
-              assert.equal(report.compilerBootstrap.origin, 'first-use');
-              assert.ok(report.compilerBootstrap.functions >= 93);
-              assert.ok(report.tests.filter(test => test.passed).every(test => test.compilation?.compiled > 0),
-                'A compiler test passed without native compilation');
-            }
-          }
-          JS
-
-      - name: Upload ANSI results
-        if: always() && runner.os == 'Linux' && matrix.lisp == 'sbcl-bin'
-        uses: actions/upload-artifact@v4
+          test -s reports/ansi-full-results.json
+          test -s reports/ansi-compiler-results.json
+          test -s reports/ansi-results.html
+          test -s reports/ansi-compiler-results.html
+      - uses: actions/upload-artifact@v4
         with:
           name: ansi-results
-          path: |
-            ansi-results.json
-            ansi-full-results.json
-            ansi-results.html
-            ansi-compiler-results.json
-            ansi-compiler-results.html
-          if-no-files-found: ignore
+          path: reports/
+          if-no-files-found: error
+
+  browser-examples:
+    name: Assemble tested browser examples and size report
+    needs: [runtime, integration, applications]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - uses: actions/download-artifact@v4
+        with:
+          name: miricl-runtime
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-pages
+      - uses: actions/download-artifact@v4
+        with:
+          name: application-game-of-life
+          path: game-of-life/build
+      - uses: actions/download-artifact@v4
+        with:
+          name: application-maxima
+          path: build/maxima/site
+      - uses: actions/download-artifact@v4
+        with:
+          name: application-fricas
+          path: build/fricas/site
+      - name: Assemble static site and measure the actual payloads
+        run: |
+          mkdir -p public
+          cp miricl.html public/index.html
+          cp todo.html public/todo.html
+          cp -R game-of-life/build public/game-of-life
+          cp -R build/maxima/site public/maxima
+          cp -R build/fricas/site public/fricas
+          node scripts/build-size-html.mjs . public/image-sizes.html index.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: miricl-browser-examples
+          path: public/
+          if-no-files-found: error

@@ -9,20 +9,20 @@
       (dolist (type1 '(list vector))
         (dolist (type2 '(list vector))
           (let ((a (coerce (first pair) type1)) (b (coerce (second pair) type2)))
-            (loop for start1 from 0 to (length a) do
-              (loop for end1 from start1 to (length a) do
-                (loop for start2 from 0 to (length b) do
-                  (loop for end2 from start2 to (length b) do
+            (dolist (bounds1 (sequence-test-bounds a))
+              (destructuring-bind (start1 end1) bounds1
+                (dolist (bounds2 (sequence-test-bounds b))
+                  (destructuring-bind (start2 end2) bounds2
                     (dolist (from-end '(nil t))
                       (let ((form `(mismatch ',a ',b :start1 ,start1 :end1 ,end1
                                      :start2 ,start2 :end2 ,end2 :from-end ,from-end)))
                         (is (eql (eval form) (m:evaluate vm form)) "Mismatch for ~S" form)))))))))))
     (dolist (test '(eql char= char-equal))
       (dolist (keyword '(:test :test-not))
-        (loop for start1 from 0 to 3 do
-          (loop for end1 from start1 to 3 do
-            (loop for start2 from 0 to 4 do
-              (loop for end2 from start2 to 4 do
+        (dolist (bounds1 (sequence-test-bounds "aλ🙂"))
+          (destructuring-bind (start1 end1) bounds1
+            (dolist (bounds2 (sequence-test-bounds "AΛ🙂x"))
+              (destructuring-bind (start2 end2) bounds2
                 (dolist (from-end '(nil t))
                   (let ((form `(mismatch "aλ🙂" "AΛ🙂x" :start1 ,start1 :end1 ,end1
                                  :start2 ,start2 :end2 ,end2 :from-end ,from-end ,keyword (function ,test))))
@@ -97,10 +97,10 @@
       (dolist (type1 (if (stringp (first pair)) '(string list vector) '(list vector)))
         (dolist (type2 (if (stringp (second pair)) '(string list vector) '(list vector)))
           (let ((a (coerce (first pair) type1)) (b (coerce (second pair) type2)))
-            (loop for start1 from 0 to (length a) do
-              (loop for end1 from start1 to (length a) do
-                (loop for start2 from 0 to (length b) do
-                  (loop for end2 from start2 to (length b) do
+            (dolist (bounds1 (sequence-test-bounds a))
+              (destructuring-bind (start1 end1) bounds1
+                (dolist (bounds2 (sequence-test-bounds b))
+                  (destructuring-bind (start2 end2) bounds2
                     (dolist (from-end '(nil t))
                       (dolist (test (if (stringp (first pair)) '(eql char-equal) '(eql)))
                         (let ((form `(search ',a ',b :start1 ,start1 :end1 ,end1

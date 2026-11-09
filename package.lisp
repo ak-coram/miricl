@@ -33,8 +33,9 @@
 (defpackage #:miricl-compiler
   (:use #:cl)
   (:export #:analyze-file #:shake-file #:optimize-system
+           #:*compile-evaluations*
            #:compile-to-hir #:verify-hir #:hir-unit #:hir-unit-functions
-           #:emit-native-module #:compile-native
+           #:emit-native-module #:compile-native #:compile-native-bundle
            #:ir-program #:ir-program-nodes #:ir-program-units
            #:ir-node #:ir-node-kind #:ir-node-name #:ir-node-source
            #:ir-node-references #:ir-node-reason #:ir-node-retained-p))

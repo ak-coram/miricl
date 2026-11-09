@@ -11,7 +11,7 @@ import {collectImageSizes, renderImageSizes} from '../scripts/build-size-html.mj
 
 function checkMeasurements(report, directory) {
   assert.deepEqual(report.artifacts.map(artifact => artifact.file),
-    ['miricl.wasm', 'miricl-repl.wasm', 'miricl.html', 'todo.html',
+    ['miricl.wasm', 'miricl-precompiled.wasm', 'miricl-repl.wasm', 'miricl-asdf.wasm', 'miricl.html', 'todo.html',
       'game-of-life/', 'game-of-life/build/game-of-life.wasm', 'maxima/', 'build/maxima/site/maxima.core', 'fricas/', 'build/fricas/site/fricas.wasm']);
   for (const artifact of report.artifacts) {
     if (artifact.kind === 'application') {
@@ -54,7 +54,7 @@ function browserChecks(expected) {
   output.id = 'browser-test-result';
   try {
     check(!globalThis.injected, 'Metadata executed as HTML or JavaScript');
-    check(document.querySelectorAll('#artifact-sizes [data-artifact]').length === 10, 'All ten artifact rows are required');
+    check(document.querySelectorAll('#artifact-sizes [data-artifact]').length === expected.length, 'All artifact rows are required');
     check(document.querySelectorAll('#artifact-sizes .group').length === 5, 'Runtime, pages, Life, Maxima and FriCAS groups are required');
     for (const artifact of expected) {
       const row = document.querySelector(`[data-artifact="${artifact.file}"]`);
@@ -65,7 +65,7 @@ function browserChecks(expected) {
       }
     }
     const sections = document.querySelectorAll('.sections');
-    check(sections.length === 5, 'Runtime and application section breakdowns are required');
+    check(sections.length === 7, 'Runtime, precompiled compiler, ASDF and application section breakdowns are required');
     for (const section of sections) {
       const names = [...section.querySelectorAll('tbody th')].map(cell => cell.firstChild.textContent);
       check(new Set(names).size === names.length, 'Section chart has repeated names');
@@ -87,6 +87,8 @@ try {
   fs.writeFileSync(path.join(directory, 'miricl.wasm'), header);
   const repeatedSections = Buffer.concat([header, Buffer.from([0, 2, 1, 120, 0, 2, 1, 120])]);
   fs.writeFileSync(path.join(directory, 'miricl-repl.wasm'), repeatedSections);
+  fs.writeFileSync(path.join(directory, 'miricl-precompiled.wasm'), repeatedSections);
+  fs.writeFileSync(path.join(directory, 'miricl-asdf.wasm'), repeatedSections);
   fs.writeFileSync(path.join(directory, 'miricl.html'), '<!doctype html><p>Complete REPL λ🙂</p>'.repeat(100));
   fs.writeFileSync(path.join(directory, 'todo.html'), '<script type="text/x-common-lisp">(print "TODO λ🙂")</script>'.repeat(150));
   fs.mkdirSync(path.join(directory, 'game-of-life/build'), {recursive: true});
@@ -112,7 +114,7 @@ try {
   checkMeasurements(report, directory);
   assert.deepEqual(report.artifacts[1].sections.find(s => s.name === 'custom:x'),
     {name: 'custom:x', bytes: 8, count: 2});
-  assert.match(report.artifacts[1].description, /precompiled compiler/);
+  assert.match(report.artifacts[1].description, /bootstrapped native compiler/);
   const hostileReport = structuredClone(report);
   hostileReport.artifacts[0].description = hostile;
   hostileReport.artifacts[0].sections[0].name = hostile;

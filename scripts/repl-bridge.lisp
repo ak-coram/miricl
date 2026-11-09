@@ -1,4 +1,4 @@
-;;;; Development WASI 0.3 TCP / WebSocket relay and host compiler transport.
+;;;; Development WASI 0.3 TCP / WebSocket terminal relay.
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
@@ -72,16 +72,10 @@
     ;; Instantiate memory first, so canonical imports and the core share it.
     (core module $storage
       (memory (export "memory") 324)
-      (func (export "compiler-realloc") (param i32 i32 i32 i32) (result i32)
-        (if (i32.gt_u (local.get 3) (i32.const 1048562)) (then unreachable))
-        (i32.const 19922944))
       ,(repl-filesystem-allocator-wat))
     (core instance $storage (instantiate $storage))
     (alias core export $storage "memory" (core memory $memory))
     (alias core export $storage "realloc" (core func $realloc))
-    (alias core export $storage "compiler-realloc" (core func $compiler-realloc))
-    (import "compile" (func $compiler (param "request" string) (result string)))
-    (core func $compile (canon lower (func $compiler) (memory $memory) (realloc $compiler-realloc)))
     (core func $create (canon lower (func $sockets "[static]tcp-socket.create") (memory $memory) (realloc $realloc)))
     (core func $bind (canon lower (func $sockets "[method]tcp-socket.bind") (memory $memory) (realloc $realloc)))
     (core func $listen (canon lower (func $sockets "[method]tcp-socket.listen") (memory $memory) (realloc $realloc)))
@@ -118,7 +112,6 @@
     (core func $exit (canon lower (func $cli-exit "exit")))
     (core module $relay
       (import "" "memory" (memory 324))
-      (import "" "compile" (func $compile (param i32 i32 i32)))
       (import "" "create" (func $create (param i32 i32)))
       (import "" "bind" (func $bind (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
       (import "" "listen" (func $listen (param i32 i32)))
@@ -329,9 +322,10 @@
               (then
                 (call $queue (i32.const 5120) (call $input (local.get $c)) (local.get $n))
                 (call $frame (global.get $browser) (i32.const 2) (call $input (local.get $c)) (local.get $n)))
-              (else (if (local.get $n)
-                (then (call $queue (local.get $c) (i32.const 18200) (i32.const 40))
-                  (call $queue (i32.const 5120) (i32.const 18200) (i32.const 40)))))))
+              (else (call $offline-input (local.get $c) (local.get $r))
+                (if (i32.and (i32.ne (local.get $n) (i32.const 0)) (i32.eqz (global.get $quitting)))
+                  (then (call $queue (local.get $c) (i32.const 18200) (i32.const 40))
+                    (call $queue (i32.const 5120) (i32.const 18200) (i32.const 40)))))))
           (else
             (i32.store offset=32 (local.get $c) (i32.add (i32.load offset=32 (local.get $c)) (local.get $n)))
             (if (i32.eq (i32.load (local.get $c)) (i32.const 2)) (then (call $handshake (local.get $c))))
@@ -456,7 +450,6 @@
       ,(repl-console-wat))
     (core instance $relay (instantiate $relay (with "" (instance
       (export "memory" (memory $memory))
-      (export "compile" (func $compile))
       (export "create" (func $create)) (export "bind" (func $bind))
       (export "listen" (func $listen)) (export "receive" (func $receive))
       (export "send" (func $send)) (export "drop-socket" (func $drop-socket))

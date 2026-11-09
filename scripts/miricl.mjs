@@ -422,11 +422,19 @@ export class Miricl {
     }
     this.vm.initialize();
     if (this.vm['native-services']) {
+      this.nativeModules = new WeakMap();
       const bridge = new WebAssembly.Instance(nativeCompilerBridge, {host: {service: (code, literals, name) => {
-        const [start, length] = this.vm['native-code-bytes'](code);
-        const module = new WebAssembly.Module(new Uint8Array(this.vm.memory.buffer, start, length));
-        const compiled = new WebAssembly.Instance(module, {'miricl.runtime': this.vm});
-        return this.vm['native-function'](compiled.exports.entry, literals, name, length);
+        const storage = this.vm['native-code-storage']?.(code) ?? code;
+        let compiled = this.nativeModules.get(storage);
+        if (!compiled) {
+          const [start, length] = this.vm['native-code-bytes'](code);
+          const module = new WebAssembly.Module(new Uint8Array(this.vm.memory.buffer, start, length));
+          compiled = {instance: new WebAssembly.Instance(module, {'miricl.runtime': this.vm}), length};
+          this.nativeModules.set(storage, compiled);
+        }
+        const index = this.vm['native-code-entry']?.(code) ?? -1;
+        return this.vm['native-function'](compiled.instance.exports[index < 0 ? 'entry' : `entry${index}`],
+          literals, name, compiled.length);
       }}});
       this.vm['native-services'].set(0, bridge.exports.service);
     }

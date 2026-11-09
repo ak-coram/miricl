@@ -8,13 +8,18 @@ import {connectTerminal, createWebapp, startHost, testPorts, waitFor} from './re
 
 const binary = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
-const bytes = await fs.readFile(binary);
+const browserImage = path.resolve(process.argv[4] ?? path.join(path.dirname(binary), 'miricl-precompiled.wasm'));
+const bytes = await fs.readFile(browserImage);
+const [relay] = WebAssembly.Module.customSections(await WebAssembly.compile(bytes), 'miricl.repl-bridge');
+assert.ok(relay, 'The runtime must provide its terminal relay.');
+assert.equal(WebAssembly.Module.imports(await WebAssembly.compile(relay)).some(imported => imported.name === 'compile'), false,
+  'The relay must not import a host compiler.');
 const devOptions = {url: `ws://127.0.0.1:${testPorts.websocket}/repl`};
 const httpOrigin = `http://127.0.0.1:${testPorts.http}`;
 const production = await Miricl.instantiate(bytes);
 assert.equal(production.dev, undefined);
 production.close();
-const directory = await createWebapp(binary);
+const directory = await createWebapp(browserImage);
 const large = Buffer.alloc(2 * 1024 * 1024 + 19, 97);
 await fs.writeFile(path.join(directory, 'large.bin'), large);
 await fs.writeFile(path.join(directory, 'λ.txt'), 'Unicode path 🙂');
@@ -24,6 +29,30 @@ await fs.symlink(path.resolve('README.org'), path.join(directory, 'outside.txt')
 
 try {
   for (const [runtime, image] of [['node', binary], ...(wasi ? [['wasmtime', wasi]] : [])]) {
+    for (const mode of ['browser-repl', 'dev-server', 'repl-bridge']) {
+      const offline = await startHost(runtime, image, mode, directory);
+      try {
+        offline.child.stdin.write('\":quit\"\n:quitter\n; :quit\n');
+        await waitFor(() => offline.output.includes('[No browser connected; input discarded]'), 'offline ordinary input');
+        assert.equal(offline.child.exitCode, null);
+        const start = offline.output.length;
+        offline.child.stdin.write(' \t:Qu');
+        await waitFor(() => offline.output.length > start, 'fragmented offline command');
+        offline.child.stdin.write('It \t; stop the host\r\n');
+        await offline.waitForExit();
+        console.log(`PASS ${runtime} ${mode}: terminal :quit without a browser, including fragmented input`);
+      } finally { await offline.close(); }
+    }
+    const offlineTCP = await startHost(runtime, image, 'repl-bridge');
+    let offlineTerminal;
+    try {
+      offlineTerminal = await connectTerminal();
+      await waitFor(() => offlineTerminal.output.includes('Waiting for the browser interpreter.'), 'offline TCP status');
+      offlineTerminal.socket.write(':quit\n');
+      await offlineTCP.waitForExit();
+      await waitFor(() => offlineTerminal.ended, 'offline TCP quit disconnects');
+      console.log(`PASS ${runtime} TCP :quit without a browser`);
+    } finally { offlineTerminal?.socket.destroy(); await offlineTCP.close(); }
     const standalone = await startHost(runtime, image, 'browser-repl');
     let standaloneVM;
     try {
@@ -67,14 +96,19 @@ try {
       await waitFor(() => host.output.includes('(incf *app-count*)\n42\nmiricl> '), 'ordinary terminal transcript');
       assert.doesNotMatch(host.output, /\[Emacs\]|\[Remote\]/);
       assert.equal((await vm.evaluateAsync('*app-count*')).output, '42\n');
+      assert.equal(vm.vm['compiler-services'], undefined, 'The bridge must not install a compiler service.');
+      assert.equal(await terminal.send('(setq miricl-compiler:*compile-evaluations* nil)'), 'NIL\nmiricl> ');
+      assert.equal(await terminal.send('(defun remote-interpreted () 42)'), 'REMOTE-INTERPRETED\nmiricl> ');
+      assert.equal(await terminal.send('(not (null (function-lambda-expression #\'remote-interpreted)))'), 'T\nmiricl> ');
+      assert.equal(await terminal.send('(setq miricl-compiler:*compile-evaluations* t)'), 'T\nmiricl> ');
       assert.equal(await terminal.send('(defun remote-add (x)', '...> '), '...> ');
       assert.equal(await terminal.send('  (+ x *app-count*))'), 'REMOTE-ADD\nmiricl> ');
       assert.equal(await terminal.send('(remote-add 1)'), '43\nmiricl> ');
       const compiled = source => terminal.send(source.replace(/\s+/gu, ' '));
       assert.equal(await compiled(`(and (compiled-function-p #'remote-add)
         (null (function-lambda-expression #'remote-add)))`), 'T\nmiricl> ');
-      assert.equal(await compiled('miricl-compiler::*compiler-state*'), ':COLD\nmiricl> ',
-        'Remote evaluation must not bootstrap the browser compiler.');
+      assert.equal(await compiled('miricl-compiler::*compiler-origin*'), ':IMAGE\nmiricl> ',
+        'The browser uses its bootstrapped local compiler.');
       vm.evaluate(`(defparameter *target-literal* (list :original))
         (defmacro target-literal () (list 'quote *target-literal*))
         (defparameter *target-js* (js:global "Math"))
@@ -89,7 +123,7 @@ try {
         (progn (incf *target-load-values*) *target-literal*)) *target-literal*)`), 'T\nmiricl> ');
       assert.equal(await compiled('*target-load-values*'), '1\nmiricl> ');
       assert.equal(await compiled('(progv nil nil (+ 20 22))'), '42\nmiricl> ');
-      assert.match(await compiled('(let () (incf *target-load-values*) (go missing-tag))'), /Error: Remote compiler:/);
+      assert.match(await compiled('(let () (incf *target-load-values*) (go missing-tag))'), /Error:.*No lexical tag/);
       assert.equal(await compiled('*target-load-values*'), '1\nmiricl> ', 'Rejected compilation must not execute the form.');
       assert.equal(await compiled('(= (js:from-js (js:invoke (target-js) "sqrt" 81)) 9)'), 'T\nmiricl> ');
       assert.equal(await compiled(`(let ((*target-special* :inner))
@@ -107,11 +141,11 @@ try {
       assert.equal(await compiled('(null (function-lambda-expression *remote-closure*))'), 'T\nmiricl> ');
       assert.equal(await compiled(`(funcall (miricl-compiler:compile-native
         '(lambda () (target-literal))))`), '(:ORIGINAL)\nmiricl> ');
-      assert.equal(await compiled('miricl-compiler::*compiler-state*'), ':COLD\nmiricl> ');
+      assert.equal(await compiled('miricl-compiler::*compiler-state*'), ':READY\nmiricl> ');
       assert.equal(await compiled('(values 17 23)'), '17\n23\nmiricl> ');
       assert.equal(await compiled(`(and (= * 17) (equal / '(17 23))
         (equal + '(values 17 23)))`), 'T\nmiricl> ');
-      console.log(`PASS ${runtime} host-compiled browser functions, target macros/literals/JS objects, dynamic state and multiple values`);
+      console.log(`PASS ${runtime} forwarding-only bridge, browser evaluation policy, local native functions, macros/literals/JS objects, dynamic state and multiple values`);
       assert.equal(await terminal.send('(values 1 2 nil)'), '1\n2\nNIL\nmiricl> ');
       assert.equal(await terminal.send('(format t "hello~%")'), 'hello\nNIL\nmiricl> ');
       const start = terminal.output.length;
@@ -135,15 +169,12 @@ try {
       assert.match(terminal.output, /\[Browser connected\]\nmiricl> /);
       assert.equal(await terminal.send('*app-count*'), '42\nmiricl> ');
       const beforeClose = terminal.output.length;
-      // Closing while compilation is parked must wake the Lisp thread before
-      // detaching its service table; otherwise its poll calls a null entry.
-      vm.dev.sendCompilation = () => {};
-      const pendingCompilation = vm.evaluateAsync('(+ 1 2)');
-      const rejectedCompilation = assert.rejects(pendingCompilation, /not supported/);
-      await waitFor(() => vm.dev.compilerRequests.size === 1, 'parked compiler request');
+      // Local compilation must keep working independently of the relay.
+      const pendingCompilation = vm.evaluateAsync(`(funcall
+        (miricl-compiler:compile-native '(lambda () 42)))`);
       vm.dev.close();
-      await rejectedCompilation;
-      assert.equal(vm.vm['compiler-services'].get(0), null);
+      assert.equal((await pendingCompilation).output, '42\n');
+      assert.equal(vm.vm['compiler-services'], undefined);
       assert.equal((await vm.evaluateAsync('(+ 1 2)')).output, '3\n');
       vm.close(); vm = undefined;
       await waitFor(() => terminal.output.slice(beforeClose).includes('[Browser disconnected; waiting for a browser]'), 'TCP disconnected status');
@@ -158,6 +189,13 @@ try {
       assert.equal(await terminal.send('(+ 20 22)'), '42\nmiricl> ');
       console.log(`PASS ${runtime} browser-backed terminal and TCP REPL`);
       console.log(`PASS ${runtime} TCP waiting/connected/disconnected status and reconnection on the same connection`);
+      const beforeDisconnect = host.output.length;
+      vm.close(); vm = undefined;
+      await waitFor(() => host.output.slice(beforeDisconnect).includes('[Browser disconnected; waiting for a browser]'),
+        'browser disconnect before offline quit');
+      host.child.stdin.write(':quit\n');
+      await host.waitForExit();
+      console.log(`PASS ${runtime} terminal :quit after the browser disconnects`);
     } finally { terminal?.socket.destroy(); vm?.close(); await host.close(); }
 
     const server = await startHost(runtime, image, 'dev-server', directory);

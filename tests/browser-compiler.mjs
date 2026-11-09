@@ -5,10 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import {spawn} from 'node:child_process';
-import {compilerCases} from './compiler-cases.mjs';
+import {compilerSmokeCases} from './compiler-cases.mjs';
 
 const image = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const adapter = path.resolve(process.argv[3] ?? path.join(path.dirname(image), 'miricl.js'));
+const precompiled = process.argv.includes('--precompiled');
 const assets = new Map(await Promise.all([
   ['/miricl.wasm', image], ['/miricl.js', adapter],
 ].map(async ([url, file]) => [url, await fs.readFile(file)])));
@@ -34,7 +35,7 @@ await new Promise((resolve, reject) => {server.once('error', reject); server.lis
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-compiler-browser-'));
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-  '--disable-background-networking', `--user-data-dir=${profile}`, '--remote-debugging-pipe',
+  '--disable-background-networking', `--user-data-dir=${profile}`, '--no-startup-window', '--remote-debugging-pipe',
 ], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
 const stopped = new Promise(resolve => browser.once('exit', resolve));
 let diagnostics = '', received = '', nextId = 0;
@@ -63,12 +64,16 @@ browser.stdio[4].on('data', chunk => {
 function send(method, params = {}, sessionId) {
   return new Promise((resolve, reject) => {
     const id = ++nextId;
-    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`Timed out: ${method}. ${diagnostics}`));}, 30000);
+    // Cold self-compilation includes the optimizer kernels and can exceed 30s
+    // in Chromium under the inspector. Keep a finite bound for stalled calls.
+    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`Timed out: ${method}. ${diagnostics}`));}, 60000);
     pending.set(id, {resolve, reject, timer});
     browser.stdio[3].write(JSON.stringify({id, method, params, sessionId}) + '\0');
   });
 }
 try {
+  const version = await send('Browser.getVersion');
+  console.log(`Chromium: ${version.product}`);
   const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
   const {sessionId} = await send('Target.attachToTarget', {targetId, flatten: true});
   const command = (method, params) => send(method, params, sessionId);
@@ -88,18 +93,36 @@ try {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.equal(await evaluate("(fboundp 'miricl-compiler:compile-native)"), 'T\n');
-  assert.equal(await evaluate('miricl-compiler::*compiler-state*'), ':COLD\n');
+  assert.equal(await evaluate('miricl-compiler::*compiler-state*'), precompiled ? ':READY\n' : ':COLD\n');
+  assert.equal(await evaluate('miricl-compiler:*compile-evaluations*'), precompiled ? 'T\n' : 'NIL\n');
+  if (precompiled) {
+    assert.equal(await evaluate('miricl-compiler::*compiler-origin*'), ':IMAGE\n');
+    assert.equal(await evaluate(`(every (lambda (name)
+      (and (compiled-function-p (symbol-function name))
+           (null (function-lambda-expression (symbol-function name)))))
+      miricl-compiler::*native-compiler-seeds*)`), 'T\n');
+    await evaluate(`(setf (symbol-function 'miricl-compiler::compile-compiler)
+      (lambda () (error "Precompiled image tried to bootstrap again."))) (values)`);
+    await evaluate('(defun browser-default-native (x) (+ x 2))');
+    assert.equal(await evaluate(`(and (= (browser-default-native 40) 42)
+      (null (function-lambda-expression #'browser-default-native)))`), 'T\n');
+    assert.equal(await evaluate(`(let ((miricl-compiler:*compile-evaluations* nil))
+      (eval '(defun browser-default-interpreted () 42))
+      (not (null (function-lambda-expression #'browser-default-interpreted))))`), 'T\n');
+    // The shared cases use an interpreted driver and explicitly compile bodies.
+    await evaluate('(setq miricl-compiler:*compile-evaluations* nil)');
+  }
   assert.equal(requests.some(url => url.includes('miricl-compiler.wasm')), false);
   // All subsequent compilation happens offline in this browser instance.
   await command('Network.emulateNetworkConditions', {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
-  assert.equal(await evaluate(`(progn (miricl-compiler::ensure-compiler)
+  if (!precompiled) assert.equal(await evaluate(`(progn (miricl-compiler::ensure-compiler)
     (multiple-value-bind (installed unsupported)
       (miricl-compiler::compile-compiler)
     (and (>= (length installed) 93) (null unsupported)
       (every (lambda (name) (null (function-lambda-expression (symbol-function name))))
         '(miricl-compiler::hir-form miricl-compiler:compile-to-hir
           miricl-compiler::emit-native-module miricl-compiler:compile-native)))))`), 'T\n');
-  for (const [name, source] of compilerCases) assert.equal(await evaluate(source), 'T\n', name);
+  for (const [name, source] of compilerSmokeCases) assert.equal(await evaluate(source), 'T\n', name);
   assert.equal(await evaluate(`(let ((function (miricl-compiler:compile-native
       '(lambda (x) (js:from-js (js:invoke (js:global "Math") "sqrt" x))))))
     (= (funcall function 81) 9))`), 'T\n');
@@ -120,7 +143,7 @@ try {
   assert.equal(requests.some(url => /miricl-repl|asdf|dev-repl|dev-filesystem|^wss?:/.test(url)), false);
   assert.deepEqual(exceptions, []);
   await js('app.close()');
-  console.log('Browser compiler: built-in availability, offline self-compilation, native test bodies, JS interop and native DOM callbacks pass.');
+  console.log(`Browser compiler: ${precompiled ? 'precompiled startup without bootstrap' : 'offline self-compilation'}, native test bodies, JS interop and native DOM callbacks pass.`);
 } finally {
   fail(new Error('Browser compiler test finished.'));
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

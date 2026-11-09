@@ -4,9 +4,10 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {maximaProbeRevision} from './probe-maxima.mjs';
+import {versionAssets} from './version-assets.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const imagePath = path.resolve(process.argv[2] ?? 'miricl.wasm');
+const imagePath = path.resolve(process.argv[2] ?? 'miricl-precompiled.wasm');
 const corePath = path.resolve(process.argv[3] ?? 'build/maxima/maxima-optimized.wasm');
 const output = path.resolve(process.argv[4] ?? 'build/maxima/site');
 const [image, core] = await Promise.all([fs.readFile(imagePath), fs.readFile(corePath)]);
@@ -26,5 +27,7 @@ await Promise.all([
 for (const name of ['files.json', 'files.json.gz', 'doc', 'filesystem.bin.gz', 'filesystem-archive.mjs', 'maxima.wasm',
   'preview-desktop.png', 'preview-mobile.png'])
   await fs.rm(path.join(output, name), {force: true, recursive: true});
+report.assetVersion = await versionAssets(output, ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs',
+  'worker.mjs', 'miricl.mjs', 'maxima.mjs', 'miricl.wasm', 'maxima.core']);
 await fs.writeFile(path.join(output, 'build.json'), JSON.stringify(report, null, 2) + '\n');
 console.log(`Built Maxima browser distribution in ${output}`);

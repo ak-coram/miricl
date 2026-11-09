@@ -24,6 +24,137 @@ try {
   check(`(progn
     (defparameter *native* (miricl-compiler:compile-native '(lambda (x) (if x (+ x 2) 0))))
     (and (compiled-function-p *native*) (= (funcall *native* 40) 42) (= (funcall *native* nil) 0)))`);
+  check(`(= (length (multiple-value-list (miricl-compiler:compile-native '(lambda (x) x)))) 1)`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda (x)
+    (multiple-value-call (lambda (a b) (values (lambda () (incf a)) (lambda () a) b))
+      (values x 19))))))
+    (multiple-value-bind (write read value) (funcall f 7)
+      (and (= (funcall write) 8) (= (funcall read) 8) (= value 19))))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda (items)
+    (multiple-value-call (lambda (&rest args) (when args (setf (car args) :changed)) args)
+      (values-list items))))) (items (list 1 2 3)))
+    (and (equal (funcall f items) '(:changed 2 3)) (equal items '(1 2 3))
+         (null (funcall f nil))))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda ()
+    (multiple-value-call (lambda (a) a) (values))))))
+    (handler-case (progn (funcall f) nil) (program-error () t)))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda ()
+    (multiple-value-call (lambda (a) a) (values 1 2))))))
+    (handler-case (progn (funcall f) nil) (program-error () t)))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda ()
+    (flet ((apply (&rest args) (declare (ignore args)) :shadowed))
+      (multiple-value-call (lambda (&rest args) args) (values 1 2)))))))
+    (equal (funcall f) '(1 2)))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda ()
+    (block done (multiple-value-call (lambda (x) (declare (special x))
+      (return-from done (values x 19))) (values 7)))))))
+    (let ((x 100)) (declare (special x))
+      (and (equal (multiple-value-list (funcall f)) '(7 19)) (= x 100))))`);
+  for (const predicate of ['numberp', 'integerp', 'rationalp', 'realp', 'complexp', 'floatp',
+    'symbolp', 'listp', 'stringp']) {
+    check(`(let ((f (miricl-compiler:compile-native '(lambda (x) (if (${predicate} x) t nil)))))
+      (every (lambda (x) (eq (funcall f x) (not (null (${predicate} x)))))
+        '(nil 42 1/2 1.0f0 1.0d0 #c(1 2) :symbol (1 . 2) "text" #\\a #(1))))`);
+  }
+  for (const operator of ['=', '/=']) {
+    check(`(let ((f (miricl-compiler:compile-native '(lambda (x y) (if (${operator} x y) t nil)))))
+      (and (every (lambda (pair) (eq (apply f pair) (not (null (apply #'${operator} pair)))))
+        '((42 42) (42 43) (1/2 0.5d0) (#c(2 0) 2.0f0) (#c(2 3) #c(2 4))
+          (0.0d0 -0.0d0) (123456789012345678901 123456789012345678902)))
+        (handler-case (progn (funcall f :bad 1) nil) (type-error () t))))`);
+  }
+  for (const accessor of ['caar', 'cadr', 'cdar', 'cddr', 'caaar', 'cadadr', 'cddddr', 'tenth']) {
+    check(`(let ((f (miricl-compiler:compile-native '(lambda (x) (list (${accessor} x))))))
+      (and (equal (funcall f nil) '(nil))
+        (equal (funcall f '#1=(#1# . #1#)) (list (${accessor} '#1#)))
+        (handler-case (progn (funcall f 19) nil) (type-error () t))))`);
+  }
+  for (const accessor of ['bit', 'sbit']) {
+    check(`(let ((read (miricl-compiler:compile-native
+                      '(lambda (a i) (if (= (${accessor} a i) 1) :one :zero))))
+                (write (miricl-compiler:compile-native
+                      '(lambda (a i value) (list (setf (${accessor} a i) value)))))
+                (a (make-array 70 :element-type 'bit :initial-element 0)))
+      (and (loop for i in '(0 1 31 32 63 69) always
+             (and (eq (funcall read a i) :zero) (equal (funcall write a i 1) '(1))
+                  (eq (funcall read a i) :one) (equal (funcall write a i 0) '(0))))
+           (handler-case (progn (funcall read a -1) nil) (type-error () t))
+           (handler-case (progn (funcall read a 70) nil) (type-error () t))
+           (handler-case (progn (funcall write a 0 2) nil) (type-error () t))))`);
+  }
+  check(`(let* ((read (miricl-compiler:compile-native '(lambda (a i) (list (bit a i)))))
+               (base (make-array 70 :element-type 'bit :initial-element 1))
+               (view (make-array 35 :element-type 'bit :displaced-to base :displaced-index-offset 31
+                                 :fill-pointer 0)))
+    (setf (bit base 63) 0)
+    (equal (funcall read view 32) '(0)))`);
+  check(`(let* ((calls 0)
+    (f (miricl-compiler:compile-native '(lambda (args)
+      (apply (lambda (a b) (values (lambda () (incf a)) (lambda () a) b)) args)))))
+    (multiple-value-bind (write read value) (funcall f (progn (incf calls) (list 7 19)))
+      (let ((other (nth-value 1 (funcall f '(100 200)))))
+        (and (= calls 1) (= value 19) (= (funcall write) 8)
+          (= (funcall read) 8) (= (funcall other) 100)))))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda (args)
+      (apply (lambda (a b) (+ a b)) args)))))
+    (and (handler-case (progn (funcall f '(1)) nil) (program-error () t))
+      (handler-case (progn (funcall f '(1 2 3)) nil) (program-error () t))
+      (handler-case (progn (funcall f '(1 . 2)) nil) (type-error () t))
+      (handler-case (progn (funcall f '#1=(1 . #1#)) nil) (type-error () t))))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda () (apply (lambda () (values)) nil)))))
+    (null (multiple-value-list (funcall f))))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda (args)
+    (apply (lambda (&rest items) (values (length items) (lambda () items))) args)))))
+    (and (multiple-value-bind (size read) (funcall f '(1 :two "three"))
+      (and (= size 3) (equal (funcall read) '(1 :two "three"))))
+      (= (funcall f nil) 0)
+      (handler-case (progn (funcall f '(1 . 2)) nil) (type-error () t))
+      (handler-case (progn (funcall f '#1=(1 . #1#)) nil) (type-error () t))))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda (args)
+    (let ((count 0)) (values (apply (lambda (x) x) (progn (incf count) args)) count))))))
+    (equal (multiple-value-list (funcall f '(19))) '(19 1)))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda (args)
+    (block done
+      (apply (lambda (x) "Documentation." (declare (special x))
+        (return-from done (values x 19))) args))))))
+    (let ((x 100)) (declare (special x))
+      (and (equal (multiple-value-list (funcall f '(7))) '(7 19)) (= x 100))))`);
+  check(`(let ((f (miricl-compiler:compile-native '(lambda (args)
+    (flet ((apply (function arguments) (declare (ignore function arguments)) :local))
+      (apply (lambda (x) x) args))))))
+    (eq (funcall f '(7)) :local))`);
+  for (let arity = 1; arity <= 4; arity++) {
+    const parameters = ['a', 'b', 'c', 'd'].slice(0, arity).join(' ');
+    const arguments_ = ['nil', ':symbol', "'(1 . 2)", '"text"'].slice(0, arity).join(' ');
+    vm.evaluate(`(defparameter *fixed-callee* (miricl-compiler:compile-native
+      '(lambda (${parameters}) (list ${parameters}))))
+      (defparameter *fixed-caller* (miricl-compiler:compile-native
+        '(lambda () (equal (funcall *fixed-callee* ${arguments_}) (list ${arguments_})))) )`);
+    check('(funcall *fixed-caller*)');
+    check(`(equal (apply *fixed-callee* (list ${arguments_})) (list ${arguments_}))`);
+    vm.evaluate(`(setq *fixed-caller* (miricl-compiler:compile-native
+      '(lambda () (handler-case (progn (funcall *fixed-callee*) nil) (program-error () t)))))`);
+    check('(funcall *fixed-caller*)');
+  }
+  check(`(let* ((factory (miricl-compiler:compile-native '(lambda () (lambda () 17))))
+                 (a (funcall factory)) (b (funcall factory)))
+    (and (eq a b) (= (funcall a) 17)))`);
+  check(`(progn (defparameter *closure-dynamic* 7)
+    (let* ((factory (miricl-compiler:compile-native '(lambda () (lambda () *closure-dynamic*))))
+           (a (let ((*closure-dynamic* 11)) (funcall factory)))
+           (b (let ((*closure-dynamic* 19)) (funcall factory))))
+      (and (eq a b) (= (funcall a) 7) (= (let ((*closure-dynamic* 13)) (funcall b)) 13))))`);
+  check(`(let ((function (miricl-compiler:compile-native
+    '(lambda () (block done (funcall (lambda () (return-from done 17))))))))
+    (and (= (funcall function) 17) (= (funcall function) 17)))`);
+  check(`(let* ((factory (miricl-compiler:compile-native
+      '(lambda (x) (lambda () (values (lambda () (incf x)) (lambda () x))))))
+      (a (funcall factory 0)) (b (funcall factory 100))
+      (write-a (nth-value 0 (funcall a))) (read-a (nth-value 1 (funcall a)))
+      (write-b (nth-value 0 (funcall b))))
+    (and (eq write-a (nth-value 0 (funcall a))) (eq read-a (nth-value 1 (funcall a)))
+      (= (funcall write-a) 1) (= (funcall read-a) 1)
+      (= (funcall write-b) 101) (= (funcall read-a) 1)))`);
   const moduleSize = Number(vm.evaluate(`(length (miricl-compiler:emit-native-module
     (miricl-compiler:compile-to-hir '(lambda (x) (if x (+ x 2) 0)))))`, {eof: true}).output.trim());
   assert.ok(moduleSize > 0);
@@ -311,5 +442,17 @@ try {
   check(`(let ((package *package*) (function (miricl-compiler:compile-native
       '(lambda () (let ((*package* (find-package "KEYWORD"))) (symbol-package (intern "NATIVE-KEYWORD")))))))
     (and (eq (funcall function) (find-package "KEYWORD")) (eq *package* package)))`);
-  console.log(`Native compilation: ${bytes.length}-byte module; arithmetic, branches, lexical cells, rest arguments, macros, literal identity, multiple values, redefinition, arity and conditions pass.`);
+  assert.equal((await vm.evaluateAsync(`
+    (let* ((function (miricl-compiler:compile-native '(lambda (box)
+              (setf (cdr box) t)
+              (loop repeat 1000000 until (car box))
+              (values (car box) (cdr box)))))
+           (box (cons nil nil))
+           (worker (miricl-threads:make-thread
+             (lambda () (loop until (cdr box) do (miricl-threads:thread-yield))
+               (setf (car box) 19)))))
+      (and (equal (multiple-value-list (funcall function box)) '(19 t))
+           (= (miricl-threads:join-thread worker) 19)))`, {eof: true})).output, 'T\n',
+    'Native loop checkpoints must let a waiting thread run and preserve multiple values.');
+  console.log(`Native compilation: ${bytes.length}-byte module; arithmetic, branches, lexical cells, rest arguments, macros, literal identity, multiple values, redefinition, arity, conditions and thread preemption pass.`);
 } finally {vm.close();}

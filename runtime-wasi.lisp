@@ -119,6 +119,8 @@
     (then (global.set $terminal-build-optimize (i32.const 1)) (return)))
   #@(if (i32.eq (local.get $kind) (i32.const 9))
     (then (global.set $terminal-build-no-strip (i32.const 1)) (return)))
+  #@(if (i32.eq (local.get $kind) (i32.const 10))
+    (then (global.set $terminal-build-native (i32.const 1)) (return)))
   #@(local.set $value (call $decode-text (local.get $start) (local.get $length)))
   #@(if (i32.eq (local.get $kind) (i32.const 6))
     (then (global.set $terminal-build-entries (call $cons (local.get $value) (global.get $terminal-build-entries))))
@@ -147,6 +149,10 @@
     (then (local.set $args (call $cons (global.get $terminal-bundle-system)
       (call $cons ,(clos-library-reference :strip)
         (call $cons (ref.null $obj) (call $cdr (local.get $args))))))))
+  #@(if (global.get $terminal-build-native)
+    (then (local.set $args (call $cons (global.get $terminal-bundle-system)
+      (call $cons ,(clos-library-reference :native)
+        (call $cons (call $symbol (i32.const 1)) (call $cdr (local.get $args))))))))
   #@(block $done
     (block $error
       (try_table (catch $guest-error $error) (catch $transfer $error)
@@ -228,6 +234,7 @@
   #@(global $terminal-bundle-system (mut (ref null $obj)) (ref.null $obj))
   #@(global $terminal-bundle-output (mut (ref null $obj)) (ref.null $obj))
   #@(global $terminal-build-optimize (mut i32) (i32.const 0))
+  #@(global $terminal-build-native (mut i32) (i32.const 0))
   #@(global $terminal-build-no-strip (mut i32) (i32.const 0))
   #@(global $terminal-build-entries (mut (ref null $obj)) (ref.null $obj))
   #@(global $terminal-build-keep (mut (ref null $obj)) (ref.null $obj))

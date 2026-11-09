@@ -57,12 +57,14 @@
                (:static-file "time-library.lisp")
                (:static-file "compiler-library.lisp")
                (:static-file "file-compiler-library.lisp")
-               (:static-file "remote-compiler-library.lisp")
+               (:static-file "evaluation-library.lisp")
                (:file "fasl-utilities")
                (:file "fasl-format")
                (:file "whole-program")
                (:file "hir")
                (:file "wasm-compiler")
+               (:file "wasm-optimizer")
+               (:file "wasm-module-optimizer")
                (:static-file "environment-library.lisp")
                (:static-file "pretty-library.lisp")
                (:static-file "javascript-library.lisp")
@@ -124,7 +126,7 @@
   :serial t
   :depends-on (#:miricl
                #:fiveam)
-  :components ((:file "miricl-test") (:file "float-properties-test") (:file "transcendental-test") (:file "derived-type-test") (:file "package-test") (:file "symbol-test")
+  :components ((:file "miricl-test") (:file "wasm-optimizer-test") (:file "float-properties-test") (:file "transcendental-test") (:file "derived-type-test") (:file "package-test") (:file "symbol-test")
                (:file "condition-test") (:file "format-loop-test") (:file "clos-test")
                (:file "development-test") (:file "sequence-test") (:file "character-test")
                (:file "equality-test") (:file "integer-bit-test") (:file "hash-test")
@@ -138,8 +140,11 @@
                (:file "string-parsing-test")
                (:file "byte-fields-test") (:file "vector-test") (:file "array-test") (:file "bit-array-test") (:file "readtable-test") (:file "pprint-test") (:file "stream-test") (:file "filesystem-test"))
   :perform (test-op (o c)
-             (unless (symbol-call :fiveam '#:run! :miricl)
-               (error "miricl tests failed."))))
+             (let ((results (symbol-call :fiveam '#:run :miricl)))
+               (unless results
+                 (error "miricl suite executed no checks."))
+               (unless (symbol-call :fiveam '#:explain! results)
+                 (error "miricl tests failed.")))))
 
 (asdf:defsystem #:miricl/*
   :depends-on (#:miricl

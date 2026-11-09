@@ -2,12 +2,28 @@
 ;;;; existing runtime primitives implement Common Lisp object operations.
 (in-package :miricl-compiler)
 
+(defvar *compile-evaluations* nil
+  "When true, EVAL, source loading and local REPL input use the native compiler.
+Bind to NIL to interpret forms, including forms without native lowering.")
+(defvar *compiling-evaluation* nil)
+
 (defvar *wasm-bytes*)
 (defvar *wasm-literals*)
 (defvar *wasm-literal-index*)
+(defvar *wasm-literal-groups* nil)
 (defvar *native-functions*)
+(defvar *native-function-indices*)
+(defvar *wasm-function-relocations* nil)
+(defvar *wasm-current-function*)
+(defvar *wasm-static-closures*)
+(defvar *wasm-body-keys*)
+(defvar *wasm-function-plans* nil)
+(defvar *wasm-inline-constants* nil)
+(defvar *wasm-last-local* nil)
+(defvar *wasm-optimize* t)
 (defvar *compiler-bootstrapping* nil)
 (defvar *wasm-used-imports*)
+(defvar *wasm-import-counts* nil)
 (defvar *wasm-referenced-functions*)
 (defvar *wasm-local-cells*)
 (defvar *wasm-live-values*)
@@ -20,11 +36,29 @@
 (defvar *wasm-dynamic-bindings*)
 (defvar *wasm-entry-environment*)
 (defvar *wasm-exceptions*)
+
+;; IDs are dense within one function. Slot zero represents the NIL key used
+;; by instructions without outputs; value zero starts at slot one. Keeping
+;; this as a generalized place also supports SETF, PUSH and INCF directly.
+(defmacro native-value-slot (table value)
+  (let ((entry (gensym "HIR-VALUE")))
+    (list 'svref table
+      (list 'let (list (list entry value))
+        (list 'if entry (list '1+ (list 'hir-value-id entry)) 0)))))
+
+(defmacro native-value-table (function &optional initial)
+  (list 'make-array (list '1+ (list 'hir-function-value-count function))
+        :initial-element initial))
+
+(setf (get 'native-value-slot 'miricl::runtime-inline-macro) t
+      (get 'native-value-table 'miricl::runtime-inline-macro) t)
 (defparameter *native-imports*
   '(("native-literal" (:object :i32) :object)
     ("native-argument" (:object :i32) :object)
     ("native-rest-argument" (:object :i32) :object)
     ("native-check-arguments" (:object :i32 :i32) nil)
+    ("native-check-apply-arguments" (:object :i32) nil)
+    ("native-check-apply-list" (:object) nil)
     ("native-environment" nil :object)
     ("native-global-read" (:object :object) :object)
     ("native-global-write" (:object :object :object) :object)
@@ -37,6 +71,8 @@
     ("native-call" (:object :object :object) :object)
     ("native-return" (:object) :object)
     ("native-close" (:function :object :object) :object)
+    ("native-close-fixed" (:function :object :object :i32) :object)
+    ("native-close-cached" (:function :object :object :i32 :i32) :object)
     ("native-capture" (:object :i32) :object)
     ("native-multiple-value-call" (:object :object :object) :object)
     ("native-call0" (:object) :object)
@@ -80,15 +116,40 @@
     (append body (list '*wasm-bytes*))))
 (defun wasm-call (name)
   (pushnew name *wasm-used-imports* :test #'equal)
+  (when *wasm-import-counts* (incf (gethash name *wasm-import-counts* 0)))
   (wasm-byte #x10) (wasm-u32 (or (position name *native-imports* :key #'first :test #'equal)
                                (error "Unknown native ABI operation ~S." name))))
 (defun wasm-get (value)
-  (wasm-byte #x20) (wasm-u32 (or (gethash value *wasm-locals*) (error "Missing native operand local."))))
+  (cond
+    ((and *wasm-inline-constants* (native-value-slot *wasm-inline-constants* value))
+     (wasm-literal (first (hir-instruction-attributes (hir-value-producer value)))))
+    ((and *wasm-last-local* (eq (first *wasm-last-local*) *wasm-bytes*)
+          (= (second *wasm-last-local*) (length *wasm-bytes*))
+          (= (fifth *wasm-last-local*) #x21)
+          (eql (third *wasm-last-local*) (native-value-slot *wasm-locals* value)))
+     ;; LOCAL.SET followed immediately by LOCAL.GET is one LOCAL.TEE.
+     (setf (aref *wasm-bytes* (fourth *wasm-last-local*)) #x22)
+     (setq *wasm-last-local* nil))
+    (t (wasm-local (or (native-value-slot *wasm-locals* value) (error "Missing native operand local."))))))
 (defun wasm-set (value)
-  (let ((local (gethash value *wasm-locals*)))
-    (if local (progn (wasm-byte #x21) (wasm-u32 local)) (wasm-byte #x1a))))
+  (let ((local (native-value-slot *wasm-locals* value)))
+    (if local
+        (if (and *wasm-last-local* (eq (first *wasm-last-local*) *wasm-bytes*)
+                 (= (second *wasm-last-local*) (length *wasm-bytes*))
+                 (= (fifth *wasm-last-local*) #x20) (= (third *wasm-last-local*) local))
+            ;; A value's last use can share the result's local. Copying that
+            ;; local to itself has no effect on either the stack or the local.
+            (progn (setf (fill-pointer *wasm-bytes*) (fourth *wasm-last-local*))
+                   (setq *wasm-last-local* nil))
+            (let ((start (length *wasm-bytes*)))
+              (wasm-byte #x21) (wasm-u32 local)
+              (setq *wasm-last-local* (list *wasm-bytes* (length *wasm-bytes*) local start #x21))))
+        (wasm-byte #x1a))))
 (defun wasm-integer (value) (wasm-byte #x41) (wasm-s32 value))
-(defun wasm-local (index) (wasm-byte #x20) (wasm-u32 index))
+(defun wasm-local (index)
+  (let ((start (length *wasm-bytes*)))
+    (wasm-byte #x20) (wasm-u32 index)
+    (setq *wasm-last-local* (list *wasm-bytes* (length *wasm-bytes*) index start #x20))))
 (defun wasm-null () (wasm-byte #xd0) (wasm-byte #x6f))
 (defun wasm-gc (opcode &rest immediates)
   (wasm-byte #xfb) (wasm-u32 opcode) (dolist (immediate immediates) (wasm-u32 immediate)))
@@ -134,19 +195,19 @@
   ;; bindings carry their value directly through closure environments, since
   ;; the private binding cell has no observable identity. Mutation of the
   ;; value itself remains visible through the same object reference.
-  (let ((cells (make-hash-table :test 'eq)))
+  (let ((cells (native-value-table function)))
     (dolist (binding (hir-function-bindings function))
       (when (and (hir-binding-cell binding)
                  (or (not (hir-binding-captured-p binding))
                      (not (hir-binding-assigned-p binding))))
-        (setf (gethash (hir-binding-cell binding) cells) t)))
+        (setf (native-value-slot cells (hir-binding-cell binding)) t)))
     (dolist (value (hir-function-values function))
       (let ((producer (hir-value-producer value)))
-        (when (and (hir-instruction-p producer)
+        (when (and (%hir-instruction-p producer)
                    (eq (hir-instruction-opcode producer) :capture))
           (let ((binding (second (hir-instruction-attributes producer))))
-            (when (and (hir-binding-p binding) (not (hir-binding-assigned-p binding)))
-              (setf (gethash value cells) t))))))
+            (when (and (%hir-binding-p binding) (not (hir-binding-assigned-p binding)))
+              (setf (native-value-slot cells value) t))))))
     cells))
 
 (defun native-forward-blocks (function)
@@ -172,7 +233,7 @@
     (when (= (length order) count) (nreverse order))))
 
 (defun native-live-values (function &optional dynamic-bindings blocks)
-  (let ((live (make-hash-table :test 'eq)) (work nil))
+  (let ((live (native-value-table function)) (work nil))
     (dolist (block (or blocks (hir-function-blocks function)))
       (when dynamic-bindings (push (hir-block-environment block) work))
       (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
@@ -180,29 +241,103 @@
           (dolist (input (hir-instruction-inputs instruction)) (push input work)))))
     (loop while work do
       (let ((value (pop work)))
-        (unless (gethash value live)
-          (setf (gethash value live) t)
+        (unless (native-value-slot live value)
+          (setf (native-value-slot live value) t)
           (let ((producer (hir-value-producer value)))
-            (when (hir-instruction-p producer)
+            (when (%hir-instruction-p producer)
               (dolist (input (hir-instruction-inputs producer)) (push input work)))))))
     live))
+
+(defun native-local-layout (function blocks offset)
+  ;; Reuse temporary locals whose entire lifetime is inside one basic block.
+  ;; Bindings, dynamic scopes, block arguments and cross-block values keep
+  ;; dedicated locals, so loops and nonlocal exits need no interval heuristics.
+  (let ((owners (native-value-table function)) (last-use (native-value-table function))
+        (locals (native-value-table function)) (aliases (native-value-table function)) (count 0))
+    (dolist (block blocks)
+      (let ((position 0))
+        (dolist (instruction (append (hir-block-instructions block) (list (hir-block-terminator block))))
+          (dolist (value (cons (hir-instruction-output instruction) (hir-instruction-inputs instruction)))
+            (when value
+              (let ((owner (native-value-slot owners value)))
+                (setf (native-value-slot owners value) (if (or (null owner) (eq owner block)) block :shared)))))
+          (dolist (input (hir-instruction-inputs instruction)) (setf (native-value-slot last-use input) position))
+          (incf position))))
+    (dolist (value (hir-function-values function))
+      (when (and (native-value-slot *wasm-live-values* value) (not (native-value-slot *wasm-inline-constants* value)))
+        (let* ((producer (hir-value-producer value))
+               (alias (and (%hir-instruction-p producer)
+                        (member (hir-instruction-opcode producer) '(:block-enter :block-environment))
+                        (not (hir-target-captured-p (first (hir-instruction-attributes producer))))
+                        (first (hir-instruction-inputs producer)))))
+          (cond (alias (setf (native-value-slot aliases value) alias))
+                ((or (member (hir-value-kind value) '(:dynamic :cell)) (native-value-slot *wasm-local-cells* value) (%hir-block-p producer)
+                     (eq value (hir-function-environment function))
+                     (eq (native-value-slot owners value) :shared))
+                 (setf (native-value-slot locals value) (+ offset count)) (incf count))))))
+    (let ((pinned count))
+      (dolist (block blocks)
+        (let* ((instructions (append (hir-block-instructions block) (list (hir-block-terminator block))))
+               (even (make-array (1+ (length instructions)) :initial-element nil))
+               (odd (make-array (1+ (length instructions)) :initial-element nil))
+               (free (loop for i from pinned below count collect (+ offset i))) (position 0))
+          (dolist (instruction instructions)
+            ;; The old active-list scan reversed survivors each instruction.
+            ;; Birth-parity buckets reproduce its exact free-list order while
+            ;; touching only locals that expire here, not all survivors.
+            (setq free (if (evenp position)
+                           (nconc (aref even position) (nreconc (aref odd position) free))
+                           (nconc (aref odd position) (nreconc (aref even position) free))))
+            (setf (aref even position) nil (aref odd position) nil)
+            (let ((output (hir-instruction-output instruction)))
+              (when (and output (native-value-slot *wasm-live-values* output)
+                         (not (native-value-slot *wasm-inline-constants* output))
+                         (not (native-value-slot locals output)) (not (native-value-slot aliases output)))
+                (let ((index (if free (pop free) (prog1 (+ offset count) (incf count)))))
+                  (setf (native-value-slot locals output) index)
+                  ;; Inputs expire before this instruction stores its result.
+                  ;; An unused result cannot expire before its own creation.
+                  (push index (aref (if (evenp position) even odd)
+                               (max (1+ position) (or (native-value-slot last-use output) position)))))))
+            (incf position)))))
+    (dolist (value (hir-function-values function))
+      (let ((alias (native-value-slot aliases value)))
+        (when alias (setf (native-value-slot locals value) (native-value-slot locals alias)))))
+    (values locals count)))
+
+(defun native-inline-constants (function blocks)
+  ;; Literal lookup is pure and always returns the same object. A single use
+  ;; needs no temporary local; NIL is cheaper to recreate at any number of uses.
+  (let ((uses (native-value-table function 0)) (constants (native-value-table function)))
+    (dolist (block blocks)
+      (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+        (dolist (input (hir-instruction-inputs instruction))
+          ;; Direct cell writes can read their value twice in the emitter.
+          (incf (native-value-slot uses input) (if (eq (hir-instruction-opcode instruction) :cell-write) 2 1)))))
+    (dolist (block blocks)
+      (dolist (instruction (hir-block-instructions block))
+        (when (and (eq (hir-instruction-opcode instruction) :constant)
+                   (or (null (first (hir-instruction-attributes instruction)))
+                       (= (native-value-slot uses (hir-instruction-output instruction)) 1)))
+          (setf (native-value-slot constants (hir-instruction-output instruction)) t))))
+    constants))
 
 (defun native-single-calls (function scalar)
   ;; Multiple-value packets are only needed when a consumer observes the
   ;; group. Do not allocate a packet merely to extract its primary value.
   ;; Keep this representation choice local to emission: HIR remains reusable.
-  (let ((calls (make-hash-table :test 'eq)))
+  (let ((calls (native-value-table function)))
     (dolist (value (hir-function-values function))
       (let ((producer (hir-value-producer value)))
-        (when (and (hir-instruction-p producer) (eq (hir-instruction-opcode producer) :call)
-                   (<= (length (hir-instruction-inputs producer)) 6) (gethash value scalar))
-          (setf (gethash value calls) t))))
+        (when (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :call)
+                   (<= (length (hir-instruction-inputs producer)) 6) (native-value-slot scalar value))
+          (setf (native-value-slot calls value) t))))
     calls))
 
 (defun native-full-groups (function)
   ;; Propagate multiple-value demand backwards through joins. An IF used in
   ;; a single-value context must not force each arm through the full protocol.
-  (let ((full (make-hash-table :test 'eq)) (sources (make-hash-table :test 'eq)) (work nil))
+  (let ((full (native-value-table function)) (sources (native-value-table function)) (work nil))
     (dolist (block (hir-function-blocks function))
       (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
         (let* ((opcode (hir-instruction-opcode instruction))
@@ -212,26 +347,26 @@
           (cond
             (parameter
              (push (if (eq opcode :jump) (first (hir-instruction-inputs instruction))
-                       (third (hir-instruction-inputs instruction))) (gethash parameter sources)))
+                       (third (hir-instruction-inputs instruction))) (native-value-slot sources parameter)))
             ((not (eq opcode :primary))
              (dolist (input (hir-instruction-inputs instruction))
                (when (eq (hir-value-kind input) :multiple) (push input work))))))))
     (loop while work do
       (let ((value (pop work)))
-        (unless (gethash value full)
-          (setf (gethash value full) t)
-          (dolist (source (gethash value sources)) (push source work)))))
+        (unless (native-value-slot full value)
+          (setf (native-value-slot full value) t)
+          (dolist (source (native-value-slot sources value)) (push source work)))))
     full))
 
 (defun native-scalar-groups (function)
   ;; Value cardinality is independent of object type. Carry groups known to
   ;; contain exactly one value as the value itself, including through joins.
-  (let ((scalar (make-hash-table :test 'eq)) (incoming (make-hash-table :test 'eq)) (changed t))
+  (let ((scalar (native-value-table function)) (incoming (make-hash-table :test 'eq)) (changed t))
     (dolist (block (hir-function-blocks function))
       (dolist (instruction (hir-block-instructions block))
         (when (and (eq (hir-instruction-opcode instruction) :values)
                    (= (length (hir-instruction-inputs instruction)) 1))
-          (setf (gethash (hir-instruction-output instruction) scalar) t)))
+          (setf (native-value-slot scalar (hir-instruction-output instruction)) t)))
       (let* ((terminator (hir-block-terminator block)) (opcode (hir-instruction-opcode terminator))
              (target (first (hir-instruction-attributes terminator))))
         (when (and (member opcode '(:jump :block-return)) target (hir-block-parameters target))
@@ -245,13 +380,13 @@
       (setq changed nil)
       (dolist (block (hir-function-blocks function))
         (let ((parameter (first (hir-block-parameters block))) (values (gethash block incoming)))
-          (when (and parameter values (not (gethash parameter scalar))
-                     (every (lambda (value) (gethash value scalar)) values))
-            (setf (gethash parameter scalar) t) (setq changed t)))))
+          (when (and parameter values (not (native-value-slot scalar parameter))
+                     (every (lambda (value) (native-value-slot scalar value)) values))
+            (setf (native-value-slot scalar parameter) t) (setq changed t)))))
     (let ((full (native-full-groups function)))
       (dolist (value (hir-function-values function))
-        (when (and (eq (hir-value-kind value) :multiple) (not (gethash value full)))
-          (setf (gethash value scalar) t))))
+        (when (and (eq (hir-value-kind value) :multiple) (not (native-value-slot full value)))
+          (setf (native-value-slot scalar value) t))))
     scalar))
 
 (defun emit-native-fixed-call (inputs)
@@ -261,7 +396,7 @@
 
 (defun emit-native-cons-access (inputs)
   (let* ((function (second inputs)) (producer (hir-value-producer function))
-         (name (when (and (hir-instruction-p producer)
+         (name (when (and (%hir-instruction-p producer)
                          (eq (hir-instruction-opcode producer) :function-reference))
                  (first (hir-instruction-attributes producer))))
          (field (cond ((member name '(car first)) 4) ((member name '(cdr rest)) 5)))
@@ -285,10 +420,19 @@
     (wasm-byte #x05) (emit-native-fixed-call inputs) (wasm-byte #x0b)
     t))
 
+(defun native-fixed-arity (function)
+  (dolist (instruction (hir-block-instructions (hir-function-entry function)))
+    (when (eq (hir-instruction-opcode instruction) :check-arguments)
+      (let ((limits (hir-instruction-attributes instruction)))
+        (return-from native-fixed-arity
+          (and (= (first limits) (second limits)) (<= 0 (first limits) 4) (first limits)))))))
+
 (defun emit-native-instruction (instruction)
   (let ((inputs (hir-instruction-inputs instruction)) (attributes (hir-instruction-attributes instruction))
         (output (hir-instruction-output instruction)))
-    (when (and (native-removable-p instruction) (not (gethash output *wasm-live-values*)))
+    (when (native-value-slot *wasm-inline-constants* output)
+      (return-from emit-native-instruction nil))
+    (when (and (native-removable-p instruction) (not (native-value-slot *wasm-live-values* output)))
       (return-from emit-native-instruction nil))
     (when (and (member (hir-instruction-opcode instruction) '(:block-enter :block-environment))
                (not (hir-target-captured-p (first attributes))))
@@ -302,6 +446,13 @@
       (:check-arguments
        (wasm-local 1) (wasm-integer (first attributes)) (wasm-integer (second attributes))
        (wasm-call "native-check-arguments"))
+      (:check-apply-arguments
+       (wasm-get (first inputs)) (wasm-integer (first attributes))
+       (wasm-call "native-check-apply-arguments"))
+      (:check-apply-list
+       (wasm-get (first inputs)) (wasm-call "native-check-apply-list"))
+      (:checked-argument
+       (wasm-get (first inputs)) (wasm-integer (first attributes)) (wasm-call "native-argument"))
       (:truth
        (wasm-get (first inputs)) (wasm-byte #xd1)
        (wasm-byte #x04) (wasm-type :object) (wasm-null)
@@ -322,23 +473,26 @@
        (wasm-call "native-bind"))
       (:environment-restore
        (wasm-get (first inputs)) (wasm-call "native-restore-environment"))
-      (:values (if (gethash output *wasm-scalar-groups*)
+      (:values (if (native-value-slot *wasm-scalar-groups* output)
                    (if inputs (wasm-get (first inputs)) (wasm-null)) (wasm-list inputs)))
+      (:values-list
+       (wasm-get (first inputs))
+       (when (native-value-slot *wasm-scalar-groups* (first inputs)) (wasm-null) (wasm-call "native-cons")))
       (:list (wasm-list inputs))
       (:value-ref
-       (if (gethash (first inputs) *wasm-scalar-groups*) (wasm-null)
+       (if (native-value-slot *wasm-scalar-groups* (first inputs)) (wasm-null)
            (progn (wasm-get (first inputs)) (wasm-integer (first attributes)) (wasm-call "native-argument"))))
       ((:cell-new :cell-read :cell-write :primary)
        (cond
          ((and (eq (hir-instruction-opcode instruction) :primary)
-               (or (gethash (first inputs) *wasm-single-calls*)
-                   (gethash (first inputs) *wasm-scalar-groups*)))
+               (or (native-value-slot *wasm-single-calls* (first inputs))
+                   (native-value-slot *wasm-scalar-groups* (first inputs))))
           (wasm-get (first inputs)))
-         ((and (eq (hir-instruction-opcode instruction) :cell-new) (gethash output *wasm-local-cells*))
+         ((and (eq (hir-instruction-opcode instruction) :cell-new) (native-value-slot *wasm-local-cells* output))
           (wasm-get (first inputs)))
-         ((and (eq (hir-instruction-opcode instruction) :cell-read) (gethash (first inputs) *wasm-local-cells*))
+         ((and (eq (hir-instruction-opcode instruction) :cell-read) (native-value-slot *wasm-local-cells* (first inputs)))
           (wasm-get (first inputs)))
-         ((and (eq (hir-instruction-opcode instruction) :cell-write) (gethash (first inputs) *wasm-local-cells*))
+         ((and (eq (hir-instruction-opcode instruction) :cell-write) (native-value-slot *wasm-local-cells* (first inputs)))
           (wasm-get (second inputs)) (wasm-set (first inputs)) (wasm-get (second inputs)))
          (t
           (dolist (input inputs) (wasm-get input))
@@ -346,45 +500,62 @@
                     (:cell-new "native-cell") (:cell-read "native-cell-read")
                     (:cell-write "native-cell-write") (:primary "native-primary"))))))
       (:call
-       (if (gethash output *wasm-single-calls*)
+       (if (native-value-slot *wasm-single-calls* output)
            ;; Keep guards in the shared native primitives. Repeating CAR/CDR
            ;; type and redefinition checks at every call bloats Lisp-heavy code.
            (emit-native-fixed-call inputs)
            (progn (wasm-get (first inputs)) (wasm-get (second inputs))
                   (wasm-list (cddr inputs)) (wasm-call "native-call")
-                  (when (gethash output *wasm-scalar-groups*) (wasm-call "native-primary")))))
+                  (when (native-value-slot *wasm-scalar-groups* output) (wasm-call "native-primary")))))
       (:control-call
        (wasm-get (first inputs)) (wasm-integer (first attributes)) (wasm-get (second inputs))
        (if (member (first attributes) '(1 2 4 5 6 7)) (wasm-list (nthcdr 4 inputs)) (wasm-get (fourth inputs)))
        (wasm-get (third inputs)) (wasm-call "native-control")
-       (when (gethash output *wasm-scalar-groups*) (wasm-call "native-primary")))
+       (when (native-value-slot *wasm-scalar-groups* output) (wasm-call "native-primary")))
       (:restart-signal
        (wasm-get (first inputs)) (wasm-integer (first attributes))
        (wasm-list (cddr inputs)) (wasm-get (second inputs)) (wasm-call "native-restart-signal")
-       (when (gethash output *wasm-scalar-groups*) (wasm-call "native-primary")))
+       (when (native-value-slot *wasm-scalar-groups* output) (wasm-call "native-primary")))
       (:multiple-value-call
        (wasm-get (first inputs)) (wasm-get (second inputs))
        (dolist (group (cddr inputs))
          (wasm-get group)
-         (when (gethash group *wasm-scalar-groups*) (wasm-null) (wasm-call "native-cons")))
+         (when (native-value-slot *wasm-scalar-groups* group) (wasm-null) (wasm-call "native-cons")))
        (wasm-null) (dotimes (i (length (cddr inputs))) (wasm-call "native-cons"))
        (wasm-call "native-multiple-value-call")
-       (when (gethash output *wasm-scalar-groups*) (wasm-call "native-primary")))
+       (when (native-value-slot *wasm-scalar-groups* output) (wasm-call "native-primary")))
       (:capture
        (wasm-local 0) (wasm-integer (first attributes)) (wasm-call "native-capture"))
       (:closure
        (pushnew (first attributes) *wasm-referenced-functions*)
        (wasm-byte #xd2)
-       (wasm-u32 (+ (length *native-imports*) (position (first attributes) *native-functions*)))
-       (wasm-local 0) (wasm-list inputs) (wasm-call "native-close"))
+       (when *wasm-function-relocations*
+         (push (list (length *wasm-bytes*) (first attributes))
+               (gethash *wasm-current-function* *wasm-function-relocations*)))
+       (wasm-u32 (+ (length *native-imports*) (gethash (first attributes) *native-function-indices*)))
+       (wasm-local 0) (wasm-list inputs)
+       (let ((arity (native-fixed-arity (first attributes))))
+         (if (and *wasm-static-closures*
+                  (every (lambda (input)
+                           (let ((producer (hir-value-producer input)))
+                             (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :capture)))) inputs))
+             (progn
+               ;; Existing captures retain the same lexical binding instances
+               ;; on every invocation of this parent function object.
+               (wasm-integer (or arity -1))
+               (wasm-integer (or (gethash (first attributes) *wasm-static-closures*)
+                 (setf (gethash (first attributes) *wasm-static-closures*) (hash-table-count *wasm-static-closures*))))
+               (wasm-call "native-close-cached"))
+             (if arity (progn (wasm-integer arity) (wasm-call "native-close-fixed"))
+                 (wasm-call "native-close")))))
       (otherwise (error "Native lowering is not implemented for ~S." (hir-instruction-opcode instruction))))
     (when output (wasm-set output))))
 
 (defun emit-native-jump-value (block value)
   (when value
     (wasm-get value)
-    (when (and (gethash value *wasm-scalar-groups*)
-               (not (gethash (first (hir-block-parameters block)) *wasm-scalar-groups*)))
+    (when (and (native-value-slot *wasm-scalar-groups* value)
+               (not (native-value-slot *wasm-scalar-groups* (first (hir-block-parameters block)))))
       (wasm-null) (wasm-call "native-cons"))
     (wasm-set (first (hir-block-parameters block)))))
 
@@ -402,11 +573,11 @@
   (when *wasm-dynamic-bindings*
     (wasm-get *wasm-entry-environment*) (wasm-call "native-restore-environment"))
   (wasm-get value)
-  (wasm-call (if (gethash value *wasm-scalar-groups*) "native-return1" "native-return")))
+  (wasm-call (if (native-value-slot *wasm-scalar-groups* value) "native-return1" "native-return")))
 
 (defun emit-native-throw (inputs)
   (dolist (input inputs) (wasm-get input))
-  (when (gethash (third inputs) *wasm-scalar-groups*) (wasm-null) (wasm-call "native-cons"))
+  (when (native-value-slot *wasm-scalar-groups* (third inputs)) (wasm-null) (wasm-call "native-cons"))
   (wasm-call "native-throw") (wasm-byte #x00))
 
 (defun native-block-targets (function)
@@ -420,7 +591,7 @@
 
 (defun emit-native-block-return (inputs)
   (wasm-get (second inputs)) (wasm-get (third inputs))
-  (when (gethash (third inputs) *wasm-scalar-groups*) (wasm-null) (wasm-call "native-cons"))
+  (when (native-value-slot *wasm-scalar-groups* (third inputs)) (wasm-null) (wasm-call "native-cons"))
   (wasm-call "native-block-return") (wasm-byte #x00))
 
 (defun emit-native-forward (blocks)
@@ -463,11 +634,17 @@
     (wasm-byte #x0b)))
 
 (defun emit-native-function (function)
-  ;; Boxed SSA values are externref locals. A dispatcher is a first correct
-  ;; lowering of arbitrary CFG edges; structured regions replace it later.
+  (let ((*wasm-current-function* function))
+    (let ((body (emit-native-function-body function)))
+      (if *wasm-optimize* (native-optimize-body body) body))))
+
+(defun native-function-plan (function)
+  ;; HIR is unchanged between import discovery and final emission. Literal
+  ;; indices, closure objects and relocations remain per-emission state.
   (let* ((targets (native-block-targets function))
         (forward (unless targets (native-forward-blocks function)))
         (blocks (or forward (hir-function-blocks function)))
+        (*wasm-inline-constants* (native-inline-constants function blocks))
         (*wasm-local-cells* (native-direct-cells function))
         (*wasm-dynamic-bindings* (or targets (some (lambda (block)
           (some (lambda (instruction) (eq (hir-instruction-opcode instruction) :dynamic-bind))
@@ -476,25 +653,48 @@
         (*wasm-live-values* (native-live-values function *wasm-dynamic-bindings* blocks))
         (*wasm-scalar-groups* (native-scalar-groups function))
         (*wasm-single-calls* (native-single-calls function *wasm-scalar-groups*))
-        (*wasm-locals* (make-hash-table :test 'eq)) (count 0))
-   (dolist (value (hir-function-values function))
-     (when (gethash value *wasm-live-values*)
-       (let* ((producer (hir-value-producer value))
-              (alias (and (hir-instruction-p producer)
-                       (member (hir-instruction-opcode producer) '(:block-enter :block-environment))
-                       (not (hir-target-captured-p (first (hir-instruction-attributes producer))))
-                       (first (hir-instruction-inputs producer)))))
-         (if alias (setf (gethash value *wasm-locals*) (gethash alias *wasm-locals*))
-             (progn (setf (gethash value *wasm-locals*) (+ (if forward 2 3) count)) (incf count))))))
+        (locals nil) (count 0))
+    (multiple-value-setq (locals count)
+      (native-local-layout function blocks (if forward 2 3)))
+    (vector targets forward *wasm-inline-constants* *wasm-local-cells*
+            *wasm-dynamic-bindings* *wasm-entry-environment* *wasm-live-values*
+            *wasm-scalar-groups* *wasm-single-calls* locals count)))
+
+(defun emit-native-function-body (function)
+  ;; Boxed SSA values are externref locals. A dispatcher is a first correct
+  ;; lowering of arbitrary CFG edges; structured regions replace it later.
+  (let* ((*wasm-current-function* function)
+         (*wasm-last-local* nil)
+         ;; Unit initializers run once. Other stable closures may share
+         ;; their function object, as permitted by CLHS FUNCTION.
+         (*wasm-static-closures* (unless (and *wasm-literal-groups* (gethash function *wasm-literal-groups*))
+                                  (make-hash-table :test 'eq)))
+         (root (loop for root = function then (hir-function-parent root)
+                    while (hir-function-parent root) finally (return root)))
+        (group (and *wasm-literal-groups* (gethash root *wasm-literal-groups*)))
+        (*wasm-literals* (if group (first group) *wasm-literals*))
+        (*wasm-literal-index* (if group (second group) *wasm-literal-index*))
+        (plan (or (and *wasm-function-plans* (gethash function *wasm-function-plans*))
+                  (let ((plan (native-function-plan function)))
+                    (when *wasm-function-plans* (setf (gethash function *wasm-function-plans*) plan))
+                    plan)))
+        (targets (svref plan 0)) (forward (svref plan 1))
+        (blocks (or forward (hir-function-blocks function)))
+        (*wasm-inline-constants* (svref plan 2)) (*wasm-local-cells* (svref plan 3))
+        (*wasm-dynamic-bindings* (svref plan 4)) (*wasm-entry-environment* (svref plan 5))
+        (*wasm-live-values* (svref plan 6)) (*wasm-scalar-groups* (svref plan 7))
+        (*wasm-single-calls* (svref plan 8)) (*wasm-locals* (svref plan 9)) (count (svref plan 10)))
+   (when *wasm-function-relocations*
+     (setf (gethash function *wasm-function-relocations*) nil))
    (with-wasm-bytes
     (wasm-u32 (if forward 1 2))
     (unless forward (wasm-u32 1) (wasm-type :i32))
     (wasm-u32 count) (wasm-type :object)
-    (when (gethash (hir-function-environment function) *wasm-live-values*)
+    (when (native-value-slot *wasm-live-values* (hir-function-environment function))
       (wasm-call "native-environment") (wasm-set (hir-function-environment function)))
     (when forward
       (emit-native-forward blocks)
-      (return-from emit-native-function *wasm-bytes*))
+      (return-from emit-native-function-body *wasm-bytes*))
     (wasm-integer (hir-block-id (hir-function-entry function))) (wasm-byte #x21) (wasm-u32 2)
     (when targets
       (setq *wasm-exceptions* t)
@@ -548,7 +748,7 @@
         (wasm-call "native-block-values")
         (let ((parameter (first (hir-block-parameters (hir-target-block target)))))
           (if parameter
-              (progn (when (gethash parameter *wasm-scalar-groups*) (wasm-call "native-primary"))
+              (progn (when (native-value-slot *wasm-scalar-groups* parameter) (wasm-call "native-primary"))
                      (wasm-set parameter))
               (wasm-byte #x1a)))
         (wasm-integer (hir-block-id (hir-target-block target)))
@@ -558,24 +758,165 @@
       (wasm-byte #x0b) (wasm-byte #x00))
     (wasm-byte #x0b))))
 
-(defun emit-native-module (unit)
+(defun native-literal-groups (entries)
+  (let ((groups (make-hash-table :test 'eq)))
+    (dolist (entry entries)
+      (setf (gethash entry groups) (list (make-array 16 :adjustable t :fill-pointer 0)
+                                       (make-hash-table :test 'eq))))
+    groups))
+
+(defun native-function-indices (functions)
+  (let ((indices (make-hash-table :test 'eq)) (index 0))
+    (dolist (function functions) (setf (gethash function indices) index) (incf index))
+    indices))
+
+(defun native-coalesce-bodies (bodies)
+  ;; Equal bodies may still have different literal values and captures: both
+  ;; live in the function object passed through the boxed entry convention.
+  (let ((seen (make-hash-table :test 'equal)) (indices (make-hash-table :test 'eq))
+        (unique nil) (count 0) (changed nil))
+    (loop for function in *native-functions* for body in bodies do
+      (let ((key (or (gethash body *wasm-body-keys*)
+                     (setf (gethash body *wasm-body-keys*) (map 'string #'code-char body)))))
+       (multiple-value-bind (index found) (gethash key seen)
+        (unless found
+          (setq index count) (incf count) (push body unique)
+          (setf (gethash key seen) index))
+        (unless (= index (gethash function *native-function-indices*)) (setq changed t))
+        (setf (gethash function indices) index))))
+    (values (nreverse unique) indices changed)))
+
+(defun native-relocate-body (function body original-indices)
+  (let ((relocations (gethash function *wasm-function-relocations*)) (cursor 0))
+    (unless (some (lambda (entry)
+              (/= (gethash (second entry) original-indices)
+                  (gethash (second entry) *native-function-indices*))) relocations)
+      (return-from native-relocate-body body))
+    (with-wasm-bytes
+      (dolist (entry (reverse relocations))
+        (loop for i from cursor below (first entry) do (wasm-byte (aref body i)))
+        (setq cursor (first entry))
+        ;; Skip the original unsigned LEB; its replacement may be shorter.
+        (loop for byte = (aref body cursor) do (incf cursor) until (< byte 128))
+        (wasm-u32 (+ (length *native-imports*) (gethash (second entry) *native-function-indices*))))
+      (loop for i from cursor below (length body) do (wasm-byte (aref body i))))))
+
+(defun emit-native-bodies (entries)
+  (let ((original (mapcar #'emit-native-function *native-functions*))
+        (original-indices *native-function-indices*)
+        (*wasm-body-keys* (make-hash-table :test 'eq)))
+    (unless entries (return-from emit-native-bodies original))
+    (loop
+      (let ((bodies (mapcar (lambda (function body)
+                             (native-relocate-body function body original-indices)) *native-functions* original)))
+        (multiple-value-bind (unique indices changed) (native-coalesce-bodies bodies)
+          (setq *native-function-indices* indices)
+          ;; Patch REF.FUNC operands when their targets merge. Literal layouts
+          ;; stay unchanged; HIR and full bodies need to be emitted only once.
+          (unless changed
+            (return (native-order-bodies entries original original-indices unique))))))))
+
+(defun native-order-bodies (entries original original-indices unique)
+  ;; Compact frequently referenced function indices after body sharing reaches
+  ;; a fixed point. Relocate from the original bodies, whose offsets are known.
+  (when (<= (+ (length *native-imports*) (length unique)) 128)
+    (return-from native-order-bodies unique))
+  (let* ((size (length unique)) (representatives (make-array size :initial-element nil))
+         (counts (make-array size :initial-element 0))
+         (order (loop for i below size collect i)) (mapping (make-array size)))
+    (loop for function in *native-functions* for body in original do
+      (let ((index (gethash function *native-function-indices*)))
+        (unless (aref representatives index)
+          (setf (aref representatives index) (cons function body)))))
+    (loop for entry across representatives do
+      (dolist (relocation (gethash (car entry) *wasm-function-relocations*))
+        (incf (aref counts (gethash (second relocation) *native-function-indices*)))))
+    (dolist (entry entries) (incf (aref counts (gethash entry *native-function-indices*))))
+    (setq order (stable-sort order #'> :key (lambda (i) (aref counts i))))
+    (loop for old in order for new from 0 do (setf (aref mapping old) new))
+    (dolist (function *native-functions*)
+      (setf (gethash function *native-function-indices*)
+        (aref mapping (gethash function *native-function-indices*))))
+    (mapcar (lambda (index)
+              (let ((entry (aref representatives index)))
+                (native-relocate-body (car entry) (cdr entry) original-indices))) order)))
+
+(defun native-prune-module (bodies entries)
+  ;; RemoveUnusedModuleElements after branch/DCE cleanup. No calls or closure
+  ;; entries are renumbered until body sharing and function layout are final.
+  (let* ((old-count (length *native-imports*)) (used (make-array old-count :initial-element nil))
+         (mapping (make-array old-count))
+         (decoded (coerce (mapcar (lambda (body) (native-read-ops body t)) bodies) 'vector))
+         (live (make-array (length bodies) :initial-element nil))
+         (functions (make-array (length bodies))) (function-count 0)
+         (work (if entries (mapcar (lambda (entry) (gethash entry *native-function-indices*)) entries) '(0)))
+         (imports nil) (next 0))
+    ;; Only exports and function references in reachable code are roots. The
+    ;; declarative element segment grants REF.FUNC permission, not reachability.
+    (loop while work for index = (pop work) do
+      (unless (aref live index)
+        (setf (aref live index) t)
+        (loop for op across (aref decoded index) do
+          (when (member (native-op-code op) '(#x10 #xd2))
+            (let ((target (native-op-argument op)))
+              (if (< target old-count) (setf (aref used target) t)
+                  (push (- target old-count) work)))))))
+    (loop for import in *native-imports* for i from 0 do
+      (when (aref used i)
+        (setf (aref mapping i) next) (incf next) (push import imports)))
+    (dotimes (i (length bodies))
+      (when (aref live i) (setf (aref functions i) function-count) (incf function-count)))
+    (when (and (= next old-count) (= function-count (length bodies)))
+      (return-from native-prune-module bodies))
+    (setq *native-imports* (nreverse imports))
+    (dolist (function *native-functions*)
+      (let ((old (gethash function *native-function-indices*)))
+        (setf (gethash function *native-function-indices*) (and (aref live old) (aref functions old)))))
+    (setq *wasm-referenced-functions*
+      (remove-duplicates
+        (remove-if-not (lambda (function) (gethash function *native-function-indices*)) *wasm-referenced-functions*)
+        :key (lambda (function) (gethash function *native-function-indices*))))
+    (loop for body in bodies for old from 0 when (aref live old) collect
+      (let ((ops (aref decoded old)))
+              (with-wasm-bytes
+                (let ((cursor 0))
+                 (loop for op across ops for code = (native-op-code op) do
+                      (loop for i from cursor below (native-op-start op) do (wasm-byte (aref body i)))
+                      (let ((index (native-op-argument op)))
+                        (wasm-byte code)
+                        (wasm-u32 (if (< index old-count) (aref mapping index)
+                                      (+ next (aref functions (- index old-count))))))
+                      (setq cursor (native-op-end op)))
+                 (loop for i from cursor below (length body) do (wasm-byte (aref body i)))))))))
+
+(defun emit-native-module (unit &key entries)
   "Return Wasm bytes and literal objects; do not instantiate or run application code."
   (ensure-compiler)
   (verify-hir unit)
   (let* ((*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
          (*wasm-literal-index* (make-hash-table :test 'eq))
+         (*wasm-literal-groups* (and entries (native-literal-groups entries)))
          (*native-functions* (hir-unit-functions unit))
-         (*wasm-used-imports* nil) (*wasm-referenced-functions* nil)
+         (*wasm-function-plans* (make-hash-table :test 'eq))
+         (*native-function-indices* (native-function-indices *native-functions*))
+         (*wasm-function-relocations* (and entries (make-hash-table :test 'eq)))
+         (*wasm-used-imports* nil) (*wasm-import-counts* (make-hash-table :test 'equal))
+         (*wasm-referenced-functions* nil)
          (*wasm-object-types* nil) (*wasm-exceptions* nil) (*wasm-builtin-codes* (make-hash-table :test 'eq)))
-    ;; Collect imports using the emitter itself. Regenerate after assigning the
-    ;; compact function indices, including REF.FUNC indices in closures.
-    (mapc #'emit-native-function *native-functions*)
+    ;; Collect an import superset using raw emission; only final bodies need
+    ;; size analysis. Regenerate with compact indices, then prune functions and
+    ;; imports made unreachable by constant/control cleanup.
+    (mapc #'emit-native-function-body *native-functions*)
     (let* ((type-prefix (if *wasm-object-types* 2 0))
-         (*native-imports* (remove-if-not (lambda (import) (member (first import) *wasm-used-imports* :test #'equal))
-                                          *native-imports*))
+         (*native-imports* (stable-sort
+                           (remove-if-not (lambda (import) (member (first import) *wasm-used-imports* :test #'equal))
+                                          *native-imports*)
+                           #'> :key (lambda (import) (gethash (first import) *wasm-import-counts* 0))))
          (*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
          (*wasm-literal-index* (make-hash-table :test 'eq))
-         (bodies (mapcar #'emit-native-function *native-functions*))
+         (*wasm-literal-groups* (and entries (native-literal-groups entries)))
+         (bodies (emit-native-bodies entries))
+         (bodies (if *wasm-optimize* (native-prune-module bodies entries) bodies))
          (signatures (remove-duplicates
                        (append (mapcar #'cdr *native-imports*) (list '((:object :object) :object))
                          (when *wasm-exceptions* (list '(nil nil)))) :test #'equal))
@@ -601,40 +942,52 @@
              (dolist (body bodies) (declare (ignore body))
                (wasm-u32 (+ type-prefix (position '((:object :object) :object) signatures :test #'equal))))))
            (wasm-section 7 (with-wasm-bytes
-             (wasm-u32 1) (wasm-name "entry") (wasm-byte 0) (wasm-u32 (length *native-imports*))))
+             (wasm-u32 (if entries (length entries) 1))
+             (if entries
+                 (loop for entry in entries for index from 0 do
+                   (wasm-name (format nil "entry~D" index)) (wasm-byte 0)
+                   (wasm-u32 (+ (length *native-imports*) (gethash entry *native-function-indices*))))
+                 (progn (wasm-name "entry") (wasm-byte 0) (wasm-u32 (length *native-imports*))))))
            (when *wasm-referenced-functions*
              (wasm-section 9 (with-wasm-bytes
                (wasm-u32 1) (wasm-u32 3) (wasm-byte 0) (wasm-u32 (length *wasm-referenced-functions*))
                (dolist (function *wasm-referenced-functions*)
-                 (wasm-u32 (+ (length *native-imports*) (position function *native-functions*)))))))
+                 (wasm-u32 (+ (length *native-imports*) (gethash function *native-function-indices*)))))))
            (wasm-section 10 (with-wasm-bytes
              (wasm-u32 (length bodies))
              (dolist (body bodies) (wasm-u32 (length body)) (loop for byte across body do (wasm-byte byte))))))))
-    (values bytes (coerce *wasm-literals* 'simple-vector)))))
+    (values bytes (if entries
+                     (mapcar (lambda (entry) (coerce (first (gethash entry *wasm-literal-groups*)) 'simple-vector)) entries)
+                     (coerce *wasm-literals* 'simple-vector))))))
 
 (defun compile-native (lambda-expression &key name)
   "Compile a lambda to native Wasm using the current host's module loader."
-  (when (and (not *compiler-bootstrapping*) (compiler-primitive 23 nil))
-    (return-from compile-native (compiler-primitive 24 lambda-expression name)))
   (ensure-compiler)
-  (multiple-value-bind (bytes literals) (emit-native-module (compile-to-hir lambda-expression :name name))
-    (multiple-value-bind (function native) (compiler-primitive 17 bytes literals name)
-      (unless native (error "This host cannot instantiate compiled Wasm modules.")) function)))
+  (let ((unit (compile-to-hir lambda-expression :name name)))
+    (multiple-value-bind (bytes literals) (emit-native-module unit)
+      (multiple-value-bind (function native) (compiler-primitive 17 bytes literals name)
+        (unless native (error "This host cannot instantiate compiled Wasm modules."))
+        (let ((arity (native-fixed-arity (first (hir-unit-functions unit)))))
+          (if arity (values (compiler-primitive 30 function arity)) function))))))
 
 (defparameter *native-compiler-seeds*
   '(compiler-primitive
                    wasm-byte wasm-u32 wasm-s32 wasm-name wasm-type wasm-section wasm-call
                    wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
                    native-builtin-code emit-native-object-types wasm-literal wasm-list
-                   native-removable-p native-direct-cells native-forward-blocks native-live-values native-single-calls native-full-groups native-scalar-groups native-block-targets
-                   emit-native-fixed-call emit-native-cons-access emit-native-instruction emit-native-jump-value emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
+                   native-removable-p native-direct-cells native-forward-blocks native-live-values native-local-layout native-single-calls native-full-groups native-scalar-groups native-block-targets
+                   emit-native-fixed-call emit-native-cons-access native-fixed-arity emit-native-instruction emit-native-jump-value emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant
                    hir-capture hir-cell-for-binding hir-special-p hir-declarations hir-shadow-specials
                    hir-bind-value hir-read-variable hir-write-variable hir-function-reference
-                   hir-small-membership hir-call-arguments hir-case-form hir-macro-environment hir-assert-form
+                   hir-small-membership hir-call-arguments hir-literal-apply-form hir-case-form hir-macro-environment hir-assert-form
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
                    hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir
-                   emit-native-function emit-native-module
+                   native-inline-constants native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies emit-native-module
+                   hir-body hir-close hir-choice hir-expand-local-macros hir-lambda hir-form compile-to-hir
+                   make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-stack native-stackify-ops native-coalesce-ops native-fold-locals native-optimize-body
+                   ;; Compile larger size passes after the frontend and emitter.
+                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops native-prune-module
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
                    definition-info namespace form-references
                    miricl::%compile-place-form miricl::%compile-parallel-places miricl::%compile-loop-collector
@@ -644,10 +997,9 @@
                    miricl::%compile-option-function miricl::%compile-condition miricl::%compile-form
                    miricl::%file-lexical-name miricl::%file-lexical-specials miricl::%file-lexical-bind
                    miricl::%file-lexical-reference miricl::%file-code-cons miricl::%file-lexical-forms
-                   miricl::%file-lexical-function miricl::%file-lexical-form
+                   miricl::%file-lexical-function miricl::%file-lexical-call miricl::%file-lexical-form
                    miricl::%fasl-reference miricl::%fasl-dump
-                   hir-body hir-close hir-choice hir-expand-local-macros hir-lambda hir-form
-                   compile-to-hir compile-native record-edges pool-record-less-p layout-records compact-unit compile-linker ensure-compiler compile-compiler))
+                   compile-native record-edges pool-record-less-p layout-records compact-unit compile-linker ensure-compiler compile-compiler))
 
 (defvar *native-compiler-functions* (make-hash-table :test 'eq))
 (defvar *compiler-state* :cold)
@@ -677,7 +1029,9 @@
 (defun compile-compiler ()
   "Bootstrap supported compiler kernels; return installed names and unsupported sources.
 This does not change the policy for compiling application bodies."
-  (let ((*compiler-bootstrapping* t) (installed nil) (unsupported nil))
+  ;; The first kernels make the optimizer itself fast. The image builder then
+  ;; recompiles them with optimization enabled, using these compiled kernels.
+  (let ((*compiler-bootstrapping* t) (*wasm-optimize* nil) (installed nil) (unsupported nil))
     (dolist (name *native-compiler-seeds*)
       (unless (gethash name *native-compiler-functions*)
         (handler-case

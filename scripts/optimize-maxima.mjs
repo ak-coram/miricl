@@ -1,12 +1,14 @@
-// Compact the complete dynamic Maxima environment with MIRICL's optimizer.
+// Prune metadata and compile the complete dynamic Maxima environment ahead of time.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {Miricl} from './miricl.mjs';
 
-const [image = 'miricl.wasm', input = 'build/maxima/maxima.wasm',
+const [image = 'miricl-precompiled.wasm', input = 'build/maxima/maxima.wasm',
   output = 'build/maxima/maxima-optimized.wasm'] = process.argv.slice(2);
 const original = await fs.readFile(input);
-const vm = await Miricl.instantiate(await fs.readFile(image));
+const vm = await Miricl.instantiate(await fs.readFile(image), {imports: {build: {
+  progress(count) {if (count % 1000 === 0) console.log(`Maxima: compiled ${count} initializers`);},
+}}});
 try {
   vm.mountFile('/maxima-input.wasm', original);
   // A REPL can call any Maxima function and load packages using its macros.
@@ -14,17 +16,23 @@ try {
   // and removing the optional compiler/source index.
   await vm.evaluateAsync(`(progn
     (miricl-compiler:shake-file "/maxima-input.wasm" "/maxima-output.wasm"
-      :strip nil :report "/maxima-retention.txt") (values))`, {eof: true});
+      :strip nil :report "/maxima-retention.txt")
+    (setq miricl:*trap-floating-point-underflow* nil)
+    (load "/maxima-output.wasm")
+    (js:define-import native-build-progress ("build" "progress") (:i32) :void)
+    (miricl-compiler:compile-native-bundle "/maxima-output.wasm" "/maxima-output.wasm"
+      :progress (lambda (file count) (declare (ignore file)) (native-build-progress count)))
+    (values))`, {eof: true});
   const bytes = await vm.readFile('/maxima-output.wasm');
-  if (!WebAssembly.validate(bytes) || bytes.length > original.length)
-    throw new Error('Maxima optimization did not produce a valid, smaller bundle.');
+  if (!WebAssembly.validate(bytes))
+    throw new Error('Maxima optimization did not produce a valid native bundle.');
   await fs.mkdir(path.dirname(output), {recursive: true});
   await fs.writeFile(output, bytes);
   await fs.writeFile(path.join(path.dirname(output), 'retention.txt'), await vm.readFile('/maxima-retention.txt'));
   await fs.writeFile(path.join(path.dirname(output), 'optimization.json'), JSON.stringify({
     inputBytes: original.length, outputBytes: bytes.length,
     retainedInterface: 'complete dynamic Maxima environment',
-    optimizer: 'miricl-compiler:shake-file', strip: false,
+    optimizer: 'miricl-compiler:shake-file + compile-native-bundle', backend: 'native-wasm', strip: false,
   }, null, 2) + '\n');
   console.log(`Optimized Maxima: ${original.length} → ${bytes.length} bytes (${output}).`);
 } finally {vm.close();}

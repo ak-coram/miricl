@@ -23,6 +23,15 @@ async function run(program, args, input) {
   } finally { clearTimeout(timeout); }
 }
 try {
+  const libraryVM = await Miricl.instantiate(await fs.readFile(image));
+  try {
+    libraryVM.mountFile('/miricl-asdf.wasm', await fs.readFile(asdf));
+    assert.equal(libraryVM.evaluate(`(load "/miricl-asdf.wasm")
+      (and (equal (asdf:asdf-version) "3.3.7")
+        (eq (uiop:implementation-type) :miricl)
+        (eq miricl-compiler::*compiler-state* :cold))`).output,
+      'T\nT\n', 'The compact ASDF artifact must load without compiler startup.');
+  } finally {libraryVM.close();}
   await fs.copyFile(asdf, path.join(directory, 'miricl-asdf.wasm'));
   await fs.copyFile(new URL('../miricl.js', import.meta.url), path.join(directory, 'miricl.js'));
   await fs.copyFile(image, path.join(directory, 'miricl.wasm'));
@@ -89,6 +98,18 @@ try {
       assert.match(await fs.readFile(path.join(directory, host, 'retention.txt'), 'utf8'), /DROP :FUNCTION \("BROWSER-START"/);
     } finally { optimizedVM.close(); }
     console.log(`PASS ${host}: whole-program entry points, dead definitions and retention report`);
+    const native = await run(program, [...args, '--optimize', 'demo', '--native', '--entry', 'DEMO:ANSWER',
+      '--output', `${host}/native.wasm`]);
+    assert.equal(native.code, 0, native.output + native.errors);
+    const nativeVM = await Miricl.instantiate(await fs.readFile(image));
+    try {
+      nativeVM.mountFile('/native.wasm', await fs.readFile(path.join(directory, host, 'native.wasm')));
+      nativeVM.evaluate('(load "/native.wasm")');
+      assert.equal(nativeVM.evaluate(`(and (= (demo:answer) 42)
+        (eq miricl-compiler::*compiler-state* :cold)
+        (plusp (miricl-compiler::compiler-primitive 26 #'demo:answer)))`).output, 'T\n');
+    } finally {nativeVM.close();}
+    console.log(`PASS ${host}: --native loads compiled application code without compiler startup`);
     const unstripped = await run(program, [...args, '--optimize', 'demo', '--no-strip',
       '--output', `${host}/unstripped.wasm`, '--report', `${host}/unstripped.txt`]);
     assert.equal(unstripped.code, 0, unstripped.output + unstripped.errors);

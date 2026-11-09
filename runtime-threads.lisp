@@ -123,7 +123,12 @@
   #@(memory.copy 0 $thread-memory (i32.const 0)
     (struct.get $green-thread $memory-offset (local.get $thread))
     (struct.get $green-thread $memory-bytes (local.get $thread)))
-  #@(global.set $thread-budget (i32.const 2048)))
+  #@(global.set $thread-budget (i32.const 2048))
+  ;; Poll cheaply between clock samples, and yield by elapsed time rather than
+  ;; taking a host round trip every few microseconds of native execution.
+  #@(global.set $thread-slice-deadline
+    (f64.add (call $host-service (i32.const 1) (f64.const 0)) (f64.const 8)))
+  #@(global.set $thread-pending (struct.get $green-thread $interrupts (local.get $thread))))
 
 (define-runtime-function $thread-switch () ()
   (wat-fail-when #@(i32.or (i32.eqz (global.get $thread-active))
@@ -137,6 +142,9 @@
            ($values :nullable-object) ($count i32))
   #@(if (i32.or (i32.eqz (global.get $thread-active))
       (i32.or (global.get $thread-mask) (global.get $javascript-depth))) (then (return)))
+  #@(global.set $thread-budget (i32.sub (global.get $thread-budget) (i32.const 1)))
+  #@(if (i32.and (i32.gt_s (global.get $thread-budget) (i32.const 0))
+      (ref.is_null (global.get $thread-pending))) (then (return)))
   #@(local.set $values (global.get $extra-values))
   #@(local.set $count (global.get $value-count))
   #@(local.set $thread (call $thread-current))
@@ -146,9 +154,13 @@
   #@(if (i32.eqz (ref.is_null (local.get $pending)))
     (then
       (struct.set $green-thread $interrupts (local.get $thread) (call $cdr (local.get $pending)))
+      (global.set $thread-pending (call $cdr (local.get $pending)))
       (drop (call $apply (call $car (local.get $pending)) (ref.null $obj)))))
-  #@(global.set $thread-budget (i32.sub (global.get $thread-budget) (i32.const 1)))
-  #@(if (i32.le_s (global.get $thread-budget) (i32.const 0)) (then (call $thread-switch)))
+  #@(if (i32.le_s (global.get $thread-budget) (i32.const 0))
+    (then
+      (global.set $thread-budget (i32.const 2048))
+      (if (f64.ge (call $host-service (i32.const 1) (f64.const 0)) (global.get $thread-slice-deadline))
+        (then (call $thread-switch)))))
   #@(global.set $extra-values (local.get $values))
   #@(global.set $value-count (local.get $count)))
 
@@ -301,6 +313,8 @@
     (then
       (struct.set $green-thread $interrupts (local.get $thread)
         (call $cons (local.get $b) (struct.get $green-thread $interrupts (local.get $thread))))
+      (if (ref.eq (local.get $thread) (global.get $current-thread))
+        (then (global.set $thread-pending (struct.get $green-thread $interrupts (local.get $thread)))))
       (if (i32.eq (struct.get $green-thread $state (local.get $thread)) (i32.const 1))
         (then (struct.set $green-thread $state (local.get $thread) (i32.const 0))))
       (return (ref.null $obj))))
@@ -333,6 +347,10 @@
   #@(global $thread-active (export "thread-active") (mut i32) (i32.const 0))
   #@(global $thread-mask (mut i32) (i32.const 0))
   #@(global $thread-budget (mut i32) (i32.const 2048))
+  ;; Derived from the current thread on entry, never restored from a stale
+  ;; saved context: another thread can enqueue an interrupt while it sleeps.
+  #@(global $thread-pending (mut (ref null $obj)) (ref.null $obj))
+  #@(global $thread-slice-deadline (mut f64) (f64.const 0))
   ($thread-find) ($thread-create) ($thread-current) ($thread-free-scratch) ($thread-allocate-scratch) ($thread-save) ($thread-enter)
   ($thread-switch) ($thread-checkpoint) ($thread-park) ($thread-next) ($thread-delay)
   ($thread-run) ($thread-failed) ($thread-id) ($thread-main-state) ($thread-retire) ($thread-operation))

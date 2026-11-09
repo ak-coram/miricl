@@ -14,7 +14,7 @@ const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-browser-'));
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run',
   '--no-default-browser-check', '--disable-background-networking',
-  `--user-data-dir=${profile}`, '--remote-debugging-pipe',
+  `--user-data-dir=${profile}`, '--no-startup-window', '--remote-debugging-pipe',
 ], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
 let diagnostics = '';
 browser.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8000); });
@@ -63,13 +63,15 @@ function send(method, params = {}, sessionId) {
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`Timed out: ${method}. ${diagnostics}`));
-    }, 15000);
+    }, ['Browser.getVersion', 'Target.createTarget'].includes(method) ? 45000 : 15000);
     pending.set(id, {resolve, reject, timer});
     browser.stdio[3].write(JSON.stringify({id, method, params, sessionId}) + '\0');
   });
 }
 
 try {
+  const version = await send('Browser.getVersion');
+  console.log(`Chromium: ${version.product}`);
   const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
   const {sessionId} = await send('Target.attachToTarget', {targetId, flatten: true});
   const command = (method, params) => send(method, params, sessionId);

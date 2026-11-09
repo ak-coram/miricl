@@ -42,8 +42,12 @@ Build the production application:
 just build
 #+end_src
 
-Both commands use the shipped WASI REPL with its precompiled compiler.
-The build compiles and optimizes the ASDF system without a browser, then copies
+Development loads =miricl-precompiled.wasm= in the browser. The shipped WASI
+command serves files and forwards REPL forms; the browser selects compilation
+or interpretation using =miricl-compiler:*compile-evaluations*=, initially =t=.
+Production builds run the precompiled compiler image in Node.
+The build prunes the ASDF system and compiles its retained functions and
+initializers to WASM with =--native=, then copies
 the production HTML, adapter and runtime into =build/=. Publish these four files
 together: =index.html=, =miricl.js=, =miricl.wasm= and =game-of-life.wasm=.
 =build/retention.txt= explains which definitions the optimizer keeps.

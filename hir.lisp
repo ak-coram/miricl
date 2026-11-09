@@ -1,14 +1,38 @@
 ;;;; Object-level control/data flow, separate from the definition linker IR.
 (in-package :miricl-compiler)
 
+;; Internal records have fixed, named vector layouts on both hosts. Keep the
+;; ordinary constructor, copier and predicate functions available, while hot
+;; field references (including SETF places) expand to a single indexed access.
+(defmacro define-hir-record (name &rest slots)
+  (let* ((package (symbol-package name))
+         (predicate (intern (concatenate 'string (symbol-name name) "-P") package))
+         (forms (list (list* 'defstruct (list name '(:type vector) :named) slots))))
+    (push (list 'deftype name nil (list 'quote (list 'satisfies predicate))) forms)
+    (loop for slot in slots for index from 1 do
+      (let ((accessor (intern (concatenate 'string (symbol-name name) "-"
+                               (symbol-name (if (consp slot) (car slot) slot))) package)))
+        (setf (get accessor 'miricl::runtime-inline-macro) t)
+        (push (list 'defmacro accessor '(object) (list 'list ''svref 'object index)) forms)))
+    (setf (get (intern (concatenate 'string "%" (symbol-name predicate)) package)
+               'miricl::runtime-inline-macro) t)
+    (push (list 'defmacro (intern (concatenate 'string "%" (symbol-name predicate)) package) '(object)
+            (list 'let '((record (gensym "HIR-RECORD")))
+              (list 'list ''let (list 'list (list 'list 'record 'object))
+                (list 'list ''and (list 'list ''simple-vector-p 'record)
+                  (list 'list ''>= (list 'list ''length 'record) (1+ (length slots)))
+                  (list 'list ''eq (list 'list ''svref 'record 0)
+                    (list 'list ''quote (list 'quote name))))))) forms)
+    (cons 'progn (nreverse forms))))
+
 (defstruct hir-unit functions)
-(defstruct hir-function name parent parameters environment entry blocks captures bindings values
+(define-hir-record hir-function name parent parameters environment entry blocks captures bindings values
   (value-count 0) (block-count 0))
-(defstruct hir-block id parameters instructions terminator predecessors environment)
-(defstruct hir-value id kind owner producer (type t))
-(defstruct hir-instruction opcode inputs output attributes origin effect)
-(defstruct hir-binding name owner cell special-p captured-p assigned-p)
-(defstruct hir-target name owner block token captured-p)
+(define-hir-record hir-block id parameters instructions terminator predecessors environment)
+(define-hir-record hir-value id kind owner producer (type t))
+(define-hir-record hir-instruction opcode inputs output attributes origin effect)
+(define-hir-record hir-binding name owner cell special-p captured-p assigned-p)
+(define-hir-record hir-target name owner block token captured-p)
 (defvar *hir-unit*)
 (defvar *hir-function*)
 (defvar *hir-block*)
@@ -56,7 +80,7 @@
 (defun hir-nth-value (value index)
   (if (eq (hir-value-kind value) :multiple)
       (let ((producer (hir-value-producer value)))
-        (cond ((and (hir-instruction-p producer) (eq (hir-instruction-opcode producer) :values))
+        (cond ((and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :values))
                (or (nth index (hir-instruction-inputs producer)) (hir-constant nil)))
               ((zerop index) (hir-single value))
               (t (hir-emit :value-ref (list value) :single (list index)))))
@@ -65,7 +89,7 @@
 (defun hir-constant (value) (hir-emit :constant nil :single (list value)))
 
 (defun hir-capture (identity kind)
-  (when (hir-target-p identity) (setf (hir-target-captured-p identity) t))
+  (when (%hir-target-p identity) (setf (hir-target-captured-p identity) t))
   (unless (member identity (hir-function-captures *hir-function*))
     (setf (hir-function-captures *hir-function*)
       (append (hir-function-captures *hir-function*) (list identity))))
@@ -175,6 +199,36 @@
     (dolist (argument arguments)
       (push (hir-single (hir-form argument variables functions targets)) values))
     (hir-emit :call (list* *hir-dynamic* function (nreverse values)) :multiple nil :call)))
+
+(defun hir-literal-apply-form (form functions)
+  ;; A literal lambda cannot observe its function object here. Inline its
+  ;; parameter bindings after checking the final APPLY argument. A sole &REST
+  ;; parameter may share that list (CLHS APPLY). Bound required-parameter growth
+  ;; and leave optional/keyword and mixed required/rest lists alone.
+  (when (and (= (length form) 3) (not (assoc 'apply functions)))
+    (let* ((designator (second form))
+           (lambda-form (if (and (consp designator) (eq (car designator) 'function)
+                                 (= (length designator) 2)) (second designator) designator))
+           (parameters (and (consp lambda-form) (second lambda-form)))
+           (rest-name (and (consp parameters) (eq (car parameters) '&rest)
+                           (= (length parameters) 2) (second parameters)))
+           (names (if rest-name (list rest-name) parameters)))
+      (when (and (consp lambda-form) (eq (car lambda-form) 'lambda)
+                 (listp names) (<= (length names) 4)
+                 (every (lambda (name) (and (symbolp name) name (not (eq name t))
+                                           (not (keywordp name)) (not (member name lambda-list-keywords))))
+                        names)
+                 (= (length (remove-duplicates names)) (length names)))
+        (let ((arguments (gensym)) (body (cddr lambda-form)) (bindings nil) (index 0))
+          (when (and (stringp (car body)) (cdr body)) (setq body (cdr body)))
+          (if rest-name (push (list rest-name arguments) bindings)
+              (dolist (name names)
+                (push (list name (list 'miricl::%%checked-argument arguments index)) bindings)
+                (incf index)))
+          (list 'let (list (list arguments (third form)))
+            (if rest-name (list 'miricl::%%check-apply-list arguments)
+                (list 'miricl::%%check-apply-arguments arguments (length names)))
+            (cons 'let (cons (nreverse bindings) body))))))))
 
 (defun hir-case-form (form variables functions targets)
   (let ((key (hir-single (hir-form (second form) variables functions targets)))
@@ -650,9 +704,21 @@
             (multiple-value-bind (body specials) (hir-declarations (cddr form))
               (hir-body body (hir-shadow-specials variables specials) local targets))))
          (multiple-value-call
+          ;; Reuse literal APPLY inlining after exposing the complete value
+          ;; group as its argument list. SETF and MULTIPLE-VALUE-BIND expansions
+          ;; commonly introduce these immediately invoked closures.
+          (when (= (length form) 3)
+            (let ((expanded (hir-literal-apply-form
+                             (list 'apply (second form)
+                               (list 'miricl::%%native-value-list (third form))) nil)))
+              (when expanded
+                (return-from hir-form (hir-form expanded variables functions targets)))))
           (let ((function (hir-single (hir-form (second form) variables functions targets))) (groups nil))
             (dolist (child (cddr form)) (push (hir-multiple (hir-form child variables functions targets)) groups))
             (hir-emit :multiple-value-call (list* *hir-dynamic* function (nreverse groups)) :multiple nil :call)))
+         (miricl::%%native-value-list
+          (hir-emit :values-list (list (hir-multiple (hir-form (second form) variables functions targets)))
+            :single))
          (multiple-value-bind
           ;; Keep the binding in this function. Expanding it to a call of an
           ;; optional/rest lambda needlessly captures every outer place
@@ -667,6 +733,21 @@
                   (when (and (not (eq entry *hir-dynamic*)) (not (hir-block-terminator *hir-block*)))
                     (hir-emit :environment-restore (list entry) nil nil :control))
                   result)))))
+         (miricl::%%check-apply-list
+          (hir-emit :check-apply-list
+            (list (hir-single (hir-form (second form) variables functions targets))) nil nil :check))
+         (miricl::%%check-apply-arguments
+          (hir-emit :check-apply-arguments
+            (list (hir-single (hir-form (second form) variables functions targets)))
+            nil (list (third form)) :check))
+         (miricl::%%checked-argument
+          (hir-emit :checked-argument
+            (list (hir-single (hir-form (second form) variables functions targets)))
+            :single (list (third form)) :read))
+         (apply
+          (let ((expanded (hir-literal-apply-form form functions)))
+            (if expanded (hir-form expanded variables functions targets)
+                (hir-call-arguments (hir-function-reference 'apply functions) (cdr form) variables functions targets))))
          (funcall
           (when (null (cdr form)) (error "FUNCALL requires a function."))
           (hir-call-arguments
@@ -834,7 +915,18 @@ Unsupported special operators and parameter syntax signal an error."
 
 (defun verify-hir (unit)
   (dolist (function (hir-unit-functions unit))
-    (let ((blocks (hir-function-blocks function)) (index (make-hash-table :test 'eq)) (id 0))
+    (let ((blocks (hir-function-blocks function)) (index (make-hash-table :test 'eq)) (id 0)
+          (values (make-array (hir-function-value-count function) :initial-element nil)) (count 0))
+      ;; Indexed analyses require unique dense IDs owned by this function.
+      ;; Check the canonical value identity as well as its numeric index.
+      (dolist (value (hir-function-values function))
+        (unless (and (%hir-value-p value) (eq (hir-value-owner value) function)
+                     (integerp (hir-value-id value)) (<= 0 (hir-value-id value))
+                     (< (hir-value-id value) (length values))
+                     (null (aref values (hir-value-id value))))
+          (error "HIR value IDs must be unique, dense and owned by their function."))
+        (setf (aref values (hir-value-id value)) value) (incf count))
+      (unless (= count (length values)) (error "HIR value count does not match its values."))
       (dolist (block blocks)
         (unless (= (hir-block-id block) id) (error "HIR block IDs must be dense and ordered."))
         (incf id) (setf (gethash block index) t (hir-block-predecessors block) nil))
@@ -842,7 +934,10 @@ Unsupported special operators and parameter syntax signal an error."
         (unless (hir-block-terminator block) (error "Unterminated HIR block."))
         (dolist (instruction (append (hir-block-instructions block) (list (hir-block-terminator block))))
           (dolist (input (hir-instruction-inputs instruction))
-            (unless (and (hir-value-p input) (eq (hir-value-owner input) function))
+            (unless (and (%hir-value-p input) (eq (hir-value-owner input) function)
+                         (integerp (hir-value-id input)) (<= 0 (hir-value-id input))
+                         (< (hir-value-id input) (length values))
+                         (eq input (aref values (hir-value-id input))))
               (error "HIR operand crosses function boundaries without a capture."))))
         (let* ((terminator (hir-block-terminator block)) (opcode (hir-instruction-opcode terminator))
                (successors (hir-instruction-attributes terminator)))

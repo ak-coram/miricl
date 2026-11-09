@@ -307,6 +307,7 @@
           (memory.copy $memory $scratch (local.get $out) (i32.load $scratch (i32.const 2056)) (local.get $size))
           (call $bundle-configure (local.get $p) (local.get $n) (local.get $out) (local.get $size))))
       (if (i32.load $scratch (i32.const 2064)) (then (call $build-option (i32.const 0) (i32.const 0) (i32.const 0))))
+      (if (i32.load $scratch (i32.const 2080)) (then (call $build-option (i32.const 10) (i32.const 0) (i32.const 0))))
       (if (i32.load $scratch (i32.const 2076)) (then (call $build-option (i32.const 9) (i32.const 0) (i32.const 0))))
       (local.set $option (i32.load $scratch (i32.const 2072)))
       (block $options-done (loop $options

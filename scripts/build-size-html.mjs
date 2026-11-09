@@ -7,7 +7,9 @@ import {measureFile, measureWasm} from './wasm-size.mjs';
 
 const artifacts = [
   {file: 'miricl.wasm', description: 'Import-free Common Lisp interpreter and compiler', kind: 'wasm'},
+  {file: 'miricl-precompiled.wasm', description: 'Import-free interpreter with bootstrapped native compiler', kind: 'wasm'},
   {file: 'miricl-repl.wasm', description: 'Terminal REPL and precompiled compiler for Node and WASI', kind: 'wasm'},
+  {file: 'miricl-asdf.wasm', description: 'Optional ASDF and UIOP library', kind: 'wasm'},
   {file: 'miricl.html', description: 'Complete browser REPL page', kind: 'html'},
   {file: 'todo.html', description: 'Complete Common Lisp + CLOS TODO page', kind: 'html'},
   {file: 'game-of-life/', description: 'Game of Life — total HTML, adapter, interpreter and application (4 files)',
@@ -55,7 +57,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
 
 export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = 'image-sizes.json'} = {}) {
   if (report.schemaVersion !== 1 || !Array.isArray(report.artifacts) || report.artifacts.length !== artifacts.length)
-    throw new Error('Expected measurements for the runtime, REPL, standalone pages, Game of Life, Maxima and FriCAS.');
+    throw new Error('Expected measurements for the runtime, REPL, ASDF, standalone pages, Game of Life, Maxima and FriCAS.');
   for (const artifact of report.artifacts) {
     for (const key of ['rawBytes', 'gzipBytes', 'brotliBytes']) {
       if (!Number.isSafeInteger(artifact[key]) || artifact[key] < 0) throw new Error(`Invalid ${key}.`);

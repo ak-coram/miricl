@@ -23,7 +23,7 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-maxima-browser-'));
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-  '--disable-background-networking', `--user-data-dir=${profile}`, '--remote-debugging-pipe',
+  '--disable-background-networking', `--user-data-dir=${profile}`, '--no-startup-window', '--remote-debugging-pipe',
 ], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
 const stopped = new Promise(resolve => browser.once('exit', resolve));
 let diagnostics = '', received = '', nextId = 0;
@@ -50,12 +50,14 @@ browser.stdio[4].on('data', bytes => {
 function send(method, params = {}, sessionId) {
   return new Promise((resolve, reject) => {
     const id = ++nextId;
-    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`Timed out: ${method}`));}, 15000);
+    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`Timed out: ${method}`));}, ['Browser.getVersion', 'Target.createTarget'].includes(method) ? 45000 : 15000);
     pending.set(id, {resolve, reject, timer});
     browser.stdio[3].write(JSON.stringify({id, method, params, sessionId}) + '\0');
   });
 }
 try {
+  const version = await send('Browser.getVersion');
+  console.log(`Chromium: ${version.product}`);
   const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
   const {sessionId} = await send('Target.attachToTarget', {targetId, flatten: true});
   const command = (method, params) => send(method, params, sessionId);
@@ -73,8 +75,10 @@ try {
   };
   await command('Page.enable'); await command('Network.enable');
   await command('Emulation.setDeviceMetricsOverride', {width: 1200, height: 900, deviceScaleFactor: 1, mobile: false});
+  const startupStarted = performance.now();
   await command('Page.navigate', {url: `http://127.0.0.1:${server.address().port}/`});
-  await waitFor('!document.querySelector("#evaluate").disabled');
+  await waitFor('document.querySelector("#evaluate")?.disabled === false');
+  console.log(`Browser maxima startup: ${Math.round(performance.now() - startupStarted)} ms`);
   assert.ok(requested.has('/maxima.core'));
   assert.ok(![...requested].some(name => /filesystem|files\.json|\.lisp$/.test(name)), 'Startup must only load the compiled core.');
   for (const name of ['filesystem.bin.gz', 'filesystem-archive.mjs', 'maxima.wasm', 'doc'])
@@ -128,7 +132,7 @@ try {
   assert.equal(await js('document.querySelectorAll("#history li").length'), savedCount);
   assert.equal(await js('document.querySelector("#evaluate").disabled'), true);
   await js('document.querySelector("#resume").click()');
-  await waitFor('!document.querySelector("#evaluate").disabled');
+  await waitFor('document.querySelector("#evaluate")?.disabled === false');
   await run('persisted(29);', /42/);
   if (process.env.MIRICL_MAXIMA_PREVIEW) {
     const desktop = await command('Page.captureScreenshot', {format: 'png'});
@@ -144,7 +148,7 @@ try {
   await js(`document.querySelector('#source').value = 'while true do a:a+1;'; document.querySelector('#form').requestSubmit()`);
   await new Promise(resolve => setTimeout(resolve, 100));
   await js(`document.querySelector('#restart').click()`);
-  await waitFor('!document.querySelector("#evaluate").disabled');
+  await waitFor('document.querySelector("#evaluate")?.disabled === false');
   await run('f(3);', /f\(3\)/);
   console.log('Browser Maxima app: offline algebra, manual examples, Unicode, prompts, help, persistence, replay, recording controls, responsive layout, cancellation and restart pass.');
 } finally {

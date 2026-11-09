@@ -21,11 +21,13 @@ try {
             (dump (symbol-function (compiler-primitive 10 1 "%FASL-DUMP"))))
         ;; This second compilation uses the already self-compiled frontend and emitter.
         (dolist (entry *image-sources*)
-          (multiple-value-bind (code literals) (emit-native-module (compile-to-hir (second entry) :name (first entry)))
-            (push (list (and (symbol-package (first entry)) (package-name (symbol-package (first entry))))
-                        (symbol-name (first entry))) names)
-            (push (coerce code 'list) codes)
-            (push (funcall dump (list (first entry) literals)) roots)))
+          (let ((unit (compile-to-hir (second entry) :name (first entry))))
+            (multiple-value-bind (code literals) (emit-native-module unit)
+              (push (list (and (symbol-package (first entry)) (package-name (symbol-package (first entry))))
+                          (symbol-name (first entry))) names)
+              (push (coerce code 'list) codes)
+              (push (funcall dump (list (first entry) literals
+                (native-fixed-arity (first (hir-unit-functions unit))))) roots))))
         (with-open-file (out "/compiler-image.lisp" :direction :output :if-exists :supersede)
           (let ((*print-readably* t) (*print-pretty* nil) (*print-circle* t) (*print-base* 10) (*print-radix* nil))
             (write (list (nreverse names) (nreverse codes) (nreverse roots)
@@ -121,6 +123,7 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries) {
             case 0x1a: instructions.push('drop'); break;
             case 0x20: instructions.push(`local.get ${unsigned()}`); break;
             case 0x21: instructions.push(`local.set ${unsigned()}`); break;
+            case 0x22: instructions.push(`local.tee ${unsigned()}`); break;
             case 0x41: instructions.push(`i32.const ${signed()}`); break;
             case 0x45: instructions.push('i32.eqz'); break;
             case 0x46: instructions.push('i32.eq'); break;
