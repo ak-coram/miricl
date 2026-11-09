@@ -892,12 +892,47 @@
            (not (%featurep (cadr expression))))
           (t (error 'reader-error)))))
 
+(defvar %debug-default-level 0)
+(defparameter %debug-declaration '(declare (optimize (debug 3))))
+
+(defun %optimize-debug-level (qualities inherited)
+  ;; OPTIMIZE's bare quality means 3. Intermediate debug qualities currently
+  ;; have level 0 behavior; retain their declared values for lexical overrides.
+  (dolist (quality qualities inherited)
+    (let ((name (if (consp quality) (first quality) quality))
+          (level (if (consp quality) (second quality) 3)))
+      (unless (and (symbolp name) (integerp level) (<= 0 level 3)
+                   (or (atom quality) (= (length quality) 2)))
+        (error 'program-error))
+      (when (eq name 'debug) (setq inherited level)))))
+
+(defun %body-debug-level (body &optional inherited)
+  (when (and (stringp (car body)) (cdr body)) (setq body (cdr body)))
+  (loop while (and (consp (car body)) (eq (caar body) 'declare)) do
+    (dolist (spec (cdar body))
+      (when (eq (car spec) 'optimize)
+        (setq inherited (%optimize-debug-level (cdr spec) inherited))))
+    (setq body (cdr body)))
+  inherited)
+
+(defun %debug-form-p (form)
+  ;; An interpreted debug region cannot expose a containing native frame.
+  ;; Select interpretation for the containing evaluation as well. Quoted data
+  ;; is never a request to change evaluation policy.
+  (and (consp form) (not (eq (car form) 'quote))
+    (if (eq (car form) 'declare) (eql (%body-debug-level (list form)) 3)
+        ;; Source trees include dotted destructuring lists and macro data.
+        ;; Walk their cons cells without treating an atomic tail as a sequence.
+        (loop for tail = form then (cdr tail) while (consp tail)
+              thereis (%debug-form-p (car tail))))))
+
 (defun %proclaim-all (specs)
   (%%while specs
     (let ((spec (pop specs)))
       (unless (and (consp spec) (symbolp (car spec)) (list-length spec))
         (error 'program-error))
       (case (car spec)
+        (optimize (setq %debug-default-level (%optimize-debug-level (cdr spec) %debug-default-level)))
         (special
           (let ((names (cdr spec)))
             (%%while names (%%proclaim-variable (pop names)))))

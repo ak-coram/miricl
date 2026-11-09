@@ -136,8 +136,81 @@ try {
   await input('(defun browser-trace () (error "browser trace"))');
   await input('(browser-trace)');
   assert.match(await js("document.getElementById('transcript').innerText"),
-    /Error: browser trace[\s\S]*Backtrace \(most recent call first\):\n  COMMON-LISP:ERROR\n  COMMON-LISP-USER::BROWSER-TRACE/);
+    /Error: browser trace[\s\S]*Backtrace \(most recent call first\):\n   0: COMMON-LISP:ERROR\n   1: COMMON-LISP-USER::BROWSER-TRACE/);
   assert.equal(await input('(browser-double 3)'), '6\n');
+  // The shipped example exercises the debugger using the visible controls.
+  await js("document.getElementById('clear').click(); document.getElementById('examples').value = 'debugger'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
+  await waitFor("document.getElementById('debugger').open && document.querySelectorAll('#debug-threads [role=tab]').length === 2");
+  await js(`Array.from(document.querySelectorAll('#debug-threads [role=tab]')).find(tab => !tab.textContent.includes('Greeting worker')).click()`);
+  await waitFor("document.getElementById('debugger').open && document.getElementById('debug-condition').textContent.includes('Discount 150')");
+  assert.match(await js("document.getElementById('debug-stack').textContent"), /\n   0: COMMON-LISP:ERROR\n/);
+  assert.equal(await js("document.getElementById('debug-stack-details').open && document.getElementById('debug-panel').lastElementChild.id === 'debug-stack-details'"), true);
+  assert.equal(await js("getComputedStyle(document.getElementById('debug-evaluate')).borderTopColor"), 'rgb(0, 0, 0)');
+  assert.match(await js("document.getElementById('debug-locals').textContent"), /SUBTOTAL = 36/);
+  await js(`document.getElementById('debug-expression').value = '(values subtotal discount)'; document.getElementById('debug-evaluate').click()`);
+  await waitFor("document.querySelector('#debug-result .debug-evaluation pre:last-child')?.textContent === '36\\n150'");
+  for (const value of [7, 8]) {
+    await js(`document.getElementById('debug-expression').value = '${value}'; document.getElementById('debug-evaluate').click()`);
+    await waitFor(`document.querySelector('#debug-result .debug-evaluation:last-child pre:last-child')?.textContent === '${value}'`);
+  }
+  assert.equal(await js("document.querySelectorAll('#debug-result .debug-evaluation').length"), 3);
+  await js(`const frames = document.getElementById('debug-frame');
+    frames.selectedIndex = Array.from(frames.options).findIndex(option => option.textContent.includes('DEBUG-ORDER'));
+    frames.dispatchEvent(new Event('change'));`);
+  assert.match(await js("document.getElementById('debug-locals').textContent"), /QUANTITY = 3/);
+  // A failed restart must remain usable and explain the mistake inline.
+  for (const argumentsSource of ['10', '(list']) {
+    await js(`document.getElementById('debug-arguments').value = ${JSON.stringify(argumentsSource)};
+      Array.from(document.querySelectorAll('#debug-restarts button')).find(button => button.textContent.includes('USE-DISCOUNT')).click()`);
+    await waitFor("!document.getElementById('debug-command-error').hidden && !document.getElementById('debug-restarts').firstElementChild.disabled");
+    assert.match(await js("document.getElementById('debug-command-error').textContent"), /Restart failed:/);
+    if (argumentsSource === '10') {
+      assert.match(await js("document.getElementById('debug-command-error').textContent"), /proper list.*got 10.*\(list value\)/);
+    }
+    assert.equal(await js("document.getElementById('debug-arguments').getAttribute('aria-invalid')"), 'true');
+    assert.equal(await js("document.querySelectorAll('#debug-threads [role=tab]').length"), 2);
+    assert.match(await js("document.getElementById('debug-condition').textContent"), /Discount 150/);
+  }
+  await js("document.querySelector('#debug-threads [aria-selected=false]').click()");
+  assert.equal(await js("document.getElementById('debug-command-error').hidden"), true);
+  await js("document.querySelector('#debug-threads [aria-selected=false]').click()");
+  assert.equal(await js("document.getElementById('debug-command-error').hidden"), false);
+  assert.equal(await js("document.getElementById('debug-arguments').value"), '(list');
+  await js(`document.getElementById('debug-arguments').value = '(list 10)';
+    Array.from(document.querySelectorAll('#debug-restarts button')).find(button => button.textContent.includes('USE-DISCOUNT')).click()`);
+  await waitFor("document.getElementById('debugger').open && document.getElementById('debug-condition').textContent.includes('worker is paused')");
+  await waitFor("document.querySelectorAll('#debug-threads [role=tab]').length === 1");
+  await waitFor("document.getElementById('transcript').textContent.includes('Recovered total: 162/5')");
+  assert.match(await output(), /Recovered total: 162\/5/);
+  assert.equal(await js("document.getElementById('debug-command-error').hidden"), true);
+  assert.match(await js("document.getElementById('debug-threads').textContent"), /Greeting worker/);
+  assert.match(await js("document.getElementById('debug-locals').textContent"), /MESSAGE = "Hello from the worker"/);
+  assert.equal(await js("document.getElementById('debug-steps').hidden"), true);
+  await js(`Array.from(document.querySelectorAll('#debug-restarts button')).find(button => button.textContent.includes('CONTINUE')).click()`);
+  await waitFor("!document.getElementById('debugger').open");
+  await waitFor("document.getElementById('transcript').textContent.includes('Hello from the worker')");
+  await waitFor(completed);
+  assert.equal(await js("document.getElementById('debugger').hidden"), true);
+
+  // Multiple paused threads share a dialog and preserve their own UI state.
+  await input(`(dotimes (i 2) (let ((quantity (1+ i)))
+    (miricl-threads:make-thread (lambda () (debug-order quantity)) :name "Browser order")))`);
+  await waitFor("document.querySelectorAll('#debug-threads [role=tab]').length === 2");
+  const firstThread = await js("document.querySelector('#debug-threads [aria-selected=true]').id");
+  await js(`document.getElementById('debug-expression').value = '42'; document.getElementById('debug-evaluate').click()`);
+  await waitFor("document.querySelector('#debug-result .debug-evaluation pre:last-child')?.textContent === '42'");
+  await js("document.querySelector('#debug-threads [aria-selected=false]').click()");
+  assert.equal(await js("document.querySelectorAll('#debug-result .debug-evaluation').length"), 0);
+  await js(`document.getElementById(${JSON.stringify(firstThread)}).click()`);
+  assert.equal(await js("document.querySelectorAll('#debug-result .debug-evaluation').length"), 1);
+  assert.equal(await js("document.getElementById('debug-expression').value"), '42');
+  for (const remaining of [1, 0]) {
+    await js(`document.getElementById('debug-arguments').value = '(list 0)';
+      Array.from(document.querySelectorAll('#debug-restarts button')).find(button => button.textContent.includes('USE-DISCOUNT')).click()`);
+    await waitFor(`document.querySelectorAll('#debug-threads [role=tab]').length === ${remaining}`);
+  }
+  assert.equal(await js("document.getElementById('debugger').hidden"), true);
+  assert.equal(await js("document.getElementById('debugger').open"), false);
   assert.equal(await input(`(let ((start (get-internal-real-time)))
     (and (null (sleep 1/50)) (>= (- (get-internal-real-time) start) 15)
       (integerp (get-universal-time))))`), 'T\n');
@@ -244,7 +317,7 @@ try {
     const {data} = await command('Page.captureScreenshot', {format: 'png'});
     await fs.writeFile(process.env.MIRICL_BROWSER_SCREENSHOT, Buffer.from(data, 'base64'));
   }
-  console.log('Browser REPL: offline file:// startup, persistent Lisp, Unicode, errors, incomplete input, selection, history, clear, stop, reset, quit, and mobile layout pass.');
+  console.log('Browser REPL: offline file:// startup, persistent Lisp, Unicode, errors, incomplete input, selection, history, clear, stop, reset, quit, debugger dialog, thread tabs, evaluation history, and mobile layout pass.');
 } finally {
   const exited = new Promise(resolve => browser.once('exit', resolve));
   if (browser.exitCode === null && browser.signalCode === null) {

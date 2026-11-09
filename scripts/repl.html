@@ -16,8 +16,8 @@
       font: 15px/1.5 "Lucida Console", "DejaVu Sans Mono", monospace; }
     ::selection { background: var(--select); color: var(--ink); }
     button, select, textarea { font: inherit; color: inherit; border-radius: 0; }
-    button { padding: 2px 8px; border: 1px solid transparent; background: transparent; cursor: pointer; }
-    button:hover:enabled, select:hover { background: var(--paper); border-color: var(--border); }
+    button { padding: 2px 8px; border: 1px solid black; background: var(--tag); cursor: pointer; }
+    button:hover:enabled, select:hover { background: var(--paper); }
     button:disabled { opacity: .45; cursor: default; }
     :focus-visible { outline: 2px solid #000099; outline-offset: 2px; }
     main { background: var(--paper); border: 1px solid black; min-height: calc(100dvh - 40px);
@@ -48,6 +48,24 @@
     .notice { color: var(--muted); }
     footer { padding: 8px 14px; border-top: 1px solid black; color: var(--muted); font-size: 12px; }
     kbd { font: inherit; color: var(--ink); }
+    #debugger { width: min(900px, calc(100vw - 32px)); max-height: 90dvh; padding: 0;
+      border: 2px solid black; background: var(--paper); color: var(--ink); }
+    #debugger::backdrop { background: rgb(0 0 0 / 35%); }
+    #debug-threads { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; border-bottom: 1px solid black; }
+    #debug-threads [aria-selected="true"] { background: var(--select); font-weight: bold; }
+    .debug-evaluation { border-top: 1px solid var(--border); padding: 10px 0; }
+    .debug-evaluation pre { margin: 0; }
+    .debug-evaluation .input { margin-bottom: 6px; }
+    #debug-result { margin-top: 12px; }
+    #debug-stack-details { border-top: 1px solid black; margin-top: 12px; padding-top: 8px; }
+    #debug-stack { margin-top: 8px; }
+    #debugger[hidden] { display: none; }
+    .debug-content { padding: 12px 18px; }
+    #debugger textarea { min-height: 70px; padding: 8px; border: 1px solid var(--border); resize: vertical; }
+    #debugger pre { max-height: 240px; overflow: auto; }
+    #debug-frame { width: 100%; margin-bottom: 8px; }
+    #debugger input { font: inherit; width: 100%; padding: 5px; }
+    .debug-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
     noscript p { margin: 16px; }
     @media (max-width: 720px) {
       body { padding: 6px; font-size: 14px; }
@@ -77,6 +95,7 @@
           <option value="arithmetic">Arithmetic</option>
           <option value="function">Functions</option>
           <option value="compilation">Compilation &amp; code size</option>
+          <option value="debugger">Debugger: price an order &amp; thread break</option>
           <option value="loop">Loops &amp; output</option>
           <option value="environment">Browser environment</option>
           <option value="timeout">Callback with setTimeout</option>
@@ -99,6 +118,31 @@
       <div id="transcript" role="log" aria-label="REPL transcript" aria-live="polite" tabindex="0"></div>
     </section>
   </div>
+  <dialog id="debugger" hidden aria-label="Lisp debugger">
+    <div class="tag"><span class="filename" id="debug-title">Debugger</span>
+      <button id="debug-abort">Abort evaluation</button></div>
+    <div id="debug-threads" role="tablist" aria-label="Paused threads"></div>
+    <div class="debug-content" id="debug-panel" role="tabpanel">
+      <pre id="debug-condition"></pre>
+      <label for="debug-frame">Inspectable interpreter frames</label>
+      <select id="debug-frame" aria-label="Debug frame"></select>
+      <pre id="debug-form"></pre><pre id="debug-locals"></pre>
+      <p id="debug-unavailable" class="notice" hidden>For local variables and stepping, reevaluate the definition with (declare (optimize (debug 3))).</p>
+      <div class="debug-actions" id="debug-steps">
+        <button data-debug="into">Step into</button><button data-debug="over">Step over</button>
+        <button data-debug="out">Step out</button><button data-debug="resume">Resume</button>
+      </div>
+      <label for="debug-arguments">Restart arguments (an expression returning a list; optional)</label>
+      <input id="debug-arguments" value="" placeholder="(list replacement-value)" aria-describedby="debug-command-error">
+      <p id="debug-command-error" class="error" role="alert" hidden></p>
+      <div class="debug-actions" id="debug-restarts"></div>
+      <label for="debug-expression">Evaluate in the selected frame</label>
+      <textarea id="debug-expression" rows="2" spellcheck="false"></textarea>
+      <button id="debug-evaluate">Evaluate in frame</button>
+      <div id="debug-result" role="log" aria-label="Frame evaluation history"></div>
+      <details id="debug-stack-details" open><summary>Stack trace</summary><pre id="debug-stack"></pre></details>
+    </div>
+  </dialog>
   <footer>Runs entirely in your browser. No server or network needed. Stop and Reset discard Lisp definitions. Reloading starts a fresh session.
     <a href="todo.html">CLOS TODO example</a> ·
     <a href="maxima/">Maxima workbench</a> ·
@@ -111,13 +155,27 @@
 @@MIRICL_ADAPTER@@
 
 let interpreter;
+const debuggerStops = new Map();
 self.onmessage = async ({data}) => {
   try {
     if (data.type === 'initialize') {
       interpreter = await Miricl.instantiate(data.bytes, {
-        onOutput: output => self.postMessage({type: 'output', output})
+        onOutput: output => self.postMessage({type: 'output', output}),
+        onDebugger: event => {
+          if (event.type === 'stopped') {
+            debuggerStops.set(event.stop.sessionId, event.stop);
+            self.postMessage({type: 'debugger', event: {...event, stop: event.stop.snapshot}});
+          } else {
+            debuggerStops.delete(event.sessionId);
+            self.postMessage({type: 'debugger', event});
+          }
+        }
       });
       self.postMessage({type: 'ready'});
+    } else if (data.type === 'debug-command') {
+      const stop = debuggerStops.get(data.sessionId);
+      if (!stop || stop.stopId !== data.stopId) throw new Error('This debugger stop has expired.');
+      await interpreter.debugCommand(stop, data.command);
     } else if (data.type === 'evaluate') {
       const start = performance.now();
       const result = await interpreter.evaluateAsync(data.source);
@@ -125,8 +183,8 @@ self.onmessage = async ({data}) => {
       self.postMessage({type: 'result', ...result, elapsed: performance.now() - start});
     }
   } catch (error) {
-    self.postMessage({type: data.type === 'initialize' ? 'fatal' : 'error',
-      message: error.message, output: error.output ?? '', backtrace: error.backtrace ?? ''});
+    self.postMessage({type: data.type === 'initialize' ? 'fatal' : data.type === 'debug-command' ? 'debug-command-error' : 'error',
+      sessionId: data.sessionId, stopId: data.stopId, message: error.message, output: error.output ?? '', backtrace: error.backtrace ?? ''});
   }
 };
 </script>
@@ -145,7 +203,201 @@ let draft = '';
 let worker;
 let workerURL;
 let busy = false;
+let debuggerState;
+const debuggerSessions = new Map();
+const debuggerPane = document.getElementById('debugger');
+const debugFrame = document.getElementById('debug-frame');
+const debugThreads = document.getElementById('debug-threads');
+const debugViews = new Map();
+
+function debugView(sessionId = debuggerState?.sessionId) {
+  if (!debugViews.has(sessionId)) debugViews.set(sessionId, {history: [], expression: '', arguments: ''});
+  return debugViews.get(sessionId);
+}
+function saveDebugView() {
+  if (!debuggerState) return;
+  Object.assign(debugView(), {frame: debugFrame.value,
+    expression: document.getElementById('debug-expression').value,
+    arguments: document.getElementById('debug-arguments').value});
+}
+function showDebugFrame() {
+  const frame = debuggerState?.frames.find(frame => frame.id === Number(debugFrame.value));
+  document.getElementById('debug-form').textContent = frame?.form ?? '';
+  document.getElementById('debug-locals').textContent = frame
+    ? frame.locals.map(({name, value}) => `  ${name} = ${value}`).join('\n') : '';
+  if (debuggerState) debugView().frame = debugFrame.value;
+}
+function showDebugHistory() {
+  document.getElementById('debug-result').replaceChildren(...debugView().history.map(entry => {
+    const item = document.createElement('div'); item.className = 'debug-evaluation';
+    const input = document.createElement('pre'); input.className = 'input';
+    input.textContent = `> ${entry.source}`;
+    const result = document.createElement('pre');
+    result.textContent = entry.result === undefined ? 'Evaluating…' : entry.result;
+    item.append(input, result); return item;
+  }));
+}
+function showDebugError() {
+  const error = debugView().error;
+  const message = document.getElementById('debug-command-error');
+  message.hidden = !error;
+  message.textContent = error ? `${error.op === 'restart' ? 'Restart failed' : 'Debugger command failed'}: ${error.message}` : '';
+  document.getElementById('debug-arguments').setAttribute('aria-invalid', String(error?.op === 'restart'));
+}
+function updateDebugControls() {
+  const waiting = !!debugView().command;
+  for (const button of document.querySelectorAll('#debug-restarts button, [data-debug], #debug-abort'))
+    button.disabled = waiting;
+  document.getElementById('debug-evaluate').disabled = waiting || !debuggerState.frames.some(frame => frame.inspectable);
+}
+function debugCommand(command) {
+  if (!debuggerState || debugView().command) return;
+  const view = debugView();
+  view.command = {...command, stopId: debuggerState.stopId};
+  view.error = undefined;
+  showDebugError();
+  if (command.op === 'eval') {
+    const entry = {source: command.source};
+    view.history.push(entry); view.pending = entry;
+    showDebugHistory();
+  }
+  updateDebugControls();
+  worker.postMessage({type: 'debug-command', sessionId: debuggerState.sessionId,
+    stopId: debuggerState.stopId, command});
+}
+function threadSessions() {
+  const threads = new Map();
+  for (const state of debuggerSessions.values()) {
+    if (!threads.has(state.threadId) || threads.get(state.threadId).level < state.level)
+      threads.set(state.threadId, state);
+  }
+  return [...threads.values()];
+}
+function showDebugger(state) {
+  saveDebugView();
+  const wasPaused = !!debuggerState;
+  debuggerState = state;
+  debuggerPane.hidden = !state;
+  if (!state) {
+    debugThreads.replaceChildren();
+    if (debuggerPane.open) debuggerPane.close();
+    if (wasPaused) status.textContent = busy ? 'Running…' : 'Ready';
+    return;
+  }
+  const view = debugView();
+  if (!debuggerPane.open) debuggerPane.showModal();
+  document.getElementById('debug-title').textContent = `Debugger · level ${state.level}`;
+  debugThreads.replaceChildren(...threadSessions().map(thread => {
+    const button = document.createElement('button');
+    button.id = `debug-thread-${thread.threadId}`;
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-controls', 'debug-panel');
+    button.setAttribute('aria-selected', String(thread.threadId === state.threadId));
+    button.tabIndex = thread.threadId === state.threadId ? 0 : -1;
+    button.textContent = `${thread.threadName} (#${thread.threadId})`;
+    button.onclick = () => showDebugger(debuggerSessions.get(thread.sessionId));
+    button.onkeydown = event => {
+      const tabs = [...debugThreads.children], index = tabs.indexOf(button);
+      const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length
+        : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length
+        : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
+      if (next >= 0) { event.preventDefault(); tabs[next].click(); debugThreads.children[next].focus(); }
+    };
+    return button;
+  }));
+  document.getElementById('debug-panel').setAttribute('aria-labelledby', `debug-thread-${state.threadId}`);
+  document.getElementById('debug-condition').textContent = `${state.condition.type}: ${state.condition.message}`;
+  document.getElementById('debug-stack').textContent = state.backtrace;
+  const inspectable = state.frames.filter(frame => frame.inspectable);
+  debugFrame.replaceChildren(...inspectable.map(({id, name}) => {
+    const option = document.createElement('option');
+    option.value = String(id); option.textContent = `${String(id).padStart(2, ' ')}: ${name}`; return option;
+  }));
+  if (inspectable.some(frame => String(frame.id) === view.frame)) debugFrame.value = view.frame;
+  document.getElementById('debug-unavailable').hidden = inspectable.length > 0;
+  document.getElementById('debug-steps').hidden = !state.canStep;
+  document.getElementById('debug-expression').value = view.expression;
+  document.getElementById('debug-arguments').value = view.arguments;
+  showDebugHistory();
+  showDebugError();
+  document.getElementById('debug-restarts').replaceChildren(...state.restarts.map(({id, name, description}) => {
+    const button = document.createElement('button');
+    button.textContent = `${String(id).padStart(2, ' ')}: ${name} — ${description}`;
+    button.onclick = () => debugCommand({op: 'restart', frame: id, source: document.getElementById('debug-arguments').value});
+    return button;
+  }));
+  showDebugFrame();
+  updateDebugControls();
+  status.textContent = `Paused · ${state.threadName} · debugger level ${state.level}`;
+}
+function debuggerEvent(event) {
+  let selected = debuggerState?.sessionId;
+  if (event.type === 'stopped') {
+    debuggerSessions.set(event.stop.sessionId, event.stop);
+    const view = debugViews.get(event.stop.sessionId);
+    if (view && event.stop.result) {
+      const result = event.stop.result;
+      if (view.pending) {
+        view.pending.result = [result.output, result.error ? `Error: ${result.error}` : result.values.join('\n')]
+          .filter(Boolean).join('\n');
+        view.pending = undefined;
+      } else if (result.error) {
+        view.error = {op: view.command?.op ?? view.error?.op, message: result.error};
+      }
+      view.command = undefined;
+    }
+    if (selected === undefined || event.stop.parentSessionId === selected) selected = event.stop.sessionId;
+  } else {
+    debuggerSessions.delete(event.sessionId);
+    if (selected === event.sessionId) selected = event.parentSessionId;
+  }
+  showDebugger(debuggerSessions.get(selected) ?? threadSessions()[0]);
+  if (event.type === 'closed') debugViews.delete(event.sessionId);
+}
+debuggerPane.oncancel = event => event.preventDefault();
+debugFrame.onchange = showDebugFrame;
+document.getElementById('debug-abort').onclick = () => debugCommand({op: 'abort'});
+document.getElementById('debug-evaluate').onclick = () => debugCommand({op: 'eval',
+  frame: Number(debugFrame.value), source: document.getElementById('debug-expression').value});
+for (const button of document.querySelectorAll('[data-debug]'))
+  button.onclick = () => debugCommand({op: button.dataset.debug});
 const exampleSources = {
+  debugger: `;; Debug 3 keeps these definitions in the interpreter.
+;; Press Run. Each pause opens the debugger dialog.
+;; 1. Pause a worker thread with BREAK. The main thread keeps running.
+;;    Select its tab, inspect MESSAGE, or evaluate (string-upcase message).
+;;    Click CONTINUE to let the worker finish.
+(defun debug-worker ()
+  (declare (optimize (debug 3)))
+  (let ((message "Hello from the worker"))
+    (break "The worker is paused. Inspect MESSAGE, then continue.")
+    (format t "~A~%" message)))
+
+(miricl-threads:make-thread #'debug-worker :name "Greeting worker")
+
+(defun debug-price (unit-price quantity discount)
+  (declare (optimize (debug 3)))
+  (let ((subtotal (* unit-price quantity)))
+    (restart-case
+        (unless (<= 0 discount 100)
+          (error "Discount ~A must be between 0 and 100." discount))
+      (use-discount (replacement)
+        :report "Supply a replacement discount, then finish the calculation."
+        (setf discount replacement)))
+    (* subtotal (- 1 (/ discount 100)))))
+
+(defun debug-order (quantity)
+  (declare (optimize (debug 3)))
+  (let ((unit-price 12))
+    (debug-price unit-price quantity 150)))
+
+;; 2. This error pauses the main thread too: the dialog now has two tabs.
+;;    Switch between the main thread and Greeting worker.
+;;    Inspect DEBUG-PRICE's locals and its current expression.
+;;    Evaluate (list subtotal discount), or (incf subtotal 5).
+;;    Select DEBUG-ORDER to inspect its separate lexical environment.
+;;    Enter (list 10) as restart arguments, then click USE-DISCOUNT.
+(format t "Recovered total: ~A~%" (debug-order 3))`,
   arithmetic: '(+ 1/3 2/3)\n(expt 2 100)\n(values "hello λ 🙂" #c(1 2))',
   function: '(defun factorial (n)\n  (if (zerop n)\n      1\n      (* n (factorial (1- n)))))\n\n(factorial 30)',
   compilation: `;; Press Reset first to measure a cold compiler. Reruns reuse it.
@@ -213,7 +465,8 @@ function append(text, kind = '') {
 }
 
 function setState(message, ready = false, running = false) {
-  status.textContent = message;
+  status.textContent = debuggerState
+    ? `Paused · ${debuggerState.threadName} · debugger level ${debuggerState.level}` : message;
   run.disabled = !ready;
   stop.disabled = !running;
   busy = running;
@@ -221,6 +474,7 @@ function setState(message, ready = false, running = false) {
 }
 
 function disposeWorker() {
+  showDebugger(undefined); debuggerSessions.clear(); debugViews.clear();
   if (worker) worker.terminate();
   worker = undefined;
   if (workerURL) URL.revokeObjectURL(workerURL);
@@ -254,16 +508,31 @@ function startSession(message) {
         URL.revokeObjectURL(workerURL);
         workerURL = undefined;
         setState('Ready', true);
+      } else if (data.type === 'debugger') {
+        debuggerEvent(data.event);
+      } else if (data.type === 'debug-command-error') {
+        const view = debugViews.get(data.sessionId);
+        // Lisp command errors also arrive in a refreshed stop. Ignore the
+        // duplicate rejection, and replies belonging to an older command.
+        if (!view?.command || view.command.stopId !== data.stopId) return;
+        if (view.pending) { view.pending.result = `Error: ${data.message}`; view.pending = undefined; }
+        else view.error = {op: view.command.op, message: data.message};
+        view.command = undefined;
+        if (debuggerState?.sessionId === data.sessionId) {
+          showDebugHistory(); showDebugError(); updateDebugControls();
+        }
       } else if (data.type === 'fatal') {
         fail(`Could not load the interpreter: ${data.message}\nUse a browser with WebAssembly GC and exception handling support.`);
       } else if (data.type === 'output') {
         append(data.output);
       } else if (data.type === 'error') {
+        if (!debuggerSessions.size) showDebugger(undefined);
         append(data.output);
         append(`Error: ${data.message}`, 'error');
         if (data.backtrace) append(data.backtrace, 'error');
         setState('Ready · evaluation failed', true);
       } else if (data.type === 'result') {
+        if (!debuggerSessions.size) showDebugger(undefined);
         append(data.output);
         if (data.incomplete) {
           append('Incomplete input. Finish the form in the editor and run it again.', 'notice');

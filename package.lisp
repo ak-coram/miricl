@@ -1,4 +1,9 @@
 ;;;; package.lisp
+(defpackage #:miricl-debugger
+  (:use #:cl)
+  (:export #:frames #:frame-name #:frame-form #:frame-locals #:eval-in-frame
+           #:*step-hook* #:set-breakpoint #:remove-breakpoint #:clear-breakpoints))
+
 (defpackage #:miricl-js
   (:use #:cl)
   (:shadow #:array)

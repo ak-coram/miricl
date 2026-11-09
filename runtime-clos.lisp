@@ -27,7 +27,7 @@
 
 ;; The remaining high function IDs are reserved for formatters, complements, constant macro expanders,
 ;; generic functions, and condition readers in $APPLY1.
-(setf *clos-primitives* (append *clos-primitives* '(%pop-arg %list-eq %%find-method %%dispatch-eql-key %nth)))
+(setf *clos-primitives* (append *clos-primitives* '(%pop-arg %list-eq %%find-method %%dispatch-eql-key %nth %%debugger)))
 
 (assert (<= (length *clos-primitives*) (- 2147483642 +clos-primitive-base+)))
 
@@ -37,7 +37,7 @@
 (defvar *compile-evaluations-default* nil)
 (defparameter *clos-library*
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "bundle-library.lisp" "fasl-utilities.lisp" "fasl-format.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "evaluation-library.lisp") append
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "fasl-utilities.lisp" "fasl-format.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "evaluation-library.lisp") append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let* ((*package* (find-package :miricl))
              (forms (loop for form = (read in nil :eof) until (eq form :eof)
@@ -46,8 +46,9 @@
                       else collect (lower-runtime-library form))))
         ;; Establish the native package and symbol identities before DEFSTRUCT
         ;; generates accessors. Public exports are declared in PACKAGE.LISP.
-        (when (member file '("thread-library.lisp" "bundle-library.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "fasl-utilities.lisp" "fasl-format.lisp") :test #'equal)
+        (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "whole-program.lisp" "hir.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "fasl-utilities.lisp" "fasl-format.lisp") :test #'equal)
           (let* ((package (find-package (cond ((equal file "thread-library.lisp") :miricl-threads)
+                                            ((equal file "debugger-library.lisp") :miricl-debugger)
                                             ((equal file "bundle-library.lisp") :miricl-bundle)
                                             (t :miricl-compiler))))
                  (exports (sort (loop for symbol being the external-symbols of package collect symbol)
@@ -385,6 +386,8 @@
            ($start i32) ($column i32))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%compile)))
     (then (return (call $compile-primitive (local.get $args)))))
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%debugger)))
+    (then (return (call $debug-operation (local.get $args)))))
   #@(if (i32.ge_u (local.get $op) (i32.const ,(clos-primitive-op '%%list-copy)))
     (then (return (call $list-primitive (local.get $op) (local.get $args)))))
   #@(local.set $a (call $car (local.get $args)))
@@ -649,7 +652,8 @@
     (local.set $forms (call $cons (call $read-library-literal) (local.get $forms))) (br $next)))
   #@(local.set $scan (call $reverse-onto (local.get $forms) (ref.null $obj) (i32.const 0)))
   (wat-list-loop ($scan)
-    #@(drop (call $eval (call $car (local.get $scan)) (ref.null $obj))))
+    #@(drop (call $eval (call $car (local.get $scan)) (ref.null $obj)))
+  #@(global.set $debug-ready (i32.const 1)))
   #@(drop (call $set-symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*gensym-counter*)))
     (call $int (i32.const 0))))
   #@(call $clear-values))

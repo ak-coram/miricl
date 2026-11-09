@@ -17,13 +17,15 @@ const groups = {
     ['--experimental-wasm-wasmfx', ...test('text-repl', wasm, repl)],
     test('repl-bridge', wasm, repl), test('repl-websocket', wasm, repl),
     test('dev-filesystem-server', wasm, repl), test('dev-filesystem', wasm), test('mounted-filesystem', wasm),
-    ...['backtrace', 'javascript', 'development', 'readtable-iteration', 'hash-structural']
+    test('terminal-debugger', wasm, image('miricl.js')),
+    ...['backtrace', 'debugger', 'javascript', 'development', 'readtable-iteration', 'hash-structural']
       .map(name => test(name, wasm)),
     test('ansi-report-check'),
   ],
   compiler: [
     test('compiler-runtime', wasm), test('compiler-runtime', precompiled, '--precompiled'),
     test('evaluation-policy', wasm, precompiled, repl),
+    test('debugger', precompiled),
     ...['compilation', 'hir', 'whole-program', 'class-reachability', 'generic-dispatch',
       'native-bundle', 'native-compilation', 'native-size', 'compiler-throughput',
       'fasl-format', 'file-compilation', 'file-code-sharing', 'nested-backquote',

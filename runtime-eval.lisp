@@ -11,13 +11,17 @@
 (define-runtime-function $body
     (($body :nullable-object) ($env :nullable-object) ($stop :nullable-object))
     (:nullable-object)
-  (:locals ($value :nullable-object))
+  (:locals ($value :nullable-object) ($debug i32))
+  #@(local.set $debug (i32.const -1))
   #@(call $clear-values)
   #@(block $declarations-done (loop $declarations
     (br_if $declarations-done (i32.ne (call $operator (call $car (local.get $body)))
                                       (i32.const ,(runtime-symbol-id 'declare))))
+    (local.set $debug (call $debug-declarations (call $cdr (call $car (local.get $body))) (local.get $debug)))
     (local.set $env (call $declare (call $cdr (call $car (local.get $body))) (local.get $env) (local.get $stop)))
     (local.set $body (call $cdr (local.get $body))) (br $declarations)))
+  #@(if (i32.ge_s (local.get $debug) (i32.const 0))
+    (then (return_call $debug-body (local.get $body) (local.get $env) (local.get $stop) (local.get $debug))))
   #@(block $done (loop $next
     (br_if $done (ref.is_null (local.get $body)))
     ;; No work remains after the final body form. Keep the evaluator's
@@ -160,7 +164,7 @@
           (call $cons (local.get $form) (ref.null $obj))))))))
   #@(return_call $eval (local.get $form) (ref.null $obj)))
 
-(define-runtime-function $eval
+(define-runtime-function $eval0
     (($form :nullable-object) ($env :nullable-object))
     (:nullable-object)
   (:locals ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
@@ -584,5 +588,5 @@
   ($eval-list)
   ($validate-params)
   ($declared-special-p)
-  ($eval)
+  ($eval0)
   ($eval1))

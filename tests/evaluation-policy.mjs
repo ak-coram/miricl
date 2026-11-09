@@ -17,9 +17,17 @@ for (const [file, compiled] of [[process.argv[2] ?? 'miricl.wasm', false],
     check(`(and (= (policy-default 40) 42)
       (eq (null (function-lambda-expression #'policy-default)) ${compiled ? 't' : 'nil'}))`);
 
+    mode(true);
+    // Policy scanning must accept dotted destructuring lists in source,
+    // including macro calls, while preserving native compilation at debug 0.
+    output(`(defmacro policy-dotted-macro ((head . tail)) (list 'quote (cons head tail)))
+      (defun policy-dotted-function (pair)
+        (destructuring-bind (head . tail) pair (cons head tail)))`);
+    check(`(and (equal (policy-dotted-macro (1 . 2)) '(1 . 2))
+      (equal (policy-dotted-function '(3 . 4)) '(3 . 4))
+      (null (function-lambda-expression #'policy-dotted-function)))`);
     // A dynamic binding controls a nested EVAL without changing the global
     // preference, even when the enclosing form was compiled.
-    mode(true);
     check(`(let ((miricl-compiler:*compile-evaluations* nil))
       (eval '(defun policy-interpreted (x) (+ x 3)))
       (not (null (function-lambda-expression #'policy-interpreted))))`);

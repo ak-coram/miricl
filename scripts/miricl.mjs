@@ -402,11 +402,33 @@ export class MiriclError extends Error {
   }
 }
 
+// A handle belongs to one paused activation, never to the frontend's selection.
+class DebuggerStop {
+  #owner;
+  constructor(owner, snapshot) { this.#owner = owner; Object.assign(this, snapshot); }
+  get snapshot() { return {...this}; }
+  locals(frameId) {
+    const frame = this.frames.find(frame => frame.id === frameId);
+    this.#owner.assertDebugStop(this);
+    if (!frame?.inspectable) return Promise.reject(new Error('This frame has no interpreter debugging information.'));
+    return Promise.resolve(frame.locals);
+  }
+  evaluate(frameId, source) { return this.#owner.debugCommand(this, {op: 'eval', frame: frameId, source}); }
+  invokeRestart(restartId, {argumentsSource = ''} = {}) {
+    return this.#owner.debugCommand(this, {op: 'restart', frame: restartId, source: argumentsSource});
+  }
+  step(mode) { return this.#owner.debugCommand(this, {op: mode}); }
+  resume() { return this.#owner.debugCommand(this, {op: 'resume'}); }
+  abort() { return this.#owner.debugCommand(this, {op: 'abort'}); }
+}
+
 export class Miricl {
-  constructor(instance, {imports = {}, onOutput, onThreadError} = {}) {
+  constructor(instance, {imports = {}, onOutput, onThreadError, onDebugger} = {}) {
     this.vm = instance.exports;
     this.onOutput = onOutput;
     this.onThreadError = onThreadError;
+    this.onDebugger = onDebugger;
+    this.debugSessions = new Map();
     this.encoder = new TextEncoder();
     this.decoder = new TextDecoder('utf-8', {fatal: true});
     this.realOrigin = performance.now();
@@ -438,9 +460,18 @@ export class Miricl {
       }}});
       this.vm['native-services'].set(0, bridge.exports.service);
     }
-    if (this.vm['javascript-services']) this.javascript = new JavaScriptHost(this, imports);
+    if (onDebugger !== undefined && typeof onDebugger !== 'function')
+      throw new TypeError('onDebugger must be a function.');
+    const debuggerImports = onDebugger ? {miriclDebugger: {
+      stop: (data, reply) => this.debugStopped(data, reply),
+      close: sessionId => this.debugClosed(sessionId),
+    }} : {};
+    if (this.vm['javascript-services'])
+      this.javascript = new JavaScriptHost(this, {...imports, ...debuggerImports});
     if (this.vm['thread-services'] && typeof WebAssembly.Suspending === 'function')
       this.threads = new GreenThreads(this);
+    if (onDebugger && this.threads && this.vm['debugger-connected'])
+      this.vm['debugger-connected'].value = 1;
     if (this.vm['seed-random']) {
       const seed = globalThis.crypto.getRandomValues(new Uint32Array(4));
       this.vm['seed-random'](...seed);
@@ -561,7 +592,89 @@ export class Miricl {
     return Uint8Array.from(output, character => character.charCodeAt(0));
   }
 
-  close() { this.dev?.close(); this.threads?.close(); }
+  debugStopped(data, reply) {
+    const [sessionId, stopId, threadId, threadName, level, parentSessionId, type, message,
+      backtrace, descriptions, reports, canStep, hasResult, values, output, error] = data;
+    const indices = new Map();
+    const frames = backtrace.split('\n').flatMap(line => {
+      const match = /^\s*(\d+): (.*)$/.exec(line);
+      if (!match) return [];
+      const id = Number(match[1]);
+      const index = descriptions.findIndex(description => description[0] === id);
+      const description = descriptions[index];
+      if (description) indices.set(id, index);
+      return [{id, name: match[2], inspectable: !!description,
+        form: description?.[2] ?? null,
+        locals: description?.[3].map(([name, value]) => ({name, value})) ?? []}];
+    });
+    // A top-level LOCALLY/STEP scope has an environment but no function call
+    // in the bounded call ring. Expose that interpreter scope as well.
+    descriptions.forEach(([id, name, form, locals], index) => {
+      if (frames.some(frame => frame.id === id)) return;
+      indices.set(id, index);
+      frames.push({id, name, inspectable: true, form, locals: locals.map(([name, value]) => ({name, value}))});
+    });
+    const result = hasResult ? {values, output, ...(error ? {error} : {})} : null;
+    const stop = new DebuggerStop(this, {sessionId, stopId, threadId, threadName, level,
+      parentSessionId: parentSessionId || null, condition: {type, message}, backtrace,
+      frames, restarts: reports.map(([name, description], id) => ({id, name, description})), canStep, result});
+    const previous = this.debugSessions.get(sessionId);
+    this.debugSessions.set(sessionId, {stop, reply, indices});
+    if (previous?.pending && hasResult) {
+      if (error) previous.pending.reject(new Error(error));
+      else previous.pending.resolve({values, output});
+    }
+    queueMicrotask(() => this.onDebugger?.({type: 'stopped', stop}));
+  }
+
+  debugClosed(sessionId) {
+    const entry = this.debugSessions.get(sessionId);
+    if (!entry) return;
+    this.debugSessions.delete(sessionId);
+    if (entry.pending?.op === 'eval') entry.pending.reject(new Error('Debugger evaluation was interrupted.'));
+    else entry.pending?.resolve();
+    const {threadId, level, parentSessionId} = entry.stop;
+    queueMicrotask(() => this.onDebugger?.({type: 'closed', sessionId, threadId, level, parentSessionId}));
+  }
+
+  debuggerSessions() { return [...this.debugSessions.values()].map(entry => entry.stop); }
+
+  assertDebugStop(stop) {
+    const entry = this.debugSessions.get(stop.sessionId);
+    if (!entry || entry.stop.stopId !== stop.stopId || entry.stop.threadId !== stop.threadId)
+      throw new Error('This debugger stop is no longer active.');
+    if (!entry.reply || [...this.debugSessions.values()].some(child => child.stop.parentSessionId === stop.sessionId))
+      throw new Error('This debugger session is busy or suspended by a nested debugger.');
+    return entry;
+  }
+
+  async debugCommand(stop, {op, frame = 0, source = ''}) {
+    const entry = this.assertDebugStop(stop);
+    if (!['eval', 'restart', 'abort', 'into', 'over', 'out', 'resume'].includes(op))
+      throw new TypeError('Unknown debugger command.');
+    if (!Number.isSafeInteger(frame) || frame < 0 || typeof source !== 'string')
+      throw new TypeError('Debugger commands require a nonnegative frame index and a source string.');
+    if (['into', 'over', 'out', 'resume'].includes(op) && !stop.canStep)
+      throw new Error('This stop cannot resume without invoking an available restart.');
+    if (op === 'eval') {
+      if (!entry.indices.has(frame)) throw new Error('This frame has no interpreter debugging information.');
+      frame = entry.indices.get(frame);
+    }
+    if (op === 'restart' && !stop.restarts.some(restart => restart.id === frame))
+      throw new Error('This restart does not exist at this stop.');
+    const reply = entry.reply;
+    const quoted = `"${source.replace(/["\\]/g, '\\$&')}"`;
+    const result = new Promise((resolve, reject) => {entry.pending = {resolve, reject, op};});
+    entry.reply = null;
+    try { reply(`(:${op} ${frame} ${quoted})`); this.threads.schedule(); }
+    catch (error) {entry.pending.reject(error);}
+    return result;
+  }
+
+  close() {
+    for (const entry of this.debugSessions.values()) entry.pending?.reject(new Error('The interpreter was closed.'));
+    this.debugSessions.clear(); this.dev?.close(); this.threads?.close();
+  }
 
   evaluateAsync(source, options) {
     return this.threads ? this.threads.evaluate(source, options) : Promise.resolve(this.evaluate(source, options));

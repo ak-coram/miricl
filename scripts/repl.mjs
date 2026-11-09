@@ -84,8 +84,11 @@ if (help) {
   // commands and an explicitly selected WASI component can reuse its Node core.
   const compilerImage = options.bundle || options.optimize || path.basename(selectedImage) === 'miricl-repl.wasm'
     ? await replCompilerImage(selectedImage) : undefined;
+  const {TerminalDebugger} = await import('./terminal-debugger.mjs');
+  const debuggerUI = options.bundle || options.optimize ? undefined : new TerminalDebugger();
   const interpreter = await Miricl.instantiate(compilerImage ?? await fs.readFile(selectedImage), {
-    onOutput: output => process.stdout.write(output), onThreadError: report
+    onOutput: output => process.stdout.write(output), onThreadError: report,
+    onDebugger: debuggerUI && (event => debuggerUI.handle(event))
   });
   const {HostFilesystem} = await import('./host-filesystem.mjs');
   const filesystem = new HostFilesystem(interpreter, options.directory);
@@ -108,32 +111,58 @@ if (help) {
   } else {
     const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
     const input = readline.createInterface({input: process.stdin, output: process.stdout, terminal});
-    let pending = '', quit = false;
+    let pending = '', quit = false, ended = false, evaluating = false, finished = false;
+    const lines = [];
+    const commands = new Set();
+    let finish;
+    const done = new Promise(resolve => {finish = resolve;});
     function prompt() {
-      if (terminal) { input.setPrompt(pending ? '...> ' : 'miricl> '); input.prompt(); }
+      if (ended || finished) return;
+      const debugPrompt = debuggerUI.ready ? debuggerUI.prompt() : '';
+      if (terminal) { input.setPrompt(debugPrompt || (pending ? '...> ' : 'miricl> ')); input.prompt(); }
+      else if (debugPrompt) process.stdout.write(debugPrompt);
     }
-
+    async function submit(source, eof = false) {
+      evaluating = true;
+      try {
+        const result = await interpreter.evaluateAsync(source, {eof});
+        if (result.output) process.stdout.write(result.output);
+        await filesystem.publish();
+        if (!result.incomplete) pending = '';
+        if (result.quit) {quit = true; lines.length = 0; input.close();}
+      } catch (error) {report(error); pending = ''; if (eof) process.exitCode = 1;}
+      finally {evaluating = false; pump(); prompt();}
+    }
+    function pump() {
+      if (finished) return;
+      const stop = debuggerUI.active;
+      if (stop) {
+        const local = /^(sessions?|threads|help|\?)\b/i.test(lines[0] ?? '');
+        if ((!debuggerUI.ready && !local) || commands.has(stop.stopId)) return;
+        const line = lines.length ? lines.shift() : ended ? 'abort' : undefined;
+        if (line === undefined) return;
+        commands.add(stop.stopId);
+        debuggerUI.command(line).finally(() => {commands.delete(stop.stopId); pump(); prompt();});
+        return;
+      }
+      if (evaluating) return;
+      if (lines.length) {pending += lines.shift() + '\n'; void submit(pending); return;}
+      if (ended) {
+        if (pending && !quit) {const source = pending; pending = ''; void submit(source, true);}
+        else {finished = true; finish();}
+      }
+    }
+    debuggerUI.onReady = () => {pump(); prompt();};
+    input.on('line', line => {lines.push(line); pump();});
+    input.on('close', () => {ended = true; pump();});
     input.on('SIGINT', () => {
-      if (pending) { pending = ''; process.stdout.write('\n'); prompt(); }
+      if (debuggerUI.active) {lines.unshift('abort'); pump();}
+      else if (pending) {pending = ''; process.stdout.write('\n'); prompt();}
       else input.close();
     });
     try {
       prompt();
-      for await (const line of input) {
-        pending += `${line}\n`;
-        try {
-          const result = await interpreter.evaluateAsync(pending);
-          if (result.output) process.stdout.write(result.output);
-          await filesystem.publish();
-          if (!result.incomplete) pending = '';
-          if (result.quit) { quit = true; input.close(); break; }
-        } catch (error) { report(error); pending = ''; }
-        prompt();
-      }
-      if (pending && !quit) {
-        try { process.stdout.write((await interpreter.evaluateAsync(pending, {eof: true})).output); await filesystem.publish(); }
-        catch (error) { report(error); process.exitCode = 1; }
-      }
+      await done;
     } finally { input.close(); filesystem.close(); interpreter.close(); }
   }
 }

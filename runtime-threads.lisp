@@ -8,16 +8,17 @@
     (loop for name in '($extra-values $dynamic-package $dynamic-variables $handlers $restarts
                        $restart-associations $catches $targets $transfer-target
                        $transfer-values $transfer-function $last-condition $undefined-name
-                       $derived-type-environment $format-stream $format-list-stream
+                       $debug-frames $derived-type-environment $format-stream $format-list-stream
                        $format-list-state $source-labels $reader-stream $reader-readtable $warnings)
           collect (list name '(ref null $obj) '(ref.null $obj)))
     (loop for name in '($error $unbound-symbol $backtrace-depth $backtrace-saved-depth
-                       $cursor $limit $loop-expansion-slot $source-generic $source-end $source-position
+                       $debug-evaluating $debug-internal $debug-depth $cursor $limit $loop-expansion-slot $source-generic $source-end $source-position
                        $source-depth $source-bq-depth $source-suppress $text-status
                        $text-output-length $format-base $format-column $method-print-depth
                        $circle-phase $circle-label $javascript-depth $thread-mask)
           collect (list name 'i32 '(i32.const 0)))
-    '(($value-count i32 (i32.const 1))
+    '(($debug-step-depth i32 (i32.const -1))
+      ($value-count i32 (i32.const 1))
       ($reader-standard-syntax i32 (i32.const 1))
       ($reader-object-present i32 (i32.const 1))
       ($circle-table (ref null $obj) (ref.null $obj))

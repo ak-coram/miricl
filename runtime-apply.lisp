@@ -2,7 +2,7 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-(define-runtime-function $apply
+(define-runtime-function $apply0
     (($name :nullable-object) ($args :nullable-object))
     (:nullable-object)
   (:locals ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
@@ -368,6 +368,6 @@
   #@(ref.null $obj))
 
 (define-runtime-section apply-runtime-wat ()
-  ($apply)
+  ($apply0)
   ($apply-spread)
   ($apply1))

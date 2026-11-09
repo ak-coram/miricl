@@ -19,7 +19,7 @@
       (if (i32.eq (local.get $id) (i32.const 2147483645))
         (then
           (local.set $body (call $generic-property (local.get $function) ,(clos-library-reference :name)))
-          (if (call $symbolp (local.get $body)) (then (return (local.get $body))))))
+          (if (i32.eqz (ref.is_null (local.get $body))) (then (return (local.get $body))))))
       (if (i32.eqz (local.get $id))
         (then
           (local.set $body (struct.get $obj $b (local.get $function)))
@@ -44,15 +44,20 @@
         (i32.and (i32.sub (i32.sub (global.get $backtrace-depth) (i32.const 1)) (local.get $i)) (i32.const 63)))))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next))))
 
-(define-runtime-function $print-backtrace () ()
-  (:locals ($i i32) ($name :nullable-object) ($home :nullable-object) ($entry :nullable-object))
-  #@(if (i32.eqz (global.get $backtrace-saved-depth)) (then (return)))
-  #@(block ,(emit-text (format nil "Backtrace (most recent call first):~%")))
-  #@(block $done (loop $next
-    (br_if $done (i32.ge_u (local.get $i) (global.get $backtrace-saved-depth)))
-    (br_if $done (i32.ge_u (local.get $i) (i32.const 64)))
-    ,(emit-text "  ")
-    (local.set $name (array.get $objects (global.get $backtrace-saved) (local.get $i)))
+(define-runtime-function $print-backtrace-name (($name :nullable-object)) ()
+  (:locals ($home :nullable-object) ($entry :nullable-object))
+  ;; Function names may be (SETF symbol). Print only this bounded shape;
+  ;; diagnostic printing must never call a user-defined object printer.
+  #@(if (i32.eq (call $tag (local.get $name)) (i32.const 7))
+    (then
+      (if (i32.eq (call $operator (local.get $name)) (i32.const ,(runtime-symbol-id 'setf)))
+        (then ,(emit-text "(SETF ")
+          (call $print-backtrace-name (call $car (call $cdr (local.get $name))))
+          (call $emit-char (i32.const 41)) (return)))
+      ,(emit-text "#<ANONYMOUS-FUNCTION>") (return)))
+  #@(if (i32.eqz (call $symbolp (local.get $name)))
+    (then ,(emit-text "#<ANONYMOUS-FUNCTION>") (return)))
+  #@(block
     ;; Always qualify names, including those accessible in *PACKAGE*. Keep
     ;; ordinary symbol printing unchanged and avoid user-defined printers.
     (local.set $home (call $symbol-home (local.get $name)))
@@ -69,10 +74,25 @@
             (if (ref.is_null (local.get $entry)) (then (call $emit-char (i32.const 58)))
               (else (if (i32.ne (struct.get $obj $n (local.get $entry)) (i32.const 2))
                 (then (call $emit-char (i32.const 58))))))))))
-    (call $print-name (call $symbol-name (local.get $name))) (call $emit-char (i32.const 10))
+    (call $print-name (call $symbol-name (local.get $name)))))
+
+(define-runtime-function $print-backtrace () ()
+  (:locals ($i i32))
+  #@(if (i32.eqz (global.get $backtrace-saved-depth)) (then (return)))
+  #@(block ,(emit-text (format nil "Backtrace (most recent call first):~%")))
+  #@(block $done (loop $next
+    (br_if $done (i32.ge_u (local.get $i) (global.get $backtrace-saved-depth)))
+    (br_if $done (i32.ge_u (local.get $i) (i32.const 64)))
+    ,(emit-text "  ")
+    ;; All 64 possible indices occupy two columns, regardless of print settings.
+    (if (i32.lt_u (local.get $i) (i32.const 10)) (then (call $emit-char (i32.const 32))))
+    (call $print-small-integer (i64.extend_i32_u (local.get $i)) (i32.const 10))
+    ,(emit-text ": ")
+    (call $print-backtrace-name (array.get $objects (global.get $backtrace-saved) (local.get $i)))
+    (call $emit-char (i32.const 10))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
   #@(if (i32.gt_u (global.get $backtrace-saved-depth) (i32.const 64))
-    (then ,(emit-text (format nil "  ... older calls omitted~%")))))
+    (then ,(emit-text (format nil "      ... older calls omitted~%")))))
 
 (define-runtime-function $format-backtrace () (i32)
   (:export "format-backtrace")
@@ -85,4 +105,4 @@
   #@(global $backtrace-saved-depth (mut i32) (i32.const 0))
   #@(global $backtrace-frames (mut (ref $objects)) (array.new_default $objects (i32.const 64)))
   #@(global $backtrace-saved (mut (ref $objects)) (array.new_default $objects (i32.const 64)))
-  ($backtrace-name) ($capture-backtrace) ($print-backtrace) ($format-backtrace))
+  ($backtrace-name) ($capture-backtrace) ($print-backtrace-name) ($print-backtrace) ($format-backtrace))

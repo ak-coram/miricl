@@ -113,7 +113,7 @@
 (define-runtime-function $make-symbol-macro-binding
     (($name :nullable-object) ($expansion :nullable-object)) (:nullable-object)
   #@(call $node (i32.const 9) (call $id (local.get $name))
-    (call $node (i32.const 11) (i32.const 2) (local.get $expansion) (ref.null $obj) (ref.null $obj))
+    (call $node (i32.const 11) (i32.const 2) (local.get $expansion) (ref.null $obj) (local.get $name))
     (call $closure
       (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'quote)))
         (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'function))) (ref.null $obj)))

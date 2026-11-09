@@ -47,6 +47,7 @@
       ,(environment-runtime-wat)
       ,(condition-runtime-wat)
       ,(backtrace-runtime-wat)
+      ,(debugger-runtime-wat)
       ,(eval-runtime-wat)
       ,(loop-runtime-wat)
       ,(clos-runtime-wat)

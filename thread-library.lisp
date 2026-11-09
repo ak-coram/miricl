@@ -46,7 +46,11 @@
                   (let ((bindings (remove-duplicates bindings :key #'car :from-end t)))
                     (progv (mapcar #'car bindings)
                         (mapcar (lambda (binding) (eval (cdr binding))) bindings)
-                      (cons (multiple-value-list (funcall function)) nil))))
+                      (cons (multiple-value-list
+                        (if (or (miricl::%%debugger 11) *debugger-hook*)
+                            (handler-bind ((serious-condition #'miricl-debugger::%unhandled-thread-condition))
+                              (funcall function))
+                            (funcall function))) nil))))
               (serious-condition (condition) (cons nil condition))))))
     (%finish thread outcome)))
 (defun %finish (thread outcome)

@@ -18,8 +18,11 @@ let cli = (await read('repl.mjs')).replace(/^#!.*\n/, '').replace(/^import .*;\n
   .replace("const {startReplBridge} = await import('./repl-bridge.mjs');", '')
   .replace("const {replCompilerImage} = await import('./repl-bridge.mjs');", '')
   .replace("const {HostFilesystem} = await import('./host-filesystem.mjs');", '')
+  .replace("const {TerminalDebugger} = await import('./terminal-debugger.mjs');", '')
   .replace('node scripts/repl.mjs', 'node miricl.js');
-const terminal = await localModule('host-filesystem.mjs', 'HostFilesystem') + await localModule('repl-bridge.mjs', 'startReplBridge, replCompilerImage');
+const terminal = await localModule('host-filesystem.mjs', 'HostFilesystem') +
+  await localModule('terminal-debugger.mjs', 'TerminalDebugger') +
+  await localModule('repl-bridge.mjs', 'startReplBridge, replCompilerImage');
 const text = `${browser}\n${adapter}\n
 // The same file is also the Node terminal command; importing it has no CLI effects.
 if (typeof process !== 'undefined' && process.versions?.node && process.argv[1]) {

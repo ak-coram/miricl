@@ -30,7 +30,9 @@
     (:object)
   #@(call $check-variable (local.get $name))
   #@(call $cons (call $node (i32.const 9) (call $id (local.get $name))
-    (call $node (i32.const 11) (i32.const 0) (local.get $value) (ref.null $obj) (ref.null $obj))
+    ;; The existing cell's spare C slot keeps the binding's symbol available to
+    ;; the interpreter debugger, without allocating or registering a name map.
+    (call $node (i32.const 11) (i32.const 0) (local.get $value) (ref.null $obj) (local.get $name))
     (call $symbol (i32.const 1))
     (call $bool (call $specialp (local.get $name)))) (local.get $env)))
 

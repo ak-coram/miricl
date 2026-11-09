@@ -26,7 +26,9 @@
   (list (eval (read *query-io*))))
 
 ;; The standard explicitly permits normal execution as the minimal stepper.
-(defmacro step (form) (list 'locally form))
+(defmacro step (form)
+  (list 'locally '(declare (optimize (debug 3)))
+    (list 'unwind-protect (list 'progn '(%%debugger 4 0) form) '(%%debugger 4 nil))))
 
 (defvar %dribble-state nil)
 (defun dribble (&optional (pathname nil suppliedp))
