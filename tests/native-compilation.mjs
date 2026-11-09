@@ -24,6 +24,34 @@ try {
   check(`(progn
     (defparameter *native* (miricl-compiler:compile-native '(lambda (x) (if x (+ x 2) 0))))
     (and (compiled-function-p *native*) (= (funcall *native* 40) 42) (= (funcall *native* nil) 0)))`);
+  // Carry across limb boundaries, the native small-integer limit, and the
+  // signed i32 boundary; larger integers must still use exact arithmetic.
+  const integers = [0n, 1n, -1n, 32767n, 32768n, -32768n,
+    1073741823n, -1073741823n, 1073741824n, -2147483648n, 1n << 80n];
+  vm.evaluate(`(defparameter *startup-add* (miricl-compiler:compile-native '(lambda (a b) (+ a b))))`);
+  for (const a of integers) for (const b of integers)
+    check(`(eql (funcall *startup-add* ${a} ${b}) ${a + b})`);
+  vm.evaluate(`(defparameter *bounded-arithmetic* (miricl-compiler:compile-native
+    '(lambda (a b) (list (- a b) (* a b) (< a b) (> a b) (<= a b) (>= a b) (= a b) (/= a b)))))`);
+  for (const a of [...integers, -32767n, 256n, -17n, 2147483647n]) for (const b of integers) {
+    const expected = [a - b, a * b, a < b, a > b, a <= b, a >= b, a === b, a !== b]
+      .map(value => typeof value === 'boolean' ? (value ? 't' : 'nil') : value).join(' ');
+    check(`(equal (funcall *bounded-arithmetic* ${a} ${b}) '(${expected}))`);
+  }
+  for (let count = 1; count <= 3; count++) {
+    const items = Array(count).fill('x').join(' ');
+    check(`(let* ((f (miricl-compiler:compile-native '(lambda (x)
+                   (let ((result (list ${items}))) (values result :done)))))
+                 (item (cons :item nil)) (a (funcall f item)) (b (funcall f item)))
+      (and (= (length a) ${count}) (every (lambda (x) (eq x item)) a)
+           (not (eq a b)) (progn (setf (car a) :changed) (eq (car b) item))
+           (eq (nth-value 1 (funcall f item)) :done)
+           (let ((original (symbol-function 'list)))
+             (unwind-protect
+               (progn (setf (symbol-function 'list) (lambda (&rest args) (declare (ignore args)) :replacement))
+                      (eq (funcall f item) :replacement))
+               (setf (symbol-function 'list) original)))))`);
+  }
   check(`(= (length (multiple-value-list (miricl-compiler:compile-native '(lambda (x) x)))) 1)`);
   check(`(let ((f (miricl-compiler:compile-native '(lambda (x)
     (multiple-value-call (lambda (a b) (values (lambda () (incf a)) (lambda () a) b))
@@ -80,8 +108,28 @@ try {
                   (eq (funcall read a i) :one) (equal (funcall write a i 0) '(0))))
            (handler-case (progn (funcall read a -1) nil) (type-error () t))
            (handler-case (progn (funcall read a 70) nil) (type-error () t))
+           (handler-case (progn (funcall read a 1073741823) nil) (type-error () t))
+           (handler-case (progn (funcall read a 1073741824) nil) (type-error () t))
+           (handler-case (progn (funcall write a -1 1) nil) (type-error () t))
+           (handler-case (progn (funcall write a 70 1) nil) (type-error () t))
            (handler-case (progn (funcall write a 0 2) nil) (type-error () t))))`);
   }
+  check(`(let* ((name (gensym "LATE-FUNCTION"))
+                (f (miricl-compiler:compile-native
+                    (list 'lambda '(run) (list 'when 'run
+                      (list 'dotimes '(i 3) (list name 'i) (list name 'i)))))))
+    (and (null (funcall f nil))
+      (handler-case (progn (funcall f t) nil) (undefined-function () t))
+      (progn (setf (symbol-function name) (lambda (x) x)) (null (funcall f t)))
+      (progn (fmakunbound name)
+        (handler-case (progn (funcall f t) nil) (undefined-function () t)))))`);
+  check(`(progn (defun loop-current-definition (x) x)
+    (let ((f (miricl-compiler:compile-native
+      '(lambda () (loop for i below 4 collect
+         (list (loop-current-definition i) (loop-current-definition i))
+         do (when (= i 1) (setf (symbol-function 'loop-current-definition)
+                               (lambda (x) (+ x 10)))))))))
+      (equal (funcall f) '((0 0) (1 1) (12 12) (13 13)))))`);
   check(`(let* ((read (miricl-compiler:compile-native '(lambda (a i) (list (bit a i)))))
                (base (make-array 70 :element-type 'bit :initial-element 1))
                (view (make-array 35 :element-type 'bit :displaced-to base :displaced-index-offset 31

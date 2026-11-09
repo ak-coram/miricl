@@ -257,12 +257,10 @@
          (%fasl-records (coerce (second payload) 'vector))
          (%fasl-values (make-array (length %fasl-records)))
          (%fasl-states (make-array (length %fasl-records) :initial-element 0)) (%fasl-pending nil))
-    (dolist (index (first payload))
-      (let ((form (%fasl-object index)))
-        (%fasl-finish-initializations)
-        ;; These forms have already passed COMPILE-FILE's frontend. Execute
-        ;; their stored code rather than implicitly compiling the FASL again.
-        (let ((value (%%eval form))) (when print (print value)))))))
+    ;; Reconstruct and execute each root before touching the next one. The
+    ;; native loop preserves load-time dependencies without Lisp dispatch for
+    ;; every root and every empty pending-initialization check.
+    (%%compile 31 (first payload) print)))
 (defun %load-compiled-file (pathname truename options)
   (let ((*load-pathname* pathname) (*load-truename* truename))
     (%load-message truename (car options))

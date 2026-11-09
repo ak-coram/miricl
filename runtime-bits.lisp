@@ -98,11 +98,6 @@
       (local.set $v (i32.xor (i32.sub (local.get $v) (local.get $borrow)) (i32.const -1)))))
   #@(call $bool (i32.and (i32.shr_u (local.get $v) (i32.rem_u (local.get $bit) (i32.const 15))) (i32.const 1))))
 
-(define-runtime-function $small-integer-value (($x :object)) (i32)
-  ;; Callers have established that the magnitude occupies at most two limbs.
-  #@(i32.mul (struct.get $obj $n (local.get $x)) (i32.or
-    (call $digit (local.get $x) (i32.const 0)) (i32.shl (call $digit (local.get $x) (i32.const 1)) (i32.const 15)))))
-
 (define-runtime-function $boole-word (($op i32) ($a i32) ($b i32)) (i32)
   ;; Dispatch once to the native operation instead of expanding the truth table
   ;; into four masked terms for every integer limb or packed bit-array word.
@@ -226,4 +221,4 @@
 
 (define-runtime-section integer-bits-runtime-wat ()
   ($require-integer) ($ash-native) ($integer-bit-measure) ($logbitp-native)
-  ($small-integer-value) ($boole-word) ($boole-native) ($integer-bits-apply))
+  ($boole-word) ($boole-native) ($integer-bits-apply))

@@ -20,7 +20,14 @@
   #@(array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $name))
   #@(global.set $backtrace-depth (i32.add (local.get $backtrace-depth) (i32.const 1)))
   #@(call $clear-values)
-  (wat-dynamic-call #@(call $apply1 (local.get $name) (local.get $args))
+  ;; Resolved native functions already carry a typed entry. Preserve the same
+  ;; dynamic cleanup and backtrace frame while bypassing generic dispatch.
+  (wat-dynamic-call
+    #@(if (result (ref null $obj)) (ref.test (ref $native-function) (local.get $name))
+      (then (ref.cast (ref null $obj) (any.convert_extern
+        (call_ref $native-entry (extern.convert_any (local.get $name)) (extern.convert_any (local.get $args))
+          (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $name)))))))
+      (else (call $apply1 (local.get $name) (local.get $args))))
     :cleanup #@(block
       (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
       (global.set $backtrace-depth (local.get $backtrace-depth)))))

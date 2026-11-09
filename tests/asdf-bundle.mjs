@@ -6,6 +6,9 @@ import {Miricl, MiriclError} from '../scripts/miricl.mjs';
 const binary = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
 const asdf = fs.readFileSync(process.argv[3] ?? 'build/asdf/asdf.lisp', 'utf8');
 const vm = await Miricl.instantiate(binary);
+const hostService = vm.hostService.bind(vm);
+let date = 4000000000;
+vm.hostService = (operation, argument) => operation === 0 ? date : hostService(operation, argument);
 const machines = [vm];
 const fresh = async () => {
   const machine = await Miricl.instantiate(binary);
@@ -87,8 +90,12 @@ try {
   // A cached make leaves the artifact alone; a changed dependency rebuilds it.
   await check(vm, '(asdf:make "app")');
   assert.deepEqual(await vm.readFile(output), bundle);
+  // Advance the filesystem clock explicitly: fast builds can otherwise edit
+  // the dependency within ASDF's timestamp resolution. :FORCE T would force
+  // APP alone, leaving LEFT's rebuild dependent on that timestamp as well.
+  date++;
   vm.mountFile('/src/left/left.lisp', sources.find(([name]) => name === 'left/left.lisp')[1].replace('(twice 10)', '(twice 20)'));
-  await check(vm, '(asdf:make "app" :force t)');
+  await check(vm, '(asdf:make "app")');
   const rebuilt = await fresh();
   rebuilt.mountFile('/app.wasm', await vm.readFile(output));
   await check(rebuilt, '(load "/app.wasm")');

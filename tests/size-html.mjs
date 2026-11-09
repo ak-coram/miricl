@@ -21,7 +21,7 @@ function checkMeasurements(report, directory) {
           ? ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs', 'miricl.mjs', 'maxima.mjs',
             'miricl.wasm', 'maxima.core'].map(file => `build/maxima/site/${file}`)
           : ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs', 'miricl.mjs', 'fricas.mjs',
-            'filesystem-archive.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`));
+            'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`));
       const sizes = {rawBytes: 0, gzipBytes: 0, brotliBytes: 0};
       for (const file of artifact.files) {
         const bytes = fs.readFileSync(path.join(directory, file.file));
@@ -104,7 +104,7 @@ try {
     fs.writeFileSync(path.join(directory, 'build/maxima/site', file), repeatedSections);
   fs.mkdirSync(path.join(directory, 'build/fricas/site'), {recursive: true});
   for (const file of ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-    'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'filesystem.bin.gz'])
+    'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'filesystem.bin.gz'])
     fs.writeFileSync(path.join(directory, 'build/fricas/site', file), 'FriCAS fixture λ🙂'.repeat(20));
   for (const file of ['miricl.wasm', 'fricas.wasm'])
     fs.writeFileSync(path.join(directory, 'build/fricas/site', file), repeatedSections);

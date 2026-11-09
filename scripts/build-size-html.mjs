@@ -20,9 +20,9 @@ const artifacts = [
     kind: 'application', files: ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
       'miricl.mjs', 'maxima.mjs', 'miricl.wasm', 'maxima.core'].map(file => `build/maxima/site/${file}`)},
   {file: 'build/maxima/site/maxima.core', description: 'Maxima — optimized Lisp core (included in total above)', kind: 'wasm'},
-  {file: 'fricas/', description: 'FriCAS — initial HTML, scripts, interpreter, optimized image and algebra filesystem (11 files)',
+  {file: 'fricas/', description: 'FriCAS — initial HTML, scripts, interpreter, optimized image and algebra filesystem (12 files)',
     kind: 'application', files: ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-      'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`)},
+      'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`)},
   {file: 'build/fricas/site/fricas.wasm', description: 'FriCAS — optimized Lisp payload (included in total above)', kind: 'wasm'},
 ];
 const escape = value => String(value ?? '').replace(/[&<>"']/g,

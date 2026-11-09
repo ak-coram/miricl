@@ -10,6 +10,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-bytes*)
 (defvar *wasm-literals*)
 (defvar *wasm-literal-index*)
+(defvar *wasm-literal-locals* nil)
 (defvar *wasm-literal-groups* nil)
 (defvar *native-functions*)
 (defvar *native-function-indices*)
@@ -175,11 +176,14 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                  #x63 1 1 #x63 1 1 #x63 1 1))
     (wasm-byte byte)))
 (defun wasm-literal (value)
-  (if (null value) (wasm-null)
+  (cond ((null value) (wasm-null))
+    ((and *wasm-literal-locals* (gethash value *wasm-literal-locals*))
+     (wasm-local (gethash value *wasm-literal-locals*)))
+    (t
       (let ((index (multiple-value-bind (index found) (gethash value *wasm-literal-index*)
                      (if found index (setf (gethash value *wasm-literal-index*)
                                       (vector-push-extend value *wasm-literals*))))))
-        (wasm-local 0) (wasm-integer index) (wasm-call "native-literal"))))
+        (wasm-local 0) (wasm-integer index) (wasm-call "native-literal")))))
 (defun wasm-list (values)
   (dolist (value values) (wasm-get value)) (wasm-null)
   (dotimes (i (length values)) (wasm-call "native-cons")))
@@ -638,6 +642,25 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (let ((body (emit-native-function-body function)))
       (if *wasm-optimize* (native-optimize-body body) body))))
 
+(defun native-loop-literals (function blocks)
+  ;; Literal identity is stable for the lifetime of this function object.
+  ;; Load loop operands and global *names* once per invocation; the function
+  ;; definitions themselves are still resolved at each original call site.
+  (when (null (native-forward-blocks function))
+    (let ((seen (make-hash-table :test 'eq)) (literals nil))
+      (dolist (block blocks)
+        (dolist (instruction (hir-block-instructions block))
+          (when (member (hir-instruction-opcode instruction)
+                        '(:constant :function-reference :global-read :global-write :dynamic-bind))
+            (let ((value (first (hir-instruction-attributes instruction))))
+              (when value
+                (unless (gethash value seen) (push value literals))
+                (incf (gethash value seen 0)))))))
+      ;; A one-site cache adds a prologue load, store and local to save a
+      ;; single static lookup. Share repeated literals so code size pays for
+      ;; the cache as well as repeated execution benefiting from it.
+      (remove-if (lambda (literal) (< (gethash literal seen) 2)) (nreverse literals)))))
+
 (defun native-function-plan (function)
   ;; HIR is unchanged between import discovery and final emission. Literal
   ;; indices, closure objects and relocations remain per-emission state.
@@ -653,12 +676,16 @@ Bind to NIL to interpret forms, including forms without native lowering.")
         (*wasm-live-values* (native-live-values function *wasm-dynamic-bindings* blocks))
         (*wasm-scalar-groups* (native-scalar-groups function))
         (*wasm-single-calls* (native-single-calls function *wasm-scalar-groups*))
-        (locals nil) (count 0))
+        (locals nil) (count 0)
+        (literals (native-loop-literals function blocks))
+        (literal-locals (make-hash-table :test 'eq)))
     (multiple-value-setq (locals count)
       (native-local-layout function blocks (if forward 2 3)))
+    (dolist (literal literals)
+      (setf (gethash literal literal-locals) (+ (if forward 2 3) count)) (incf count))
     (vector targets forward *wasm-inline-constants* *wasm-local-cells*
             *wasm-dynamic-bindings* *wasm-entry-environment* *wasm-live-values*
-            *wasm-scalar-groups* *wasm-single-calls* locals count)))
+            *wasm-scalar-groups* *wasm-single-calls* locals count literal-locals literals)))
 
 (defun emit-native-function-body (function)
   ;; Boxed SSA values are externref locals. A dispatcher is a first correct
@@ -683,13 +710,17 @@ Bind to NIL to interpret forms, including forms without native lowering.")
         (*wasm-inline-constants* (svref plan 2)) (*wasm-local-cells* (svref plan 3))
         (*wasm-dynamic-bindings* (svref plan 4)) (*wasm-entry-environment* (svref plan 5))
         (*wasm-live-values* (svref plan 6)) (*wasm-scalar-groups* (svref plan 7))
-        (*wasm-single-calls* (svref plan 8)) (*wasm-locals* (svref plan 9)) (count (svref plan 10)))
+        (*wasm-single-calls* (svref plan 8)) (*wasm-locals* (svref plan 9)) (count (svref plan 10))
+        (*wasm-literal-locals* (svref plan 11)))
    (when *wasm-function-relocations*
      (setf (gethash function *wasm-function-relocations*) nil))
    (with-wasm-bytes
     (wasm-u32 (if forward 1 2))
     (unless forward (wasm-u32 1) (wasm-type :i32))
     (wasm-u32 count) (wasm-type :object)
+    (dolist (literal (svref plan 12))
+      (let ((*wasm-literal-locals* nil)) (wasm-literal literal))
+      (wasm-byte #x21) (wasm-u32 (gethash literal *wasm-literal-locals*)))
     (when (native-value-slot *wasm-live-values* (hir-function-environment function))
       (wasm-call "native-environment") (wasm-set (hir-function-environment function)))
     (when forward
@@ -983,7 +1014,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                    hir-small-membership hir-call-arguments hir-literal-apply-form hir-case-form hir-macro-environment hir-assert-form
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
                    hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir
-                   native-inline-constants native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies emit-native-module
+                   native-inline-constants native-loop-literals native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies emit-native-module
                    hir-body hir-close hir-choice hir-expand-local-macros hir-lambda hir-form compile-to-hir
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-stack native-stackify-ops native-coalesce-ops native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.

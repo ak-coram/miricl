@@ -16,7 +16,7 @@ const groups = {
     test('threads', wasm, repl), test('standalone', wasm),
     ['--experimental-wasm-wasmfx', ...test('text-repl', wasm, repl)],
     test('repl-bridge', wasm, repl), test('repl-websocket', wasm, repl),
-    test('dev-filesystem-server', wasm, repl), test('dev-filesystem', wasm),
+    test('dev-filesystem-server', wasm, repl), test('dev-filesystem', wasm), test('mounted-filesystem', wasm),
     ...['backtrace', 'javascript', 'development', 'readtable-iteration', 'hash-structural']
       .map(name => test(name, wasm)),
     test('ansi-report-check'),

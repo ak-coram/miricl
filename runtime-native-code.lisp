@@ -290,6 +290,18 @@
 
 (define-runtime-function $native-function-reference (($name externref)) (externref)
   (:export-raw "native-function-reference")
+  (:locals ($symbol :nullable-object) ($binding :nullable-object) ($value :nullable-object))
+  ;; Compiled global calls overwhelmingly name symbols. Read the current
+  ;; binding directly; retain FDEFINITION for SETF names and undefined calls.
+  #@(local.set $symbol ,(native-object '(local.get $name)))
+  #@(if (call $symbolp (local.get $symbol))
+    (then
+      (local.set $binding (call $symbol-index-get (global.get $function-bindings) (call $id (local.get $symbol))))
+      (if (i32.eqz (ref.is_null (local.get $binding)))
+        (then
+          (local.set $value (struct.get $obj $a (struct.get $obj $a (local.get $binding))))
+          (if (i32.eqz (ref.is_null (local.get $value)))
+            (then (return (extern.convert_any (local.get $value)))))))))
   #@(extern.convert_any (call $fdefinition ,(native-object '(local.get $name)))))
 
 (define-runtime-function $native-cons (($a externref) ($b externref)) (externref)
@@ -586,6 +598,7 @@
   (wat-symbol-case #@(local.get $id)
     ((not null) #@(return (extern.convert_any (call $bool (ref.is_null (local.get $a))))))
     (identity #@(return (local.get $value)))
+    (list #@(return (extern.convert_any (call $cons (local.get $a) (ref.null $obj)))))
     ((car first)
       #@(if (i32.or (ref.is_null (local.get $a)) (i32.eq (local.get $tag) (i32.const 7)))
         (then (return (extern.convert_any (call $car (local.get $a)))))))
@@ -650,6 +663,8 @@
           (i32.xor (call $equal (local.get $a) (local.get $b))
             (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '/=))))))))))
     (cons #@(return (extern.convert_any (call $cons (local.get $a) (local.get $b)))))
+    (list #@(return (extern.convert_any
+      (call $cons (local.get $a) (call $cons (local.get $b) (ref.null $obj))))))
     (gethash
       #@(if (i32.eq (local.get $bt) (i32.const 29))
         (then (local.set $cell (call $hash-cell-native (local.get $a) (local.get $b)))
@@ -658,12 +673,14 @@
     ((bit sbit)
       #@(if (i32.and (i32.eq (local.get $at) (i32.const 36)) (i32.eq (local.get $bt) (i32.const 1)))
         (then
-          (if (i32.and (i32.ge_s (struct.get $obj $n (local.get $b)) (i32.const 0))
-                       (i32.le_u (call $bitlength (ref.as_non_null (local.get $b))) (i32.const 29)))
-            (then (local.set $index (call $natural-count (local.get $b)))
+          (if (i32.le_u (array.len (struct.get $obj $digits (local.get $b))) (i32.const 2))
+            (then (local.set $index (call $small-integer-value (ref.as_non_null (local.get $b))))
               (if (i32.lt_u (local.get $index) (struct.get $obj $n (local.get $a)))
-                (then (return (extern.convert_any (call $array-raw-element
-                  (local.get $a) (local.get $index) (ref.null $obj) (i32.const 0)))))))))))
+                (then (return (extern.convert_any (call $int
+                  (i32.and (i32.shr_u
+                    (array.get $digits (struct.get $obj $digits (local.get $a))
+                      (i32.shr_u (local.get $index) (i32.const 5)))
+                    (local.get $index)) (i32.const 1))))))))))))
     ((+ - *)
       #@(if (i32.and (i32.le_u (i32.sub (local.get $at) (i32.const 1)) (i32.const 4))
                      (i32.le_u (i32.sub (local.get $bt) (i32.const 1)) (i32.const 4)))
@@ -685,10 +702,9 @@
     ((aref svref)
       #@(if (i32.and (i32.eq (local.get $at) (i32.const 34)) (i32.eq (local.get $bt) (i32.const 1)))
         (then
-          (if (i32.and (i32.ge_s (struct.get $obj $n (local.get $b)) (i32.const 0))
-                       (i32.le_u (call $bitlength (ref.as_non_null (local.get $b))) (i32.const 29)))
+          (if (i32.le_u (array.len (struct.get $obj $digits (local.get $b))) (i32.const 2))
             (then
-              (local.set $index (call $natural-count (local.get $b)))
+              (local.set $index (call $small-integer-value (ref.as_non_null (local.get $b))))
               (if (i32.lt_u (local.get $index) (array.len (call $vector-data (local.get $a))))
                 (then (return (extern.convert_any (array.get $objects
                   (call $vector-data (local.get $a)) (local.get $index))))))))))))
@@ -709,14 +725,17 @@
       (then (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (struct.new $native-arguments (call $allocate-object-tag (i32.const 52))
         (i32.const 3) (f64.const 0) (ref.null $digits) (ref.cast (ref null $obj) (any.convert_extern (local.get $a))) (ref.cast (ref null $obj) (any.convert_extern (local.get $b))) (ref.cast (ref null $obj) (any.convert_extern (local.get $c))) (ref.null $obj)))))))))
+  #@(if (i32.eq (local.get $id) (i32.const ,(- -2 (runtime-symbol-id 'list))))
+    (then (return (extern.convert_any
+      (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
+        (call $cons ,(native-object '(local.get $c)) (ref.null $obj))))))))
   (wat-symbol-case #@(local.get $id)
     ((bit sbit)
       #@(if (i32.and (i32.eq (call $tag (local.get $array)) (i32.const 36))
                      (i32.eq (call $tag (local.get $subscript)) (i32.const 1)))
         (then
-          (if (i32.and (i32.ge_s (struct.get $obj $n (local.get $subscript)) (i32.const 0))
-                       (i32.le_u (call $bitlength (ref.as_non_null (local.get $subscript))) (i32.const 29)))
-            (then (local.set $index (call $natural-count (local.get $subscript)))
+          (if (i32.le_u (array.len (struct.get $obj $digits (local.get $subscript))) (i32.const 2))
+            (then (local.set $index (call $small-integer-value (ref.as_non_null (local.get $subscript))))
               (if (i32.lt_u (local.get $index) (struct.get $obj $n (local.get $array)))
                 (then (return (extern.convert_any (call $array-raw-element
                   (local.get $array) (local.get $index) ,(native-object '(local.get $a)) (i32.const 1)))))))))))
@@ -724,10 +743,9 @@
       #@(if (i32.and (i32.eq (call $tag (local.get $array)) (i32.const 34))
                      (i32.eq (call $tag (local.get $subscript)) (i32.const 1)))
         (then
-          (if (i32.and (i32.ge_s (struct.get $obj $n (local.get $subscript)) (i32.const 0))
-                       (i32.le_u (call $bitlength (ref.as_non_null (local.get $subscript))) (i32.const 29)))
+          (if (i32.le_u (array.len (struct.get $obj $digits (local.get $subscript))) (i32.const 2))
             (then
-              (local.set $index (call $natural-count (local.get $subscript)))
+              (local.set $index (call $small-integer-value (ref.as_non_null (local.get $subscript))))
               (if (i32.lt_u (local.get $index) (array.len (call $vector-data (local.get $array))))
                 (then (array.set $objects (call $vector-data (local.get $array)) (local.get $index)
                   ,(native-object '(local.get $a)))

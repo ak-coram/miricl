@@ -55,8 +55,22 @@
       (i32.and (i32.shr_u (local.get $abs) (i32.const 15)) (i32.const 32767)))))
   #@(if (i32.eq (local.get $length) (i32.const 3))
     (then (array.set $digits (local.get $digits) (i32.const 2) (i32.shr_u (local.get $abs) (i32.const 30)))))
-  #@(call $integer (select (i32.const -1) (i32.const 1) (i32.lt_s (local.get $n) (i32.const 0)))
-        (local.get $digits)))
+  ;; The magnitude and digit count are already canonical. The cache lookup
+  ;; above covers every small result after runtime initialization.
+  #@(if (i32.lt_u (i32.add (local.get $n) (i32.const 16)) (i32.const 272))
+    (then (return (call $integer
+      (select (i32.const -1) (i32.const 1) (i32.lt_s (local.get $n) (i32.const 0))) (local.get $digits)))))
+  (wat-new-object :integer
+    :n #@(select (i32.const -1) (i32.const 1) (i32.lt_s (local.get $n) (i32.const 0)))
+    :digits #@(local.get $digits)))
+
+(define-runtime-function $small-integer-value (($x :object)) (i32)
+  ;; The caller proves an integer magnitude of at most two base-2^15 limbs.
+  #@(i32.mul (struct.get $obj $n (local.get $x))
+    (i32.or (array.get $digits (struct.get $obj $digits (local.get $x)) (i32.const 0))
+      (if (result i32) (i32.eq (array.len (struct.get $obj $digits (local.get $x))) (i32.const 2))
+        (then (i32.shl (array.get $digits (struct.get $obj $digits (local.get $x)) (i32.const 1)) (i32.const 15)))
+        (else (i32.const 0))))))
 
 (define-runtime-function $digit
     (($x :object) ($i i32))
@@ -131,6 +145,13 @@
     (:object)
   (:locals ($r :object)
            ($s i32))
+  ;; Two base-2^15 limbs fit a signed i32 even after addition. Construct the
+  ;; result once, avoiding a scratch digit array and its normalization copy.
+  #@(if (i32.and (i32.le_u (array.len (struct.get $obj $digits (local.get $a))) (i32.const 2))
+                 (i32.le_u (array.len (struct.get $obj $digits (local.get $b))) (i32.const 2)))
+    (then (return (call $int (i32.add
+      (call $small-integer-value (local.get $a))
+      (call $small-integer-value (local.get $b)))))))
   #@(local.set $r (local.get $a))
   #@(local.set $s (struct.get $obj $n (local.get $a)))
   #@(if (i32.eqz (local.get $s)) (then (return (local.get $b))))
@@ -157,6 +178,10 @@
            ($k i32))
   #@(local.set $na (array.len (struct.get $obj $digits (local.get $a))))
   #@(local.set $nb (array.len (struct.get $obj $digits (local.get $b))))
+  ;; One limb each gives a product below 2^30, including both signs.
+  #@(if (i32.and (i32.eq (local.get $na) (i32.const 1)) (i32.eq (local.get $nb) (i32.const 1)))
+    (then (return (call $int (i32.mul
+      (call $small-integer-value (local.get $a)) (call $small-integer-value (local.get $b)))))))
   #@(local.set $digits (array.new_default $digits (i32.add (local.get $na) (local.get $nb))))
   #@(block $done (loop $outer
     (br_if $done (i32.ge_u (local.get $i) (local.get $na)))
@@ -324,6 +349,7 @@
   #@(global $small-integers (ref $objects) (array.new_default $objects (i32.const 272)))
   ($integer)
   ($int)
+  ($small-integer-value)
   ($digit)
   ($negative)
   ($iabs)
@@ -783,6 +809,23 @@
            ($v f64)
            ($scale f64)
            ($d f64))
+  ;; Integer arithmetic needs no numeric contagion or floating/complex
+  ;; dispatch. This also keeps small loop counters on IADD's short path.
+  #@(if (i32.and (i32.eq (call $tag (local.get $a)) (i32.const 1))
+                 (i32.eq (call $tag (local.get $b)) (i32.const 1)))
+    (then
+      (if (i32.eqz (local.get $op))
+        (then (return (call $iadd (ref.as_non_null (local.get $a)) (ref.as_non_null (local.get $b))))))
+      (if (i32.eq (local.get $op) (i32.const 1))
+        (then
+          (if (i32.and (i32.le_u (array.len (struct.get $obj $digits (local.get $a))) (i32.const 2))
+                       (i32.le_u (array.len (struct.get $obj $digits (local.get $b))) (i32.const 2)))
+            (then (return (call $int (i32.sub
+              (call $small-integer-value (ref.as_non_null (local.get $a)))
+              (call $small-integer-value (ref.as_non_null (local.get $b))))))))
+          (return (call $iadd (ref.as_non_null (local.get $a)) (call $negative (ref.as_non_null (local.get $b)))))))
+      (if (i32.eq (local.get $op) (i32.const 2))
+        (then (return (call $imul (ref.as_non_null (local.get $a)) (ref.as_non_null (local.get $b))))))))
   #@(drop (call $number (local.get $a)))
   #@(drop (call $number (local.get $b)))
   #@(if (i32.and (i32.eq (local.get $op) (i32.const 3)) (call $zero (ref.as_non_null (local.get $b))))
@@ -861,6 +904,10 @@
   #@(if (i32.and (i32.eq (call $tag (local.get $ar)) (i32.const 1))
                  (i32.eq (call $tag (local.get $br)) (i32.const 1)))
     (then
+      (if (i32.and (i32.le_u (array.len (struct.get $obj $digits (local.get $ar))) (i32.const 2))
+                   (i32.le_u (array.len (struct.get $obj $digits (local.get $br))) (i32.const 2)))
+        (then (return (i32.sub (call $small-integer-value (local.get $ar))
+                              (call $small-integer-value (local.get $br))))))
       (local.set $sign-a (struct.get $obj $n (local.get $ar)))
       (local.set $sign-b (struct.get $obj $n (local.get $br)))
       (if (i32.ne (local.get $sign-a) (local.get $sign-b))

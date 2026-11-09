@@ -192,31 +192,49 @@ explicit labels for nested loops. The list local is consumed."
                           symbols))))
     (wat-fragment (wat-string `(if ,condition (then ,body))))))
 
-(defun wat-symbol-dispatch (value clauses)
-  "Use a branch table when its symbol range is compact enough."
-  (let* ((ids (loop for (symbols . body) in clauses append
-                   (mapcar #'runtime-symbol-id symbols)))
-         (first (reduce #'min ids)) (last (reduce #'max ids))
+(defun wat-index-dispatch (value entries done)
+  "Branch to shared clause labels using compact tables and a sparse search tree."
+  (let* ((first (caar entries)) (last (caar (last entries)))
          (span (1+ (- last first))))
-    (unless (and (>= (length ids) 4) (<= span (* 6 (length ids))))
-      (return-from wat-symbol-dispatch
-        (apply #'runtime-wat-sequence
-          (loop for (symbols . body) in clauses collect (wat-symbol-branch value symbols body)))))
-    (let* ((done (gensym "$dispatch-done"))
-           (labels (loop repeat (length clauses) collect (gensym "$dispatch-case")))
-           (targets (make-array span :initial-element done))
-           (seen (make-hash-table)))
+    (cond
+      ((<= (length entries) 3)
+       (apply #'runtime-wat-sequence
+         (append (loop for (id . label) in entries collect
+                   (wat-string `(br_if ,label (i32.eq ,value (i32.const ,id)))))
+                 (list (wat-string `(br ,done))))))
+      ((<= span (* 6 (length entries)))
+       (let ((targets (make-array span :initial-element done)))
+         (dolist (entry entries) (setf (aref targets (- (car entry) first)) (cdr entry)))
+         (wat-fragment (wat-string `(br_table ,@(coerce targets 'list) ,done
+                                     (i32.sub ,value (i32.const ,first)))))))
+      (t
+       (let* ((middle (floor (length entries) 2)) (pivot (car (nth middle entries))))
+         (wat-fragment (wat-string
+           `(if (i32.lt_s ,value (i32.const ,pivot))
+              (then ,(wat-index-dispatch value (subseq entries 0 middle) done))
+              (else ,(wat-index-dispatch value (nthcdr middle entries) done))))))))))
+
+(defun wat-symbol-dispatch (value clauses)
+  "Keep each body once, including when sparse symbol IDs need several tables."
+  (when (< (loop for (symbols . body) in clauses sum (length symbols)) 4)
+    (return-from wat-symbol-dispatch
+      (apply #'runtime-wat-sequence
+        (loop for (symbols . body) in clauses collect (wat-symbol-branch value symbols body)))))
+  (let* ((done (gensym "$dispatch-done"))
+         (labels (loop repeat (length clauses) collect (gensym "$dispatch-case")))
+         (entries nil)
+         (seen (make-hash-table)))
+    (loop for (symbols . body) in clauses for label in labels do
+      (dolist (symbol symbols)
+        (let ((id (runtime-symbol-id symbol)))
+          (when (gethash id seen) (error "Duplicate WAT dispatch symbol ~S." symbol))
+          (setf (gethash id seen) t)
+          (push (cons id label) entries))))
+    (let ((dispatch (wat-index-dispatch value (sort entries #'< :key #'car) done)))
       (loop for (symbols . body) in clauses for label in labels do
-        (dolist (symbol symbols)
-          (let ((id (runtime-symbol-id symbol)))
-            (when (gethash id seen) (error "Duplicate WAT dispatch symbol ~S." symbol))
-            (setf (gethash id seen) t (aref targets (- id first)) label))))
-      (let ((dispatch (wat-fragment (wat-string `(br_table ,@(coerce targets 'list) ,done
-                                   (i32.sub ,value (i32.const ,first)))))))
-        (loop for (symbols . body) in clauses for label in labels do
-          (setf dispatch (runtime-wat-sequence
-            (wat-string `(block ,label ,dispatch)) body (wat-string `(br ,done)))))
-        (wat-fragment (wat-string `(block ,done ,dispatch)))))))
+        (setf dispatch (runtime-wat-sequence
+          (wat-string `(block ,label ,dispatch)) body (wat-string `(br ,done)))))
+      (wat-fragment (wat-string `(block ,done ,dispatch))))))
 
 (defmacro wat-symbol-case (value &body clauses)
   "Dispatch on a bootstrap symbol ID. Each clause names a symbol or list.
