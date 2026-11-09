@@ -52,6 +52,32 @@ try {
                       (eq (funcall f item) :replacement))
                (setf (symbol-function 'list) original)))))`);
   }
+  for (const operator of ['vector-push', 'vector-push-extend']) {
+    vm.evaluate(`(defparameter *native-push* (miricl-compiler:compile-native
+      '(lambda (element vector) (values (${operator} element vector)))))`);
+    check(`(let* ((item (list :shared)) (vector (make-array 3 :fill-pointer 1)))
+      (and (equal (multiple-value-list (funcall *native-push* item vector)) '(1))
+           (= (fill-pointer vector) 2) (eq (aref vector 1) item)))`);
+    check(`(let* ((backing (vector :before nil nil :after))
+                  (view (make-array 2 :fill-pointer 0 :displaced-to backing :displaced-index-offset 1)))
+      (and (= (funcall *native-push* :item view) 0)
+           (= (fill-pointer view) 1) (equalp backing #(:before :item nil :after))))`);
+    check(`(let ((text (make-array 2 :element-type 'character :fill-pointer 0))
+                 (bits (make-array 2 :element-type 'bit :fill-pointer 0)))
+      (and (= (funcall *native-push* #\\x text) 0) (string= text "x")
+           (= (funcall *native-push* 1 bits) 0) (equalp bits #*1)
+           (handler-case (progn (funcall *native-push* 2 bits) nil) (type-error () t))
+           (= (fill-pointer bits) 1)))`);
+    check(`(and (handler-case (progn (funcall *native-push* :x #(nil)) nil) (error () t))
+                (handler-case (progn (funcall *native-push* :x 3) nil) (error () t)))`);
+  }
+  check(`(let* ((f (miricl-compiler:compile-native '(lambda (v) (values (vector-push :x v)))))
+                (v (make-array 1 :fill-pointer 1 :initial-element :old)))
+    (and (null (funcall f v)) (= (fill-pointer v) 1) (eq (aref v 0) :old)))`);
+  check(`(let* ((f (miricl-compiler:compile-native '(lambda (v) (values (vector-push-extend :x v)))))
+                (v (make-array 0 :adjustable t :fill-pointer 0)))
+    (and (= (funcall f v) 0) (= (fill-pointer v) 1) (eq (aref v 0) :x)
+         (handler-case (progn (funcall f (make-array 0 :fill-pointer 0)) nil) (error () t))))`);
   check(`(= (length (multiple-value-list (miricl-compiler:compile-native '(lambda (x) x)))) 1)`);
   check(`(let ((f (miricl-compiler:compile-native '(lambda (x)
     (multiple-value-call (lambda (a b) (values (lambda () (incf a)) (lambda () a) b))

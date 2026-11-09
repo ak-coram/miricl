@@ -1,49 +1,50 @@
 # Goals
 
 This project has two main goals: provide an interactive development
-environment for developing Common Lisp programs targetting WASM and a
-whole program optimizing compiler also targetting WASM. The host
-Common Lisp system is intented to host the compiler and bootstrap the
-interpreter running inside the WASM environment.
+environment for developing Common Lisp programs targetting Wasm and a
+whole program optimizing compiler also targetting Wasm. The host
+Common Lisp system is intented to bootstrap the interpreter running
+inside the Wasm environment.
 
 While providing an interactive environment for development, the
 intention is to ship small and efficient binaries using the
-compiler. The interpreter can also be used to extend programs
-dynamically at runtime.
+compiler. The interpreter / compiler can also be used to extend
+programs dynamically at runtime.
 
 The Common Lisp type system shall be used for optimization and for
 generating smaller binaries.
 
-Eventual goal is full ANSI Common Lisp compliance.
+Full ANSI Common Lisp compliance is important.
 
 # Common Lisp semantics
 
 Consult the [Common Lisp HyperSpec](https://www.lispworks.com/documentation/HyperSpec/Front/index.htm)
-when implementing new Common Lisp functions. Check the relevant entries
+when implementing Common Lisp functions. Check the relevant entries
 for argument and return types, multiple values, copying and sharing,
 side effects, and exceptional situations before implementing them.
 Use those requirements to guide the implementation and regression tests.
 
 # Performance
 
-Keep compiler optimizations generic: derive them from Common Lisp semantics,
-types, values, and control/data flow. Libraries and applications, including
-FSet and Game of Life, are benchmarks rather than compiler special cases.
+Keep compiler optimizations generic: derive them from Common Lisp
+semantics, types, values, and control/data flow. Libraries and
+applications, including Game of Life, Maxima and FriCAS are benchmarks
+rather than compiler special cases.
 
-Prefer direct WASM implementations for performance-critical functions,
-especially frequently used primitives and allocation or traversal loops.
-Use the interpreter for functions where its performance impact is
-negligible. Follow the project's Common Lisp WAT integration style for
-direct WASM implementations.
+Prefer direct Wasm implementations for performance-critical functions,
+especially frequently used primitives and allocation or traversal
+loops. Use the interpreter for functions where its performance impact
+is negligible. Follow the project's Common Lisp WAT integration style
+for direct Wasm implementations.
 
 # Style
 
-WASM supports a Lisp-style syntax, the intention is to integrate WASM
+Wasm supports a Lisp-style syntax, the intention is to integrate Wasm
 modules into the Common Lisp source code using reader macros, regular
 macros and hand over compilation and some optimizations to the
 wasmtime library.
 
-The wasmtime runtime also serves for running tests, the REPL by
+The Wasmtime runtime also serves for running tests, the REPL by
 default. The main target is the browser. Use only stable WASM and WASI
 features; do not rely on experimental proposals or features requiring
 experimental runtime flags. Advanced, stable WASM features such as
@@ -56,14 +57,15 @@ not permit other unstable WASM or WASI features.
 
 # Other
 
-Never perform remote Git operations, including push, pull, fetch, clone,
-or submodule commands that access a remote.
+Never perform remote Git operations, including push, pull, fetch,
+clone, or submodule commands that access a remote.
 
 Local Git operations that change repository state require the user's
-explicit approval for the specific action. This includes staging, commits,
-amends, rebases, merges, cherry-picks, resets, restores, branch changes,
-and worktree changes. Read-only local inspection is allowed. Requests to
-implement, integrate, publish, or deploy work do not imply Git approval.
+explicit approval for the specific action. This includes staging,
+commits, amends, rebases, merges, cherry-picks, resets, restores,
+branch changes, and worktree changes. Read-only local inspection is
+allowed. Requests to implement, integrate, publish, or deploy work do
+not imply Git approval.
 
 When you're told to keep working, don't stop at arbitrary points: keep
 working indefinitely as long there are any parts of the task

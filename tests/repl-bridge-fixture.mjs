@@ -52,12 +52,20 @@ export async function startHost(runtime, binary, mode, directory = '.', ports = 
       assert.doesNotMatch(diagnostics, /wasm trap|CompileError|TypeError|RuntimeError|uncaughtException/, diagnostics);
     }};
   try {
+    // A fresh Wasmtime process may compile the WASI component before printing
+    // anything. CI's browser group reaches this host with a cold code cache.
+    // Keep ordinary interaction deadlines short, but allow cold host startup.
+    const startupTimeout = runtime === 'node' ? 10_000 : 60_000;
     await waitFor(() => {
       if (ended) throw new Error(`${runtime} exited: ${diagnostics}`);
       return output.includes('Waiting for the browser interpreter.');
-    }, `${runtime} ${mode} startup`);
+    }, `${runtime} ${mode} startup`, startupTimeout);
     return host;
-  } catch (error) { await host.close(); throw error; }
+  } catch (error) {
+    error.message += `\nHost stdout:\n${output}\nHost stderr:\n${diagnostics}`;
+    await host.close();
+    throw error;
+  }
 }
 
 export async function connectTerminal(port = testPorts.tcp) {

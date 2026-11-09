@@ -94,7 +94,19 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-block-values" nil :object)
     ("native-restart-signal" (:object :i32 :object :object) :object)))
 
-(defun wasm-byte (byte) (vector-push-extend byte *wasm-bytes*))
+(defun wasm-byte (byte)
+  ;; VECTOR-PUSH-EXTEND returns exactly one index. Keep the byte writer on
+  ;; the scalar call path even when its caller could observe multiple values.
+  (values (vector-push-extend byte *wasm-bytes*)))
+(defun wasm-append (bytes &optional (start 0) (end (length bytes)))
+  ;; Append whole byte ranges using the runtime's sequence copy loop. Emission
+  ;; and relocation otherwise dispatch WASM-BYTE once per already encoded byte.
+  (let* ((position (length *wasm-bytes*)) (size (+ position (- end start))))
+    (when (> size (array-total-size *wasm-bytes*))
+      (setq *wasm-bytes* (adjust-array *wasm-bytes*
+                          (max size (* 2 (array-total-size *wasm-bytes*))))))
+    (setf (fill-pointer *wasm-bytes*) size)
+    (replace *wasm-bytes* bytes :start1 position :start2 start :end2 end)))
 (defun wasm-u32 (number)
   (loop (wasm-byte (logior (logand number 127) (if (> number 127) 128 0)))
     (setq number (ash number -7)) (when (zerop number) (return))))
@@ -106,11 +118,11 @@ Bind to NIL to interpret forms, including forms without native lowering.")
         (wasm-byte (logior byte (if done 0 128))) (when done (return))))))
 (defun wasm-name (name)
   (let ((bytes (utf8-bytes name))) (wasm-u32 (length bytes))
-    (loop for byte across bytes do (wasm-byte byte))))
+    (wasm-append bytes)))
 (defun wasm-type (type)
   (ecase type (:object (wasm-byte #x6f)) (:i32 (wasm-byte #x7f)) (:function (wasm-byte #x70))))
 (defun wasm-section (kind bytes)
-  (wasm-byte kind) (wasm-u32 (length bytes)) (loop for byte across bytes do (wasm-byte byte)))
+  (wasm-byte kind) (wasm-u32 (length bytes)) (wasm-append bytes))
 (defmacro with-wasm-bytes (&body body)
   (list* 'let (list (list '*wasm-bytes*
     '(make-array 128 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
@@ -825,12 +837,12 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (return-from native-relocate-body body))
     (with-wasm-bytes
       (dolist (entry (reverse relocations))
-        (loop for i from cursor below (first entry) do (wasm-byte (aref body i)))
+        (wasm-append body cursor (first entry))
         (setq cursor (first entry))
         ;; Skip the original unsigned LEB; its replacement may be shorter.
         (loop for byte = (aref body cursor) do (incf cursor) until (< byte 128))
         (wasm-u32 (+ (length *native-imports*) (gethash (second entry) *native-function-indices*))))
-      (loop for i from cursor below (length body) do (wasm-byte (aref body i))))))
+      (wasm-append body cursor))))
 
 (defun emit-native-bodies (entries)
   (let ((original (mapcar #'emit-native-function *native-functions*))
@@ -912,13 +924,13 @@ Bind to NIL to interpret forms, including forms without native lowering.")
               (with-wasm-bytes
                 (let ((cursor 0))
                  (loop for op across ops for code = (native-op-code op) do
-                      (loop for i from cursor below (native-op-start op) do (wasm-byte (aref body i)))
+                      (wasm-append body cursor (native-op-start op))
                       (let ((index (native-op-argument op)))
                         (wasm-byte code)
                         (wasm-u32 (if (< index old-count) (aref mapping index)
                                       (+ next (aref functions (- index old-count))))))
                       (setq cursor (native-op-end op)))
-                 (loop for i from cursor below (length body) do (wasm-byte (aref body i)))))))))
+                 (wasm-append body cursor)))))))
 
 (defun emit-native-module (unit &key entries)
   "Return Wasm bytes and literal objects; do not instantiate or run application code."
@@ -986,7 +998,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                  (wasm-u32 (+ (length *native-imports*) (gethash function *native-function-indices*)))))))
            (wasm-section 10 (with-wasm-bytes
              (wasm-u32 (length bodies))
-             (dolist (body bodies) (wasm-u32 (length body)) (loop for byte across body do (wasm-byte byte))))))))
+             (dolist (body bodies) (wasm-u32 (length body)) (wasm-append body)))))))
     (values bytes (if entries
                      (mapcar (lambda (entry) (coerce (first (gethash entry *wasm-literal-groups*)) 'simple-vector)) entries)
                      (coerce *wasm-literals* 'simple-vector))))))
@@ -1003,7 +1015,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defparameter *native-compiler-seeds*
   '(compiler-primitive
-                   wasm-byte wasm-u32 wasm-s32 wasm-name wasm-type wasm-section wasm-call
+                   wasm-byte wasm-append wasm-u32 wasm-s32 wasm-name wasm-type wasm-section wasm-call
                    wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
                    native-builtin-code emit-native-object-types wasm-literal wasm-list
                    native-removable-p native-direct-cells native-forward-blocks native-live-values native-local-layout native-single-calls native-full-groups native-scalar-groups native-block-targets

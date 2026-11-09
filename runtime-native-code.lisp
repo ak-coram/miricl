@@ -641,7 +641,7 @@
     (($function externref) ($left externref) ($right externref)) (externref)
   (:export-raw "native-call2")
   (:locals ($id i32) ($at i32) ($bt i32) ($index i32) ($cmp i32)
-           ($a :nullable-object) ($b :nullable-object) ($cell :nullable-object))
+           ($a :nullable-object) ($b :nullable-object) ($cell :nullable-object) ($vector (ref $array)))
   #@(local.set $a ,(native-object '(local.get $left)))
   #@(local.set $b ,(native-object '(local.get $right)))
   #@(local.set $id (call $native-builtin-id ,(native-object '(local.get $function))))
@@ -665,6 +665,19 @@
     (cons #@(return (extern.convert_any (call $cons (local.get $a) (local.get $b)))))
     (list #@(return (extern.convert_any
       (call $cons (local.get $a) (call $cons (local.get $b) (ref.null $obj))))))
+    ((vector-push vector-push-extend)
+      ;; The common append needs no argument list or general APPLY dispatch.
+      ;; Retain the full path for missing fill pointers and capacity growth.
+      #@(if (i32.eq (local.get $bt) (i32.const 35))
+        (then
+          (local.set $vector (ref.cast (ref $array) (local.get $b)))
+          (local.set $index (struct.get $array $fill (local.get $vector)))
+          (if (i32.and (i32.ge_s (local.get $index) (i32.const 0))
+                      (i32.lt_u (local.get $index) (call $array-length (local.get $b))))
+            (then
+              (drop (call $array-raw-element (local.get $b) (local.get $index) (local.get $a) (i32.const 1)))
+              (struct.set $array $fill (local.get $vector) (i32.add (local.get $index) (i32.const 1)))
+              (return (extern.convert_any (call $int (local.get $index)))))))))
     (gethash
       #@(if (i32.eq (local.get $bt) (i32.const 29))
         (then (local.set $cell (call $hash-cell-native (local.get $a) (local.get $b)))

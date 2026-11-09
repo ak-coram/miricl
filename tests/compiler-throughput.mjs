@@ -6,6 +6,35 @@ const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
 try {
   vm.evaluate('(miricl-compiler::ensure-compiler) (in-package :miricl-compiler) (values)');
+  check(`(every (lambda (entry)
+    (let ((bytes (coerce (append '(99) (second entry) '(99)) 'vector)))
+      (multiple-value-bind (value next) (funcall (first entry) bytes 1)
+        (and (= value (third entry)) (= next (1+ (length (second entry))))))))
+    (list (list #'native-read-uleb '(0) 0)
+          (list #'native-read-uleb '(127) 127)
+          (list #'native-read-uleb '(128 1) 128)
+          (list #'native-read-uleb '(128 128 1) 16384)
+          (list #'native-read-sleb '(64) -64)
+          (list #'native-read-sleb '(127) -1)
+          (list #'native-read-sleb '(0) 0)
+          (list #'native-read-sleb '(63) 63)
+          (list #'native-read-sleb '(192 0) 64)
+          (list #'native-read-sleb '(191 127) -65)
+          (list #'native-read-sleb '(128 128 128 128 120) -2147483648)
+          (list #'native-read-sleb '(255 255 255 255 7) 2147483647)))`);
+  // Sibling stores may be consumed in creation order. Eliminating the older
+  // store inserts a real operand below the younger one; both must stackify.
+  // A temporary real operand must block them only until it is consumed.
+  for (const barrier of ['', '(65 99) (26 nil)']) {
+    check(`(let* ((ops (map 'vector (lambda (entry)
+                    (make-native-op (first entry) (second entry) 0 0))
+                  '((65 1) (33 2) (65 2) (33 3) ${barrier}
+                    (32 2) (32 3) (70 nil) (15 nil) (11 nil)))))
+      (native-op-flow ops) (native-op-liveness ops 4 nil)
+      (native-stackify-ops ops)
+      (equal (loop for op across ops when (native-op-code op) collect (native-op-code op))
+        '(65 65 ${barrier ? '65 26' : ''} 70 15 11)))`);
+  }
   // The named records retain callable predicates, type tests and shallow copy
   // semantics as well as the field macros used by the self-compiled kernels.
   check(`(let* ((unit (compile-to-hir '(lambda (x) (+ x 19))))
@@ -63,5 +92,5 @@ try {
   vm.evaluate(`(defparameter *throughput-function* (compile-native '(lambda (n) (list ${expressions})))) (values)`);
   for (const n of [-5, 7]) check(`(equal (funcall *throughput-function* ${n})
     '(${Array.from({length: 280}, (_, i) => n + i).join(' ')}))`);
-  console.log('Compiler throughput: record APIs, dense value validation, changed HIR reuse and 280 live temporaries pass.');
+  console.log('Compiler throughput: LEB boundaries, operand barriers, record APIs, dense value validation, changed HIR reuse and 280 live temporaries pass.');
 } finally {vm.close();}

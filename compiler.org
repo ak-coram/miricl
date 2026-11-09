@@ -342,6 +342,22 @@ edges. Handler-bearing functions skip interference construction and receive
 distinct colors directly. These speed improvements preserve the allocation
 order and emitted application bytes.
 
+Byte emission appends encoded ranges with =replace= instead of dispatching once
+per byte. The decoder handles single-byte instruction operands directly, and
+stackification indexes candidate stack cells by instruction position. Its stack
+of real-operand barriers preserves operand order without scanning sibling stores.
+Native two-argument =vector-push= and =vector-push-extend= calls append directly
+when capacity is available; growth uses the ordinary array implementation.
+
+Compare compiler throughput with
+=node scripts/benchmark-native-compiler.mjs BEFORE.wasm AFTER.wasm=.
+With a prepared FriCAS bootstrap and optimized core,
+=node scripts/benchmark-fricas-compiler.mjs BEFORE.wasm AFTER.wasm= measures
+compilation, compaction, loading and native emission for three algebra libraries.
+Both benchmarks alternate image order over three rounds and require identical
+application bytes. The FriCAS benchmark also records runtime image sizes in raw,
+gzip and Brotli formats; it excludes startup and bypasses the algebra cache.
+
 Loading currently decodes all object blocks eagerly. The directory permits
 independent lookup and later decoding, but deferred bodies, external archives
 and dependency fetching are not implemented yet. Initializers remain ordered

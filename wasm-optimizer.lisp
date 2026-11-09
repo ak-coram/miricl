@@ -31,12 +31,20 @@
 (defun make-native-flow (start) (vector start nil nil 0 0 0 0))
 
 (defun native-read-uleb (bytes position)
+  ;; Most operands are a single byte, including opcodes, small indices and
+  ;; block types. Avoid entering the general shift/accumulate loop for them.
+  (let ((byte (aref bytes position)))
+    (when (< byte 128) (return-from native-read-uleb (values byte (1+ position)))))
   (let ((value 0) (shift 0))
     (loop for byte = (aref bytes position) do
       (incf position) (setq value (logior value (ash (logand byte 127) shift)))
       (when (< byte 128) (return (values value position))) (incf shift 7))))
 
 (defun native-read-sleb (bytes position)
+  (let ((byte (aref bytes position)))
+    (when (< byte 128)
+      (return-from native-read-sleb
+        (values (if (< byte 64) byte (- byte 128)) (1+ position)))))
   (let ((value 0) (shift 0))
     (loop for byte = (aref bytes position) do
       (incf position) (setq value (logior value (ash (logand byte 127) shift)))
@@ -62,8 +70,14 @@
         (cond
           ((member code '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x20 #x21 #x22 #x41 #xd0 #xd2))
            ;; Constants and heap types only need their encoded extent here.
-           (multiple-value-setq (argument position)
-             (if (= code #x41) (native-read-sleb bytes position) (native-read-uleb bytes position))))
+           ;; Decode the common one-byte case here, avoiding a helper call
+           ;; and multiple-value packet for nearly every instruction operand.
+           (let ((byte (aref bytes position)))
+             (if (< byte 128)
+                 (progn (setq argument (if (and (= code #x41) (>= byte 64)) (- byte 128) byte))
+                   (incf position))
+                 (multiple-value-setq (argument position)
+                   (if (= code #x41) (native-read-sleb bytes position) (native-read-uleb bytes position))))))
           ((= code #x0e)
            (let ((count nil))
              (multiple-value-setq (count position) (native-read-uleb bytes position))
@@ -224,15 +238,18 @@
   ;; Stack entries are NIL for real operands and an instruction index for a
   ;; store whose value could remain on the stack. Liveness ensures its matching
   ;; load is the last use; any earlier load invalidates the candidate.
-  (let ((stack nil) (candidates (make-hash-table :test 'eql)))
+  (let ((stack nil) (barriers nil) (candidates (make-hash-table :test 'eql)))
     (dotimes (i (length ops))
       (let* ((op (aref ops i)) (code (native-op-code op)) (local (native-op-argument op))
              (store (and (eql code #x20) (gethash local candidates)))
              ;; Other candidate stores are not actual operands. Looking past
              ;; them lets sibling temporaries become stack operands together,
              ;; while an actual value (NIL) remains a strict ordering barrier.
-             (candidate (and store (loop for tail on stack while (car tail)
-                                    when (eql store (car tail)) return tail))))
+             ;; Instruction positions order stack cells. A store above the
+             ;; most recent real operand is available without scanning its
+             ;; sibling stores. Turning a store into an operand inserts its
+             ;; original position as a barrier, leaving younger stores usable.
+             (candidate (and store (or (null barriers) (> (car store) (car barriers))) store)))
         ;; A throwing call may expose any local to a landing pad. Keeping a
         ;; value on the operand stack cannot replace that observable store.
         (when (and exceptions (member code '(#x08 #x10))) (clrhash candidates))
@@ -247,11 +264,12 @@
         (cond
           ((null code))
           ((member code '(#x00 #x02 #x03 #x04 #x05 #x08 #x0b #x0c #x0d #x0e #x0f #x1f))
-           (setq stack nil) (clrhash candidates))
+           (setq stack nil barriers nil) (clrhash candidates))
           ((and (= code #x20) candidate
                 (not (and types (eql (car (aref types local)) #x64)))
                 (not (logbitp local (native-op-live-out op))))
-           (setf (native-op-code (aref ops store)) nil (native-op-code op) nil)
+           (setf (native-op-code (aref ops (car candidate))) nil (native-op-code op) nil)
+           (push (car candidate) barriers)
            (setf (car candidate) nil) (remhash local candidates))
           (t
            (when (= code #x20) (remhash local candidates))
@@ -259,11 +277,11 @@
              (dotimes (j consumed)
                (loop while (and stack (car stack)) do
                  (remhash (native-op-argument (aref ops (pop stack))) candidates))
-               (pop stack))
+               (when stack (pop stack) (pop barriers)))
              (when (member code '(#x21 #x22)) (remhash local candidates))
              (if (= code #x21)
-                 (progn (push i stack) (setf (gethash local candidates) i))
-                 (dotimes (j produced) (push nil stack))))))))
+                 (progn (push i stack) (setf (gethash local candidates) stack))
+                 (dotimes (j produced) (push nil stack) (push i barriers))))))))
   ops))
 
 (defun native-coalesce-ops (ops offset count exceptions &optional types)
