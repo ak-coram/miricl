@@ -10,6 +10,15 @@ try {
   builder.mountFile('/native-source.lisp', `
     (defpackage :native-bundle-test (:use :cl))
     (in-package :native-bundle-test)
+    (defmacro deeply-expanded (x)
+      (dotimes (i 2000 x) (setq x (list 'identity x))))
+    (defun deep-from-file (x) (deeply-expanded x))
+    (defmacro deeply-bound (x)
+      (dotimes (i 1000 x)
+        (setq x (list 'let* '((a 17) (b a))
+                  (list 'locally '(declare (special *deep-special*))
+                    (list 'if 'b x :absent))))))
+    (defun bindings-from-file (x) (deeply-bound x))
     (defparameter *initializations* 0)
     (defparameter *cycle* (progn (incf *initializations*) '#1=(:cycle . #1#)))
     (defun values-and-capture (x)
@@ -44,6 +53,8 @@ try {
   fresh.evaluate('(load "/native.wasm")', {eof: true});
   check(fresh, `(and (eq miricl-compiler::*compiler-state* :cold)
     (= native-bundle-test::*initializations* 2)
+    (= (native-bundle-test::deep-from-file 42) 42)
+    (= (native-bundle-test::bindings-from-file 42) 42)
     (null (function-lambda-expression #'native-bundle-test::values-and-capture))
     (eq (nth-value 2 (function-lambda-expression #'native-bundle-test::values-and-capture))
         'native-bundle-test::values-and-capture)
@@ -70,5 +81,29 @@ try {
     (null (native-bundle-test::escape 4))
     (= (native-bundle-test::twice (make-instance 'native-bundle-test::point :x 21)) 42)
     (eq native-bundle-test::*cycle* (cdr native-bundle-test::*cycle*)))`);
+  builder.mountFile('/ordered.lisp', `
+    (defpackage :native-order-test (:use :cl))
+    (in-package :native-order-test)
+    (defvar *initializations* 0)
+    (defun count-up (n acc)
+      (if (zerop n) acc (count-up (1- n) (1+ acc))))
+    (defparameter *count* (load-time-value (count-up 100000 0)))
+    (defclass token () ((value :initarg :value :reader token-value)))
+    (defparameter *token* (make-instance 'token :value *count*))
+    (incf *initializations*)
+    (defun state () (values (token-value *token*) *initializations*))`);
+  builder.evaluate('(compile-file "/ordered.lisp") (values)', {eof: true});
+  const ordered = await Miricl.instantiate(image);
+  try {
+    ordered.mountFile('/ordered.wasm', await builder.readFile('/ordered.wasm'));
+    // No application packages or definitions exist before this call. Decoding
+    // the LTV needs the preceding function already installed as native code.
+    ordered.evaluate(`(miricl-compiler:compile-native-bundle "/ordered.wasm" "/ordered-native.wasm" :load t)
+      (values)`, {eof: true});
+    check(ordered, `(equal (multiple-value-list (native-order-test::state)) '(100000 1))`);
+    fresh.mountFile('/ordered-native.wasm', await ordered.readFile('/ordered-native.wasm'));
+    fresh.evaluate('(load "/ordered-native.wasm") (values)', {eof: true});
+    check(fresh, `(equal (multiple-value-list (native-order-test::state)) '(100000 1))`);
+  } finally {ordered.close();}
   console.log('Native bundle: fresh load without compiler startup, initialization order, native closures, multiple values, nonlocal exits, methods and cyclic constants pass.');
 } finally {builder.close(); fresh?.close();}

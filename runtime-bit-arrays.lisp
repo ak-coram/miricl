@@ -17,8 +17,8 @@
   #@(block $resolved (loop $resolve
     (br_if $resolved (i32.ne (call $tag (local.get $array)) (i32.const 35)))
     (local.set $offset (i32.add (local.get $offset) (struct.get $array $offset (ref.cast (ref $array) (local.get $array)))))
-    (local.set $array (struct.get $obj $a (local.get $array))) (br $resolve)))
-  #@(ref.as_non_null (struct.get $obj $digits (local.get $array)))
+    (local.set $array (struct.get $obj $a (ref.cast (ref $obj) (local.get $array)))) (br $resolve)))
+  #@(ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $array))))
   #@(local.get $offset))
 
 (define-runtime-function $bit-read-word (($data :digits) ($offset i32)) (i32)
@@ -128,7 +128,7 @@
     (then
       (local.set $storage (call $make-bit-vector (local.get $length) (call $int (i32.const 0))))
       (local.set $rank (call $array-rank-value (local.get $a)))
-      (local.set $result (if (result (ref null $obj)) (i32.eq (local.get $rank) (i32.const 1))
+      (local.set $result (if (result (ref null eq)) (i32.eq (local.get $rank) (i32.const 1))
         (then (local.get $storage))
         (else (call $array-new (call $array-shape (local.get $a)) (i32.const 2) (local.get $storage) (i32.const 0) (i32.const -1))))))
     (else (if (i32.eq (call $id (local.get $result)) (i32.const 1)) (then (local.set $result (local.get $a))))))

@@ -11,8 +11,19 @@
 (define-runtime-function $tag
     (($x :nullable-object))
     (i32)
+  #@(if (ref.test (ref i31) (local.get $x)) (then (return (i32.const 1))))
   #@(if (result i32) (ref.is_null (local.get $x)) (then (i32.const 0))
-      (else (i32.and (struct.get $obj $tag (local.get $x)) (i32.const 63)))))
+      (else (i32.and (struct.get $obj $tag (ref.cast (ref $obj) (local.get $x))) (i32.const 63)))))
+
+;; The N header field denotes sign for integers and metadata for heap objects.
+;; Immediate integers have no header; obtain their sign with native comparisons.
+(define-runtime-function $value-n (($x :nullable-object)) (i32)
+  (:locals ($value i32))
+  #@(if (ref.test (ref i31) (local.get $x))
+    (then (local.set $value (i31.get_s (ref.cast (ref i31) (local.get $x))))
+      (return (i32.sub (i32.gt_s (local.get $value) (i32.const 0))
+                       (i32.lt_s (local.get $value) (i32.const 0))))))
+  #@(struct.get $obj $n (ref.cast (ref $obj) (local.get $x))))
 
 (define-runtime-function $allocate-object-tag (($tag i32)) (i32)
   ;; Reuse the tag word's spare bits for a stable identity hash. Wrapping can
@@ -54,7 +65,7 @@
     (i32)
   #@(if (ref.is_null (local.get $x)) (then (return (i32.const 0))))
   #@(if (i32.ne (call $tag (local.get $x)) (i32.const 6)) (then (return (i32.const -1))))
-  #@(struct.get $obj $n (local.get $x)))
+  #@(call $value-n (local.get $x)))
 
 (define-runtime-function $symbol
     (($id i32))
@@ -68,8 +79,8 @@
 (define-runtime-function $bool
     (($x i32))
     (:nullable-object)
-  #@(if (result (ref null $obj)) (local.get $x)
-      (then (call $symbol (i32.const 1))) (else (ref.null $obj))))
+  #@(if (result (ref null eq)) (local.get $x)
+      (then (call $symbol (i32.const 1))) (else (ref.null eq))))
 
 ;; Bootstrap identities are dense and hot. Later symbol IDs may be separated
 ;; by millions of ephemeral gensyms, so their bindings use lazy 256-cell pages.
@@ -79,9 +90,9 @@
     (then (return (array.get $objects (struct.get $symbol-index $dense (local.get $index)) (local.get $id)))))
   #@(local.set $pages (struct.get $symbol-index $pages (local.get $index)))
   #@(if (i32.ge_u (i32.shr_u (local.get $id) (i32.const 8)) (array.len (local.get $pages)))
-    (then (return (ref.null $obj))))
+    (then (return (ref.null eq))))
   #@(local.set $page (array.get $object-pages (local.get $pages) (i32.shr_u (local.get $id) (i32.const 8))))
-  #@(if (ref.is_null (local.get $page)) (then (return (ref.null $obj))))
+  #@(if (ref.is_null (local.get $page)) (then (return (ref.null eq))))
   #@(array.get $objects (local.get $page) (i32.and (local.get $id) (i32.const 255))))
 
 (define-runtime-function $symbol-index-set
@@ -121,55 +132,62 @@
   #@(rec (type $obj (sub (struct
                   (field $tag i32) (field $n (mut i32)) (field $f f64)
                   (field $digits (ref null $digits))
-                  (field $a (mut (ref null $obj)))
-                  (field $b (mut (ref null $obj)))
-                  (field $c (mut (ref null $obj)))))))
-  #@(type $objects (array (mut (ref null $obj))))
+                  (field $a (mut (ref null eq)))
+                  (field $b (mut (ref null eq)))
+                  (field $c (mut (ref null eq)))))))
+  #@(type $objects (array (mut (ref null eq))))
+  ;; Scalar payloads stay out of the common object layout. DIGITS is NIL;
+  ;; only this subtype carries an i64, rather than a separately allocated array.
+  #@(type $fixnum (sub final $obj (struct
+        (field $tag i32) (field $n (mut i32)) (field $f f64)
+        (field $digits (ref null $digits))
+        (field $a (mut (ref null eq))) (field $b (mut (ref null eq)))
+        (field $c (mut (ref null eq))) (field $value i64))))
   #@(type $source-entry (sub final $obj (struct
         (field $tag i32) (field $n (mut i32)) (field $f f64)
         (field $digits (ref null $digits))
-        (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj)))
-        (field $c (mut (ref null $obj))) (field $modified (mut f64)))))
+        (field $a (mut (ref null eq))) (field $b (mut (ref null eq)))
+        (field $c (mut (ref null eq))) (field $modified (mut f64)))))
   #@(type $object-pages (array (mut (ref null $objects))))
   #@(type $symbol-index (struct (field $dense (ref $objects)) (field $pages (mut (ref $object-pages)))))
       ;; Public tables retain constructor hints without changing the trie fields.
   #@(type $hash-table (sub final $obj (struct
         (field $tag i32) (field $n (mut i32)) (field $f f64)
         (field $digits (ref null $digits))
-        (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj)))
-        (field $c (mut (ref null $obj)))
-        (field $size-hint (ref null $obj)) (field $rehash-size (ref null $obj))
-        (field $rehash-threshold (ref null $obj)))))
+        (field $a (mut (ref null eq))) (field $b (mut (ref null eq)))
+        (field $c (mut (ref null eq)))
+        (field $size-hint (ref null eq)) (field $rehash-size (ref null eq))
+        (field $rehash-threshold (ref null eq)))))
       ;; Only vectors carry a reference array; ordinary objects keep their layout.
   #@(type $vector (sub final $obj (struct
         (field $tag i32) (field $n (mut i32)) (field $f f64)
         (field $digits (ref null $digits))
-        (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj)))
-        (field $c (mut (ref null $obj))) (field $data (ref $objects)))))
+        (field $a (mut (ref null eq))) (field $b (mut (ref null eq)))
+        (field $c (mut (ref null eq))) (field $data (ref $objects)))))
       ;; General arrays own mutable shape/view metadata, not extra fields in OBJ.
   #@(type $array (sub final $obj (struct
         (field $tag i32) (field $n (mut i32)) (field $f f64)
         (field $digits (ref null $digits))
-        (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj)))
-        (field $c (mut (ref null $obj)))
+        (field $a (mut (ref null eq))) (field $b (mut (ref null eq)))
+        (field $c (mut (ref null eq)))
         (field $shape (mut (ref $digits))) (field $offset (mut i32)) (field $fill (mut i32)))))
   #@(type $text-stream (sub final $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64)
     (field $digits (ref null $digits))
-    (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
+    (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
     (field $data (mut (ref $digits))) (field $length (mut i32)) (field $closed (mut i32)))))
   ;; Structure and metadata method wrappers retain their interpreted source
   ;; and environment, with direct call metadata confined to this subtype.
   #@(type $direct-function (sub final $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64)
     (field $digits (ref null $digits))
-    (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
-    (field $owner (ref null $obj)) (field $slot (ref null $obj)) (field $mode i32))))
+    (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
+    (field $owner (ref null eq)) (field $slot (ref null eq)) (field $mode i32))))
   #@(type $generic-discriminator (sub final $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64)
     (field $digits (ref null $digits))
-    (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
-    (field $owner (ref null $obj)))))
+    (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
+    (field $owner (ref null eq)))))
   #@(memory (export "memory") 2)
   #@(global $object-serial (mut i32) (i32.const 0))
   #@(global $character-pages (ref $object-pages)
@@ -180,6 +198,7 @@
       ,(if wasi '(throw $guest-error) '(unreachable)))
   ($error-code)
   ($tag)
+  ($value-n)
   ($allocate-object-tag)
   ($node)
   ($id)

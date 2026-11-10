@@ -34,6 +34,7 @@ assert.match(failure('(flet ((local-trace () (trace-leaf))) (local-trace))').bac
 assert.match(failure('(funcall (lambda () (trace-leaf)))').backtrace, / +\d+: COMMON-LISP-USER::TRACE-LEAF\n +\d+: COMMON-LISP:LAMBDA\n +\d+: COMMON-LISP:FUNCALL\n/);
 assert.match(failure('(trace-undefined)').backtrace, /\n +\d+: COMMON-LISP-USER::TRACE-UNDEFINED\n/);
 assert.match(failure("(funcall #'car 7)").backtrace, /\n +\d+: COMMON-LISP:CAR\n +\d+: COMMON-LISP:FUNCALL\n/);
+assert.match(failure('(car 7)').backtrace, /\n +\d+: COMMON-LISP:CAR\n/);
 evaluate(`(defgeneric trace-generic (x))
   (defmethod trace-generic ((x integer)) (trace-leaf))`);
 assert.match(failure("(funcall #'trace-generic 1)").backtrace, /\n +\d+: COMMON-LISP-USER::TRACE-GENERIC\n/);

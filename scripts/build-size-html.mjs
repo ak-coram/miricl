@@ -7,6 +7,7 @@ import {measureFile, measureWasm} from './wasm-size.mjs';
 
 const artifacts = [
   {file: 'miricl.wasm', description: 'Import-free Common Lisp interpreter and compiler', kind: 'wasm'},
+  {file: 'miricl-interpreter.wasm', description: 'Import-free interpreter without the compiler; compilation is a no-op', kind: 'wasm'},
   {file: 'miricl-precompiled.wasm', description: 'Import-free interpreter with bootstrapped native compiler', kind: 'wasm'},
   {file: 'miricl-repl.wasm', description: 'Terminal REPL and precompiled compiler for Node and WASI', kind: 'wasm'},
   {file: 'miricl-asdf.wasm', description: 'Optional ASDF and UIOP library', kind: 'wasm'},
@@ -25,6 +26,29 @@ const artifacts = [
       'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`)},
   {file: 'build/fricas/site/fricas.wasm', description: 'FriCAS — optimized Lisp payload (included in total above)', kind: 'wasm'},
 ];
+const acl2Scripts = ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
+  'miricl.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs'];
+const acl2Preview = [
+  {file: 'acl2/', description: 'ACL2 — HTML, scripts, interpreter, native compiled core and system sources (13 files; bootstrap unverified)',
+    kind: 'application', files: [...acl2Scripts,
+      'miricl.wasm', 'acl2.wasm', 'filesystem.bin.gz'].map(file => `build/acl2/site/${file}`)},
+  {file: 'build/acl2/site/acl2.wasm', description: 'ACL2 — native compiled prover payload (included in total above; no initialized world)', kind: 'wasm'},
+  {file: 'build/acl2/site/filesystem.bin.gz', description: 'ACL2 — compressed system sources (included in total above)', kind: 'data'},
+];
+const acl2ImageFile = 'acl2-image.wasm.gz';
+const acl2Image = [
+  {file: 'acl2/', description: 'ACL2 — HTML, scripts and initialized native prover image (11 files)',
+    kind: 'application', files: [...acl2Scripts, acl2ImageFile].map(file => `build/acl2/site/${file}`)},
+  {file: `build/acl2/site/${acl2ImageFile}`, description: 'ACL2 — compressed initialized world and runtime (included in total above)', kind: 'data'},
+];
+const booksArtifact = {file: 'build/acl2/books/filesystem.bin.gz',
+  description: 'ACL2 — selected math book sources and dependencies, separate on-demand download; no precompiled books', kind: 'data'};
+const coaltonArtifacts = [
+  {file: 'coalton/', description: 'Coalton — interactive whirlwind tour, scripts, interpreter and native compiled compiler and standard library (7 files)',
+    kind: 'application', files: ['index.html', 'app.mjs', 'worker.mjs', 'coalton.mjs',
+      'miricl.mjs', 'miricl.wasm', 'coalton.wasm'].map(file => `build/coalton/site/${file}`)},
+  {file: 'build/coalton/site/coalton.wasm', description: 'Coalton — native compiled compiler and standard library (included in total above)', kind: 'wasm'},
+];
 const escape = value => String(value ?? '').replace(/[&<>"']/g,
   char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
 const number = value => value.toLocaleString('en-US');
@@ -35,18 +59,45 @@ const webURL = value => /^https?:\/\//.test(value ?? '');
 export function collectImageSizes(directory, {commit = '', runURL = '', generatedAt = new Date().toISOString(),
   applicationDirectory = path.join(directory, 'game-of-life'),
   maximaDirectory = path.join(directory, 'build/maxima/site'),
-  fricasDirectory = path.join(directory, 'build/fricas/site')} = {}) {
+  fricasDirectory = path.join(directory, 'build/fricas/site'),
+  acl2Directory = path.join(directory, 'build/acl2/site'),
+  coaltonDirectory = path.join(directory, 'build/coalton/site'),
+  acl2BooksDirectory = path.join(directory, 'build/acl2/books')} = {}) {
+  const wasm = new Set([...artifacts, ...acl2Preview, ...coaltonArtifacts]
+    .filter(artifact => artifact.kind === 'wasm').map(artifact => artifact.file));
+  const measurements = new Map();
   const measure = (name, kind) => {
     const file = name.startsWith('game-of-life/')
       ? path.join(applicationDirectory, name.slice('game-of-life/'.length))
+      : name.startsWith('build/acl2/site/') ? path.join(acl2Directory, name.slice('build/acl2/site/'.length))
+      : name.startsWith('build/acl2/books/') ? path.join(acl2BooksDirectory, name.slice('build/acl2/books/'.length))
+      : name.startsWith('build/coalton/site/') ? path.join(coaltonDirectory, name.slice('build/coalton/site/'.length))
       : name.startsWith('build/fricas/site/') ? path.join(fricasDirectory, name.slice('build/fricas/site/'.length))
       : name.startsWith('build/maxima/site/') ? path.join(maximaDirectory, name.slice('build/maxima/site/'.length)) : path.join(directory, name);
-    return {...(kind === 'wasm' ? measureWasm(file) : measureFile(file)), file: name};
+    if (!measurements.has(name)) measurements.set(name, wasm.has(name) ? measureWasm(file) : measureFile(file));
+    const {sections, ...sizes} = measurements.get(name);
+    return {...sizes, ...(kind === 'wasm' ? {sections} : {}), file: name};
   };
+  let acl2Artifacts = [];
+  const acl2Manifest = path.join(acl2Directory, 'build.json');
+  if (fs.existsSync(acl2Manifest)) {
+    acl2Artifacts = acl2Preview;
+    if (fs.existsSync(path.join(acl2Directory, acl2ImageFile))) {
+      const {imageBytes} = JSON.parse(fs.readFileSync(acl2Manifest, 'utf8'));
+      if (!Number.isSafeInteger(imageBytes) || imageBytes < 1) throw new Error('Expected the uncompressed ACL2 image size.');
+      const [application, archive] = acl2Image;
+      acl2Artifacts = [application, {...archive, uncompressedBytes: imageBytes,
+        description: `ACL2 — initialized world and runtime, ${number(imageBytes)} bytes before gzip (archive included in total above)`}];
+    }
+  }
   return {schemaVersion: 1, generatedAt, commit, runURL,
     compression: {gzipLevel: 9, brotliQuality: 11},
     tools: {node: process.versions.node, zlib: process.versions.zlib},
-    artifacts: artifacts.map(({files: names, ...artifact}) => {
+    artifacts: [...artifacts,
+      ...acl2Artifacts,
+      ...(fs.existsSync(path.join(acl2BooksDirectory, 'manifest.json')) ? [booksArtifact] : []),
+      ...(fs.existsSync(path.join(coaltonDirectory, 'build.json')) ? coaltonArtifacts : []),
+    ].map(({files: names, ...artifact}) => {
       if (!names) return {...measure(artifact.file, artifact.kind), ...artifact};
       const files = names.map(name => measure(name));
       const totals = Object.fromEntries(['rawBytes', 'gzipBytes', 'brotliBytes'].map(key =>
@@ -56,7 +107,11 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
 }
 
 export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = 'image-sizes.json'} = {}) {
-  if (report.schemaVersion !== 1 || !Array.isArray(report.artifacts) || report.artifacts.length !== artifacts.length)
+  const known = [...artifacts, ...acl2Preview, ...acl2Image, booksArtifact, ...coaltonArtifacts].map(artifact => artifact.file);
+  if (report.schemaVersion !== 1 || !Array.isArray(report.artifacts)
+    || artifacts.some(required => !report.artifacts.some(artifact => artifact.file === required.file))
+    || report.artifacts.some(artifact => !known.includes(artifact.file))
+    || new Set(report.artifacts.map(artifact => artifact.file)).size !== report.artifacts.length)
     throw new Error('Expected measurements for the runtime, REPL, ASDF, standalone pages, Game of Life, Maxima and FriCAS.');
   for (const artifact of report.artifacts) {
     for (const key of ['rawBytes', 'gzipBytes', 'brotliBytes']) {
@@ -76,13 +131,16 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
     <td data-size="gzipBytes">${size(artifact.gzipBytes)}</td>
     <td data-size="brotliBytes">${size(artifact.brotliBytes)}</td>
   </tr>`;
+  const initializedAcl2 = report.artifacts.some(artifact => artifact.file.endsWith('/' + acl2ImageFile));
   const rows = [
-    ['Runtime files', artifact => artifact.kind === 'wasm' && !/^(game-of-life|build\/(?:maxima|fricas))\//.test(artifact.file)],
+    ['Runtime files', artifact => artifact.kind === 'wasm' && !/^(game-of-life|build\/(?:maxima|fricas|acl2|coalton))\//.test(artifact.file)],
     ['Standalone applications', artifact => artifact.kind === 'html'],
     ['Game of Life', artifact => artifact.file.startsWith('game-of-life/')],
     ['FriCAS', artifact => artifact.file === 'fricas/' || artifact.file.startsWith('build/fricas/')],
     ['Maxima', artifact => artifact.file === 'maxima/' || artifact.file.startsWith('build/maxima/')],
-  ].map(([title, matches]) => `<tbody><tr class="group"><th colspan="4" scope="rowgroup">${title}</th></tr>\n` +
+    [initializedAcl2 ? 'ACL2' : 'ACL2 (development preview)', artifact => artifact.file === 'acl2/' || artifact.file.startsWith('build/acl2/')],
+    ['Coalton', artifact => artifact.file === 'coalton/' || artifact.file.startsWith('build/coalton/')],
+  ].filter(([, matches]) => report.artifacts.some(matches)).map(([title, matches]) => `<tbody><tr class="group"><th colspan="4" scope="rowgroup">${title}</th></tr>\n` +
     report.artifacts.filter(matches).map(row).join('\n') + '</tbody>').join('\n');
   const sections = report.artifacts.filter(artifact => artifact.kind === 'wasm').map(artifact => {
     if (!Array.isArray(artifact.sections) || artifact.sections.some(section =>
@@ -103,9 +161,12 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
     <dt>Compression tools</dt><dd>Node ${escape(report.tools?.node)} · zlib ${escape(report.tools?.zlib)}</dd></dl>
     ${webURL(report.runURL) ? `<p><a href="${escape(report.runURL)}">Workflow run</a></p>` : ''}`;
   const replacements = {'@@ROWS@@': rows, '@@SECTIONS@@': sections, '@@METADATA@@': metadata,
+    '@@ACL2@@': report.artifacts.some(artifact => artifact.file === 'acl2/')
+      ? `<a href="acl2/">${initializedAcl2 ? 'ACL2' : 'ACL2 preview'}</a>` : '',
+    '@@COALTON@@': report.artifacts.some(artifact => artifact.file === 'coalton/') ? '<a href="coalton/">Coalton tour</a>' : '',
     '@@REPL@@': escape(replPage), '@@JSON@@': escape(jsonPage)};
   const template = fs.readFileSync(new URL('./image-sizes.html', import.meta.url), 'utf8');
-  return template.replace(/@@[A-Z]+@@/g, marker => {
+  return template.replace(/@@[A-Z0-9]+@@/g, marker => {
     if (!Object.hasOwn(replacements, marker)) throw new Error(`Unknown template marker: ${marker}`);
     return replacements[marker];
   });

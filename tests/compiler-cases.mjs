@@ -1,5 +1,35 @@
 // These forms run unchanged in Node and in the browser's Lisp environment.
 export const compilerCases = [
+  ['deep compiler expression trees', `(let ((form '(values x :deep)))
+    (dotimes (i 1000)
+      (setq form (list 'let '((y x)) (list 'if 'y
+        (list 'locally '(declare (optimize (debug 1))) (list 'progn form)) :absent))))
+    (let ((function (miricl-compiler:compile-native (list 'lambda '(x) form))))
+      (and (equal (multiple-value-list (funcall function 42)) '(42 :deep))
+           (eq (funcall function nil) :absent))))`],
+  ['general tail calls', `(funcall (miricl-compiler:compile-native '(lambda ()
+      (labels ((even-step (n function)
+                 (if (zerop n)
+                     (let ((*compiler-tail-special* t))
+                       (declare (special *compiler-tail-special*))
+                       (values *compiler-tail-special* :done))
+                     (funcall function (1- n) #'even-step)))
+               (odd-step (n function)
+                 (if (zerop n)
+                     (block finished (funcall (lambda () (return-from finished (values nil :done)))))
+                     (apply function (1- n) (list #'odd-step)))))
+        (equal (multiple-value-list (even-step 50000 #'odd-step)) '(t :done))))))`],
+  ['integer tier boundaries', `(let ((function (miricl-compiler:compile-native
+      '(lambda (a b) (list (+ a 1) (- b 1) (- b) (* a a)
+                           (ash b -63) (ldb (byte 64 0) b)))))
+      (typed (miricl-compiler:compile-native
+        '(lambda (a b) (values (+ (the (signed-byte 63) a) (the (signed-byte 63) b)))))))
+    (and (equal (funcall function 1073741823 -9223372036854775808)
+           '(1073741824 -9223372036854775809 9223372036854775808
+             1152921502459363329 -1 9223372036854775808))
+      (= (funcall typed 4611686018427387903 4611686018427387903) 9223372036854775806)
+      (= most-positive-fixnum 9223372036854775807)
+      (typep 9223372036854775807 'fixnum) (typep 9223372036854775808 'bignum)))`],
   ['subnormal exponential formatting', `(let* ((source
       '(lambda (x)
          (let ((*read-default-float-format* (type-of x)))
@@ -270,6 +300,9 @@ export const compilerCases = [
 // Runtime/browser smoke coverage checks the native ABI. The complete set runs
 // once in FILE-CODE-SHARING through a fresh FASL; ANSI owns broad conformance.
 const smokeNames = new Set([
+  'deep compiler expression trees',
+  'general tail calls',
+  'integer tier boundaries',
   'arithmetic and branches', 'shared mutable captures', 'unassigned transitive captures',
   'zero and multiple values', 'dynamic bindings', 'literal cycles and identity',
   'native condition propagation', 'native cleanup on transfers',

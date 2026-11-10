@@ -7,7 +7,7 @@
   (:locals ($args :nullable-object) ($part :nullable-object) ($class :nullable-object))
   #@(local.set $class (call $subtype-class (local.get $type)))
   #@(if (i32.eqz (ref.is_null (local.get $class)))
-    (then (local.set $type (call $car (call $property-cell (struct.get $obj $b (local.get $class))
+    (then (local.set $type (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $class)))
       ,(clos-library-reference :name))))))
   #@(if (i32.ne (call $id (local.get $type)) (i32.const ,(runtime-symbol-id 'complex)))
     (then
@@ -58,7 +58,7 @@
       (return (select (i32.const 2) (i32.const 0)
         (i32.eqz (ref.is_null (call $car (global.get $extra-values))))))))
   #@(if (i32.eqz (i32.or (local.get $am) (local.get $bm))) (then (return (i32.const 0))))
-  #@(local.set $other (if (result (ref null $obj)) (local.get $am)
+  #@(local.set $other (if (result (ref null eq)) (local.get $am)
     (then (local.get $b)) (else (local.get $a))))
   #@(if (ref.is_null (local.get $other)) (then (return (i32.const 2))))
   #@(local.set $class (call $subtype-class (local.get $other)))
@@ -69,14 +69,14 @@
           (local.set $base (call $named-class (call $symbol (i32.const ,(runtime-symbol-id 'complex)))))
           (return (select (i32.const 1) (i32.const 2)
             (call $member-eq (local.get $class) (call $car (call $property-cell
-              (struct.get $obj $b (local.get $base)) ,(clos-library-reference :cpl))))))))
-      (if (i32.eqz (ref.is_null (call $car (call $property-cell (struct.get $obj $b (local.get $class))
+              (struct.get $obj $b (ref.cast (ref $obj) (local.get $base))) ,(clos-library-reference :cpl))))))))
+      (if (i32.eqz (ref.is_null (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $class)))
         ,(clos-library-reference :finalized))))) (then (return (i32.const 2))))))
   #@(if (i32.eq (call $id (local.get $other)) (i32.const ,(runtime-symbol-id 'atom)))
     (then (return (select (i32.const 1) (i32.const 2) (local.get $am)))))
   ;; Numeric emptiness is important here: an empty real interval is a subtype
   ;; of every complex type, while every inhabited real interval is disjoint.
-  #@(local.set $result (call $numeric-subtypep (local.get $other) (ref.null $obj)))
+  #@(local.set $result (call $numeric-subtypep (local.get $other) (ref.null eq) (local.get $env)))
   #@(if (i32.eqz (ref.is_null (call $car (global.get $extra-values))))
     (then (return (select (i32.const 1) (i32.const 2)
       (i32.and (i32.eqz (local.get $am)) (i32.eqz (ref.is_null (local.get $result))))))))

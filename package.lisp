@@ -18,6 +18,7 @@
   (:export #:thread #:threadp #:thread-name #:current-thread #:all-threads
            #:make-thread #:join-thread #:thread-alive-p #:thread-yield
            #:interrupt-thread #:destroy-thread #:start-multiprocessing
+           #:without-interrupts #:with-interrupts
            #:+supports-threads-p+ #:*standard-io-bindings* #:*default-special-bindings*
            #:thread-error #:abnormal-exit #:abnormal-exit-condition #:abnormal-exit-thread
            #:lock #:lockp #:lock-name #:make-lock #:acquire-lock #:release-lock #:with-lock-held
@@ -34,6 +35,10 @@
 (defpackage #:miricl-bundle
   (:use #:cl)
   (:export #:initialize #:dump-system))
+
+(defpackage #:miricl-core
+  (:use #:cl)
+  (:export #:save-image))
 
 (defpackage #:miricl-compiler
   (:use #:cl)

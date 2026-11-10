@@ -15,6 +15,20 @@ const output = source => {
 const check = (source, expected) => assert.equal(output(source), `${expected}\n`, source);
 const fails = source => assert.throws(() => output(source), MiriclError);
 
+// A primitive call returns its own values, not extra values from arguments.
+check("(multiple-value-list (car (values '(17 19) :discard)))", '(17)');
+check('(multiple-value-list (+ (values 17 :discard) (values 25 :discard)))', '(42)');
+check('(multiple-value-list (identity (values)))', '(NIL)');
+check("(multiple-value-list (floor 17 5))", '(3 2)');
+check(`(let ((table (make-hash-table))) (setf (gethash :key table) 17)
+  (multiple-value-list (gethash :key table)))`, '(17 T)');
+check(`(let ((original (symbol-function 'identity)))
+  (unwind-protect
+    (progn (setf (symbol-function 'identity) (lambda (x) (values x :replacement)))
+      (multiple-value-list (identity 17)))
+    (setf (symbol-function 'identity) original)))`, '(17 :REPLACEMENT)');
+check('(handler-case (car 1 2) (program-error () :arity))', ':ARITY');
+
 check('(list (string-equal "ÉΛЖ𐐀🙂" "éλж𐐨🙂") (string-equal \'abc "ABC") (string-equal #\\a "A"))',
   '(T T T)');
 check('(list (string-equal "prefixABCtail" "abc" :start1 6 :end1 9) (string-equal "a" "ab"))', '(T NIL)');

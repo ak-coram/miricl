@@ -42,7 +42,7 @@
         (then (local.set $state (call $symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*random-state*)))))))
       (local.set $state (call $require-random-state (local.get $state)))
       (array.copy $digits $digits (local.get $data) (i32.const 0)
-        (struct.get $obj $digits (local.get $state)) (i32.const 0) (i32.const 4))))
+        (struct.get $obj $digits (ref.cast (ref $obj) (local.get $state))) (i32.const 0) (i32.const 4))))
   (wat-new-object :random-state :digits #@(local.get $data)))
 
 (define-runtime-function $seed-random (($a i32) ($b i32) ($c i32) ($d i32)) ()
@@ -76,7 +76,7 @@
             (local.set $word (i32.and (call $random-word (local.get $state)) (local.get $mask)))
             (br_if $small (i32.ge_u (local.get $word) (local.get $bound))))
           (return (call $int (local.get $word)))))
-      (local.set $length (array.len (struct.get $obj $digits (local.get $limit))))
+      (local.set $length (call $integer-length (ref.as_non_null (local.get $limit))))
       (local.set $bits (i32.sub (local.get $bits) (i32.mul (i32.sub (local.get $length) (i32.const 1)) (i32.const 15))))
       (local.set $mask (i32.sub (i32.shl (i32.const 1) (local.get $bits)) (i32.const 1)))
       (loop $large
@@ -99,11 +99,11 @@
           (f64.add (f64.mul (f64.convert_i32_u (i32.shr_u (local.get $word) (i32.const 5))) (f64.const 67108864))
             (f64.convert_i32_u (i32.shr_u (call $random-word (local.get $state)) (i32.const 6))))
           (f64.const 1.1102230246251565e-16)))))
-    (local.set $result (f64.mul (local.get $fraction) (struct.get $obj $f (local.get $limit))))
+    (local.set $result (f64.mul (local.get $fraction) (struct.get $obj $f (ref.cast (ref $obj) (local.get $limit)))))
     (if (i32.eq (local.get $kind) (i32.const 3))
       (then (local.set $result (f64.promote_f32 (f32.demote_f64 (local.get $result))))))
     ;; Rounding multiplication can produce LIMIT; reject that endpoint.
-    (br_if $float (f64.ge (local.get $result) (struct.get $obj $f (local.get $limit)))))
+    (br_if $float (f64.ge (local.get $result) (struct.get $obj $f (ref.cast (ref $obj) (local.get $limit))))))
   #@(call $float (local.get $kind) (local.get $result)))
 
 (define-runtime-function $random-apply (($id i32) ($args :nullable-object)) (:nullable-object)
@@ -117,23 +117,23 @@
   #@(local.set $kind (call $tag (local.get $limit)))
   #@(block $valid
     (if (i32.eq (local.get $kind) (i32.const 1))
-      (then (br_if $valid (i32.gt_s (struct.get $obj $n (local.get $limit)) (i32.const 0)))))
+      (then (br_if $valid (i32.gt_s (call $value-n (local.get $limit)) (i32.const 0)))))
     (if (i32.le_u (i32.sub (local.get $kind) (i32.const 3)) (i32.const 1))
-      (then (br_if $valid (f64.gt (struct.get $obj $f (local.get $limit)) (f64.const 0)))))
+      (then (br_if $valid (f64.gt (struct.get $obj $f (ref.cast (ref $obj) (local.get $limit))) (f64.const 0)))))
     (call $type-fail (local.get $limit)
       (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'or)))
         (call $cons
           (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
-            (call $cons (call $int (i32.const 1)) (ref.null $obj)))
+            (call $cons (call $int (i32.const 1)) (ref.null eq)))
           (call $cons
             (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'float)))
-              (call $cons (call $cons (call $int (i32.const 0)) (ref.null $obj)) (ref.null $obj)))
-            (ref.null $obj))))
+              (call $cons (call $cons (call $int (i32.const 0)) (ref.null eq)) (ref.null eq)))
+            (ref.null eq))))
       (i32.const ,(runtime-error-code :expected-number))))
-  #@(local.set $state (call $require-random-state (if (result (ref null $obj)) (ref.is_null (local.get $args))
+  #@(local.set $state (call $require-random-state (if (result (ref null eq)) (ref.is_null (local.get $args))
     (then (call $symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*random-state*)))))
     (else (call $car (local.get $args))))))
-  #@(call $random-native (ref.as_non_null (local.get $limit)) (ref.as_non_null (struct.get $obj $digits (local.get $state)))))
+  #@(call $random-native (ref.as_non_null (local.get $limit)) (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $state))))))
 
 (define-runtime-function $read-random-state (($form :nullable-object)) (:object)
   (:locals ($data :digits) ($value :nullable-object) ($i i32) ($word i32) ($bits i32))
@@ -146,7 +146,7 @@
     ,(wat-fail-when #@(i32.ne (call $tag (local.get $form)) (i32.const 7)) :reader-syntax)
     (local.set $value (call $car (local.get $form))) (local.set $form (call $cdr (local.get $form)))
     ,(wat-fail-when #@(i32.ne (call $tag (local.get $value)) (i32.const 1)) :reader-syntax)
-    ,(wat-fail-when #@(i32.or (i32.lt_s (struct.get $obj $n (local.get $value)) (i32.const 0))
+    ,(wat-fail-when #@(i32.or (i32.lt_s (call $value-n (local.get $value)) (i32.const 0))
       (i32.gt_u (call $bitlength (ref.as_non_null (local.get $value))) (i32.const 32))) :reader-syntax)
     (local.set $word (i32.or (call $digit (ref.as_non_null (local.get $value)) (i32.const 0))
       (i32.or (i32.shl (call $digit (ref.as_non_null (local.get $value)) (i32.const 1)) (i32.const 15))
@@ -164,7 +164,7 @@
   #@(loop $next
     ,(emit-text " #x")
     (call $print-small-integer
-      (i64.extend_i32_u (array.get $digits (struct.get $obj $digits (local.get $state)) (local.get $i))) (i32.const 16))
+      (i64.extend_i32_u (array.get $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $state))) (local.get $i))) (i32.const 16))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br_if $next (i32.lt_u (local.get $i) (i32.const 4))))
   (wat-string (emit-text ")")))
 

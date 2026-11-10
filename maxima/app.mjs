@@ -3,6 +3,20 @@ import {newSession, sessionStore} from './session-store.mjs';
 const $ = selector => document.querySelector(selector);
 const source = $('#source'), answers = $('#answers'), status = $('#status'), evaluate = $('#evaluate');
 const history = $('#history'), prompt = $('#prompt'), answerText = $('#answer-text');
+const startupPanel = $('#startup-panel');
+function startupOutput(text) {
+  if (!startupPanel || !text) return;
+  const output = $('#startup-output');
+  output.textContent = (output.textContent + text).slice(-12000);
+  $('#startup-details').hidden = false;
+}
+function startupError(message, details = '') {
+  if (!startupPanel) return;
+  startupPanel.hidden = false; startupPanel.dataset.state = 'error';
+  $('#startup-message').textContent = `${config.name} could not continue. Restart to try a fresh session.`;
+  startupOutput([message, details].filter(Boolean).join('\n'));
+  $('#startup-details').open = true;
+}
 let storageError, storage;
 try {storage = localStorage;} catch (error) {storageError = error;}
 const store = sessionStore(storage ?? {getItem: () => null, setItem: () => {throw storageError;}}, error => {
@@ -51,7 +65,7 @@ function renderEntry(entry, index) {
   reuse.onclick = () => {source.value = entry.source; answers.value = entry.answers ?? ''; source.focus();};
   heading.append(label, reuse); node.append(heading); history.append(node); append(entry.source, 'input', node);
   for (const output of entry.outputs ?? []) append(output.text, output.className, node);
-  if (entry.state === 'cancelled') append('Calculation cancelled.', 'error', node);
+  if (entry.state === 'cancelled') append(config.cancelledMessage ?? 'Calculation cancelled.', 'error', node);
   if (entry.milliseconds !== undefined) {const time = document.createElement('div'); time.className = 'entry-time'; time.textContent = `${entry.milliseconds} ms`; node.append(time);}
   return node;
 }
@@ -59,16 +73,21 @@ function render() {
   history.replaceChildren(); current.entries.forEach(renderEntry); $('#session-name').value = current.name; savedList(); controls();
 }
 function cancel() {
-  if (active?.state === 'running') {active.state = 'cancelled'; append('Calculation cancelled.', 'error'); save();}
+  if (active?.state === 'running') {active.state = 'cancelled'; append(config.cancelledMessage ?? 'Calculation cancelled.', 'error'); save();}
   active = null; activeNode = null; replay = null; busy = false; prompt.hidden = true;
 }
 function start(onReady) {
   worker?.terminate(); ready = false; busy = false; controls(); setStatus('Loading assets…');
+  if (startupPanel) {
+    startupPanel.hidden = false; startupPanel.dataset.state = 'loading';
+    $('#startup-message').textContent = `Starting ${config.name}…`;
+    $('#startup-output').textContent = ''; $('#startup-details').hidden = true; $('#startup-details').open = false;
+  }
   const running = worker = new Worker('./worker.mjs', {type: 'module'});
   running.onmessage = ({data}) => {
     if (worker !== running) return;
-    if (data.type === 'status') setStatus(data.message);
-    if (data.type === 'ready') {ready = true; controls(); setStatus(viewing ? 'Saved transcript — Resume to continue' : 'Ready'); onReady?.();}
+    if (data.type === 'status') {setStatus(data.message); if (startupPanel && !ready) $('#startup-message').textContent = data.message;}
+    if (data.type === 'ready') {ready = true; if (startupPanel) startupPanel.hidden = true; controls(); setStatus(viewing ? 'Saved transcript — Resume to continue' : 'Ready'); onReady?.();}
     if (data.type === 'prompt') {
       if (replay) {
         const recorded = replay.entries[replay.index].replies?.[replay.replyIndex++];
@@ -76,25 +95,39 @@ function start(onReady) {
       }
       $('#question').textContent = data.question; prompt.hidden = false; answerText.value = ''; answerText.focus(); setStatus('Waiting for an answer');
     }
-    if (data.type === 'output' && active && !replay && data.output) recordOutput(data.output);
+    if (data.type === 'output' && data.output) {
+      if (!ready) startupOutput(data.output);
+      else if (active && !replay) recordOutput(data.output);
+    }
     if (data.type === 'result') {
-      if (replay) {replay.index++; replayNext(); return;}
+      if (replay) {
+        if (data.failed) {replay = null; busy = false; viewing = true; controls(); setStatus(`Resume stopped: ${config.rejectedMessage ?? 'Input failed.'}`);}
+        else {replay.index++; replayNext();}
+        return;
+      }
       if (active) {
         if (data.output) recordOutput(data.output);
-        for (const result of data.results) recordOutput(`(${result.label.toLowerCase()}) ${result.text}`, 'result');
-        active.state = 'complete'; active.milliseconds = data.milliseconds;
+        for (const result of data.results ?? []) recordOutput(`(${result.label.toLowerCase()}) ${result.text}`, 'result');
+        if (data.failed) recordOutput(config.rejectedMessage ?? 'Input failed.', 'error');
+        active.state = data.failed ? 'error' : 'complete'; active.milliseconds = data.milliseconds;
         const time = document.createElement('div'); time.className = 'entry-time'; time.textContent = `${data.milliseconds} ms`; activeNode.append(time);
-        active = null; activeNode = null; busy = false; save(); setStatus(`${data.milliseconds} ms`); source.focus();
+        active = null; activeNode = null; busy = false; save(); setStatus(data.failed ? (config.rejectedMessage ?? 'Input failed.') : `${data.milliseconds} ms`); source.focus();
       }
     }
     if (data.type === 'error') {
       const text = [data.output, data.message].filter(Boolean).join('\n');
+      if (!ready || data.fatal) {ready = false; startupError(data.message, [data.output, data.backtrace].filter(Boolean).join('\n'));}
       if (replay) {replay = null; busy = false; viewing = true; controls(); setStatus(`Resume stopped: ${data.message}`); return;}
       if (active) {recordOutput(text, 'error'); active.state = 'error'; active = null; activeNode = null; busy = false; save();}
       setStatus(data.message); controls();
     }
   };
-  running.onerror = event => {ready = false; busy = false; setStatus(event.message); controls();};
+  running.onerror = event => {
+    if (worker !== running) return;
+    ready = false; busy = false; replay = null;
+    if (active) {recordOutput(event.message, 'error'); active.state = 'error'; active = null; activeNode = null; save();}
+    startupError(event.message); setStatus(event.message); controls();
+  };
   running.postMessage({type: 'start'});
 }
 function recordOutput(text, className = '') {
@@ -125,7 +158,7 @@ $('#form').onsubmit = event => {
   event.preventDefault(); if (evaluate.disabled || !source.value.trim()) return;
   active = {source: source.value, answers: answers.value, replies: [], outputs: [], state: 'running', recorded: recording};
   current.entries.push(active); activeNode = renderEntry(active, current.entries.length - 1);
-  busy = true; save(); setStatus('Calculating…'); worker.postMessage({type: 'evaluate', source: active.source, answers: active.answers});
+  busy = true; save(); setStatus(config.busyStatus ?? 'Calculating…'); worker.postMessage({type: 'evaluate', source: active.source, answers: active.answers});
 };
 source.onkeydown = event => {if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {event.preventDefault(); $('#form').requestSubmit();}};
 $('#new').onclick = fresh;
@@ -142,7 +175,7 @@ function answer() {
   const text = answerText.value;
   if (replay) {replay.entries[replay.index].replies ??= []; replay.entries[replay.index].replies.push(text); save();}
   else if (active) {active.replies.push(text); save();}
-  prompt.hidden = true; setStatus('Calculating…'); worker.postMessage({type: 'answer', text});
+  prompt.hidden = true; setStatus(config.busyStatus ?? 'Calculating…'); worker.postMessage({type: 'answer', text});
 }
 $('#answer').onclick = answer;
 answerText.onkeydown = event => {if (event.key === 'Enter') {event.preventDefault(); answer();}};

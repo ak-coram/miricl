@@ -1,6 +1,6 @@
 // Compare native emission and frontend+emission, excluding bootstrap and loading.
 // Comparisons require byte-identical output; warm up before each timed batch.
-// Usage: node scripts/benchmark-native-compiler.mjs [--compare-size] IMAGE [COMPARISON_IMAGE ...]
+// Usage: node scripts/benchmark-native-compiler.mjs [--compare-size] [--large] IMAGE [COMPARISON_IMAGE ...]
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -21,7 +21,15 @@ const cases = [
     (dotimes (i n) (if (evenp i) (incf a b) (incf b a))) (values a b)))`, 50],
 ];
 const compareSize = process.argv.includes('--compare-size');
-const paths = process.argv.slice(2).filter(argument => argument !== '--compare-size');
+if (process.argv.includes('--large')) {
+  // Large generated initializers retain many values while creating
+  // their literal graphs. Exercise the resulting wide liveness bitmaps.
+  const largeBindings = Array.from({length: 1000}, (_, i) => `(v${i} (+ n ${i}))`).join(' ');
+  const largeValues = Array.from({length: 1000}, (_, i) => `v${i}`).join(' ');
+  cases.splice(0, cases.length, ['large-initializer',
+    `(lambda (n) (let (${largeBindings}) (list ${largeValues})))`, 1]);
+}
+const paths = process.argv.slice(2).filter(argument => !['--compare-size', '--large'].includes(argument));
 if (!paths.length) paths.push('miricl.wasm');
 const variants = await Promise.all(paths.map(async file => ({file,
   image: await fs.readFile(file), measurements: []})));

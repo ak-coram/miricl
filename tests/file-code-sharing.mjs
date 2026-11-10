@@ -100,6 +100,18 @@ try {
         (list fixnum it (loop for i fixnum from 1 to 3 collect i)
           (loop for x in '(1 2 3) when (and (evenp x) (+ x 10)) collect it))))
     (defun quoted-names (x) (list x 'x '#:separate '#:separate '#1=(:cycle . #1#)))
+    (defun primitive-values ()
+      (let ((table (make-hash-table)) (original (symbol-function 'identity)))
+        (setf (gethash :key table) 17)
+        (list (multiple-value-list (car (values '(17 19) :discard)))
+          (multiple-value-list (+ (values 17 :discard) (values 25 :discard)))
+          (multiple-value-list (identity (values)))
+          (multiple-value-list (floor 17 5))
+          (multiple-value-list (gethash :key table))
+          (unwind-protect
+            (progn (setf (symbol-function 'identity) (lambda (x) (values x :replacement)))
+              (multiple-value-list (identity 17)))
+            (setf (symbol-function 'identity) original)))))
   `);
   check(builder, '(pathnamep (compile-file "/scope.lisp"))');
   check(builder, '(not (boundp (quote file-scope-test::*dynamic*)))');
@@ -119,6 +131,7 @@ try {
     "(and (eq (file-scope-test::proclaimed-binding) :dynamic) (not (boundp 'file-scope-test::*proclaimed*)))",
     "(equal (file-scope-test::nested-definitions 42) '(:lexical :lexical 42 42))",
     "(equal (file-scope-test::local-setters) '(2 1))",
+    "(equal (file-scope-test::primitive-values) '((17) (42) (nil) (3 2) (17 t) (17 :replacement)))",
     "(equal (file-scope-test::condition-forms nil) '(42 42))",
     "(equal (file-scope-test::condition-forms t) '(t 42))",
     "(equal (file-scope-test::restart-options 17) '(42 \"17\"))",

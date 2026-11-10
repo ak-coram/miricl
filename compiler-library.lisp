@@ -53,8 +53,8 @@
 
 (defun %file-lexical-call (form variables functions blocks tags)
   ;; Ordinary expression trees can be arbitrarily deep after macro expansion.
-  ;; Binding constructs recurse through the scope-aware converter; calls and
-  ;; conditionals use an explicit worklist instead of the native control stack.
+  ;; Binding constructs carry their scope on the worklist too; generated code
+  ;; can nest LET/LET* and LOCALLY as deeply as calls and conditionals.
   (let* ((result (list nil)) (work (list (list form result variables))))
     (loop while work do
       (let* ((task (pop work)) (source (first task)) (destination (second task))
@@ -62,6 +62,27 @@
         (cond
           ((atom source)
            (rplaca destination (if (symbolp source) (%file-lexical-reference source environment) source)))
+          ((member (car source) '(let let*))
+           (let* ((outer environment) (specials (%file-lexical-specials (cddr source)))
+                  (bindings nil) (initializers nil) (forms (cddr source))
+                  (slots (make-list (length forms))))
+             (dolist (binding (second source))
+               (let* ((name (if (consp binding) (car binding) binding))
+                      (init (if (consp binding) (second binding) nil))
+                      (initial-environment (if (eq (car source) 'let*) environment outer)))
+                 (setq environment (%file-lexical-bind name environment specials))
+                 (let ((copy (list (cdar environment) nil)))
+                   (push copy bindings)
+                   (push (list init (cdr copy) initial-environment) initializers))))
+             (dolist (name specials) (push (cons name name) environment))
+             (rplaca destination (%file-code-cons source (car source) (cons (nreverse bindings) slots)))
+             (loop for form in forms for slot on slots do (push (list form slot environment) work))
+             (dolist (task initializers) (push task work))))
+          ((eq (car source) 'locally)
+           (let* ((forms (cdr source)) (slots (make-list (length forms))))
+             (dolist (name (%file-lexical-specials forms)) (push (cons name name) environment))
+             (rplaca destination (%file-code-cons source 'locally slots))
+             (loop for form in forms for slot on slots do (push (list form slot environment) work))))
           ((member (car source)
              '(quote lambda let let* flet labels locally function block return-from tagbody go the
                defvar defparameter defconstant declare %%case-form %%list-test %%list-accumulate
@@ -93,16 +114,7 @@
     (case operator
       (quote form)
       (lambda (%file-lexical-function form operator variables functions blocks tags))
-      ((let let*)
-       (let* ((outer variables) (specials (%file-lexical-specials (cdr args))) (bindings nil))
-         (dolist (binding (car args))
-           (let* ((name (if (consp binding) (car binding) binding))
-                  (init (%file-lexical-form (if (consp binding) (second binding) nil)
-                          (if (eq operator 'let*) variables outer) functions blocks tags)))
-             (setq variables (%file-lexical-bind name variables specials))
-             (push (list (cdar variables) init) bindings)))
-         (%file-code-cons form operator
-           (cons (nreverse bindings) (%file-lexical-forms (cdr args) variables functions blocks tags)))))
+      ((let let*) (%file-lexical-call form variables functions blocks tags))
       ((flet labels)
        (let ((outer functions) (definitions nil))
          (dolist (definition (car args))
@@ -112,8 +124,7 @@
                    variables (if (eq operator 'labels) functions outer) blocks tags) definitions))
          (%file-code-cons form operator
            (cons (nreverse definitions) (%file-lexical-forms (cdr args) variables functions blocks tags)))))
-      (locally
-       (%file-code-cons form operator (%file-lexical-forms args variables functions blocks tags)))
+      (locally (%file-lexical-call form variables functions blocks tags))
       (function
        (%file-code-cons form operator
          (list (if (or (symbolp (car args)) (eq (caar args) 'setf))
@@ -444,9 +455,70 @@
       (otherwise (setq %compilation-complete nil compiled args)))
     (list* '%%condition-form operator compiled)))
 (defun %compile-form (form environment)
+  ;; Macro expansions routinely contain much deeper trees than their source.
+  ;; Keep pending conversions on the heap, preserving expansion order and the
+  ;; lexical environment of each initializer and body.
+  (let ((result (list nil)) (work nil))
+    (labels
+        ((forms (items environment)
+           (let ((slots (make-list (length items))) (tasks nil))
+             (loop for item in items for slot on slots do
+               (let ((source item) (place slot))
+                 (push (lambda () (walk source environment place)) tasks)))
+             (setq work (nconc (nreverse tasks) work))
+             slots))
+         (body (items environment)
+           (let ((declarations nil))
+             (when (and (stringp (car items)) (cdr items)) (push (pop items) declarations))
+             (loop while (and (consp (car items)) (eq (caar items) 'declare)) do
+               (let ((declaration (pop items)))
+                 (dolist (spec (cdr declaration))
+                   (when (eq (car spec) 'special)
+                     (dolist (name (cdr spec)) (setq environment (%%compile 3 environment name)))))
+                 (push declaration declarations)))
+             (append (nreverse declarations) (forms items environment))))
+         (bindings (remaining operator outer local compiled specials items destination)
+           (if (null remaining)
+               (progn
+                 (when specials (push (list 'declare (cons 'special (nreverse specials))) items))
+                 (rplaca destination (list* operator (nreverse compiled) (body items local))))
+               (let* ((binding (car remaining))
+                      (name (if (consp binding) (car binding) binding))
+                      (slot (list nil)))
+                 (push (lambda ()
+                         (bindings (cdr remaining) operator outer (%%compile 3 local name)
+                           (cons (list name (car slot)) compiled)
+                           (if (%%compile 18 name) (cons name specials) specials) items destination)) work)
+                 (push (lambda ()
+                         (walk (if (consp binding) (cadr binding) nil)
+                           (if (eq operator 'let*) local outer) slot)) work))))
+         (walk (form environment destination)
+           (setq form (macroexpand form environment))
+           (cond
+             ((atom form) (rplaca destination form))
+             ((member (car form) '(quote go declare)) (rplaca destination form))
+             ((member (car form) '(let let*))
+              (bindings (second form) (car form) environment environment nil nil (cddr form) destination))
+             ((member (car form) '(block return-from the))
+              (rplaca destination (list* (car form) (second form) (forms (cddr form) environment))))
+             ((eq (car form) 'locally)
+              (rplaca destination (cons 'locally (body (cdr form) environment))))
+             ((member (car form) '(if progn multiple-value-call multiple-value-prog1 catch throw unwind-protect progv %%while))
+              (rplaca destination (cons (car form) (forms (cdr form) environment))))
+             ((or (not (symbolp (car form))) (special-operator-p (car form))
+                  (member (car form) '(quasiquote %%case-form %%list-test %%list-accumulate %%numeric-collect
+                    %%parallel-place-form %%symbol-iterate %%arithmetic-step %%condition-form))
+                  (and (not (symbol-package (car form))) (not (fboundp (car form)))))
+              (rplaca destination (%compile-recursive-form form environment)))
+             (t (rplaca destination (%%compile 1 (car form) (forms (cdr form) environment)))))))
+      (push (lambda () (walk form environment result)) work)
+      (loop while work do (funcall (pop work)))
+      (car result))))
+
+(defun %compile-recursive-form (form environment)
   (multiple-value-bind (expansion expanded) (macroexpand form environment)
-    (when expanded (return-from %compile-form (%compile-form expansion environment))))
-  (unless (consp form) (return-from %compile-form form))
+    (when expanded (return-from %compile-recursive-form (%compile-form expansion environment))))
+  (unless (consp form) (return-from %compile-recursive-form form))
   (let ((operator (car form)) (args (cdr form)))
     (case operator
       ((go declare) form)

@@ -6,6 +6,66 @@ export const threadCases = [
     (not (member :bordeaux-threads *features*))
     (notany #'find-package '("BORDEAUX-THREADS" "BORDEAUX-THREADS-2" "BT" "BT2")))`],
   ['main thread', '(and (miricl-threads:threadp (miricl-threads:current-thread)) (string= (miricl-threads:thread-name (miricl-threads:current-thread)) "Main thread"))'],
+  ['interrupt masking across waits and scheduler critical sections', `(let
+      ((events nil) (deferred nil) (counter (miricl-threads:make-atomic-integer)))
+    (miricl-threads:without-interrupts
+      (miricl-threads:interrupt-thread (miricl-threads:current-thread)
+        (lambda () (push :interrupt events)))
+      (miricl-threads:atomic-integer-incf counter)
+      (miricl-threads:without-interrupts (sleep 0.001))
+      (setq deferred (null events))
+      (push :body events))
+    (miricl-threads:thread-yield)
+    (and deferred (= (miricl-threads:atomic-integer-value counter) 1)
+         (equal events '(:interrupt :body))))`],
+  ['nested interrupt enabling restores the enclosing mask', `(let
+      ((events nil) (enabled nil) (deferred nil))
+    (miricl-threads:without-interrupts
+      (miricl-threads:interrupt-thread (miricl-threads:current-thread) (lambda () (push :one events)))
+      (miricl-threads:with-interrupts (miricl-threads:thread-yield))
+      (setq enabled (equal events '(:one)))
+      (miricl-threads:interrupt-thread (miricl-threads:current-thread) (lambda () (push :two events)))
+      (sleep 0.001)
+      (setq deferred (equal events '(:one))))
+    (miricl-threads:thread-yield)
+    (and enabled deferred (equal events '(:two :one))))`],
+  ['interrupt masks unwind after an interrupt makes a nonlocal exit', `(let
+      ((result nil) (delivered nil) (deferred nil))
+    (miricl-threads:without-interrupts
+      (setq result (catch :interrupt-exit
+        (miricl-threads:interrupt-thread (miricl-threads:current-thread)
+          (lambda () (throw :interrupt-exit :escaped)))
+        (miricl-threads:with-interrupts (miricl-threads:thread-yield))
+        :missed))
+      (miricl-threads:interrupt-thread (miricl-threads:current-thread) (lambda () (setq delivered t)))
+      (sleep 0.001)
+      (setq deferred (not delivered)))
+    (miricl-threads:thread-yield)
+    (and (eq result :escaped) deferred delivered
+      (equal (multiple-value-list (miricl-threads:without-interrupts (values 17 nil 23))) '(17 nil 23))
+      (null (miricl-threads:without-interrupts)) (null (miricl-threads:with-interrupts))
+      (null (multiple-value-list (miricl-threads:with-interrupts (values))))))`],
+  ['queued interrupts cannot interrupt mask restoration', `(let ((events nil) (restored nil))
+    (let ((outcome
+      (catch :second-interrupt
+        (miricl-threads:without-interrupts
+          (let ((first (catch :first-interrupt
+            (miricl-threads:interrupt-thread (miricl-threads:current-thread)
+              (lambda () (push :second events) (throw :second-interrupt :second)))
+            (miricl-threads:interrupt-thread (miricl-threads:current-thread)
+              (lambda () (push :first events) (throw :first-interrupt :first)))
+            (miricl-threads:with-interrupts (miricl-threads:thread-yield))
+            :missed)))
+            (sleep 0.001)
+            (setq restored (and (eq first :first) (equal events '(:first))))))
+        (miricl-threads:thread-yield) :missed)))
+      (and restored (eq outcome :second) (equal events '(:second :first)))))`],
+  ['interrupt queues drain without recursive callback entry', `(let ((count 0))
+    (miricl-threads:without-interrupts
+      (dotimes (i 1000)
+        (miricl-threads:interrupt-thread (miricl-threads:current-thread) (lambda () (incf count)))))
+    (loop until (= count 1000) do (miricl-threads:thread-yield))
+    (= count 1000))`],
   ['multiple values', `(equal (multiple-value-list (miricl-threads:join-thread
     (miricl-threads:make-thread (lambda () (miricl-threads:thread-yield) (values 42 :ok))))) '(42 :ok))`],
   ['zero values', `(null (multiple-value-list (miricl-threads:join-thread (miricl-threads:make-thread (lambda () (values))))))`],

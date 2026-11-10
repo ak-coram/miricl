@@ -68,7 +68,7 @@
       (let* ((start position) (code (aref bytes position)) (argument nil))
         (incf position)
         (cond
-          ((member code '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x20 #x21 #x22 #x41 #xd0 #xd2))
+          ((member code '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x41 #xd0 #xd2))
            ;; Constants and heap types only need their encoded extent here.
            ;; Decode the common one-byte case here, avoiding a helper call
            ;; and multiple-value packet for nearly every instruction operand.
@@ -98,13 +98,13 @@
                  (multiple-value-setq (ignored position) (native-read-uleb bytes position))))))
           ((= code #xfb)
            (multiple-value-setq (argument position) (native-read-uleb bytes position))
-           (dotimes (i (case argument (2 2) (#x17 1) ((#x1a #x1b) 0)
+           (dotimes (i (case argument (2 2) ((#x14 #x16 #x17) 1) ((#x1a #x1b #x1c #x1d) 0)
                         (otherwise (error "Unexpected native GC instruction ~D." argument))))
              (multiple-value-bind (ignored next) (native-read-uleb bytes position)
                (declare (ignore ignored)) (setq position next))))
-          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x71 #xd1)))
+          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #xac #xd1)))
            (error "Unexpected native instruction ~D." code)))
-        (when (or (not references-only) (member code '(#x10 #xd2)))
+        (when (or (not references-only) (member code '(#x10 #x12 #xd2)))
           (push (make-native-op code argument start position) ops))))
     (values (coerce (nreverse ops) 'simple-vector) offset locals)))
 
@@ -136,7 +136,7 @@
                 (push i scopes))
           (#x05 (setq successors (list (aref ends (first scopes)))))
           (#x0b (pop scopes))
-          ((#x00 #x08 #x0f) (setq successors nil))
+          ((#x00 #x08 #x0f #x12) (setq successors nil))
           ((#x0c #x0d)
            (unless (= code #x0d) (setq successors nil))
            (let ((target (native-op-target (native-op-argument op) scopes ends ops)))
@@ -188,13 +188,25 @@
         (let* ((op (aref ops i)) (code (native-op-code op)))
           (setf (native-op-uses op)
                   (cond ((eql code #x20) (ash 1 (native-op-argument op)))
-                        ((and exceptions (member code '(#x08 #x10))) all) (t 0))
+                        ((and exceptions (member code '(#x08 #x10 #x12))) all) (t 0))
                 (native-op-definitions op)
-                  (if (member code '(#x21 #x22)) (ash 1 (native-op-argument op)) 0)
-                (native-flow-uses block)
-                  (logior (native-flow-uses block) (logandc2 (native-op-uses op) (native-flow-definitions block)))
-                (native-flow-definitions block)
-                  (logior (native-flow-definitions block) (native-op-definitions op))))))
+                  (if (member code '(#x21 #x22)) (ash 1 (native-op-argument op)) 0))
+          ;; Most instructions neither read nor write locals. Reuse the
+          ;; existing bitmap instead of copying it through a union with zero.
+          (cond
+            ((eql code #x20)
+             (let ((local (native-op-argument op)))
+               (unless (or (logbitp local (native-flow-definitions block))
+                           (logbitp local (native-flow-uses block)))
+                 (setf (native-flow-uses block)
+                   (logior (native-flow-uses block) (native-op-uses op))))))
+            ((not (zerop (native-op-uses op)))
+             (setf (native-flow-uses block)
+               (logior (native-flow-uses block) (logandc2 (native-op-uses op) (native-flow-definitions block))))))
+          (unless (or (zerop (native-op-definitions op))
+                      (logbitp (native-op-argument op) (native-flow-definitions block)))
+            (setf (native-flow-definitions block)
+              (logior (native-flow-definitions block) (native-op-definitions op)))))))
     ;; A forward-only CFG needs one reverse sweep. Cycles iterate block
     ;; summaries to a fixed point, without revisiting their instructions.
     (loop while changed do
@@ -212,7 +224,13 @@
         (loop for i downfrom (1- (native-flow-end block)) to (native-flow-start block) do
           (let ((op (aref ops i)))
             (setf (native-op-live-out op) out)
-            (setq out (logior (native-op-uses op) (logandc2 out (native-op-definitions op))))
+            (unless (or (zerop (native-op-definitions op))
+                        (not (logbitp (native-op-argument op) out)))
+              (setq out (logandc2 out (native-op-definitions op))))
+            (unless (or (zerop (native-op-uses op))
+                        (and (eql (native-op-code op) #x20)
+                             (logbitp (native-op-argument op) out)))
+              (setq out (logior (native-op-uses op) out)))
             (setf (native-op-live-in op) out)))))
     blocks))
 
@@ -227,11 +245,11 @@
     (case code
       ((#x20 #x41 #xd0 #xd2) (values 0 1))
       ((#x21 #x1a) (values 1 0))
-      ((#x22 #x45 #xd1 #xfb) (values 1 1))
-      ((#x46 #x71) (values 2 1))
-      (#x10 (let ((import (nth (native-op-argument op) *native-imports*)))
-               (if import (values (length (second import)) (if (third import) 1 0))
-                   (values 2 1))))
+      ((#x22 #x45 #xac #xd1 #xfb) (values 1 1))
+      ((#x46 #x48 #x4a #x4c #x4e #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e) (values 2 1))
+      ((#x10 #x12) (let ((import (nth (native-op-argument op) *native-imports*)))
+               (if import (values (length (second import)) (if (and (= code #x10) (third import)) 1 0))
+                   (values 2 (if (= code #x10) 1 0)))))
       (otherwise (values 0 0)))))
 
 (defun native-stackify-ops (ops &optional exceptions types)
@@ -252,7 +270,7 @@
              (candidate (and store (or (null barriers) (> (car store) (car barriers))) store)))
         ;; A throwing call may expose any local to a landing pad. Keeping a
         ;; value on the operand stack cannot replace that observable store.
-        (when (and exceptions (member code '(#x08 #x10))) (clrhash candidates))
+        (when (and exceptions (member code '(#x08 #x10 #x12))) (clrhash candidates))
         ;; Wasm's definite-initialization validation is structural, rather than
         ;; ordinary CFG liveness. Keep stores to non-defaultable typed refs even
         ;; when all runtime paths overwrite them inside nested blocks.
@@ -320,8 +338,11 @@
         (loop while (and (< color next)
                         (or (and (null types) (<= 2 color) (< color offset))
                             (and types (not (equal (aref types local) (aref color-types color))))
-                            (not (zerop (logand (aref conflicts local) (aref colors color))))
-                            (logbitp local (aref color-conflicts color))))
+                            ;; Reject the single-bit conflict before scanning
+                            ;; both potentially very wide neighbor sets.
+                            (logbitp local (aref color-conflicts color))
+                            ;; LOGTEST avoids allocating the intersection.
+                            (logtest (aref conflicts local) (aref colors color))))
           do (incf color))
         (when (= color next)
           (when types (setf (aref color-types color) (aref types local)))
@@ -486,7 +507,7 @@
              (setf (aref active top) i) (incf top)
              (when (and (member code '(#x02 #x03)) (eql (native-op-argument op) #x40))
                (setq void-scopes t))
-             (setq dead (member code '(#x00 #x08 #x0c #x0e #x0f))))))))
+             (setq dead (member code '(#x00 #x08 #x0c #x0e #x0f #x12))))))))
     (when (and clean-scopes void-scopes) (native-clean-scopes ops bytes))
     (remove-if-not (lambda (op) (native-op-code op)) ops)))
 

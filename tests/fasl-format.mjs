@@ -9,6 +9,8 @@ try {
     (defparameter *codec-records*
       (coerce (loop for i below 600 collect (if (< i 300) (list 5 i (mod (1+ i) 600) (mod i 4))
         (list 5 i (mod (1+ i) 600) 0 "é𝄞" :keyword t nil -2147483647 2147483647 #()))) 'vector))
+    (setq *codec-records* (concatenate 'vector *codec-records*
+      '#((11 0 1 (-1 0 127 128 16383 16384 2147483646)) (11 0 0 nil))))
     (with-open-file (s "/native.wasm" :direction :output :element-type '(unsigned-byte 8))
       (dolist (b '(0 97 115 109 1 0 0 0)) (write-byte b s))
       (miricl-compiler::write-indexed-unit s nil *codec-records*
@@ -19,6 +21,7 @@ try {
   const payload = new Uint8Array(WebAssembly.Module.customSections(await WebAssembly.compile(bytes), 'miricl.fasl')[0]);
   assert.deepEqual([...payload.subarray(0, 4)], [77, 73, 82, 70]);
   const directory = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  assert.equal(directory.getUint32(4, true), 3, 'Metadata and dense-record feature bits');
   const entries = Array.from({length: directory.getUint32(12, true)}, (_, i) => {
     const at = 20 + 16 * i;
     return {at, kind: directory.getUint32(at, true), key: directory.getUint32(at + 4, true),
@@ -32,6 +35,12 @@ try {
     (file-position s 26)
     (let ((payload (miricl-compiler::read-unit-payload s (file-length s) :metadata t)))
       (and (equalp (second payload) *codec-records*)
+           (equal (third payload) '(:miricl-ir "source é𝄞" nil)))))`);
+  check(`(with-open-file (s "/native.wasm" :element-type '(unsigned-byte 8))
+    (file-position s 26)
+    (multiple-value-bind (payload count)
+        (miricl-compiler::read-unit-payload s (file-length s) :metadata t :records nil)
+      (and (= count (length *codec-records*)) (null (second payload))
            (equal (third payload) '(:miricl-ir "source é𝄞" nil)))))`);
   // Exercise the portable host algorithm independently of the native codec.
   check(`(let ((native (symbol-function 'miricl-compiler::compiler-primitive)))

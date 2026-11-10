@@ -134,6 +134,13 @@ try {
   await js('document.getElementById("compiled").click()');
   assert.equal(await evaluate('*compiler-clicks*'), '1\n');
   assert.equal(await js('app.evaluateAsync("(funcall *compiler-test-function* 40)").then(r => r.output)'), '42\n');
+  if (precompiled) {
+    assert.equal(await js(`(async () => {
+      const restored = await Miricl.instantiate(app.saveImage());
+      try {return restored.evaluate("(list *compiler-clicks* (funcall *compiler-test-function* 40))").output;}
+      finally {restored.close();}
+    })()`), '(1 42)\n');
+  }
   await command('Network.emulateNetworkConditions', {offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
   assert.equal(await js(`(async () => {
     const second = await Miricl.instantiate(image);

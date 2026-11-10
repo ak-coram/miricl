@@ -10,10 +10,10 @@
   #@(if (i32.eq (call $tag (local.get $function)) (i32.const 8))
     (then
       (if (ref.test (ref $native-function) (local.get $function))
-        (then (return (if (result (ref null $obj)) (ref.is_null (struct.get $obj $c (local.get $function)))
+        (then (return (if (result (ref null eq)) (ref.is_null (struct.get $obj $c (ref.cast (ref $obj) (local.get $function))))
           (then (call $symbol (i32.const ,(runtime-symbol-id 'lambda))))
-          (else (struct.get $obj $c (local.get $function)))))))
-      (local.set $id (struct.get $obj $n (local.get $function)))
+          (else (struct.get $obj $c (ref.cast (ref $obj) (local.get $function))))))))
+      (local.set $id (call $value-n (local.get $function)))
       (if (i32.lt_u (i32.sub (local.get $id) (i32.const 1)) (i32.const ,(length *runtime-symbols*)))
         (then (return (call $symbol (i32.sub (local.get $id) (i32.const 1))))))
       (if (i32.eq (local.get $id) (i32.const 2147483645))
@@ -22,7 +22,7 @@
           (if (i32.eqz (ref.is_null (local.get $body))) (then (return (local.get $body))))))
       (if (i32.eqz (local.get $id))
         (then
-          (local.set $body (struct.get $obj $b (local.get $function)))
+          (local.set $body (struct.get $obj $b (ref.cast (ref $obj) (local.get $function))))
           (block $done (loop $declarations
             (br_if $done (i32.ne (call $operator (call $car (local.get $body)))
               (i32.const ,(runtime-symbol-id 'declare))))
@@ -37,7 +37,7 @@
   #@(global.set $backtrace-saved-depth (global.get $backtrace-depth))
   #@(local.set $count (select (global.get $backtrace-depth) (i32.const 64)
     (i32.lt_u (global.get $backtrace-depth) (i32.const 64))))
-  #@(array.fill $objects (global.get $backtrace-saved) (i32.const 0) (ref.null $obj) (i32.const 64))
+  #@(array.fill $objects (global.get $backtrace-saved) (i32.const 0) (ref.null eq) (i32.const 64))
   #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
     (array.set $objects (global.get $backtrace-saved) (local.get $i)
       (call $backtrace-name (array.get $objects (global.get $backtrace-frames)
@@ -66,13 +66,13 @@
         (if (ref.eq (local.get $home) (global.get $keyword-package))
           (then (call $emit-char (i32.const 58)))
           (else
-            (if (ref.is_null (struct.get $obj $a (local.get $home)))
+            (if (ref.is_null (struct.get $obj $a (ref.cast (ref $obj) (local.get $home))))
               (then ,(emit-text "#<DELETED-PACKAGE>"))
-              (else (call $print-name (call $car (struct.get $obj $a (local.get $home))))))
+              (else (call $print-name (call $car (struct.get $obj $a (ref.cast (ref $obj) (local.get $home)))))))
             (call $emit-char (i32.const 58))
             (local.set $entry (call $present (call $symbol-name (local.get $name)) (local.get $home)))
             (if (ref.is_null (local.get $entry)) (then (call $emit-char (i32.const 58)))
-              (else (if (i32.ne (struct.get $obj $n (local.get $entry)) (i32.const 2))
+              (else (if (i32.ne (call $value-n (local.get $entry)) (i32.const 2))
                 (then (call $emit-char (i32.const 58))))))))))
     (call $print-name (call $symbol-name (local.get $name)))))
 

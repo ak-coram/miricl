@@ -121,10 +121,20 @@
 (defparameter *interpreter-wasm* nil)
 (defparameter *interpreter-wasm-compact* nil)
 (defparameter *interpreter-native-compiler-wasm* nil)
-(defun interpreter-wasm (&key wasi native-compiler debug-names)
+(defparameter *interpreter-only-wasm* nil)
+(defun interpreter-wasm (&key wasi native-compiler debug-names (compiler t))
   "Return the interpreter binary. NATIVE-COMPILER includes the bootstrapped
-compiler. DEBUG-NAMES retains native debugging names."
+compiler. COMPILER NIL omits the compiler and makes compilation a no-op.
+DEBUG-NAMES retains native debugging names."
+  (when (and (not compiler) (or wasi native-compiler))
+    (error "COMPILER NIL requires an import-free image without NATIVE-COMPILER."))
   (cond
+    ((not compiler)
+      (unless *interpreter-only-wasm*
+        (let ((raw (miricl-compiler::optimize-wasm-module
+                    (wt:wat-to-wasm (interpreter-wat :compiler nil)))))
+          (setf *interpreter-only-wasm* (list raw (wasm-without-debug-names raw)))))
+      (copy-seq (if debug-names (first *interpreter-only-wasm*) (second *interpreter-only-wasm*))))
     (wasi
       (let* ((image (ensure-native-compiler-image))
              (*native-compiler-image* image)
@@ -149,17 +159,18 @@ compiler. DEBUG-NAMES retains native debugging names."
         (copy-seq (if debug-names raw
           (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
             (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw)))))))))))
-(defun write-interpreter-wasm (pathname &key wasi native-compiler debug-names)
+(defun write-interpreter-wasm (pathname &key wasi native-compiler debug-names (compiler t))
   "Write an interpreter image with the bridge, or the WASI 0.3 development command.
-NATIVE-COMPILER includes the bootstrapped compiler in the import-free image."
+NATIVE-COMPILER includes the bootstrapped compiler in the import-free image.
+COMPILER NIL writes the smaller interpreter-only image."
   ;; Complete compilation before opening the destination: a build failure must
   ;; not truncate an existing working image.
   (let ((bytes (if wasi
                        (wasm-with-custom-section
-                         (repl-command-wasm (interpreter-wasm :wasi t :debug-names debug-names))
+                         (repl-command-wasm (interpreter-wasm :wasi t :debug-names debug-names :compiler compiler))
                          "miricl.node-compiler" (interpreter-wasm :native-compiler t :debug-names debug-names))
                        (wasm-with-custom-section
-                         (interpreter-wasm :native-compiler native-compiler :debug-names debug-names)
+                         (interpreter-wasm :native-compiler native-compiler :debug-names debug-names :compiler compiler)
                          "miricl.repl-bridge" (repl-bridge-core-wasm)))))
     (with-open-file (stream pathname :direction :output :if-exists :supersede
                                     :element-type '(unsigned-byte 8))

@@ -45,6 +45,44 @@ for (const [file, compiled] of [[process.argv[2] ?? 'miricl.wasm', false],
       (and (= (eval 'policy-global) 42)
            (equal (multiple-value-list (eval '(values *policy-special* 23))) '(19 23))
            (null (multiple-value-list (eval '(values))))))`);
+    // Repeated lookups must follow binding cells across assignment, unbinding,
+    // PROGV and nonlocal exits. An absent dynamic binding must not hide a new
+    // global value created in the same dynamic environment.
+    output(`(defvar *policy-binding* :global)
+      (defun policy-binding-read ()
+        (if (boundp '*policy-binding*) (symbol-value '*policy-binding*) :unbound))`);
+    check(`(and
+      (eq (policy-binding-read) :global)
+      (eq (catch 'policy-exit
+        (let ((*policy-binding* :inner))
+          (assert (eq (policy-binding-read) :inner))
+          (setf (symbol-value '*policy-binding*) :changed)
+          (assert (eq (policy-binding-read) :changed))
+          (progv '(*policy-binding*) nil
+            (assert (eq (policy-binding-read) :unbound))
+            (setf (symbol-value '*policy-binding*) :rebound)
+            (assert (eq (policy-binding-read) :rebound))
+            (makunbound '*policy-binding*)
+            (assert (eq (policy-binding-read) :unbound)))
+          (assert (eq (policy-binding-read) :changed))
+          (throw 'policy-exit :done))) :done)
+      (eq (policy-binding-read) :global)
+      (let ((name (gensym)) (*policy-binding* nil))
+        (and (null (policy-binding-read)) (not (boundp name))
+          (eq (setf (symbol-value name) :new-global) :new-global)
+          (boundp name) (eq (symbol-value name) :new-global)
+          (progn (makunbound name) (not (boundp name))))))`);
+    check(`(let ((*policy-binding* :outer) (noise (gensym)))
+      (and (eq (policy-binding-read) :outer)
+        (progv (list noise) '(:noise)
+          (and (eq (policy-binding-read) :outer)
+            (eq (symbol-value noise) :noise)
+            (eq (setf (symbol-value '*policy-binding*) :modified) :modified)
+            (eq (policy-binding-read) :modified)
+            (progv '(*policy-binding*) '(:shadow)
+              (eq (policy-binding-read) :shadow))
+            (eq (policy-binding-read) :modified)))
+        (not (boundp noise)) (eq (policy-binding-read) :modified)))`);
     check(`(let* ((object (list 42)) (miricl-compiler:*compile-evaluations* t))
       (setf (cdr object) object)
       (eq object (eval (list 'identity (list 'quote object)))))`);

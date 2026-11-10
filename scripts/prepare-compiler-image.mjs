@@ -47,7 +47,8 @@ try {
   const codes = JSON.parse(codeOutput);
   const declarations = [], entries = [];
   const wat = codes.map((code, index) => nativeModuleToWat(Uint8Array.from(code), index, declarations, entries)).join('\n');
-  await fs.writeFile(`${output}.wat`, `${wat}\n(elem declare func ${declarations.join(' ')})\n(table $compiler-entries ${entries.length} ${entries.length} funcref)\n(elem (table $compiler-entries) (i32.const 0) func ${entries.join(' ')})\n`);
+  const functions = [...new Set([...entries, ...declarations])];
+  await fs.writeFile(`${output}.wat`, `${wat}\n(table $compiler-entries (export "core-compiler-functions") ${functions.length} ${functions.length} funcref)\n(elem (table $compiler-entries) (i32.const 0) func ${functions.join(' ')})\n`);
   await fs.writeFile(`${output}.lisp`, image);
   console.log(`Self-compiled compiler: ${codes.length} functions, ${codes.reduce((n, code) => n + code.length, 0)} module bytes before linking.`);
 } finally {vm.close();}
@@ -72,6 +73,7 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries) {
   const valueType = () => {
     const type = byte();
     if (type === 0x7f) return 'i32';
+    if (type === 0x7e) return 'i64';
     if (type === 0x6f) return 'externref';
     throw new Error(`Unexpected native local type ${type}`);
   };
@@ -120,6 +122,7 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries) {
             }
             case 0x0f: instructions.push('return'); break;
             case 0x10: instructions.push(`call ${functionName(unsigned())}`); break;
+            case 0x12: instructions.push(`return_call ${functionName(unsigned())}`); break;
             case 0x1a: instructions.push('drop'); break;
             case 0x20: instructions.push(`local.get ${unsigned()}`); break;
             case 0x21: instructions.push(`local.set ${unsigned()}`); break;
@@ -127,7 +130,19 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries) {
             case 0x41: instructions.push(`i32.const ${signed()}`); break;
             case 0x45: instructions.push('i32.eqz'); break;
             case 0x46: instructions.push('i32.eq'); break;
+            case 0x48: instructions.push('i32.lt_s'); break;
+            case 0x4a: instructions.push('i32.gt_s'); break;
+            case 0x4c: instructions.push('i32.le_s'); break;
+            case 0x4e: instructions.push('i32.ge_s'); break;
+            case 0x53: instructions.push('i64.lt_s'); break;
+            case 0x55: instructions.push('i64.gt_s'); break;
+            case 0x57: instructions.push('i64.le_s'); break;
+            case 0x59: instructions.push('i64.ge_s'); break;
             case 0x71: instructions.push('i32.and'); break;
+            case 0x7c: instructions.push('i64.add'); break;
+            case 0x7d: instructions.push('i64.sub'); break;
+            case 0x7e: instructions.push('i64.mul'); break;
+            case 0xac: instructions.push('i64.extend_i32_s'); break;
             case 0xd0: assert.equal(byte(), 0x6f); instructions.push('ref.null extern'); break;
             case 0xd1: instructions.push('ref.is_null'); break;
             case 0xd2: instructions.push(`ref.func ${functionName(unsigned())}`); break;
@@ -135,8 +150,12 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries) {
               const gc = unsigned();
               if (gc === 2) {assert.equal(unsigned(), 1); instructions.push(`struct.get $obj ${unsigned()}`);}
               else if (gc === 0x17) {assert.equal(unsigned(), 1); instructions.push('ref.cast (ref null $obj)');}
+              else if (gc === 0x14) {assert.equal(unsigned(), 1); instructions.push('ref.test (ref $obj)');}
+              else if (gc === 0x16) {assert.equal(unsigned(), 0x6c); instructions.push('ref.cast (ref i31)');}
               else if (gc === 0x1a) instructions.push('any.convert_extern');
               else if (gc === 0x1b) instructions.push('extern.convert_any');
+              else if (gc === 0x1c) instructions.push('ref.i31');
+              else if (gc === 0x1d) instructions.push('i31.get_s');
               else throw new Error(`Unsupported native GC instruction ${gc}`);
               break;
             }

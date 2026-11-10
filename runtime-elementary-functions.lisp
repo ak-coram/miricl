@@ -48,7 +48,7 @@
   ;; Only the float converter sees this temporary fraction. Its numerator and
   ;; denominator need no GCD: conversion rounds their quotient directly.
   #@(f64.mul (call $coerce-float (call $node (i32.const 2) (i32.const 0)
-    (local.get $fraction) (local.get $denominator) (ref.null $obj)) (i32.const 4))
+    (local.get $fraction) (local.get $denominator) (ref.null eq)) (i32.const 4))
     (f64.const 1.5707963267948966))
   #@(local.get $quadrant))
 
@@ -158,7 +158,7 @@
       (call $cons (call $symbol (i32.const ,(runtime-symbol-id :operation)))
         (call $cons (call $symbol (local.get $operation))
           (call $cons (call $symbol (i32.const ,(runtime-symbol-id :operands)))
-            (call $cons (local.get $args) (ref.null $obj))))))))
+            (call $cons (local.get $args) (ref.null eq))))))))
   #@(unreachable))
 
 (define-runtime-function $elementary-float
@@ -260,7 +260,7 @@
                   (local.set $i (f64.mul (local.get $sh) (local.get $s))))))
             (else (local.set $r (select (local.get $sh) (local.get $ch)
               (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'sinh)))))))))))
-  #@(if (result (ref $obj)) (local.get $complex)
+  #@(if (result (ref eq)) (local.get $complex)
     (then (call $complex (call $elementary-float (local.get $kind) (local.get $r) (local.get $id) (local.get $args))
       (call $elementary-float (local.get $kind) (local.get $i) (local.get $id) (local.get $args))))
     (else (call $elementary-float (local.get $kind) (local.get $r) (local.get $id) (local.get $args)))))
@@ -292,10 +292,10 @@
     (($base :object) ($power :object) ($args :nullable-object)) (:object)
   (:locals ($kind i32) ($bit i32) ($x f64) ($result f64))
   #@(local.set $kind (call $tag (local.get $base)))
-  #@(local.set $x (struct.get $obj $f (local.get $base)))
+  #@(local.set $x (struct.get $obj $f (ref.cast (ref $obj) (local.get $base))))
   #@(local.set $bit (call $bitlength (local.get $power)))
   #@(if (i32.eqz (local.get $bit)) (then (return (call $float (local.get $kind) (f64.const 1)))))
-  #@(if (i32.lt_s (struct.get $obj $n (local.get $power)) (i32.const 0))
+  #@(if (i32.lt_s (call $value-n (local.get $power)) (i32.const 0))
     (then
       (if (f64.eq (local.get $x) (f64.const 0))
         (then (call $division-error (local.get $base) (local.get $power))))
@@ -324,10 +324,10 @@
     (then (local.set $kind (i32.const 4))))
   #@(call $elementary-native (i32.const ,(runtime-symbol-id 'exp))
     (call $cons (call $op (i32.const 2) (local.get $power)
-      (call $natural-log (local.get $base) (local.get $kind))) (ref.null $obj))))
+      (call $natural-log (local.get $base) (local.get $kind))) (ref.null eq))))
 
 (define-runtime-section elementary-functions-runtime-wat ()
-  #@(global $two-over-pi (mut (ref null $obj)) (ref.null $obj))
+  #@(global $two-over-pi (mut (ref null eq)) (ref.null eq))
   ($reduce-large-angle) ($sincos-f64) ($expm1-small-f64) ($exp-f64)
   ($sinhcosh-f64) ($complex-tan-f64)
   ($elementary-error) ($elementary-float) ($elementary-native)

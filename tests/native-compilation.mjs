@@ -445,7 +445,8 @@ try {
   check(`(multiple-value-bind (bytes literals)
     (miricl-compiler:emit-native-module
       (miricl-compiler:compile-to-hir '(lambda () "Discarded literal" 42)))
-    (and (< (length bytes) 250) (equalp literals #(42))))`);
+    ;; The surviving immediate integer is encoded directly in Wasm.
+    (and (< (length bytes) 250) (zerop (length literals))))`);
   check('(= (funcall *native* 40) 42)');
   check(`(multiple-value-bind (bytes literals)
     (miricl-compiler:emit-native-module (miricl-compiler:compile-to-hir '(lambda (x) (+ x 2))))

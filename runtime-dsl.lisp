@@ -5,8 +5,8 @@
 (defun runtime-wat-type (type)
   "Expand common guest reference types; leave native WAT types unchanged."
   (case type
-    (:object '(ref $obj))
-    (:nullable-object '(ref null $obj))
+    (:object '(ref eq))
+    (:nullable-object '(ref null eq))
     (:digits '(ref $digits))
     (otherwise type)))
 
@@ -133,8 +133,8 @@ of converting them to the ordinary top-level host trap."
 
 (defun wat-new-object (tag &key (n #@(i32.const 0)) (f #@(f64.const 0))
                               (digits #@(ref.null $digits))
-                              (a #@(ref.null $obj)) (b #@(ref.null $obj))
-                              (c #@(ref.null $obj)))
+                              (a #@(ref.null eq)) (b #@(ref.null eq))
+                              (c #@(ref.null eq)))
   "Allocate an object, spelling out only its populated fields.
 TAG is a named object kind or a rendered WAT expression. Field arguments
 are rendered expressions, evaluated once in their struct field order."

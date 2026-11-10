@@ -21,7 +21,7 @@
   (:locals ($number i32))
   #@(block $invalid
     (br_if $invalid (i32.ne (call $tag (local.get $value)) (i32.const 1)))
-    (br_if $invalid (i32.or (i32.lt_s (struct.get $obj $n (local.get $value)) (i32.const 0))
+    (br_if $invalid (i32.or (i32.lt_s (call $value-n (local.get $value)) (i32.const 0))
       (i32.gt_u (call $bitlength (ref.as_non_null (local.get $value))) (i32.const 31))))
     (local.set $number (call $natural-count (local.get $value)))
     (br_if $invalid (i32.or (i32.lt_s (local.get $number) (local.get $min))
@@ -29,7 +29,7 @@
     (return (local.get $number)))
   #@(call $type-fail (local.get $value)
     (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
-      (call $cons (call $int (local.get $min)) (call $cons (call $int (local.get $max)) (ref.null $obj))))
+      (call $cons (call $int (local.get $min)) (call $cons (call $int (local.get $max)) (ref.null eq))))
     (i32.const ,(runtime-error-code :expected-designator)))
   #@(unreachable))
 
@@ -57,7 +57,7 @@
     (local.set $seconds (call $real-op (i32.const 2) (ref.as_non_null (local.get $zone)) (call $int (i32.const 3600))))
     (br_if $invalid (i32.ne (call $tag (local.get $seconds)) (i32.const 1)))
     (return (i32.trunc_f64_s (call $coerce-float (local.get $seconds) (i32.const 4)))))
-  #@(drop (call $apply ,(clos-library-reference '%time-zone-seconds) (call $cons (local.get $zone) (ref.null $obj))))
+  #@(drop (call $apply ,(clos-library-reference '%time-zone-seconds) (call $cons (local.get $zone) (ref.null eq))))
   #@(unreachable))
 
 (define-runtime-function $calendar-native (($operation i32) ($value :nullable-object) ($zone :nullable-object)) (:nullable-object)
@@ -68,11 +68,11 @@
     (then
       (if (i32.ne (call $tag (local.get $value)) (i32.const 1))
         (then (call $list-type-error (local.get $value) (i32.const ,(runtime-symbol-id 'unsigned-byte)))))
-      (if (i32.lt_s (struct.get $obj $n (local.get $value)) (i32.const 0))
+      (if (i32.lt_s (call $value-n (local.get $value)) (i32.const 0))
         (then (call $list-type-error (local.get $value) (i32.const ,(runtime-symbol-id 'unsigned-byte)))))
       (if (i32.gt_u (call $bitlength (ref.as_non_null (local.get $value))) (i32.const 53))
         (then (return (call $apply ,(clos-library-reference '%decode-universal-time)
-          (call $cons (local.get $value) (call $cons (local.get $zone) (ref.null $obj)))))))
+          (call $cons (local.get $value) (call $cons (local.get $zone) (ref.null eq)))))))
       (local.set $time (i64.sub (i64.trunc_f64_s (call $coerce-float (ref.as_non_null (local.get $value)) (i32.const 4)))
         (i64.extend_i32_s (local.get $offset))))
       (local.set $days (i64.div_s (i64.sub (local.get $time)
@@ -96,14 +96,14 @@
         (call $cons (call $int (i32.div_u (local.get $clock) (i32.const 3600)))
           (call $cons (call $int (local.get $date)) (call $cons (call $int (local.get $month))
             (call $cons (call $int (local.get $year)) (call $cons (call $int (local.get $day))
-              (call $cons (ref.null $obj) (call $cons (local.get $zone) (ref.null $obj))))))))))
+              (call $cons (ref.null eq) (call $cons (local.get $zone) (ref.null eq))))))))))
       (global.set $value-count (i32.const 9))
       (return (call $int (i32.rem_u (local.get $clock) (i32.const 60))))))
   ;; Bignum and two-digit years use the exact, general calendar path.
   #@(local.set $year-object (call $car (call $nthcdr-native (call $int (i32.const 5)) (local.get $value))))
   #@(block $ordinary
     (br_if $ordinary (i32.ne (call $tag (local.get $year-object)) (i32.const 1)))
-    (br_if $ordinary (i32.or (i32.lt_s (struct.get $obj $n (local.get $year-object)) (i32.const 0))
+    (br_if $ordinary (i32.or (i32.lt_s (call $value-n (local.get $year-object)) (i32.const 0))
       (i32.gt_u (call $bitlength (ref.as_non_null (local.get $year-object))) (i32.const 26))))
     (local.set $year (call $natural-count (local.get $year-object)))
     (br_if $ordinary (i32.lt_u (local.get $year) (i32.const 100)))
@@ -123,8 +123,8 @@
     (call $clear-values)
     (return (call $uint64 (local.get $time))))
   #@(call $apply ,(clos-library-reference '%encode-universal-time)
-    (call $reverse-onto (call $reverse-onto (local.get $value) (ref.null $obj) (i32.const 0))
-      (call $cons (local.get $zone) (ref.null $obj)) (i32.const 1))))
+    (call $reverse-onto (call $reverse-onto (local.get $value) (ref.null eq) (i32.const 0))
+      (call $cons (local.get $zone) (ref.null eq)) (i32.const 1))))
 
 (define-runtime-section time-runtime-wat ()
   #@(type $host-service-type (func (param i32 f64) (result f64)))

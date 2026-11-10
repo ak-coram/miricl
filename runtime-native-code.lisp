@@ -3,14 +3,14 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-(defun native-object (form) `(ref.cast (ref null $obj) (any.convert_extern ,form)))
+(defun native-object (form) `(ref.cast (ref null eq) (any.convert_extern ,form)))
 (defun native-external (form) `(extern.convert_any ,form))
 (defun native-context (form) `(ref.cast (ref $native-context) (any.convert_extern ,form)))
 
 (define-runtime-function $native-install
     (($code :nullable-object) ($literals :nullable-object) ($name :nullable-object)) (:nullable-object)
   (wat-fail-when #@(ref.is_null (table.get $native-services (i32.const 0))) :unsupported)
-  #@(ref.cast (ref null $obj) (any.convert_extern
+  #@(ref.cast (ref null eq) (any.convert_extern
     (call_indirect $native-services (type $native-service)
       (extern.convert_any (local.get $code)) (extern.convert_any (local.get $literals))
       (extern.convert_any (local.get $name)) (i32.const 0)))))
@@ -18,7 +18,7 @@
 (define-runtime-function $compiler-image-function
     (($index i32) ($literals :nullable-object) ($name :nullable-object)) (:nullable-object)
   (if *native-compiler-image*
-      #@(ref.cast (ref null $obj) (any.convert_extern
+      #@(ref.cast (ref null eq) (any.convert_extern
         (call $native-function (table.get $compiler-entries (local.get $index))
           (extern.convert_any (local.get $literals)) (extern.convert_any (local.get $name)) (i32.const 0))))
       (runtime-wat-sequence (wat-fail :unsupported) #@(unreachable))))
@@ -26,9 +26,15 @@
 (define-runtime-function $native-function
     (($entry funcref) ($literals externref) ($name externref) ($size i32)) (externref)
   (:export-raw "native-function")
+  #@(return_call $native-function-with-code (local.get $entry) (local.get $literals)
+    (local.get $name) (local.get $size) (ref.null extern)))
+
+(define-runtime-function $native-function-with-code
+    (($entry funcref) ($literals externref) ($name externref) ($size i32) ($code externref)) (externref)
+  (:export-raw "core-native-function")
   #@(extern.convert_any (struct.new $native-function (call $allocate-object-tag (i32.const 8))
-    (i32.const 0) (f64.const 1) (ref.null $digits)
-    ,(native-object '(local.get $literals)) (ref.null $obj) ,(native-object '(local.get $name))
+    (i32.const 0) (f64.const 1) (ref.cast (ref null $digits) (any.convert_extern (local.get $code)))
+    ,(native-object '(local.get $literals)) (ref.null eq) ,(native-object '(local.get $name))
     (ref.cast (ref $native-entry) (local.get $entry)) (local.get $size))))
 
 ;; F=1 denotes a general native entry; F=2+arity permits packed fixed calls.
@@ -39,11 +45,12 @@
   #@(local.set $count (call $length (local.get $values)))
   ;; The final private slot caches children that reuse this function's bindings.
   #@(local.set $vector (call $vector-from-list (local.get $values) (i32.add (local.get $count) (i32.const 1))))
-  #@(array.set $objects (call $vector-data (local.get $vector)) (local.get $count) (ref.null $obj))
+  #@(array.set $objects (call $vector-data (local.get $vector)) (local.get $count) (ref.null eq))
   #@(extern.convert_any (struct.new $native-function (call $allocate-object-tag (i32.const 8))
-    (i32.const 0) (f64.convert_i32_s (i32.add (local.get $arity) (i32.const 2))) (ref.null $digits)
-    (struct.get $obj $a ,(native-object '(local.get $parent)))
-    (local.get $vector) (ref.null $obj)
+    (i32.const 0) (f64.convert_i32_s (i32.add (local.get $arity) (i32.const 2)))
+    (struct.get $obj $digits (ref.cast (ref $obj) ,(native-object '(local.get $parent))))
+    (struct.get $obj $a (ref.cast (ref $obj) ,(native-object '(local.get $parent))))
+    (local.get $vector) (ref.null eq)
     (ref.cast (ref $native-entry) (local.get $entry))
     (struct.get $native-function $code-size (ref.cast (ref $native-function) ,(native-object '(local.get $parent)))))))
 
@@ -63,22 +70,22 @@
   (:locals ($function :nullable-object) ($captures :nullable-object) ($data (ref $objects))
            ($index i32) ($cached :nullable-object) ($value :nullable-object))
   #@(local.set $function ,(native-object '(local.get $parent)))
-  #@(local.set $captures (struct.get $obj $b (local.get $function)))
+  #@(local.set $captures (struct.get $obj $b (ref.cast (ref $obj) (local.get $function))))
   #@(if (ref.is_null (local.get $captures))
-    (then (local.set $captures (call $vector-from-list (ref.null $obj) (i32.const 1)))
-      (struct.set $obj $b (local.get $function) (local.get $captures))))
+    (then (local.set $captures (call $vector-from-list (ref.null eq) (i32.const 1)))
+      (struct.set $obj $b (ref.cast (ref $obj) (local.get $function)) (local.get $captures))))
   #@(local.set $data (call $vector-data (local.get $captures)))
   #@(local.set $index (i32.sub (array.len (local.get $data)) (i32.const 1)))
   #@(local.set $cached (array.get $objects (local.get $data) (local.get $index)))
   #@(block $missing (loop $next (br_if $missing (ref.is_null (local.get $cached)))
-    (if (i32.eq (struct.get $obj $n (local.get $cached)) (local.get $slot))
-      (then (return (extern.convert_any (struct.get $obj $a (local.get $cached))))))
-    (local.set $cached (struct.get $obj $b (local.get $cached))) (br $next)))
+    (if (i32.eq (call $value-n (local.get $cached)) (local.get $slot))
+      (then (return (extern.convert_any (struct.get $obj $a (ref.cast (ref $obj) (local.get $cached)))))))
+    (local.set $cached (struct.get $obj $b (ref.cast (ref $obj) (local.get $cached)))) (br $next)))
   #@(local.set $value ,(native-object '(call $native-close-with-arity
     (local.get $entry) (local.get $parent) (local.get $captured) (local.get $arity))))
   #@(array.set $objects (local.get $data) (local.get $index)
     (call $node (i32.const 9) (local.get $slot) (local.get $value)
-      (array.get $objects (local.get $data) (local.get $index)) (ref.null $obj)))
+      (array.get $objects (local.get $data) (local.get $index)) (ref.null eq)))
   #@(extern.convert_any (local.get $value)))
 
 (define-runtime-function $native-close-static
@@ -91,9 +98,10 @@
   (wat-fail-when #@(i32.or (i32.gt_u (local.get $arity) (i32.const 4))
     (i32.eqz (ref.test (ref $native-function) (local.get $function)))) :expected-designator)
   #@(struct.new $native-function (call $allocate-object-tag (i32.const 8)) (i32.const 0)
-    (f64.convert_i32_u (i32.add (local.get $arity) (i32.const 2))) (ref.null $digits)
-    (struct.get $obj $a (local.get $function)) (struct.get $obj $b (local.get $function))
-    (struct.get $obj $c (local.get $function))
+    (f64.convert_i32_u (i32.add (local.get $arity) (i32.const 2)))
+    (struct.get $obj $digits (ref.cast (ref $obj) (local.get $function)))
+    (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))) (struct.get $obj $b (ref.cast (ref $obj) (local.get $function)))
+    (struct.get $obj $c (ref.cast (ref $obj) (local.get $function)))
     (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $function)))
     (struct.get $native-function $code-size (ref.cast (ref $native-function) (local.get $function)))))
 
@@ -103,16 +111,17 @@
     (then
       (local.set $size (struct.get $native-function $code-size (ref.cast (ref $native-function) (local.get $function))))
       (if (local.get $size) (then (return (call $int (local.get $size)))))))
-  #@(ref.null $obj))
+  #@(ref.null eq))
 
 (define-runtime-function $native-debug-wrap
     (($function :nullable-object) ($code :object) ($id i32)) (:object)
   ;; Only debug-enabled modules allocate this subtype. Ordinary functions keep
   ;; their existing layout, allocation path and calling convention.
   #@(struct.new $native-debug-function (call $allocate-object-tag (i32.const 8)) (i32.const 0)
-    (struct.get $obj $f (local.get $function)) (ref.null $digits)
-    (struct.get $obj $a (local.get $function)) (struct.get $obj $b (local.get $function))
-    (struct.get $obj $c (local.get $function))
+    (struct.get $obj $f (ref.cast (ref $obj) (local.get $function)))
+    (struct.get $obj $digits (ref.cast (ref $obj) (local.get $function)))
+    (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))) (struct.get $obj $b (ref.cast (ref $obj) (local.get $function)))
+    (struct.get $obj $c (ref.cast (ref $obj) (local.get $function)))
     (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $function)))
     (struct.get $native-function $code-size (ref.cast (ref $native-function) (local.get $function)))
     (local.get $code) (local.get $id)))
@@ -157,15 +166,15 @@
 (define-runtime-function $native-debug-info (($function :nullable-object)) (:nullable-object)
   (:locals ($code :object) ($index :nullable-object) ($bytes (ref $objects))
            ($data :digits) ($length i32) ($i i32))
-  #@(if (i32.eqz (ref.test (ref $native-debug-function) (local.get $function))) (then (return (ref.null $obj))))
+  #@(if (i32.eqz (ref.test (ref $native-debug-function) (local.get $function))) (then (return (ref.null eq))))
   #@(local.set $code (struct.get $native-debug-function $debug-code
     (ref.cast (ref $native-debug-function) (local.get $function))))
-  #@(local.set $index (array.get $objects (call $vector-data (struct.get $obj $a (local.get $code)))
+  #@(local.set $index (array.get $objects (call $vector-data (struct.get $obj $a (ref.cast (ref $obj) (local.get $code))))
     (struct.get $native-debug-function $debug-id (ref.cast (ref $native-debug-function) (local.get $function)))))
-  #@(if (ref.is_null (local.get $index)) (then (return (ref.null $obj))))
+  #@(if (ref.is_null (local.get $index)) (then (return (ref.null eq))))
   ;; Expand only while DISASSEMBLE runs, for the existing Lisp byte reader.
-  #@(local.set $length (struct.get $obj $n (local.get $code)))
-  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (local.get $code))))
+  #@(local.set $length (call $value-n (local.get $code)))
+  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $code)))))
   #@(local.set $bytes (array.new_default $objects (local.get $length)))
   #@(block $done (loop $unpack (br_if $done (i32.eq (local.get $i) (local.get $length)))
     (array.set $objects (local.get $bytes) (local.get $i)
@@ -178,13 +187,13 @@
 (define-runtime-function $native-capture (($function externref) ($index i32)) (externref)
   (:export-raw "native-capture")
   #@(extern.convert_any (array.get $objects
-    (call $vector-data (struct.get $obj $b ,(native-object '(local.get $function)))) (local.get $index))))
+    (call $vector-data (struct.get $obj $b (ref.cast (ref $obj) ,(native-object '(local.get $function))))) (local.get $index))))
 
 (define-runtime-function $native-code-storage (($code externref)) (externref)
   (:export-raw "native-code-storage")
   (:locals ($value :nullable-object))
   #@(local.set $value ,(native-object '(local.get $code)))
-  #@(extern.convert_any (if (result (ref null $obj)) (i32.eq (call $tag (local.get $value)) (i32.const 7))
+  #@(extern.convert_any (if (result (ref null eq)) (i32.eq (call $tag (local.get $value)) (i32.const 7))
     (then (call $car (local.get $value))) (else (local.get $value)))))
 
 (define-runtime-function $native-code-entry (($code externref)) (i32)
@@ -201,7 +210,7 @@
   #@(if (i32.eq (call $tag (local.get $value)) (i32.const 7))
     (then (local.set $value (call $car (local.get $value)))))
   #@(if (i32.eq (call $tag (local.get $value)) (i32.const 10))
-    (then (local.set $text (ref.as_non_null (struct.get $obj $digits (local.get $value))))
+    (then (local.set $text (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $value)))))
       (local.set $size (array.len (local.get $text)))
       (call $reserve (local.get $size))
       (block $done (loop $copy
@@ -222,22 +231,22 @@
 (define-runtime-function $native-literal (($function externref) ($index i32)) (externref)
   (:export-raw "native-literal")
   #@(extern.convert_any (array.get $objects
-    (call $vector-data (struct.get $obj $a ,(native-object '(local.get $function)))) (local.get $index))))
+    (call $vector-data (struct.get $obj $a (ref.cast (ref $obj) ,(native-object '(local.get $function))))) (local.get $index))))
 
 (define-runtime-function $native-two-arguments
     (($function :nullable-object) ($a :nullable-object) ($b :nullable-object)) (:nullable-object)
   #@(if (ref.test (ref $native-function) (local.get $function))
-    (then (if (f64.eq (struct.get $obj $f (local.get $function)) (f64.const 4))
+    (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) (local.get $function))) (f64.const 4))
       (then (return (struct.new $native-arguments (call $allocate-object-tag (i32.const 52))
         (i32.const 2) (f64.const 0) (ref.null $digits)
-        (local.get $a) (local.get $b) (ref.null $obj) (ref.null $obj)))))))
-  #@(call $cons (local.get $a) (call $cons (local.get $b) (ref.null $obj))))
+        (local.get $a) (local.get $b) (ref.null eq) (ref.null eq)))))))
+  #@(call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq))))
 
 (define-runtime-function $native-packed-argument (($args (ref $native-arguments)) ($index i32)) (:nullable-object)
-  #@(if (i32.ge_u (local.get $index) (struct.get $obj $n (local.get $args))) (then (return (ref.null $obj))))
-  #@(if (i32.eqz (local.get $index)) (then (return (struct.get $obj $a (local.get $args)))))
-  #@(if (i32.eq (local.get $index) (i32.const 1)) (then (return (struct.get $obj $b (local.get $args)))))
-  #@(if (i32.eq (local.get $index) (i32.const 2)) (then (return (struct.get $obj $c (local.get $args)))))
+  #@(if (i32.ge_u (local.get $index) (call $value-n (local.get $args))) (then (return (ref.null eq))))
+  #@(if (i32.eqz (local.get $index)) (then (return (struct.get $obj $a (ref.cast (ref $obj) (local.get $args))))))
+  #@(if (i32.eq (local.get $index) (i32.const 1)) (then (return (struct.get $obj $b (ref.cast (ref $obj) (local.get $args))))))
+  #@(if (i32.eq (local.get $index) (i32.const 2)) (then (return (struct.get $obj $c (ref.cast (ref $obj) (local.get $args))))))
   #@(struct.get $native-arguments $d (local.get $args)))
 
 (define-runtime-function $native-list-tail (($value :nullable-object) ($index i32)) (:nullable-object)
@@ -255,7 +264,7 @@
   #@(local.set $value ,(native-object '(local.get $args)))
   #@(if (ref.test (ref $native-arguments) (local.get $value))
     (then
-      (local.set $count (struct.get $obj $n (local.get $value)))
+      (local.set $count (call $value-n (local.get $value)))
       (block $done (loop $next (br_if $done (i32.le_s (local.get $count) (local.get $index)))
         (local.set $count (i32.sub (local.get $count) (i32.const 1)))
         (local.set $result (call $cons (call $native-packed-argument
@@ -278,7 +287,7 @@
   (:locals ($scan :nullable-object) ($i i32))
   #@(local.set $scan ,(native-object '(local.get $args)))
   #@(if (ref.test (ref $native-arguments) (local.get $scan))
-    (then (local.set $i (struct.get $obj $n (local.get $scan)))
+    (then (local.set $i (call $value-n (local.get $scan)))
       ,(wat-fail-when #@(i32.or (i32.lt_u (local.get $i) (local.get $count))
         (i32.and (i32.ge_s (local.get $maximum) (i32.const 0))
           (i32.gt_u (local.get $i) (local.get $maximum)))) :wrong-arity)
@@ -337,11 +346,11 @@
     (local.get $name) ,(native-object '(local.get $value))))
   #@(local.set $binding (call $car (local.get $variables)))
   ;; A lexical SPECIAL declaration need not proclaim the name globally.
-  #@(struct.set $obj $c (local.get $binding) (call $symbol (i32.const 1)))
+  #@(struct.set $obj $c (ref.cast (ref $obj) (local.get $binding)) (call $symbol (i32.const 1)))
   #@(local.set $packages (struct.get $native-context $packages (local.get $context)))
   #@(if (i32.eq (call $id (local.get $name)) (i32.const ,(runtime-symbol-id '*package*)))
     (then (drop (call $require-package ,(native-object '(local.get $value))))
-      (local.set $packages (call $cons (struct.get $obj $a (local.get $binding)) (local.get $packages)))))
+      (local.set $packages (call $cons (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding))) (local.get $packages)))))
   #@(local.set $context (struct.new $native-context (local.get $variables) (local.get $packages)
     (struct.get $native-context $targets (local.get $context))))
   #@(global.set $dynamic-variables (local.get $variables))
@@ -369,7 +378,7 @@
       (local.set $binding (call $symbol-index-get (global.get $function-bindings) (call $id (local.get $symbol))))
       (if (i32.eqz (ref.is_null (local.get $binding)))
         (then
-          (local.set $value (struct.get $obj $a (struct.get $obj $a (local.get $binding))))
+          (local.set $value (struct.get $obj $a (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding))))))
           (if (i32.eqz (ref.is_null (local.get $value)))
             (then (return (extern.convert_any (local.get $value)))))))))
   #@(extern.convert_any (call $fdefinition ,(native-object '(local.get $name)))))
@@ -380,7 +389,7 @@
 
 (define-runtime-function $native-cell (($value externref)) (externref)
   (:export-raw "native-cell")
-  #@(extern.convert_any (call $cons ,(native-object '(local.get $value)) (ref.null $obj))))
+  #@(extern.convert_any (call $cons ,(native-object '(local.get $value)) (ref.null eq))))
 
 (define-runtime-function $native-primary (($values externref)) (externref)
   (:export-raw "native-primary")
@@ -392,7 +401,7 @@
 
 (define-runtime-function $native-cell-write (($cell externref) ($value externref)) (externref)
   (:export-raw "native-cell-write")
-  #@(struct.set $obj $a ,(native-object '(local.get $cell)) ,(native-object '(local.get $value)))
+  #@(struct.set $obj $a (ref.cast (ref $obj) ,(native-object '(local.get $cell))) ,(native-object '(local.get $value)))
   #@(local.get $value))
 
 (define-runtime-function $native-block-enter (($environment externref)) (externref)
@@ -404,17 +413,17 @@
   ;; vector. Keep the environment fields here without boxing all native contexts.
   #@(local.set $target (call $node (i32.const 21) (i32.const 0)
     (struct.get $native-context $variables (local.get $context))
-    (struct.get $native-context $packages (local.get $context)) (ref.null $obj)))
+    (struct.get $native-context $packages (local.get $context)) (ref.null eq)))
   #@(global.set $targets (call $cons (local.get $target) (global.get $targets)))
-  #@(struct.set $obj $c (local.get $target) (global.get $targets))
+  #@(struct.set $obj $c (ref.cast (ref $obj) (local.get $target)) (global.get $targets))
   #@(extern.convert_any (local.get $target)))
 
 (define-runtime-function $native-block-environment (($token externref)) (externref)
   (:export-raw "native-block-environment")
   (:locals ($target :nullable-object))
   #@(local.set $target ,(native-object '(local.get $token)))
-  #@(extern.convert_any (struct.new $native-context (struct.get $obj $a (local.get $target))
-    (struct.get $obj $b (local.get $target)) (struct.get $obj $c (local.get $target)))))
+  #@(extern.convert_any (struct.new $native-context (struct.get $obj $a (ref.cast (ref $obj) (local.get $target)))
+    (struct.get $obj $b (ref.cast (ref $obj) (local.get $target))) (struct.get $obj $c (ref.cast (ref $obj) (local.get $target))))))
 
 (define-runtime-function $native-block-return
     (($token externref) ($values externref)) ()
@@ -452,13 +461,13 @@
   #@(if (i32.eqz (local.get $mode))
     (then
       (local.set $target (call $node (i32.const 21) (i32.const 0) ,(native-object '(local.get $data))
-        (ref.null $obj) (ref.null $obj)))
+        (ref.null eq) (ref.null eq)))
       (global.set $catches (call $cons (local.get $target) (local.get $catches))))
     (else (if (i32.le_u (local.get $mode) (i32.const 2))
       (then
         (if (i32.eq (local.get $mode) (i32.const 2))
           (then (local.set $target (call $node (i32.const 21) (i32.const 0)
-            (ref.null $obj) (ref.null $obj) (ref.null $obj)))))
+            (ref.null eq) (ref.null eq) (ref.null eq)))))
         (local.set $scan ,(native-object '(local.get $data)))
         (block $done (loop $next (br_if $done (ref.is_null (local.get $scan)))
           (local.set $type (call $car (local.get $scan))) (local.set $scan (call $cdr (local.get $scan)))
@@ -466,13 +475,13 @@
           (local.set $cluster (call $cons (call $node (i32.const 20)
             (i32.eq (local.get $mode) (i32.const 2)) (local.get $type) (local.get $function) (local.get $target))
             (local.get $cluster))) (br $next)))
-        (global.set $handlers (call $cons (call $reverse-onto (local.get $cluster) (ref.null $obj) (i32.const 0))
+        (global.set $handlers (call $cons (call $reverse-onto (local.get $cluster) (ref.null eq) (i32.const 0))
           (local.get $handlers)))))))
   #@(if (i32.and (i32.ge_u (local.get $mode) (i32.const 4)) (i32.le_u (local.get $mode) (i32.const 5)))
     (then
       (if (i32.eq (local.get $mode) (i32.const 5))
         (then (local.set $target (call $node (i32.const 21) (i32.const 0)
-          (ref.null $obj) (ref.null $obj) (ref.null $obj)))))
+          (ref.null eq) (ref.null eq) (ref.null eq)))))
       (local.set $scan ,(native-object '(local.get $data)))
       (block $done (loop $next (br_if $done (ref.is_null (local.get $scan)))
         (local.set $type (call $car (local.get $scan))) (local.set $scan (call $cdr (local.get $scan)))
@@ -481,7 +490,7 @@
         (local.set $new (call $cons (call $new-restart (local.get $type) (local.get $function)
           (local.get $target) (local.get $options) (i32.eq (local.get $mode) (i32.const 5))) (local.get $new)))
         (br $next)))
-      (local.set $new (call $reverse-onto (local.get $new) (ref.null $obj) (i32.const 0)))
+      (local.set $new (call $reverse-onto (local.get $new) (ref.null eq) (i32.const 0)))
       (global.set $restarts (call $prepend-list (local.get $new) (local.get $restarts)))))
   #@(if (i32.eq (local.get $mode) (i32.const 6))
     (then
@@ -507,28 +516,28 @@
         (local.set $type (call $car (local.get $scan))) (call $check-variable (local.get $type))
         (local.set $binding (call $node (i32.const 9) (call $id (local.get $type))
           (call $node (i32.const 11) (ref.is_null (local.get $options))
-            (call $car (local.get $options)) (ref.null $obj) (ref.null $obj))
+            (call $car (local.get $options)) (ref.null eq) (ref.null eq))
           (call $symbol (i32.const 1)) (call $symbol (i32.const 1))))
         (global.set $dynamic-variables (call $cons (local.get $binding) (global.get $dynamic-variables)))
         (if (i32.eq (call $id (local.get $type)) (i32.const ,(runtime-symbol-id '*package*)))
           (then
             (if (i32.eqz (ref.is_null (local.get $options)))
               (then (drop (call $require-package (call $car (local.get $options))))))
-            (global.set $dynamic-package (call $cons (struct.get $obj $a (local.get $binding))
+            (global.set $dynamic-package (call $cons (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))
               (global.get $dynamic-package)))))
         (local.set $scan (call $cdr (local.get $scan)))
         (local.set $options (call $cdr (local.get $options))) (br $next)))))
   #@(block $failed
     (try_table (catch $transfer $failed)
       (local.set $values (call $value-list (call $apply ,(native-object '(local.get $thunk))
-        (if (result (ref null $obj)) (i32.eq (local.get $mode) (i32.const 5))
-          (then (call $cons (local.get $new) (ref.null $obj))) (else (ref.null $obj))))))
+        (if (result (ref null eq)) (i32.eq (local.get $mode) (i32.const 5))
+          (then (call $cons (local.get $new) (ref.null eq))) (else (ref.null eq))))))
       (global.set $handlers (local.get $handlers)) (global.set $catches (local.get $catches))
       (global.set $restarts (local.get $restarts)) (global.set $restart-associations (local.get $associations))
       (if (i32.eq (local.get $mode) (i32.const 7))
         (then (call $native-restore-environment (local.get $environment))))
       (if (i32.eq (local.get $mode) (i32.const 3))
-        (then (drop (call $apply ,(native-object '(local.get $data)) (ref.null $obj)))))
+        (then (drop (call $apply ,(native-object '(local.get $data)) (ref.null eq)))))
       (if (i32.eqz (ref.is_null ,(native-object '(local.get $no-error))))
         (then (local.set $values (call $value-list
           (call $apply ,(native-object '(local.get $no-error)) (local.get $values))))))
@@ -543,7 +552,7 @@
       (local.set $saved-function (global.get $transfer-function))
       (local.set $values (global.get $transfer-values)) (local.set $condition (global.get $last-condition))
       (local.set $error-code (global.get $error)) (local.set $symbol (global.get $unbound-symbol))
-      (drop (call $apply ,(native-object '(local.get $data)) (ref.null $obj)))
+      (drop (call $apply ,(native-object '(local.get $data)) (ref.null eq)))
       (global.set $transfer-target (local.get $saved-target))
       (global.set $transfer-function (local.get $saved-function))
       (global.set $transfer-values (local.get $values)) (global.set $last-condition (local.get $condition))
@@ -583,7 +592,7 @@
       (then (i32.const ,(runtime-symbol-id 'error)))
       (else (if (result i32) (i32.eq (local.get $mode) (i32.const 2))
         (then (i32.const ,(runtime-symbol-id 'warn))) (else (i32.const ,(runtime-symbol-id 'cerror)))))))))
-  #@(local.set $args (call $cons (local.get $condition) (ref.null $obj)))
+  #@(local.set $args (call $cons (local.get $condition) (ref.null eq)))
   #@(if (i32.eq (local.get $mode) (i32.const 3))
     (then (local.set $args (call $cons (local.get $control) (local.get $args)))))
   #@(local.set $saved (global.get $restart-associations))
@@ -606,7 +615,7 @@
   #@(local.set $scan (global.get $catches))
   #@(block $missing (loop $next (br_if $missing (ref.is_null (local.get $scan)))
     (local.set $target (call $car (local.get $scan)))
-    (if (ref.eq (struct.get $obj $a (local.get $target)) ,(native-object '(local.get $tag)))
+    (if (ref.eq (struct.get $obj $a (ref.cast (ref $obj) (local.get $target))) ,(native-object '(local.get $tag)))
       (then (call $transfer-to (local.get $target) ,(native-object '(local.get $values)))))
     (local.set $scan (call $cdr (local.get $scan))) (br $next)))
   (wat-fail :control-error))
@@ -629,6 +638,18 @@
   #@(call $clear-values)
   #@(local.get $value))
 
+(define-runtime-function $native-int64 (($value i64)) (externref)
+  (:export-raw "native-int64")
+  #@(extern.convert_any (call $int64 (local.get $value))))
+
+(define-runtime-function $native-unbox-int64 (($value externref)) (i64)
+  (:export-raw "native-unbox-int64")
+  #@(call $scalar-integer-value (ref.as_non_null ,(native-object '(local.get $value)))))
+
+(define-runtime-function $native-boolean (($value i32)) (externref)
+  (:export-raw "native-boolean")
+  #@(extern.convert_any (call $bool (local.get $value))))
+
 (define-runtime-function $native-primary-apply
     (($function :nullable-object) ($args :nullable-object)) (:nullable-object)
   (:locals ($value :nullable-object))
@@ -641,17 +662,52 @@
   ;; development image still takes effect. Native and interpreted closures use
   ;; N=0 and cannot accidentally enter a builtin fast path.
   #@(if (i32.eq (call $tag (local.get $function)) (i32.const 8))
-    (then (return (i32.sub (struct.get $obj $n (local.get $function)) (i32.const 1)))))
+    (then (return (i32.sub (call $value-n (local.get $function)) (i32.const 1)))))
   #@(i32.const -1))
 
 (define-runtime-function $native-poll () ()
   (:export-raw "native-poll")
   #@(call $thread-checkpoint))
 
+(define-runtime-function $native-tail-call (($function externref) ($arguments externref)) (externref)
+  (:export-raw "native-tail-call")
+  (:locals ($name :nullable-object) ($args :nullable-object) ($id i32))
+  #@(local.set $name ,(native-object '(local.get $function)))
+  #@(local.set $args ,(native-object '(local.get $arguments)))
+  #@(loop $dispatch
+    (call $thread-checkpoint)
+    (if (call $symbolp (local.get $name))
+      (then (local.set $name (call $fdefinition (local.get $name)))))
+    ;; APPLY and FUNCALL are dispatch adapters, not additional Lisp frames.
+    ;; Inspect the actual function so global redefinitions still take effect.
+    (local.set $id (call $native-builtin-id (local.get $name)))
+    (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'funcall)))
+      (then (call $arity (local.get $args) (i32.const 1) (i32.const 2147483647))
+        (local.set $name (call $car (local.get $args)))
+        (local.set $args (call $cdr (local.get $args))) (br $dispatch)))
+    (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'apply)))
+      (then (local.set $name (call $car (local.get $args)))
+        (local.set $args (call $spread-arguments (local.get $args))) (br $dispatch)))
+    ;; Preserve interactive debugger entry and frames for debug-enabled code.
+    (if (i32.and (i32.eqz (global.get $debug-evaluating))
+          (i32.and (ref.test (ref $native-function) (local.get $name))
+                   (i32.eqz (ref.test (ref $native-debug-function) (local.get $name)))))
+      (then
+        (if (global.get $backtrace-depth)
+          (then (array.set $objects (global.get $backtrace-frames)
+            (i32.and (i32.sub (global.get $backtrace-depth) (i32.const 1)) (i32.const 63))
+            (local.get $name))))
+        (call $clear-values)
+        (return_call_ref $native-entry
+          (extern.convert_any (local.get $name)) (extern.convert_any (local.get $args))
+          (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $name))))))
+    (return (extern.convert_any (call $apply (local.get $name) (local.get $args)))))
+  #@(unreachable))
+
 (define-runtime-function $native-call0 (($function externref)) (externref)
   (:export-raw "native-call0")
   #@(extern.convert_any (call $native-primary-apply
-    ,(native-object '(local.get $function)) (ref.null $obj))))
+    ,(native-object '(local.get $function)) (ref.null eq))))
 
 (define-runtime-function $native-call1 (($function externref) ($value externref)) (externref)
   (:export-raw "native-call1")
@@ -661,14 +717,14 @@
   #@(local.set $tag (call $tag (local.get $a)))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
-    (then (if (f64.eq (struct.get $obj $f ,(native-object '(local.get $function))) (f64.const 3))
+    (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 3))
       (then (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (struct.new $native-arguments (call $allocate-object-tag (i32.const 52))
-        (i32.const 1) (f64.const 0) (ref.null $digits) (local.get $a) (ref.null $obj) (ref.null $obj) (ref.null $obj)))))))))
+        (i32.const 1) (f64.const 0) (ref.null $digits) (local.get $a) (ref.null eq) (ref.null eq) (ref.null eq)))))))))
   (wat-symbol-case #@(local.get $id)
     ((not null) #@(return (extern.convert_any (call $bool (ref.is_null (local.get $a))))))
     (identity #@(return (local.get $value)))
-    (list #@(return (extern.convert_any (call $cons (local.get $a) (ref.null $obj)))))
+    (list #@(return (extern.convert_any (call $cons (local.get $a) (ref.null eq)))))
     ((car first)
       #@(if (i32.or (ref.is_null (local.get $a)) (i32.eq (local.get $tag) (i32.const 7)))
         (then (return (extern.convert_any (call $car (local.get $a)))))))
@@ -701,11 +757,11 @@
   #@(local.set $accessor (call $list-accessor-code (local.get $id)))
   #@(if (local.get $accessor)
     (then (return (extern.convert_any (call $list-accessor
-      (local.get $a) (local.get $accessor) (i32.const 0) (ref.null $obj))))))
+      (local.get $a) (local.get $accessor) (i32.const 0) (ref.null eq))))))
   ;; Uncommon functions and exceptional arguments share the complete call
   ;; path, including its backtrace, arity checks and dynamic cleanup.
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-    (call $cons (local.get $a) (ref.null $obj)))))
+    (call $cons (local.get $a) (ref.null eq)))))
 
 (define-runtime-function $native-call2
     (($function externref) ($left externref) ($right externref)) (externref)
@@ -719,10 +775,10 @@
   #@(local.set $bt (call $tag (local.get $b)))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
-    (then (if (f64.eq (struct.get $obj $f ,(native-object '(local.get $function))) (f64.const 4))
+    (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 4))
       (then (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (struct.new $native-arguments (call $allocate-object-tag (i32.const 52))
-        (i32.const 2) (f64.const 0) (ref.null $digits) (local.get $a) (local.get $b) (ref.null $obj) (ref.null $obj)))))))))
+        (i32.const 2) (f64.const 0) (ref.null $digits) (local.get $a) (local.get $b) (ref.null eq) (ref.null eq)))))))))
   (wat-symbol-case #@(local.get $id)
     (eq #@(return (extern.convert_any (call $bool (ref.eq (local.get $a) (local.get $b))))))
     (eql #@(return (extern.convert_any (call $bool (call $eql (local.get $a) (local.get $b))))))
@@ -734,7 +790,7 @@
             (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '/=))))))))))
     (cons #@(return (extern.convert_any (call $cons (local.get $a) (local.get $b)))))
     (list #@(return (extern.convert_any
-      (call $cons (local.get $a) (call $cons (local.get $b) (ref.null $obj))))))
+      (call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq))))))
     ((vector-push vector-push-extend)
       ;; The common append needs no argument list or general APPLY dispatch.
       ;; Retain the full path for missing fill pointers and capacity growth.
@@ -751,17 +807,17 @@
     (gethash
       #@(if (i32.eq (local.get $bt) (i32.const 29))
         (then (local.set $cell (call $hash-cell-native (local.get $a) (local.get $b)))
-          (return (extern.convert_any (if (result (ref null $obj)) (ref.is_null (local.get $cell))
-            (then (ref.null $obj)) (else (call $cdr (local.get $cell)))))))))
+          (return (extern.convert_any (if (result (ref null eq)) (ref.is_null (local.get $cell))
+            (then (ref.null eq)) (else (call $cdr (local.get $cell)))))))))
     ((bit sbit)
       #@(if (i32.and (i32.eq (local.get $at) (i32.const 36)) (i32.eq (local.get $bt) (i32.const 1)))
         (then
-          (if (i32.le_u (array.len (struct.get $obj $digits (local.get $b))) (i32.const 2))
+          (if (i32.le_u (call $integer-length (ref.as_non_null (local.get $b))) (i32.const 2))
             (then (local.set $index (call $small-integer-value (ref.as_non_null (local.get $b))))
-              (if (i32.lt_u (local.get $index) (struct.get $obj $n (local.get $a)))
+              (if (i32.lt_u (local.get $index) (call $value-n (local.get $a)))
                 (then (return (extern.convert_any (call $int
                   (i32.and (i32.shr_u
-                    (array.get $digits (struct.get $obj $digits (local.get $a))
+                    (array.get $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $a)))
                       (i32.shr_u (local.get $index) (i32.const 5)))
                     (local.get $index)) (i32.const 1))))))))))))
     ((+ - *)
@@ -785,14 +841,14 @@
     ((aref svref)
       #@(if (i32.and (i32.eq (local.get $at) (i32.const 34)) (i32.eq (local.get $bt) (i32.const 1)))
         (then
-          (if (i32.le_u (array.len (struct.get $obj $digits (local.get $b))) (i32.const 2))
+          (if (i32.le_u (call $integer-length (ref.as_non_null (local.get $b))) (i32.const 2))
             (then
               (local.set $index (call $small-integer-value (ref.as_non_null (local.get $b))))
               (if (i32.lt_u (local.get $index) (array.len (call $vector-data (local.get $a))))
                 (then (return (extern.convert_any (array.get $objects
                   (call $vector-data (local.get $a)) (local.get $index))))))))))))
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-    (call $cons (local.get $a) (call $cons (local.get $b) (ref.null $obj))))))
+    (call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq))))))
 
 (define-runtime-function $native-call3
     (($function externref) ($a externref) ($b externref) ($c externref)) (externref)
@@ -804,29 +860,29 @@
   #@(local.set $subscript ,(native-object '(local.get $c)))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
-    (then (if (f64.eq (struct.get $obj $f ,(native-object '(local.get $function))) (f64.const 5))
+    (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 5))
       (then (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (struct.new $native-arguments (call $allocate-object-tag (i32.const 52))
-        (i32.const 3) (f64.const 0) (ref.null $digits) (ref.cast (ref null $obj) (any.convert_extern (local.get $a))) (ref.cast (ref null $obj) (any.convert_extern (local.get $b))) (ref.cast (ref null $obj) (any.convert_extern (local.get $c))) (ref.null $obj)))))))))
+        (i32.const 3) (f64.const 0) (ref.null $digits) (ref.cast (ref null eq) (any.convert_extern (local.get $a))) (ref.cast (ref null eq) (any.convert_extern (local.get $b))) (ref.cast (ref null eq) (any.convert_extern (local.get $c))) (ref.null eq)))))))))
   #@(if (i32.eq (local.get $id) (i32.const ,(- -2 (runtime-symbol-id 'list))))
     (then (return (extern.convert_any
       (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
-        (call $cons ,(native-object '(local.get $c)) (ref.null $obj))))))))
+        (call $cons ,(native-object '(local.get $c)) (ref.null eq))))))))
   (wat-symbol-case #@(local.get $id)
     ((bit sbit)
       #@(if (i32.and (i32.eq (call $tag (local.get $array)) (i32.const 36))
                      (i32.eq (call $tag (local.get $subscript)) (i32.const 1)))
         (then
-          (if (i32.le_u (array.len (struct.get $obj $digits (local.get $subscript))) (i32.const 2))
+          (if (i32.le_u (call $integer-length (ref.as_non_null (local.get $subscript))) (i32.const 2))
             (then (local.set $index (call $small-integer-value (ref.as_non_null (local.get $subscript))))
-              (if (i32.lt_u (local.get $index) (struct.get $obj $n (local.get $array)))
+              (if (i32.lt_u (local.get $index) (call $value-n (local.get $array)))
                 (then (return (extern.convert_any (call $array-raw-element
                   (local.get $array) (local.get $index) ,(native-object '(local.get $a)) (i32.const 1)))))))))))
     ((aref svref row-major-aref)
       #@(if (i32.and (i32.eq (call $tag (local.get $array)) (i32.const 34))
                      (i32.eq (call $tag (local.get $subscript)) (i32.const 1)))
         (then
-          (if (i32.le_u (array.len (struct.get $obj $digits (local.get $subscript))) (i32.const 2))
+          (if (i32.le_u (call $integer-length (ref.as_non_null (local.get $subscript))) (i32.const 2))
             (then
               (local.set $index (call $small-integer-value (ref.as_non_null (local.get $subscript))))
               (if (i32.lt_u (local.get $index) (array.len (call $vector-data (local.get $array))))
@@ -835,65 +891,76 @@
                   (return (local.get $a))))))))))
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
-      (call $cons ,(native-object '(local.get $c)) (ref.null $obj)))))))
+      (call $cons ,(native-object '(local.get $c)) (ref.null eq)))))))
 
 (define-runtime-function $native-call4
     (($function externref) ($a externref) ($b externref) ($c externref) ($d externref)) (externref)
   (:export-raw "native-call4")
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
-    (then (if (f64.eq (struct.get $obj $f ,(native-object '(local.get $function))) (f64.const 6))
+    (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 6))
       (then (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (struct.new $native-arguments (call $allocate-object-tag (i32.const 52))
-        (i32.const 4) (f64.const 0) (ref.null $digits) (ref.cast (ref null $obj) (any.convert_extern (local.get $a))) (ref.cast (ref null $obj) (any.convert_extern (local.get $b))) (ref.cast (ref null $obj) (any.convert_extern (local.get $c))) (ref.cast (ref null $obj) (any.convert_extern (local.get $d)))))))))))
+        (i32.const 4) (f64.const 0) (ref.null $digits) (ref.cast (ref null eq) (any.convert_extern (local.get $a))) (ref.cast (ref null eq) (any.convert_extern (local.get $b))) (ref.cast (ref null eq) (any.convert_extern (local.get $c))) (ref.cast (ref null eq) (any.convert_extern (local.get $d)))))))))))
   #@(if (i32.eq (call $native-builtin-id ,(native-object '(local.get $function)))
                  (i32.const ,(runtime-symbol-id 'list)))
     (then (return (extern.convert_any
       (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
-        (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null $obj)))))))))
+        (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null eq)))))))))
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
-      (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null $obj))))))))
+      (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null eq))))))))
 
-(define-runtime-function $native-multiple-value-call
-    (($environment externref) ($function externref) ($groups externref)) (externref)
-  (:export-raw "native-multiple-value-call")
+(define-runtime-function $native-value-arguments (($groups externref)) (:nullable-object)
   (:locals ($scan :nullable-object) ($group :nullable-object) ($head :nullable-object)
-           ($tail :nullable-object) ($cell :nullable-object) ($values :nullable-object))
+           ($tail :nullable-object) ($cell :nullable-object))
   #@(local.set $scan ,(native-object '(local.get $groups)))
   (wat-list-loop ($scan)
     #@(local.set $group (call $car (local.get $scan)))
     (wat-list-loop ($group)
-      #@(local.set $cell (call $cons (call $car (local.get $group)) (ref.null $obj)))
+      #@(local.set $cell (call $cons (call $car (local.get $group)) (ref.null eq)))
       #@(if (ref.is_null (local.get $head)) (then (local.set $head (local.get $cell)))
-        (else (struct.set $obj $b (local.get $tail) (local.get $cell))))
+        (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
       #@(local.set $tail (local.get $cell))))
-  #@(local.set $values (call $value-list (call $apply ,(native-object '(local.get $function)) (local.get $head))))
+  #@(local.get $head))
+
+(define-runtime-function $native-multiple-value-call
+    (($environment externref) ($function externref) ($groups externref)) (externref)
+  (:export-raw "native-multiple-value-call")
+  (:locals ($values :nullable-object))
+  #@(local.set $values (call $value-list (call $apply ,(native-object '(local.get $function))
+    (call $native-value-arguments (local.get $groups)))))
   #@(call $clear-values)
   #@(extern.convert_any (local.get $values)))
 
+(define-runtime-function $native-tail-multiple-value-call
+    (($environment externref) ($function externref) ($groups externref)) (externref)
+  (:export-raw "native-tail-multiple-value-call")
+  #@(return_call $native-tail-call (local.get $function)
+    (extern.convert_any (call $native-value-arguments (local.get $groups)))))
+
 (define-runtime-section native-code-runtime-wat ()
-  #@(type $native-context (struct (field $variables (ref null $obj)) (field $packages (ref null $obj))
-    (field $targets (ref null $obj))))
+  #@(type $native-context (struct (field $variables (ref null eq)) (field $packages (ref null eq))
+    (field $targets (ref null eq))))
   #@(global $native-environment-cache (mut (ref null $native-context)) (ref.null $native-context))
   #@(type $native-entry (func (param externref externref) (result externref)))
   #@(type $native-service (func (param externref externref externref) (result externref)))
   #@(type $native-function (sub $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
-    (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
+    (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
     (field $entry (ref $native-entry)) (field $code-size i32))))
   #@(type $native-debug-function (sub final $native-function (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
-    (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
+    (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
     (field $entry (ref $native-entry)) (field $code-size i32)
-    (field $debug-code (ref $obj)) (field $debug-id i32))))
+    (field $debug-code (ref eq)) (field $debug-id i32))))
   #@(type $native-arguments (sub final $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
-    (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
-    (field $d (ref null $obj)))))
+    (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
+    (field $d (ref null eq)))))
   #@(table $native-services (export "native-services") 1 funcref)
   ($compiler-image-function)
-  ($native-install) ($native-function) ($native-close-with-arity) ($native-close) ($native-close-fixed) ($native-close-cached) ($native-close-static) ($native-with-arity) ($native-code-size) ($native-capture) ($native-code-storage) ($native-code-entry) ($native-code-bytes) ($native-literal)
+  ($native-install) ($native-function) ($native-function-with-code) ($native-close-with-arity) ($native-close) ($native-close-fixed) ($native-close-cached) ($native-close-static) ($native-with-arity) ($native-code-size) ($native-capture) ($native-code-storage) ($native-code-entry) ($native-code-bytes) ($native-literal)
   ($native-debug-wrap) ($native-debug-attach) ($native-debug-close) ($native-debug-info)
   ($native-two-arguments) ($native-packed-argument) ($native-list-tail) ($native-argument) ($native-rest-argument) ($native-check-arguments) ($native-check-apply-arguments) ($native-check-apply-list) ($native-environment)
   ($native-restore-environment) ($native-bind)
@@ -901,6 +968,8 @@
   ($native-control) ($native-restart-signal) ($native-throw)
   ($native-global-read) ($native-global-write) ($native-function-reference)
   ($native-cons) ($native-cell) ($native-primary) ($native-cell-read) ($native-cell-write)
-  ($native-call) ($native-multiple-value-call) ($native-return) ($native-return1)
-  ($native-primary-apply) ($native-builtin-id) ($native-poll)
+  ($native-call) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
+  ($native-return) ($native-return1)
+  ($native-int64) ($native-unbox-int64) ($native-boolean)
+  ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-tail-call)
   ($native-call0) ($native-call1) ($native-call2) ($native-call3) ($native-call4))

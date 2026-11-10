@@ -111,9 +111,9 @@
   #@(call $slice (local.get $a) (i32.const 0) (local.get $n)))
 
 (define-runtime-function $decode-source (($length i32)) ()
-  #@(global.set $source (ref.as_non_null (struct.get $obj $digits (call $decode-text (i32.const 0) (local.get $length)))))
+  #@(global.set $source (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (call $decode-text (i32.const 0) (local.get $length))))))
   #@(global.set $source-end (array.len (global.get $source)))
-  #@(global.set $reader-stream (ref.null $obj))
+  #@(global.set $reader-stream (ref.null eq))
   #@(global.set $source-generic (i32.const 0)))
 
 (define-runtime-function $emit-byte
@@ -147,7 +147,7 @@
     ()
   (:locals ($i i32)
            ($a :digits))
-  #@(local.set $a (ref.as_non_null (struct.get $obj $digits (local.get $text))))
+  #@(local.set $a (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $text)))))
   #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (array.len (local.get $a))))
     (call $emit-char (array.get $digits (local.get $a) (local.get $i)))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next))))
@@ -156,7 +156,7 @@
   #@(global $source (mut (ref $digits)) (array.new_default $digits (i32.const 0)))
   #@(global $source-generic (mut i32) (i32.const 0))
   #@(global $source-end (mut i32) (i32.const 0))
-  #@(global $reader-stream (mut (ref null $obj)) (ref.null $obj))
+  #@(global $reader-stream (mut (ref null eq)) (ref.null eq))
   #@(global $source-position (mut i32) (i32.const 0))
   #@(global $source-depth (mut i32) (i32.const 0))
   #@(global $source-bq-depth (mut i32) (i32.const 0))

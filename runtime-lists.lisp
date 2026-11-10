@@ -5,25 +5,25 @@
 (define-runtime-function $cons
     (($a :nullable-object) ($b :nullable-object))
     (:object)
-  #@(call $node (i32.const 7) (i32.const 0) (local.get $a) (local.get $b) (ref.null $obj)))
+  #@(call $node (i32.const 7) (i32.const 0) (local.get $a) (local.get $b) (ref.null eq)))
 
 (define-runtime-function $car
     (($x :nullable-object))
     (:nullable-object)
-  #@(if (ref.is_null (local.get $x)) (then (return (ref.null $obj))))
+  #@(if (ref.is_null (local.get $x)) (then (return (ref.null eq))))
   #@(if (i32.ne (call $tag (local.get $x)) (i32.const 7))
     (then (call $type-fail (local.get $x) (call $symbol (i32.const ,(runtime-symbol-id 'list)))
       (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(struct.get $obj $a (local.get $x)))
+  #@(struct.get $obj $a (ref.cast (ref $obj) (local.get $x))))
 
 (define-runtime-function $cdr
     (($x :nullable-object))
     (:nullable-object)
-  #@(if (ref.is_null (local.get $x)) (then (return (ref.null $obj))))
+  #@(if (ref.is_null (local.get $x)) (then (return (ref.null eq))))
   #@(if (i32.ne (call $tag (local.get $x)) (i32.const 7))
     (then (call $type-fail (local.get $x) (call $symbol (i32.const ,(runtime-symbol-id 'list)))
       (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(struct.get $obj $b (local.get $x)))
+  #@(struct.get $obj $b (ref.cast (ref $obj) (local.get $x))))
 
 (define-runtime-function $length
     (($list :nullable-object))
@@ -77,7 +77,7 @@
 (define-runtime-function $list-accessor
     (($x :nullable-object) ($code i32) ($write i32) ($value :nullable-object)) (:nullable-object)
   #@(block $last (loop $next (br_if $last (i32.le_u (local.get $code) (i32.const 3)))
-    (local.set $x (if (result (ref null $obj)) (i32.and (local.get $code) (i32.const 1))
+    (local.set $x (if (result (ref null eq)) (i32.and (local.get $code) (i32.const 1))
       (then (call $cdr (local.get $x))) (else (call $car (local.get $x)))))
     (local.set $code (i32.shr_u (local.get $code) (i32.const 1))) (br $next)))
   #@(if (local.get $write)
@@ -86,10 +86,10 @@
         (then (call $type-fail (local.get $x) (call $symbol (i32.const ,(runtime-symbol-id 'cons)))
           (i32.const ,(runtime-error-code :expected-designator)))))
       (if (i32.and (local.get $code) (i32.const 1))
-        (then (struct.set $obj $b (local.get $x) (local.get $value)))
-        (else (struct.set $obj $a (local.get $x) (local.get $value))))
+        (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $x)) (local.get $value)))
+        (else (struct.set $obj $a (ref.cast (ref $obj) (local.get $x)) (local.get $value))))
       (return (local.get $value))))
-  #@(if (result (ref null $obj)) (i32.and (local.get $code) (i32.const 1))
+  #@(if (result (ref null eq)) (i32.and (local.get $code) (i32.const 1))
     (then (call $cdr (local.get $x))) (else (call $car (local.get $x)))))
 
 (define-runtime-section list-runtime-wat ()
@@ -110,15 +110,15 @@
 (define-runtime-function $remove-eq
     (($x :nullable-object) ($list :nullable-object))
     (:nullable-object)
-  #@(if (ref.is_null (local.get $list)) (then (return (ref.null $obj))))
+  #@(if (ref.is_null (local.get $list)) (then (return (ref.null eq))))
   #@(if (ref.eq (local.get $x) (call $car (local.get $list))) (then (return (call $cdr (local.get $list)))))
   #@(call $cons (call $car (local.get $list)) (call $remove-eq (local.get $x) (call $cdr (local.get $list)))))
 
 (define-runtime-function $as-list
     (($x :nullable-object))
     (:nullable-object)
-  #@(if (result (ref null $obj)) (i32.or (ref.is_null (local.get $x)) (i32.eq (call $tag (local.get $x)) (i32.const 7)))
-      (then (local.get $x)) (else (call $cons (local.get $x) (ref.null $obj)))))
+  #@(if (result (ref null eq)) (i32.or (ref.is_null (local.get $x)) (i32.eq (call $tag (local.get $x)) (i32.const 7)))
+      (then (local.get $x)) (else (call $cons (local.get $x) (ref.null eq)))))
 
 (define-runtime-section list-utilities-runtime-wat ()
   ($member-eq)

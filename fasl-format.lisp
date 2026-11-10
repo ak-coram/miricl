@@ -156,6 +156,15 @@
              (progn (write-byte 5 stream) (encode-value (second record) stream)
                (encode-value (third record) stream) (write-uleb (fourth record) stream)))
          (setq last-package (third record) last-namespace (fourth record)))
+      (11
+       (write-byte 13 stream)
+       (write-uleb (second record) stream) (write-uleb (third record) stream)
+       (write-uleb (length (fourth record)) stream)
+       (dolist (reference (fourth record))
+         (unless (and (integerp reference) (<= -1 reference #x7ffffffe))
+           (error "Invalid saved slot reference."))
+         ;; Zero denotes an unbound slot; NIL has its own nonnegative ID.
+         (write-uleb (1+ reference) stream)))
       (otherwise
        (if (compact-cons-record-p record)
            (progn
@@ -215,6 +224,15 @@
             (1 '(0))
             ((2 4) (list (if (= tag 2) 1 3) (decode-sequence-value stream (1+ depth))))
             (3 (list 2 (binary-uleb stream)))
+            (13
+             (let ((class (binary-uleb stream)) (names (binary-uleb stream))
+                   (size (binary-uleb stream)))
+               (unless (<= size (- *binary-limit* (file-position stream)))
+                 (error "Invalid saved slot count."))
+               (list 11 class names
+                 (loop repeat size for reference = (binary-uleb stream) collect
+                   (if (<= reference #x7fffffff) (1- reference)
+                       (error "Invalid saved slot reference."))))))
             ((5 12)
              (let ((name (decode-sequence-value stream (1+ depth))))
                (if (= tag 5)
@@ -261,7 +279,10 @@
     (write-byte 0 stream) (write-padded-uleb 0 stream) (write-byte 11 stream)
     (loop for character across "miricl.fasl" do (write-byte (char-code character) stream))
     (dolist (byte '(77 73 82 70)) (write-byte byte stream))
-    (write-u32 (if metadata 1 0) stream) (write-u32 (length records) stream)
+    ;; Bit 1 advertises dense slot records so older readers fail at the header
+    ;; before executing any part of an unsupported unit. Bit 0 remains metadata.
+    (write-u32 (logior (if metadata 1 0) (if (find 11 records :key #'first) 2 0)) stream)
+    (write-u32 (length records) stream)
     (write-u32 chunks stream) (write-u32 +fasl-block-size+ stream)
     (dotimes (i (* chunks 16)) (write-byte 0 stream))
     (flet ((chunk (kind key value &optional record-base)
@@ -288,7 +309,7 @@
     (unless (= byte (read-byte stream)) (error "Invalid binary FASL magic.")))
   (let ((flags (read-u32 stream)) (records (read-u32 stream))
         (count (read-u32 stream)) (block-size (read-u32 stream)) (entries nil))
-    (unless (and (<= flags 1) (= block-size +fasl-block-size+)
+    (unless (and (<= flags 3) (= block-size +fasl-block-size+)
                  (<= records #x7fffffff) (<= count (floor (- end start 20) 16))
                  (<= records (- end start 20 (* count 16))))
       (error "Unsupported binary FASL header."))
@@ -303,9 +324,9 @@
       (unless (= last (- end start)) (error "Trailing binary FASL unit data.")))
     (values records (nreverse entries) flags)))
 
-(defun read-indexed-payload (stream start end metadata-p)
+(defun read-indexed-payload (stream start end metadata-p &optional (records-p t))
   (multiple-value-bind (count entries flags) (read-indexed-directory stream start end)
-    (let ((roots nil) (rootp nil) (metadata nil) (records (make-array count))
+    (let ((roots nil) (rootp nil) (metadata nil) (records (and records-p (make-array count)))
           (blocks (make-hash-table)) (metap nil) (definitionsp nil))
       (dolist (entry entries)
         (destructuring-bind (kind key first last) entry
@@ -318,18 +339,19 @@
             (3 (let ((offset (* key +fasl-block-size+)))
                  (when (or (gethash key blocks) (>= offset count)) (error "Invalid binary FASL record block."))
                  (setf (gethash key blocks) t)
-                 (let ((block (read-binary-chunk stream first last)))
+                 (when records-p
+                  (let ((block (read-binary-chunk stream first last)))
                    (unless (and (typep block 'simple-vector)
                                 (= (length block) (min +fasl-block-size+ (- count offset))))
                      (error "Invalid binary FASL record block size."))
-                   (replace records block :start1 offset))))
+                   (replace records block :start1 offset)))))
             (4 (when (or definitionsp (/= key 0)) (error "Duplicate binary FASL definition directory."))
                (setq definitionsp t))
             (otherwise (error "Unsupported binary FASL chunk kind ~D." kind)))))
-      (unless (and rootp (listp roots) (eq metap (= flags 1))
+      (unless (and rootp (listp roots) (eq metap (logbitp 0 flags))
                    (= (hash-table-count blocks) (ceiling count +fasl-block-size+)))
         (error "Missing binary FASL roots or records."))
-      (list roots records metadata))))
+      (values (list roots records metadata) count))))
 
-(defun read-unit-payload (stream end &key metadata)
-  (read-indexed-payload stream (file-position stream) end metadata))
+(defun read-unit-payload (stream end &key metadata (records t))
+  (read-indexed-payload stream (file-position stream) end metadata records))

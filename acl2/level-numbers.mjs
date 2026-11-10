@@ -1,0 +1,23 @@
+export const iterativeLevelNumbers = `(progn
+(defun miricl-max-level-no-work (termp x wrld)
+  (let ((work (list (cons termp x))) (level 0))
+    (loop while work do
+      (let* ((task (pop work)) (item (cdr task)))
+        (if (car task)
+            (unless (or (variablep item) (fquotep item))
+              (let ((fn (ffn-symb item)))
+                (push (cons nil (fargs item)) work)
+                (if (flambdap fn)
+                    (push (cons t (lambda-body fn)) work)
+                  (setq level (max level (or (getpropc fn 'level-no nil wrld) 0))))))
+          (unless (null item)
+            (push (cons nil (cdr item)) work)
+            (push (cons t (car item)) work)))))
+    level))
+(defun max-level-no (term wrld)
+  (miricl-max-level-no-work t term wrld))
+(defun max-level-no-lst (args wrld)
+  (miricl-max-level-no-work nil args wrld))
+(defun get-level-no (fn wrld)
+  (if (flambdap fn) (max-level-no (lambda-body fn) wrld)
+    (or (getpropc fn 'level-no nil wrld) 0))))`;

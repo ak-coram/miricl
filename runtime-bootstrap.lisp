@@ -1,6 +1,8 @@
 ;;;; Bootstrap identities shared by the guest and its transport.
 (in-package #:miricl)
 
+(defvar *include-compiler* t)
+
 ;; Shared with evaluator shortcuts that recognize captured native expanders.
 ;; Reserve room for native private services below the special function tags.
 ;; FASLs identify these services by symbol name, independently of their IDs.
@@ -518,3 +520,10 @@
 (setf *runtime-symbols* (append *runtime-symbols* '(readtable-macro-characters)))
 (push 'readtable-macro-characters *runtime-functions*)
 (setf *runtime-symbols* (append *runtime-symbols* '(*trap-floating-point-underflow*)))
+;; Append extension identities to preserve the numeric ABI of existing images.
+(setf *runtime-symbols* (append *runtime-symbols* '(:local-nicknames)))
+;; Explicit IEEE reinterpretation permits nonfinite values without weakening
+;; the ordinary arithmetic overflow/invalid-operation checks.
+(setf *extension-symbols* (append *extension-symbols* '(float-bits bits-float)))
+(setf *runtime-symbols* (append *runtime-symbols* '(float-bits bits-float)))
+(setf *runtime-functions* (append *runtime-functions* '(float-bits bits-float)))

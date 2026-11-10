@@ -1,0 +1,57 @@
+[
+  {
+    "name": "acclimation",
+    "url": "https://github.com/robert-strandh/Acclimation",
+    "revision": "9339b92e16e6a6784488f8bac82c189ae4bab4aa"
+  },
+  {
+    "name": "alexandria",
+    "url": "https://gitlab.common-lisp.net/alexandria/alexandria.git",
+    "revision": "f283e25efbe9f4323419a138b22ad2fc027f6641"
+  },
+  {
+    "name": "concrete-syntax-tree",
+    "url": "https://github.com/s-expressionists/Concrete-Syntax-Tree",
+    "revision": "f79dab6b6d14000259449c169b501cc6398b3f54"
+  },
+  {
+    "name": "documentation-utils",
+    "url": "https://github.com/Shinmera/documentation-utils",
+    "revision": "fcbd927dee7f311915a27ee557e3db1d4510403c"
+  },
+  {
+    "name": "eclector",
+    "url": "https://github.com/s-expressionists/Eclector",
+    "revision": "1088a7998f0d205da12ff48de7238b1008a31792"
+  },
+  {
+    "name": "float-features",
+    "url": "https://github.com/Shinmera/float-features",
+    "revision": "cd5dab00d2f4a562d65f46b3fc1cecec308e2443"
+  },
+  {
+    "name": "named-readtables",
+    "url": "https://github.com/melisgl/named-readtables",
+    "revision": "9b774b51a08124c41881f10b30fb33425a3e6085"
+  },
+  {
+    "name": "trivial-features",
+    "url": "https://github.com/trivial-features/trivial-features",
+    "revision": "828246a1c1efdcad94c1ba2f2a210bb9cb4cde3e"
+  },
+  {
+    "name": "trivial-garbage",
+    "url": "https://github.com/trivial-garbage/trivial-garbage",
+    "revision": "f0663f7b0c900ed78ac19f6db306e7c6cac999fd"
+  },
+  {
+    "name": "trivial-gray-streams",
+    "url": "https://github.com/trivial-gray-streams/trivial-gray-streams",
+    "revision": "257d73ec36958beb7d49eba5567d5409827197b7"
+  },
+  {
+    "name": "trivial-indent",
+    "url": "https://github.com/Shinmera/trivial-indent",
+    "revision": "87b35ff9202b107230e35790e93c471cc7880900"
+  }
+]

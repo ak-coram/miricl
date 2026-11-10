@@ -48,7 +48,7 @@
     (then (call $type-fail (local.get $x)
       (call $symbol (i32.const ,(runtime-symbol-id 'character)))
       (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(struct.get $obj $n (local.get $x)))
+  #@(call $value-n (local.get $x)))
 
 (define-runtime-function $character-compare (($args :nullable-object) ($op i32)) (:nullable-object)
   (:locals ($scan :nullable-object) ($pairs :nullable-object)
@@ -75,7 +75,7 @@
               for op from 0 collect
           `(if (i32.eq (local.get $op) (i32.const ,op))
             (then (local.set $match (,comparison (local.get $a) (local.get $b)))))))
-      (if (i32.eqz (local.get $match)) (then (return (ref.null $obj))))
+      (if (i32.eqz (local.get $match)) (then (return (ref.null eq))))
       (local.set $pairs (call $cdr (local.get $pairs)))
       ;; Distinctness compares every pair, not just adjacent arguments.
       (br_if $pair (i32.and (i32.eq (local.get $op) (i32.const 1))
@@ -98,9 +98,9 @@
       ;; Guest text uses Unicode scalar values; surrogate codes are holes.
       (if (i32.and (i32.ge_u (local.get $code) (i32.const 55296))
                    (i32.le_u (local.get $code) (i32.const 57343)))
-        (then (return (ref.null $obj))))
+        (then (return (ref.null eq))))
       (return (call $node (i32.const 16) (local.get $code)
-        (ref.null $obj) (ref.null $obj) (ref.null $obj)))))
+        (ref.null eq) (ref.null eq) (ref.null eq)))))
   #@(call $int (call $character-code (local.get $x))))
 
 (define-runtime-function $character-case-native (($x :nullable-object) ($down i32)) (:nullable-object)
@@ -110,7 +110,7 @@
     (then (call $unicode-case-code (local.get $code) (i32.and (local.get $down) (i32.const 1))))
     (else (call $string-case-code (local.get $code) (local.get $down)))))
   #@(if (i32.eq (local.get $code) (local.get $upper)) (then (return (local.get $x))))
-  #@(call $node (i32.const 16) (local.get $upper) (ref.null $obj) (ref.null $obj) (ref.null $obj)))
+  #@(call $node (i32.const 16) (local.get $upper) (ref.null eq) (ref.null eq) (ref.null eq)))
 
 (define-runtime-function $character-digit-weight (($code i32)) (i32)
   (:locals ($low i32) ($high i32) ($mid i32) ($offset i32) ($start i32) ($end i32))
@@ -150,17 +150,17 @@
       (if (i32.or (i32.lt_u (local.get $base) (i32.const 2)) (i32.gt_u (local.get $base) (i32.const 36)))
         (then (call $type-fail (local.get $radix)
           (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
-            (call $cons (call $int (i32.const 2)) (call $cons (call $int (i32.const 36)) (ref.null $obj))))
+            (call $cons (call $int (i32.const 2)) (call $cons (call $int (i32.const 36)) (ref.null eq))))
           (i32.const ,(runtime-error-code :expected-designator)))))))
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'digit-char)))
     (then
       (local.set $weight (call $natural-count (local.get $x)))
-      (if (i32.ge_u (local.get $weight) (local.get $base)) (then (return (ref.null $obj))))
+      (if (i32.ge_u (local.get $weight) (local.get $base)) (then (return (ref.null eq))))
       (return (call $node (i32.const 16)
         (i32.add (local.get $weight) (select (i32.const 48) (i32.const 55)
-          (i32.lt_u (local.get $weight) (i32.const 10)))) (ref.null $obj) (ref.null $obj) (ref.null $obj)))))
+          (i32.lt_u (local.get $weight) (i32.const 10)))) (ref.null eq) (ref.null eq) (ref.null eq)))))
   #@(local.set $weight (call $character-digit-weight (call $character-code (local.get $x))))
-  #@(if (i32.ge_u (local.get $weight) (local.get $base)) (then (return (ref.null $obj))))
+  #@(if (i32.ge_u (local.get $weight) (local.get $base)) (then (return (ref.null eq))))
   #@(call $int (local.get $weight)))
 
 (define-runtime-function $initialize-character-properties () ()
@@ -171,7 +171,7 @@
   #@(memory.init $character-property-data (i32.const 0) (i32.const 0) (global.get $limit))
   #@(data.drop $character-property-data)
   #@(global.set $character-alpha-ranges (ref.as_non_null
-    (struct.get $obj $digits (call $read-library-literal))))
+    (struct.get $obj $digits (ref.cast (ref $obj) (call $read-library-literal)))))
   #@(global.set $character-names (call $read-library-literal))
   #@(global.set $character-name-index (array.new_default $objects
     (i32.const ,(1+ (reduce #'max *character-names* :key #'car)))))
@@ -215,7 +215,7 @@
           `(if (i32.and (i32.ge_u (local.get $code) (i32.const ,start))
                          (i32.le_u (local.get $code) (i32.const ,end)))
             (then (return (call $bool (i32.const 1)))))))
-      #@(return (ref.null $obj))))
+      #@(return (ref.null eq))))
   #@(local.set $up (call $string-case-code (local.get $code) (i32.const 0)))
   #@(local.set $down (call $string-case-code (local.get $code) (i32.const 1)))
   (wat-symbol-case #@(local.get $id)
@@ -226,9 +226,9 @@
   #@(call $bool (i32.ne (local.get $up) (local.get $down))))
 
 (define-runtime-function $character-name (($code i32)) (:nullable-object)
-  #@(if (result (ref null $obj)) (i32.lt_u (local.get $code) (array.len (global.get $character-name-index)))
+  #@(if (result (ref null eq)) (i32.lt_u (local.get $code) (array.len (global.get $character-name-index)))
     (then (array.get $objects (global.get $character-name-index) (local.get $code)))
-    (else (ref.null $obj))))
+    (else (ref.null eq))))
 
 (define-runtime-function $character-name-code (($name :nullable-object)) (i32)
   (:locals ($names :nullable-object) ($entry :nullable-object)
@@ -245,7 +245,7 @@
     (then (return (i32.const 0))))
   ;; Accept the common Unicode character names U+HHHH and UHHHH, with four
   ;; to six hexadecimal digits. The reader and NAME-CHAR share this lookup.
-  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (local.get $name))))
+  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $name)))))
   #@(local.set $length (array.len (local.get $data)))
   #@(if (i32.ge_u (local.get $length) (i32.const 5))
     (then
@@ -273,18 +273,18 @@
   (:locals ($code i32) ($name :nullable-object))
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'char-name)))
     (then (local.set $name (call $character-name (call $character-code (local.get $x))))
-      (if (ref.is_null (local.get $name)) (then (return (ref.null $obj))))
+      (if (ref.is_null (local.get $name)) (then (return (ref.null eq))))
       ;; Keep the internal reader/printer table independent of mutable results.
-      (return (call $slice (ref.as_non_null (struct.get $obj $digits (local.get $name)))
-        (i32.const 0) (array.len (struct.get $obj $digits (local.get $name)))))))
+      (return (call $slice (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $name))))
+        (i32.const 0) (array.len (struct.get $obj $digits (ref.cast (ref $obj) (local.get $name))))))))
   #@(local.set $code (call $character-name-code (call $string-contents (call $string-designator (local.get $x)))))
-  #@(if (i32.lt_s (local.get $code) (i32.const 0)) (then (return (ref.null $obj))))
-  #@(call $node (i32.const 16) (local.get $code) (ref.null $obj) (ref.null $obj) (ref.null $obj)))
+  #@(if (i32.lt_s (local.get $code) (i32.const 0)) (then (return (ref.null eq))))
+  #@(call $node (i32.const 16) (local.get $code) (ref.null eq) (ref.null eq) (ref.null eq)))
 
 (define-runtime-section character-runtime-wat ()
   #@(data $character-property-data ,(character-property-data))
   #@(global $character-alpha-ranges (mut (ref $digits)) (array.new_default $digits (i32.const 0)))
-  #@(global $character-names (mut (ref null $obj)) (ref.null $obj))
+  #@(global $character-names (mut (ref null eq)) (ref.null eq))
   #@(global $character-name-index (mut (ref $objects)) (array.new_default $objects (i32.const 0)))
   #@(global $character-digit-ranges (ref $digits)
     (array.new_fixed $digits ,(length *character-digit-ranges*)

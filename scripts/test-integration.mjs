@@ -13,22 +13,24 @@ const asdf = image('build/asdf/asdf.lisp');
 const test = (name, ...args) => [`tests/${name}.mjs`, ...args];
 const groups = {
   runtime: [
+    test('interpreter-only', image('miricl-interpreter.wasm'), wasm, asdf),
     test('threads', wasm, repl), test('standalone', wasm),
     ['--experimental-wasm-wasmfx', ...test('text-repl', wasm, repl)],
     test('repl-bridge', wasm, repl), test('repl-websocket', wasm, repl),
     test('dev-filesystem-server', wasm, repl), test('dev-filesystem', wasm), test('mounted-filesystem', wasm),
     test('terminal-debugger', wasm, image('miricl.js')),
-    ...['backtrace', 'debugger', 'javascript', 'development', 'readtable-iteration', 'hash-structural']
+    ...['backtrace', 'debugger', 'javascript', 'development', 'integer-tiers', 'printer-integers', 'float-bits', 'derived-types', 'readtable-iteration', 'reader-suppression', 'package-local-nicknames', 'hash-structural']
       .map(name => test(name, wasm)),
     test('ansi-report-check'),
   ],
   compiler: [
     test('compiler-runtime', wasm), test('compiler-runtime', precompiled, '--precompiled'),
     test('evaluation-policy', wasm, precompiled, repl),
+    test('core-image', precompiled),
     test('debugger', precompiled),
     ...['compilation', 'hir', 'whole-program', 'class-reachability', 'generic-dispatch',
-      'native-bundle', 'native-compilation', 'native-disassembly', 'native-size', 'compiler-throughput',
-      'fasl-format', 'file-compilation', 'file-code-sharing', 'nested-backquote',
+      'native-bundle', 'native-ltv', 'native-compilation', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',
+      'fasl-format', 'fasl-hash-tables', 'fasl-shared-initialization', 'saved-slots', 'file-compilation', 'file-code-sharing', 'nested-backquote',
       'structure-printers', 'ansi-compiler-runner', 'ansi-runner', 'ansi-upstream-runner']
       .map(name => test(name, wasm)),
   ],

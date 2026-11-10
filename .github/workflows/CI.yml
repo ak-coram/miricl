@@ -41,7 +41,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
+      # The host suite only needs ASDF. ACL2 contains trailing-space filenames
+      # that Windows cannot check out; its application job runs on Linux.
+      - name: Checkout host test dependencies
+        shell: bash
+        run: git submodule update --init -- vendor/asdf
       - uses: ./.github/actions/setup-miricl
         with:
           lisp: 'true'
@@ -88,9 +93,15 @@ jobs:
           path: |
             miricl.js
             miricl.wasm
+            miricl-interpreter.wasm
             miricl-precompiled.wasm
             miricl-repl.wasm
             miricl-asdf.wasm
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: miricl-interpreter
+          path: miricl-interpreter.wasm
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
@@ -249,6 +260,176 @@ jobs:
             build/${{ matrix.app }}/core-tests.json
           if-no-files-found: ignore
 
+  acl2:
+    name: ACL2 native prover and math sources
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CHROMIUM: google-chrome
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/setup-miricl
+      - uses: actions/download-artifact@v4
+        with:
+          name: miricl-runtime
+      - name: Identify pinned ACL2 sources
+        id: source
+        run: echo "revision=$(git -C vendor/acl2 rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Cache native ACL2 core and build input
+        id: core
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/acl2/acl2.wasm
+            build/acl2/acl2-native.wasm
+            build/acl2/acl2-image.wasm
+            build/acl2/native-tests.json
+            build/acl2/runtime.wasm
+            build/acl2/fasl.json
+            build/acl2/optimization.json
+            build/acl2/retention.txt
+          key: acl2-native-v2-${{ runner.os }}-${{ steps.source.outputs.revision }}-${{ hashFiles('miricl-precompiled.wasm', '*.lisp', '*.asd', 'scripts/*.mjs', 'acl2/*.mjs', 'acl2/*.lisp', 'tests/acl2-native.mjs') }}
+      - name: Compile portable ACL2 core (without world initialization)
+        if: steps.core.outputs.cache-hit != 'true'
+        timeout-minutes: 60
+        run: node scripts/probe-acl2.mjs miricl-precompiled.wasm build/acl2/fasl.json fasl build/acl2/acl2.wasm
+      - name: Compile native ACL2 core on the default stack
+        if: steps.core.outputs.cache-hit != 'true'
+        run: node scripts/optimize-acl2.mjs
+      - name: Initialize the logical world and verify proofs after restoring it
+        if: steps.core.outputs.cache-hit != 'true'
+        run: node tests/acl2-native.mjs miricl-precompiled.wasm build/acl2/acl2-native.wasm build/acl2/native-tests.json build/acl2/acl2-image.wasm
+      - name: Package selected math sources and browser distributions
+        run: |
+          node scripts/build-acl2-books.mjs
+          node scripts/build-acl2.mjs miricl-precompiled.wasm build/acl2/acl2-native.wasm build/acl2/site --initialized-image build/acl2/acl2-image.wasm build/acl2/native-tests.json
+          node scripts/build-acl2.mjs miricl-precompiled.wasm build/acl2/acl2.wasm build/acl2/preview --frontend-only
+      - name: Check native core loading, host adaptations, math sources and frontend protocol
+        run: |
+          node tests/acl2-load.mjs miricl-precompiled.wasm build/acl2/acl2-native.wasm
+          node tests/acl2-host.mjs miricl-precompiled.wasm
+          node tests/acl2-invariant-risk.mjs miricl-precompiled.wasm
+          node tests/acl2-fnnames.mjs miricl-precompiled.wasm
+          node tests/acl2-duplicates.mjs miricl-precompiled.wasm
+          node tests/acl2-guard-holders.mjs miricl-precompiled.wasm build/acl2/acl2-native.wasm
+          node tests/acl2-level-numbers.mjs miricl-precompiled.wasm build/acl2/acl2-native.wasm
+          node tests/acl2-oneify.mjs miricl-precompiled.wasm build/acl2/acl2-native.wasm
+          node tests/acl2-source-scanner.mjs miricl-precompiled.wasm build/acl2/acl2-native.wasm
+          node tests/acl2-books.mjs miricl-precompiled.wasm build/acl2/books
+          node tests/acl2-session.mjs miricl-precompiled.wasm
+          MIRICL_ACL2_TEST_PREFIX=/miricl/acl2 node tests/browser-acl2-app.mjs build/acl2/preview
+      - name: Verify the restored native prover in Chromium
+        run: MIRICL_ACL2_TEST_PREFIX=/miricl/acl2 node tests/browser-acl2-app.mjs build/acl2/site --initialized
+      - uses: actions/upload-artifact@v4
+        with:
+          name: application-acl2
+          path: build/acl2/site/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acl2-math-books
+          path: |
+            build/acl2/books/manifest.json
+            build/acl2/books/filesystem.bin.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acl2-build-results
+          path: |
+            build/acl2/fasl.json
+            build/acl2/fasl.json.progress.json
+            build/acl2/optimization.json
+            build/acl2/native-load.json
+            build/acl2/native-tests.json
+            build/acl2/retention.txt
+            build/acl2/books/dependency-scan.log
+          if-no-files-found: ignore
+
+  coalton:
+    name: Coalton native compiler and browser tour
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CHROMIUM: google-chrome
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/setup-miricl
+      - uses: actions/download-artifact@v4
+        with:
+          name: miricl-runtime
+      - name: Identify pinned Coalton sources
+        id: source
+        run: echo "revision=$(git -C vendor/coalton rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Cache pinned dependency checkouts
+        uses: actions/cache@v4
+        with:
+          path: build/coalton/deps
+          key: coalton-dependencies-v1-${{ runner.os }}-${{ hashFiles('coalton/dependencies.json', 'scripts/prepare-coalton.mjs') }}
+      - name: Prepare dependencies and check host support and tour examples
+        run: |
+          node scripts/prepare-coalton.mjs
+          node tests/coalton-host.mjs miricl-precompiled.wasm
+          node tests/coalton-tour.mjs
+      - name: Cache native Coalton compiler and standard library
+        id: core
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/coalton/coalton.wasm
+            build/coalton/runtime.wasm
+            build/coalton/compile.json
+            build/coalton/optimization.json
+            build/coalton/retention.txt
+          key: coalton-native-v1-${{ runner.os }}-${{ steps.source.outputs.revision }}-${{ hashFiles('miricl-precompiled.wasm', 'miricl-asdf.wasm', 'coalton/**', 'scripts/coalton*.mjs', 'scripts/probe-coalton.mjs', 'scripts/optimize-coalton.mjs', 'scripts/ports/named-readtables.lisp') }}
+      - name: Compile Coalton and its standard library on the default stack
+        if: steps.core.outputs.cache-hit != 'true'
+        run: |
+          node scripts/probe-coalton.mjs miricl-precompiled.wasm build/coalton/bootstrap/compile.json compiler
+          MIRICL_COALTON_SCOPE=compiler node scripts/optimize-coalton.mjs miricl-precompiled.wasm build/coalton/bootstrap/compiler-portable.wasm build/coalton/bootstrap/compiler.wasm
+          MIRICL_COALTON_BOOTSTRAP=build/coalton/bootstrap/compiler.wasm node scripts/probe-coalton.mjs miricl-precompiled.wasm build/coalton/compile.json
+          MIRICL_COALTON_BOOTSTRAP=build/coalton/bootstrap/compiler.wasm node scripts/optimize-coalton.mjs miricl-precompiled.wasm
+      - name: Package and test the native browser tour
+        run: |
+          node scripts/build-coalton.mjs miricl-precompiled.wasm build/coalton/coalton.wasm build/coalton/site
+          node tests/coalton-session.mjs miricl-precompiled.wasm build/coalton/coalton.wasm
+          node tests/browser-coalton.mjs build/coalton/site
+      - uses: actions/upload-artifact@v4
+        with:
+          name: application-coalton
+          path: build/coalton/site/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coalton-build-results
+          path: |
+            build/coalton/bootstrap/compile.json
+            build/coalton/bootstrap/optimization.json
+            build/coalton/bootstrap/optimization-failure.json
+            build/coalton/optimization-failure.json
+            build/coalton/compile.json
+            build/coalton/optimization.json
+            build/coalton/retention.txt
+            build/coalton/site/browser-test.json
+            build/coalton/site/preview-*.png
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: coalton-reproduction
+          path: |
+            build/coalton/coalton.wasm
+            build/coalton/runtime.wasm
+            build/coalton/optimization.json
+          if-no-files-found: ignore
+
   ansi:
     name: ANSI / ${{ matrix.mode }}
     needs: runtime
@@ -275,7 +456,7 @@ jobs:
         run: node tests/ansi.mjs miricl.wasm
       - name: Full ANSI suite
         timeout-minutes: 20
-        # Both execution modes must pass the unmodified upstream suite.
+        # Both execution modes must pass every upstream test.
         # Always render and upload diagnostics, including after a failed run.
         env:
           MIRICL_ANSI_REPORT: ${{ matrix.report }}.json
@@ -325,7 +506,7 @@ jobs:
 
   browser-examples:
     name: Assemble tested browser examples and size report
-    needs: [runtime, integration, applications]
+    needs: [runtime, integration, applications, acl2, coalton]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -351,6 +532,18 @@ jobs:
         with:
           name: application-fricas
           path: build/fricas/site
+      - uses: actions/download-artifact@v4
+        with:
+          name: application-acl2
+          path: build/acl2/site
+      - uses: actions/download-artifact@v4
+        with:
+          name: application-coalton
+          path: build/coalton/site
+      - uses: actions/download-artifact@v4
+        with:
+          name: acl2-math-books
+          path: build/acl2/books
       - name: Assemble static site and measure the actual payloads
         run: |
           mkdir -p public
@@ -359,6 +552,8 @@ jobs:
           cp -R game-of-life/build public/game-of-life
           cp -R build/maxima/site public/maxima
           cp -R build/fricas/site public/fricas
+          cp -R build/acl2/site public/acl2
+          cp -R build/coalton/site public/coalton
           node scripts/build-size-html.mjs . public/image-sizes.html index.html
       - uses: actions/upload-artifact@v4
         with:

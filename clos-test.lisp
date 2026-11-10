@@ -272,8 +272,8 @@
       (defclass cache-parent () ()) (defclass cache-child (cache-parent) ())")
     (let ((cases
       '((null :null "nil") (symbol :symbol "'x") (fixnum :fixnum "536870911")
-        (fixnum :fixnum "-536870912") (bignum :bignum "536870912")
-        (bignum :bignum "-536870913") (bignum :bignum "(ash 1 200)")
+        (fixnum :fixnum "-536870912") (fixnum :fixnum "1073741824") (bignum :bignum "9223372036854775808")
+        (fixnum :fixnum "-1073741825") (bignum :bignum "-9223372036854775809") (bignum :bignum "(ash 1 200)")
         (ratio :ratio "3/7") (single-float :single "1.25f0") (double-float :double "1.25d0")
         (complex :complex "#c(1 2)") (cons :cons "'(1 . 2)")
         (function :function "#'car") (character :character "#\\λ")
@@ -1428,11 +1428,11 @@
 
 (test native-bignum-interval-subtypes
   (m:with-interpreter (vm)
-    (dolist (lower '(* -536870914 -536870913 -536870912 -1 0 536870911 536870912 536870913))
-      (dolist (upper '(* -536870914 -536870913 -536870912 -1 0 536870911 536870912 536870913))
+    (dolist (lower '(* -9223372036854775810 -9223372036854775809 -9223372036854775808 -1 0 9223372036854775807 9223372036854775808 9223372036854775809))
+      (dolist (upper '(* -9223372036854775810 -9223372036854775809 -9223372036854775808 -1 0 9223372036854775807 9223372036854775808 9223372036854775809))
         (let* ((expected (or (and (integerp lower) (integerp upper) (> lower upper))
-                             (and (integerp upper) (< upper -536870912))
-                             (and (integerp lower) (> lower 536870911))))
+                             (and (integerp upper) (< upper -9223372036854775808))
+                             (and (integerp lower) (> lower 9223372036854775807))))
                (source (format nil "(and (equal (multiple-value-list (subtypep '(integer ~S ~S) 'bignum)) '(~S t))
                  (equal (multiple-value-list (subtypep '(integer ~S ~S) (find-class 'bignum))) '(~S t)))"
                  lower upper expected lower upper expected)))

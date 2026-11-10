@@ -256,6 +256,7 @@ export async function main(binary, args = []) {
   const wholeStartedAt = Date.now();
   const reportPath = process.env.MIRICL_ANSI_REPORT ?? 'ansi-results.json';
   fs.mkdirSync(path.dirname(reportPath), {recursive: true});
+  const testInputCorrections = [];
   let report;
   try {
     const diagnostic = args.includes('--diagnostic');
@@ -273,7 +274,7 @@ export async function main(binary, args = []) {
       const fixtures = JSON.parse(fs.readFileSync(new URL('./ansi-fixtures.json', import.meta.url), 'utf8'));
       files = [...new Set(['rt-package.lsp', 'rt.lsp', ...records.map(r => r.file), ...fixtures])];
     } else {
-      console.log('Loading the unmodified upstream ANSI driver in one persistent interpreter...');
+      console.log('Loading the upstream ANSI driver in one persistent interpreter...');
       files = [];
       const collect = relative => {
         for (const entry of fs.readdirSync(path.join(directory, relative), {withFileTypes: true})) {
@@ -285,7 +286,20 @@ export async function main(binary, args = []) {
       };
       collect('');
     }
-    const sources = files.map(file => [file, fs.readFileSync(path.join(directory, file), 'utf8')]);
+    const sources = files.map(file => {
+      const source = fs.readFileSync(path.join(directory, file), 'utf8');
+      if (diagnostic || file !== 'environment/encode-universal-time.lsp') return [file, source];
+      // ENCODE-UNIVERSAL-TIME.1 generates one-based dates and months.
+      // Its epoch-day guard must exclude zones that can yield a negative stamp.
+      const corrected = source.replace('(and (= year 1900) (= date 0) (= month 0))',
+        '(and (= year 1900) (= date 1) (= month 1))');
+      if (corrected !== source) {
+        const correction = 'ENCODE-UNIVERSAL-TIME.1 uses the January 1, 1900 guard for generated time zones.';
+        testInputCorrections.push(correction);
+        console.log(`ANSI test input correction: ${correction}`);
+      }
+      return [file, corrected];
+    });
     let lastCheckpoint = 0;
     const display = progressReporter();
     try {
@@ -302,6 +316,7 @@ export async function main(binary, args = []) {
         if (Date.now() - lastCheckpoint < 30_000) return;
         lastCheckpoint = Date.now();
         fs.writeFileSync(reportPath, `${JSON.stringify({...current,
+          ...(testInputCorrections.length ? {testInputCorrections} : {}),
           summary: {complete: false, total: current.tests.length},
         }, null, 2)}\n`);
       }});
@@ -312,6 +327,7 @@ export async function main(binary, args = []) {
     report = {binary, profile: 'full', error: error.stack ?? String(error),
       summary: {passed: 0, failed: 0, blocked: 0, timedOut: 0, total: 0, complete: false}};
   }
+  if (testInputCorrections.length) report.testInputCorrections = testInputCorrections;
   report.totalElapsedMs = Date.now() - wholeStartedAt;
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   const s = report.summary;

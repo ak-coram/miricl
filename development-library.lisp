@@ -1,7 +1,7 @@
 ;;;; Development facilities evaluated in WASM, after the object library.
-;; Match the signed 30-bit range used by TYPEP in runtime-types.lisp.
-(defconstant most-positive-fixnum 536870911)
-(defconstant most-negative-fixnum -536870912)
+;; FIXNUM includes both immediate i31 values and boxed signed i64 values.
+(defconstant most-positive-fixnum 9223372036854775807)
+(defconstant most-negative-fixnum -9223372036854775808)
 ;; IEEE binary32/binary64; SHORT and LONG alias SINGLE and DOUBLE.
 (defconstant pi 3.141592653589793d0)
 (defconstant most-positive-short-float 3.4028235e38)
@@ -1092,7 +1092,9 @@
                 (t (write-line "; Size unavailable for this runtime entry."))))
         (unless source
           (let ((code (%%compile 32 function)))
-            (when code (miricl-compiler::disassemble-native (car code) (cdr code)))))
+            ;; Compiler-free images retain the native entry and size display.
+            (when (and code (fboundp 'miricl-compiler::disassemble-native))
+              (miricl-compiler::disassemble-native (car code) (cdr code)))))
         (when closure (write-line "; Lexical environment retained."))))
     nil))
 
@@ -1217,6 +1219,11 @@
     (unless (eq object (find-class name nil)) (error 'error))
     (list 'find-class (list 'quote name))))
 
+(defun %restore-saved-slots (object names values bound)
+  ;; Keep one restoration program for every saved instance. In particular,
+  ;; SETF expansion must not manufacture fresh temporaries for every slot.
+  (%%restore-saved-slots object names values bound))
+
 (defun make-load-form-saving-slots (object &key (slot-names nil suppliedp) environment)
   (declare (ignore environment))
   (unless (or (typep object 'standard-object) (typep object 'structure-object))
@@ -1226,14 +1233,16 @@
       (when (eq (slot-definition-allocation slot) :instance)
         (push (slot-definition-name slot) slot-names)))
     (setq slot-names (nreverse slot-names)))
-  (let ((initializers nil) (target (list 'quote object)))
+  (let ((names nil) (values nil) (bound 0) (index 0))
     (dolist (name slot-names)
-      (push (if (slot-boundp object name)
-                (list 'setf (list 'slot-value target (list 'quote name))
-                  (list 'quote (slot-value object name)))
-                (list 'slot-makunbound target (list 'quote name))) initializers))
+      (push name names)
+      (if (slot-boundp object name)
+          (progn (setq bound (logior bound (ash 1 index))) (push (slot-value object name) values))
+          (push nil values))
+      (incf index))
     (values (list 'allocate-instance (list 'quote (class-of object)))
-            (cons 'progn (nreverse initializers)))))
+            (list '%restore-saved-slots (list 'quote object)
+              (list 'quote (nreverse names)) (list 'quote (nreverse values)) bound))))
 
 (defun lisp-implementation-type () "Miricl")
 (defun lisp-implementation-version () nil)

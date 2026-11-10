@@ -2,6 +2,32 @@
 (in-package #:miricl-test)
 (in-suite :miricl)
 
+(test integer-intersection-subtype-proofs
+  (m:with-interpreter (vm :fuel 100000000)
+    (let ((types `((bit 0 1) (fixnum ,(- (expt 2 63)) ,(1- (expt 2 63)))
+                   (integer nil nil) ((and fixnum unsigned-byte) 0 ,(1- (expt 2 63)))
+                   ((and integer rational t) nil nil)
+                   ((and (integer -5 20) (integer 0 30)) 0 20)
+                   ((and integer (rational (0) (3))) 1 2)
+                   ((and (mod 20) (and (integer 3 *) (integer * 8))) 3 8)
+                   ((and integer (real 1/3 2/3)) 1 0))))
+      (dolist (a types)
+        (dolist (b types)
+          (let ((expected
+                  (or (and (second a) (third a) (> (second a) (third a)))
+                      (and (or (null (second b)) (and (second a) (>= (second a) (second b))))
+                           (or (null (third b)) (and (third a) (<= (third a) (third b))))))))
+            (is (equal (list (not (null expected)) t)
+                       (m:evaluate vm `(multiple-value-list (subtypep ',(first a) ',(first b)))))
+                "Integer intersection ~S -> ~S" (first a) (first b))))))
+    (is (eq t (m:evaluate-string vm
+      "(and (equal (multiple-value-list
+               (subtypep '(and fixnum (satisfies never-call)) '(unsigned-byte 8))) '(nil nil))
+            (equal (multiple-value-list
+               (subtypep '(and integer float) nil)) '(t t))
+            (equal (multiple-value-list
+               (subtypep 'integer '(and))) '(t t)))")))))
+
 (test logical-class-subtype-proofs
   (m:with-interpreter (vm)
     (dolist (form
@@ -518,16 +544,17 @@
 
 (test native-integer-width-types
   (m:with-interpreter (vm :fuel 100000000)
-    (dolist (width '(1 2 14 15 16 28 29 30 31 44 45 46 59 60 61 127 128 129 1000))
+    (dolist (width '(1 2 14 15 16 28 29 30 31 44 45 46 59 60 61 62 63 64 65 127 128 129 1000))
       (let ((power (ash 1 width)))
         (dolist (number (list 0 1 -1 power (1- power) (1+ power) (- power) (- -1 power) (1- (- power))))
           (dolist (kind (if (zerop width) '(unsigned-byte) '(signed-byte unsigned-byte)))
             (let ((form `(typep ,number '(,kind ,width))))
               (is (eql (eval form) (m:evaluate vm form)) "Integer width mismatch: ~S" form))))))
-    (dolist (number (list -536870913 -536870912 -536870911 -1 0 1 536870910 536870911 536870912
-                         (ash 1 60) (- (ash 1 60))))
-      (is (eql (<= -536870912 number 536870911) (m:evaluate vm `(typep ,number 'fixnum))))
-      (is (eql (not (<= -536870912 number 536870911)) (m:evaluate vm `(typep ,number 'bignum)))))
+    (dolist (number (list -9223372036854775809 -9223372036854775808 -9223372036854775807
+                         -1073741825 -1073741824 -1 0 1 1073741823 1073741824
+                         9223372036854775806 9223372036854775807 9223372036854775808))
+      (is (eql (<= -9223372036854775808 number 9223372036854775807) (m:evaluate vm `(typep ,number 'fixnum))))
+      (is (eql (not (<= -9223372036854775808 number 9223372036854775807)) (m:evaluate vm `(typep ,number 'bignum)))))
     (is (eq t (m:evaluate vm '(let ((n (expt 2 100)))
       (and (typep -1 (list 'signed-byte n)) (typep 0 (list 'unsigned-byte n))
         (typep (expt 2 1000) (list 'signed-byte n)) (not (typep -1 (list 'unsigned-byte n))))))))))

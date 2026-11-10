@@ -174,7 +174,7 @@
     (reverse result)))
 (defun %cpl (class)
   (unless (%get class :finalized) (finalize-inheritance class)) (%get class :cpl))
-(defun %subclassp (class superclass) (not (not (%member superclass (%cpl class)))))
+(defun %subclassp (class superclass) (%%class-subclass-p class superclass))
 (defun %boot-class (name supers metaclass)
   (let ((class (%%allocate metaclass (list :name name :class-metaobject t
       :direct-superclasses supers :direct-subclasses nil :direct-slots nil :slots nil :finalized t))))
@@ -188,7 +188,7 @@
     (setf (%get super :direct-subclasses) (cons sub (%get super :direct-subclasses)))) nil)
 (defun remove-direct-subclass (super sub)
   (setf (%get super :direct-subclasses) (%remove sub (%get super :direct-subclasses))) nil)
-(defun %instancep (object class) (%subclassp (class-of object) class))
+(defun %instancep (object class) (%%instance-type-p object class))
 (defun type-of (object)
   (cond ((compiled-function-p object) 'compiled-function)
         ((eq object t) 'boolean)
@@ -1104,6 +1104,13 @@
 (defun %effective-call (gf method next args)
   (%invoke-method gf method next args
     (if next (lambda (newargs) (%effective-call gf (car next) (cdr next) newargs)) nil)))
+(defun %primary-effective (function gf method next)
+  ;; The next-method chain belongs to the cached effective method, not to an
+  ;; invocation. Only the context's original arguments vary between calls.
+  (let ((continuation (%%eval (list 'lambda '(%effective-args)
+            (list '%effective-call (%quote gf) (%quote (car next))
+              (%quote (cdr next)) '%effective-args)))))
+    (%%structure-function function gf (list method next continuation) 9)))
 (defun compute-discriminating-function (gf)
   (%%generic-discriminator gf (lambda (args) (%invoke-effective gf args))))
 (defun %dispatch-generic (gf args)
@@ -1696,6 +1703,7 @@
     (let ((entry (pop protocols))) (%promote (car entry) (cadr entry) (caddr entry) (cadddr entry)))))
 
 (defparameter %standard-class-slots-method (car (generic-function-methods #'class-slots)))
+(defparameter %standard-slot-definition-name-method (car (generic-function-methods #'slot-definition-name)))
 
 (funcall %raw-add-method (fdefinition 'make-instances-obsolete)
   (%%allocate (find-class 'standard-method)

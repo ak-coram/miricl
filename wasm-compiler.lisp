@@ -1,5 +1,5 @@
-;;;; Initial boxed Wasm backend. Control flow and calls execute in native Wasm;
-;;;; existing runtime primitives implement Common Lisp object operations.
+;;;; Native Wasm backend with immediate integer values and scalar arithmetic;
+;;;; runtime primitives handle generic Common Lisp operations and overflow.
 (in-package :miricl-compiler)
 
 (defvar *compile-evaluations* nil
@@ -38,6 +38,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-dynamic-bindings*)
 (defvar *wasm-entry-environment*)
 (defvar *wasm-exceptions*)
+(defvar *wasm-tail-calls* nil)
 
 ;; IDs are dense within one function. Slot zero represents the NIL key used
 ;; by instructions without outputs; value zero starts at slot one. Keeping
@@ -56,6 +57,11 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (get 'native-value-table 'miricl::runtime-inline-macro) t)
 (defparameter *native-imports*
   '(("native-literal" (:object :i32) :object)
+    ("native-tail-call" (:object :object) :object)
+    ("native-tail-multiple-value-call" (:object :object :object) :object)
+    ("native-int64" (:i64) :object)
+    ("native-unbox-int64" (:object) :i64)
+    ("native-boolean" (:i32) :object)
     ("native-argument" (:object :i32) :object)
     ("native-rest-argument" (:object :i32) :object)
     ("native-check-arguments" (:object :i32 :i32) nil)
@@ -122,7 +128,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (let ((bytes (utf8-bytes name))) (wasm-u32 (length bytes))
     (wasm-append bytes)))
 (defun wasm-type (type)
-  (ecase type (:object (wasm-byte #x6f)) (:i32 (wasm-byte #x7f)) (:function (wasm-byte #x70))))
+  (ecase type (:object (wasm-byte #x6f)) (:i32 (wasm-byte #x7f))
+    (:i64 (wasm-byte #x7e)) (:function (wasm-byte #x70))))
 (defun wasm-section (kind bytes)
   (wasm-byte kind) (wasm-u32 (length bytes)) (wasm-append bytes))
 (defmacro with-wasm-bytes (&body body)
@@ -187,10 +194,12 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (dolist (byte '(#x5e #x7f 1
                  #x4e 1 #x50 0 #x5f 7
                  #x7f 0 #x7f 1 #x7c 0 #x63 0 0
-                 #x63 1 1 #x63 1 1 #x63 1 1))
+                 #x6d 1 #x6d 1 #x6d 1))
     (wasm-byte byte)))
 (defun wasm-literal (value)
   (cond ((null value) (wasm-null))
+    ((and (integerp value) (<= -1073741824 value 1073741823))
+     (wasm-integer value) (wasm-gc #x1c) (wasm-gc #x1b))
     ((and *wasm-literal-locals* (gethash value *wasm-literal-locals*))
      (wasm-local (gethash value *wasm-literal-locals*)))
     (t
@@ -412,6 +421,120 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (wasm-call (nth (length (cddr inputs))
                '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4"))))
 
+(defun native-integer-width (value)
+  "A proven signed integer width of at most 64, or NIL when unknown."
+  (let* ((type (hir-value-type value)) (producer (hir-value-producer value))
+         (width
+           (cond ((eq type 'bit) 2) ((eq type 'fixnum) 64)
+             ((consp type)
+              (case (car type)
+                (integer (when (and (integerp (second type)) (integerp (third type))
+                                    (<= (second type) (third type)))
+                           (1+ (max (integer-length (second type)) (integer-length (third type))))))
+                (signed-byte (and (integerp (second type)) (second type)))
+                (unsigned-byte (and (integerp (second type)) (1+ (second type)))))))))
+    (or (and width (<= 1 width 64) width)
+        (and (%hir-instruction-p producer)
+          (case (hir-instruction-opcode producer)
+            (:constant (let ((literal (first (hir-instruction-attributes producer))))
+                         (and (integerp literal) (<= -9223372036854775808 literal 9223372036854775807)
+                              (1+ (integer-length literal)))))
+            (:primary (native-integer-width (first (hir-instruction-inputs producer)))))))))
+
+(defun emit-native-integer-call (inputs)
+  ;; Use native arithmetic only where type ranges prove no i64 overflow.
+  ;; Otherwise the shared integer kernels promote to bignums. The resolved
+  ;; function guard preserves redefinition, including additional return values
+  ;; when the caller observes a full value group (which does not take this path).
+  (unless (= (length inputs) 4) (return-from emit-native-integer-call nil))
+  (let* ((function (second inputs)) (producer (hir-value-producer function))
+         (name (and (%hir-instruction-p producer)
+                 (eq (hir-instruction-opcode producer) :function-reference)
+                 (first (hir-instruction-attributes producer))))
+         (opcode (cdr (assoc name '((+ . #x7c) (- . #x7d) (* . #x7e)
+                                   (< . #x53) (> . #x55) (<= . #x57) (>= . #x59)))))
+         (arithmetic (member name '(+ - *)))
+         (widths (and opcode (mapcar #'native-integer-width (cddr inputs))))
+         (code (and opcode (native-builtin-code name))))
+    (unless (and code (plusp code) (every #'identity widths)
+              (or (not arithmetic)
+                  (if (eq name '*) (<= (+ (first widths) (second widths)) 64)
+                      (<= (max (first widths) (second widths)) 63))))
+      (return-from emit-native-integer-call nil))
+    (setq *wasm-object-types* t)
+    (wasm-as-object function) (wasm-gc 2 1 1) (wasm-integer code) (wasm-byte #x46)
+    (wasm-byte #x04) (wasm-type :object)
+    (loop for operand in (cddr inputs) for width in widths do
+      (wasm-get operand)
+      (if (<= width 31)
+          (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
+          (wasm-call "native-unbox-int64")))
+    (wasm-byte opcode) (wasm-call (if arithmetic "native-int64" "native-boolean"))
+    (wasm-byte #x05) (emit-native-fixed-call inputs) (wasm-byte #x0b)
+    t))
+
+(defun native-tail-forward-p (block)
+  ;; Follow value-preserving, effect-free joins to a full multiple-value return.
+  (let ((seen nil))
+    (loop
+      (when (or (member block seen :test #'eq) (hir-block-instructions block)) (return nil))
+      (push block seen)
+      (let* ((parameter (first (hir-block-parameters block)))
+             (terminator (hir-block-terminator block)))
+        (unless (and parameter (eq parameter
+                   (if (eq (hir-instruction-opcode terminator) :block-return)
+                       (third (hir-instruction-inputs terminator))
+                       (first (hir-instruction-inputs terminator))))) (return nil))
+        (case (hir-instruction-opcode terminator)
+          (:return (return t))
+          ((:jump :block-return)
+           (unless (hir-instruction-attributes terminator) (return nil))
+           (setq block (first (hir-instruction-attributes terminator))))
+          (otherwise (return nil)))))))
+
+(defun native-tail-environment-p (environment function)
+  ;; A binding or captured exit in another branch must not inhibit this
+  ;; call. Uncaptured BLOCKs add HIR tokens but no runtime dynamic extent.
+  (loop
+    (when (eq environment (hir-function-environment function)) (return t))
+    (let ((producer (hir-value-producer environment)))
+      (unless (and (%hir-instruction-p producer)
+                   (eq (hir-instruction-opcode producer) :block-environment)
+                   (not (hir-target-captured-p (first (hir-instruction-attributes producer)))))
+        (return nil))
+      (let ((token (hir-value-producer (first (hir-instruction-inputs producer)))))
+        (unless (and (%hir-instruction-p token) (eq (hir-instruction-opcode token) :block-enter))
+          (return nil))
+        (setq environment (first (hir-instruction-inputs token)))))))
+
+(defun native-tail-calls (function)
+  (let ((calls nil))
+    (when (< (hir-function-debug-level function) 2)
+      (dolist (block (hir-function-blocks function))
+        (let* ((instruction (car (last (hir-block-instructions block))))
+               (terminator (hir-block-terminator block))
+               (output (and instruction (hir-instruction-output instruction))))
+          (when (and instruction (member (hir-instruction-opcode instruction) '(:call :multiple-value-call))
+                  (native-tail-environment-p (first (hir-instruction-inputs instruction)) function)
+                  (not (native-value-slot *wasm-single-calls* output))
+                  (eq output (if (eq (hir-instruction-opcode terminator) :block-return)
+                                 (third (hir-instruction-inputs terminator))
+                                 (first (hir-instruction-inputs terminator))))
+                  (case (hir-instruction-opcode terminator)
+                    (:return t)
+                    ((:jump :block-return)
+                     (and (hir-instruction-attributes terminator)
+                          (native-tail-forward-p (first (hir-instruction-attributes terminator)))))))
+            (push instruction calls)))))
+    calls))
+
+(defun emit-native-tail-call (inputs)
+  (wasm-get (second inputs)) (wasm-list (cddr inputs))
+  (let ((start (length *wasm-bytes*)))
+    (wasm-call "native-tail-call")
+    ;; Use the same import discovery/accounting as an ordinary call.
+    (setf (aref *wasm-bytes* start) #x12)))
+
 (defun emit-native-cons-access (inputs)
   (let* ((function (second inputs)) (producer (hir-value-producer function))
          (name (when (and (%hir-instruction-p producer)
@@ -429,10 +552,14 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (wasm-get (third inputs)) (wasm-byte #xd1)
       (wasm-byte #x04) (wasm-type :object) (wasm-null)
       (wasm-byte #x05)
+        ;; Generic Lisp values also include immediate i31 integers.
+        (wasm-get (third inputs)) (wasm-gc #x1a) (wasm-gc #x14 1)
+        (wasm-byte #x04) (wasm-type :object)
         (wasm-as-object (third inputs)) (wasm-gc 2 1 0)
         (wasm-integer 63) (wasm-byte #x71) (wasm-integer 7) (wasm-byte #x46)
         (wasm-byte #x04) (wasm-type :object)
           (wasm-as-object (third inputs)) (wasm-gc 2 1 field) (wasm-gc #x1b)
+        (wasm-byte #x05) (emit-native-fixed-call inputs) (wasm-byte #x0b)
         (wasm-byte #x05) (emit-native-fixed-call inputs) (wasm-byte #x0b)
       (wasm-byte #x0b)
     (wasm-byte #x05) (emit-native-fixed-call inputs) (wasm-byte #x0b)
@@ -518,10 +645,13 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                     (:cell-new "native-cell") (:cell-read "native-cell-read")
                     (:cell-write "native-cell-write") (:primary "native-primary"))))))
       (:call
+       (when (member instruction *wasm-tail-calls* :test #'eq)
+         (emit-native-tail-call inputs)
+         (return-from emit-native-instruction nil))
        (if (native-value-slot *wasm-single-calls* output)
            ;; Keep guards in the shared native primitives. Repeating CAR/CDR
            ;; type and redefinition checks at every call bloats Lisp-heavy code.
-           (emit-native-fixed-call inputs)
+           (unless (emit-native-integer-call inputs) (emit-native-fixed-call inputs))
            (progn (wasm-get (first inputs)) (wasm-get (second inputs))
                   (wasm-list (cddr inputs)) (wasm-call "native-call")
                   (when (native-value-slot *wasm-scalar-groups* output) (wasm-call "native-primary")))))
@@ -540,7 +670,12 @@ Bind to NIL to interpret forms, including forms without native lowering.")
          (wasm-get group)
          (when (native-value-slot *wasm-scalar-groups* group) (wasm-null) (wasm-call "native-cons")))
        (wasm-null) (dotimes (i (length (cddr inputs))) (wasm-call "native-cons"))
-       (wasm-call "native-multiple-value-call")
+       (if (member instruction *wasm-tail-calls* :test #'eq)
+           (let ((start (length *wasm-bytes*)))
+             (wasm-call "native-tail-multiple-value-call")
+             (setf (aref *wasm-bytes* start) #x12)
+             (return-from emit-native-instruction nil))
+           (wasm-call "native-multiple-value-call"))
        (when (native-value-slot *wasm-scalar-groups* output) (wasm-call "native-primary")))
       (:capture
        (wasm-local 0) (wasm-integer (first attributes)) (wasm-call "native-capture"))
@@ -705,7 +840,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (setf (gethash literal literal-locals) (+ (if forward 2 3) count)) (incf count))
     (vector targets forward *wasm-inline-constants* *wasm-local-cells*
             *wasm-dynamic-bindings* *wasm-entry-environment* *wasm-live-values*
-            *wasm-scalar-groups* *wasm-single-calls* locals count literal-locals literals)))
+            *wasm-scalar-groups* *wasm-single-calls* locals count literal-locals literals
+            (native-tail-calls function))))
 
 (defun emit-native-function-body (function)
   ;; Boxed SSA values are externref locals. A dispatcher is a first correct
@@ -731,7 +867,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
         (*wasm-dynamic-bindings* (svref plan 4)) (*wasm-entry-environment* (svref plan 5))
         (*wasm-live-values* (svref plan 6)) (*wasm-scalar-groups* (svref plan 7))
         (*wasm-single-calls* (svref plan 8)) (*wasm-locals* (svref plan 9)) (count (svref plan 10))
-        (*wasm-literal-locals* (svref plan 11)))
+        (*wasm-literal-locals* (svref plan 11))
+        (*wasm-tail-calls* (svref plan 13)))
    (when *wasm-function-relocations*
      (setf (gethash function *wasm-function-relocations*) nil))
    (with-wasm-bytes
@@ -908,7 +1045,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (unless (aref live index)
         (setf (aref live index) t)
         (loop for op across (aref decoded index) do
-          (when (member (native-op-code op) '(#x10 #xd2))
+          (when (member (native-op-code op) '(#x10 #x12 #xd2))
             (let ((target (native-op-argument op)))
               (if (< target old-count) (setf (aref used target) t)
                   (push (- target old-count) work)))))))
@@ -1036,7 +1173,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                    wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
                    native-builtin-code emit-native-object-types wasm-literal wasm-list
                    native-removable-p native-direct-cells native-forward-blocks native-live-values native-local-layout native-single-calls native-full-groups native-scalar-groups native-block-targets
-                   emit-native-fixed-call emit-native-cons-access native-fixed-arity emit-native-instruction emit-native-jump-value emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
+                   emit-native-fixed-call native-integer-width emit-native-integer-call
+                   native-tail-forward-p native-tail-environment-p native-tail-calls emit-native-tail-call
+                   emit-native-cons-access native-fixed-arity emit-native-instruction emit-native-jump-value emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant
                    hir-capture hir-cell-for-binding hir-special-p hir-declarations hir-shadow-specials native-debug-level
                    hir-bind-value hir-read-variable hir-write-variable hir-function-reference
@@ -1044,22 +1183,38 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
                    hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir
                    native-inline-constants native-loop-literals native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies emit-native-module
-                   hir-body hir-close hir-choice hir-expand-local-macros hir-lambda hir-form compile-to-hir
+                   hir-body hir-close hir-choice hir-expand-local-macros hir-lambda
+                   hir-let-form hir-tagbody-form hir-setq-form hir-local-functions-form
+                   hir-multiple-value-bind-form hir-block-form hir-simple-restart-form
+                   hir-restart-signal-form hir-symbol-iterate-form hir-while-form
+                   hir-multiple-value-call-form hir-return-from-form hir-values-form
+                   hir-application-form hir-recursive-form hir-form compile-to-hir
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-stack native-stackify-ops native-coalesce-ops native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
                    native-i32 native-fold-i32 native-clean-scopes native-simplify-ops native-prune-module
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
                    definition-info namespace form-references
+                   miricl::%normalize-lambda-1 miricl::%normalize-lambda
                    miricl::%compile-place-form miricl::%compile-parallel-places miricl::%compile-loop-collector
                    miricl::%compile-forms miricl::%compile-body miricl::%compile-lambda-parts
                    miricl::%compile-lambda-form miricl::%compile-closure miricl::%compile-bindings
                    miricl::%compile-local-functions miricl::%expand-backquote miricl::%compile-backquote
-                   miricl::%compile-option-function miricl::%compile-condition miricl::%compile-form
+                   miricl::%compile-option-function miricl::%compile-condition miricl::%compile-recursive-form miricl::%compile-form
                    miricl::%file-lexical-name miricl::%file-lexical-specials miricl::%file-lexical-bind
                    miricl::%file-lexical-reference miricl::%file-code-cons miricl::%file-lexical-forms
                    miricl::%file-lexical-function miricl::%file-lexical-call miricl::%file-lexical-form
                    miricl::%fasl-reference miricl::%fasl-dump
-                   compile-native record-edges pool-record-less-p layout-records compact-unit compile-linker ensure-compiler compile-compiler))
+                   miricl::%fasl-initialize miricl::%fasl-object-slow miricl::%fasl-finish-initializations
+                   ;; Cached generic dispatch still executes method plans and
+                   ;; CALL-NEXT-METHOD continuations on every invocation.
+                   ;; Keep those shared paths native alongside the compiler.
+                   miricl::%effective-call miricl::%around-plan miricl::%call-next miricl::%invoke-effective
+                   ;; Externalizing large constant graphs repeatedly uses
+                   ;; these shared slot and load-form operations.
+                   miricl::%slot-cell miricl::%cpl make-load-form-saving-slots
+                   compile-native record-edges pool-record-less-p layout-records compact-unit compile-linker ensure-compiler compile-compiler
+                   ;; Traverse large initializer and literal graphs natively.
+                   prepare-native-unit native-unit-records compile-native-bundle))
 
 (defvar *native-compiler-functions* (make-hash-table :test 'eq))
 (defvar *compiler-state* :cold)

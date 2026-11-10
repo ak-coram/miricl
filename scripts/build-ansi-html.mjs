@@ -93,6 +93,8 @@ export function renderAnsiReport(report, {commit = '', runURL = ''} = {}) {
       [`${path.basename(image.file)} Brotli (quality 11)`, `${number(image.brotliBytes)} bytes`],
     ]) : [['Image sizes', 'Not recorded']]),
     ['Inventory', report.inventory ?? 'Not recorded'],
+    ...(report.testInputCorrections?.length
+      ? [['Test input corrections', report.testInputCorrections.join(' ')]] : []),
     ['Reference tests', report.summary.referenceTests ?? expected ?? 'Not recorded'],
     ['Additional guest tests', report.summary.extraTests ?? 0],
     ['Worker recoveries', report.recoveries ?? 0],

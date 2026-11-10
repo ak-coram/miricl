@@ -26,8 +26,8 @@
     (then
       (local.set $delta (call $real-op (i32.const 1) (call $real-absolute (local.get $number)) (call $int (i32.const 1))))
       (return (call $coerce-float (local.get $delta) (i32.const 4))
-        (struct.get $obj $n (call $numerator (local.get $delta))))))
-  #@(local.set $distance (f64.sub (f64.abs (struct.get $obj $f (local.get $number))) (f64.const 1)))
+        (call $value-n (call $numerator (local.get $delta))))))
+  #@(local.set $distance (f64.sub (f64.abs (struct.get $obj $f (ref.cast (ref $obj) (local.get $number)))) (f64.const 1)))
   #@(local.get $distance)
   #@(i32.sub (f64.gt (local.get $distance) (f64.const 0)) (f64.lt (local.get $distance) (f64.const 0))))
 
@@ -92,11 +92,11 @@
   #@(if (call $zero (local.get $delta))
     (then (call $elementary-error (i32.const ,(runtime-symbol-id 'division-by-zero))
       (i32.const ,(runtime-symbol-id 'atanh)) (local.get $args))))
-  #@(local.set $sign (f64.convert_i32_s (struct.get $obj $n (call $numerator (local.get $z)))))
+  #@(local.set $sign (f64.convert_i32_s (call $value-n (call $numerator (local.get $z)))))
   #@(local.set $value (f64.copysign (f64.mul (f64.const 0.5)
     (f64.sub (call $positive-real-log (call $real-op (i32.const 0) (local.get $a) (call $int (i32.const 1))))
       (call $positive-real-log (call $real-absolute (local.get $delta))))) (local.get $sign)))
-  #@(if (i32.gt_s (struct.get $obj $n (call $numerator (local.get $delta))) (i32.const 0))
+  #@(if (i32.gt_s (call $value-n (call $numerator (local.get $delta))) (i32.const 0))
     (then (return (call $complex (call $float (i32.const 3) (local.get $value))
       (call $float (i32.const 3) (f64.copysign (f64.const 1.5707963267948966) (local.get $sign)))))))
   #@(call $float (i32.const 3) (local.get $value)))
@@ -114,7 +114,7 @@
       ;; Reuse ATAN's exact rational handling at arbitrarily close poles.
       (local.set $rotated (call $atan-native (call $complex
         (call $negate-number (call $part (local.get $z) (i32.const 1)))
-        (call $part (local.get $z) (i32.const 0))) (ref.null $obj) (i32.const 0)))
+        (call $part (local.get $z) (i32.const 0))) (ref.null eq) (i32.const 0)))
       (return (call $complex (call $part (local.get $rotated) (i32.const 1))
         (call $negate-number (call $part (local.get $rotated) (i32.const 0)))))))
   #@(local.set $x (call $coerce-float (call $part (local.get $z) (i32.const 0)) (i32.const 4)))
@@ -169,7 +169,7 @@
                 (else (f64.copysign (f64.mul (f64.const 0.5)
                   (call $log1p-f64 (f64.div (f64.mul (f64.const 2) (local.get $a))
                     (f64.sub (f64.const 1) (local.get $a))))) (local.get $x)))))))))))
-  #@(if (result (ref $obj)) (local.get $complex)
+  #@(if (result (ref eq)) (local.get $complex)
     (then (call $complex (call $elementary-float (local.get $kind) (local.get $r) (local.get $id) (local.get $args))
       (call $elementary-float (local.get $kind) (local.get $i) (local.get $id) (local.get $args))))
     (else (call $elementary-float (local.get $kind) (local.get $r) (local.get $id) (local.get $args)))))

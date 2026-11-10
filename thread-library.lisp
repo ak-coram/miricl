@@ -5,8 +5,17 @@
 (defun %thread (op &optional a b) (miricl::%%thread op a b))
 (defmacro %critical (&body body)
   (let ((old (gensym)))
-    (list 'let (list (list old '(%thread 13 1)))
+    (list 'let (list (list old '(%thread 17 1)))
       (list 'unwind-protect (cons 'progn body) (list '%thread 13 old)))))
+
+;; The low mask bit protects scheduler internals. The next bit defers interrupts
+;; across explicit waits too. Nested scheduler critical sections retain it.
+(defmacro without-interrupts (&body body)
+  "Defer asynchronous Lisp interrupts in BODY, restoring the prior mask on exit."
+  (list '%thread 19 (list 'function (list* 'lambda nil body)) nil))
+(defmacro with-interrupts (&body body)
+  "Enable asynchronous Lisp interrupts in BODY, restoring the prior mask on exit."
+  (list '%thread 19 (list 'function (list* 'lambda nil body)) t))
 
 (define-condition thread-error (error)
   ((message :initarg :message :reader %message))

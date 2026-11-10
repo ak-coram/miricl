@@ -111,7 +111,10 @@ try {
               (car *cycle*) *events* (car object)
               (format nil "~A" (make-printable)) (constants))))
   `);
-  builder.evaluate('(compile-file "/application.lisp")');
+  // A nested COMPILE-FILE must collect its own dependencies even when its
+  // caller is externalizing native output without dependency metadata.
+  builder.evaluate(`(progv (list (miricl-compiler::compiler-primitive 10 1 "%FILE-COLLECT-OBJECT-REFERENCES"))
+      '(nil) (compile-file "/application.lisp"))`);
   check(builder, '(not (boundp (quote whole-program-test::*events*)))');
   // Bundle sections exactly as ASDF does; no runtime image is consulted.
   const sections = await Promise.all(['/definitions.wasm', '/application.wasm'].map(name => builder.readFile(name)));
@@ -209,5 +212,37 @@ try {
   fresh.mountFile('/symbol-input.wasm', await builder.readFile('/symbol-small.wasm'));
   check(fresh, '(load "/symbol-input.wasm")');
   check(fresh, '(= (symbol-input-test::lookup "HIDDEN") 81)');
+  // The metadata pass and unit-at-a-time decoding must produce the same
+  // bytes as eager analysis, including when replacing the input pathname.
+  builder.evaluate(`(miricl-compiler::write-program
+    (miricl-compiler::mark-program (miricl-compiler:analyze-file "/all.wasm") nil nil nil)
+    "/eager.wasm")
+    (miricl-compiler:shake-file "/all.wasm" "/streamed.wasm" :strip nil) (values)`);
+  const eager = await builder.readFile('/eager.wasm');
+  assert.deepEqual(await builder.readFile('/streamed.wasm'), eager);
+  builder.mountFile('/in-place.wasm', bundle);
+  builder.evaluate('(miricl-compiler:shake-file "/in-place.wasm" "/in-place.wasm" :strip nil) (values)');
+  assert.deepEqual(await builder.readFile('/in-place.wasm'), eager);
+  builder.evaluate('(miricl-compiler:shake-file "/all.wasm" "relative/streamed.wasm" :strip nil) (values)');
+  assert.deepEqual(await builder.readFile('/relative/streamed.wasm'), eager);
+  // Replacing a relative output also exercises the publisher's backup rename.
+  builder.evaluate('(miricl-compiler:shake-file "/all.wasm" "relative/streamed.wasm" :strip nil) (values)');
+  assert.deepEqual(await builder.readFile('/relative/streamed.wasm'), eager);
+  // A malformed record in a later unit is discovered after the first unit
+  // was processed. Neither compaction nor native emission may publish it.
+  const good = await builder.readFile('/reflection.wasm');
+  const bad = Buffer.from(good);
+  bad[bad.length - 1] = 255;
+  builder.mountFile('/late-invalid.wasm', Buffer.concat([good, bad.subarray(8)]));
+  const sentinel = Buffer.from('keep the previous output');
+  for (const [name, operation] of [
+    ['compact', '(miricl-compiler:shake-file "/late-invalid.wasm" "/preserved.wasm" :strip nil)'],
+    ['native', '(miricl-compiler:compile-native-bundle "/late-invalid.wasm" "/preserved.wasm")'],
+  ]) {
+    builder.mountFile('/preserved.wasm', sentinel);
+    check(builder, `(handler-case (progn ${operation} nil) (error () t))`);
+    assert.deepEqual(await builder.readFile('/preserved.wasm'), new Uint8Array(sentinel), name);
+    check(builder, '(null (directory "/.preserved-*.wasm"))');
+  }
   console.log(`Whole-program IR: ${bundle.length} -> ${small.length} bytes; fresh LOAD preserves effects, methods, callbacks, SETF functions, Unicode/cycles and explicit roots; reflection remains conservative.`);
 } finally { builder.close(); fresh.close(); }

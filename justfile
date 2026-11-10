@@ -11,18 +11,19 @@ build_dir := env('MIRICL_BUILD_DIR', '.')
 interpreter := build_dir / 'miricl.wasm'
 wasi_repl := build_dir / 'miricl-repl.wasm'
 precompiled := build_dir / 'miricl-precompiled.wasm'
+interpreter_only := build_dir / 'miricl-interpreter.wasm'
 
 # List available commands.
 default:
     @just --list
 
-# Build the import-free interpreter, precompiled compiler image and WASI REPL.
+# Build the runtime, compiler-free interpreter, precompiled compiler and WASI REPL.
 build:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-wasm.lisp {{ quote(build_dir) }}
 
 # Report raw, gzip, Brotli, and per-section sizes for all runtime images.
 size: build
-    {{ quote(node) }} scripts/wasm-size.mjs {{ quote(interpreter) }} {{ quote(precompiled) }} {{ quote(wasi_repl) }}
+    {{ quote(node) }} scripts/wasm-size.mjs {{ quote(interpreter) }} {{ quote(interpreter_only) }} {{ quote(precompiled) }} {{ quote(wasi_repl) }}
 
 # Build a self-contained browser REPL (miricl.html), including the interpreter.
 build-html:
@@ -47,6 +48,20 @@ benchmark-game-of-life: build-game-of-life
 # Check source loading and interaction through the browser's precompiled compiler.
 test-game-of-life-dev: setup-game-of-life
     {{ quote(node) }} tests/browser-game-of-life.mjs game-of-life/dev.html --dev
+
+# Clone pinned Coalton dependencies into this workspace when absent.
+prepare-coalton:
+    {{ quote(node) }} scripts/prepare-coalton.mjs
+
+# Build the complete interactive compiler and standard library as native Wasm.
+build-coalton: build build-asdf prepare-coalton
+    {{ quote(node) }} scripts/probe-coalton.mjs {{ quote(precompiled) }} build/coalton/compile.json
+    {{ quote(node) }} scripts/optimize-coalton.mjs {{ quote(precompiled) }}
+    {{ quote(node) }} scripts/build-coalton.mjs {{ quote(precompiled) }}
+
+test-coalton:
+    {{ quote(node) }} tests/coalton-host.mjs {{ quote(precompiled) }}
+    {{ quote(node) }} tests/coalton-session.mjs {{ quote(precompiled) }} build/coalton/coalton.wasm
 
 # Build raw, gzip and Brotli size reports for the Wasm images and HTML pages.
 build-sizes: build build-asdf build-html build-todo build-game-of-life build-maxima build-fricas
@@ -244,6 +259,45 @@ ansi-init:
 # Initialize the pinned upstream ASDF/UIOP sources.
 asdf-init:
     git submodule update --init vendor/asdf
+
+# Probe ACL2 bootstrap in the guest; port mode uses the MIRICL host adaptations.
+# Requires vendor/acl2 to be present locally.
+probe-acl2 mode='upstream': build
+    {{ quote(node) }} scripts/probe-acl2.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/acl2' / (mode + '.json')) }} {{ quote(mode) }}
+
+# Emit and measure portable ACL2 FASLs; logical-world initialization is separate.
+compile-acl2: build
+    {{ quote(node) }} scripts/probe-acl2.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/acl2/fasl.json') }} fasl {{ quote(build_dir / 'build/acl2/acl2.wasm') }}
+
+test-acl2-host: build
+    {{ quote(node) }} tests/acl2-host.mjs {{ quote(precompiled) }}
+    {{ quote(node) }} tests/acl2-invariant-risk.mjs {{ quote(precompiled) }}
+    {{ quote(node) }} tests/acl2-fnnames.mjs {{ quote(precompiled) }}
+    {{ quote(node) }} tests/acl2-session.mjs {{ quote(precompiled) }}
+
+# Compile the complete dynamic prover to native Wasm on the default stack.
+compile-acl2-native: compile-acl2
+    {{ quote(node) }} scripts/optimize-acl2.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/acl2/acl2.wasm') }} {{ quote(build_dir / 'build/acl2/acl2-native.wasm') }}
+
+# Initialize and verify the native prover before packaging it for the browser.
+build-acl2: compile-acl2-native build-acl2-books
+    {{ quote(node) }} tests/acl2-native.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/acl2/acl2-native.wasm') }} {{ quote(build_dir / 'build/acl2/native-tests.json') }} {{ quote(build_dir / 'build/acl2/acl2-image.wasm') }}
+    {{ quote(node) }} scripts/build-acl2.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/acl2/acl2-native.wasm') }} {{ quote(build_dir / 'build/acl2/site') }} --initialized-image {{ quote(build_dir / 'build/acl2/acl2-image.wasm') }} {{ quote(build_dir / 'build/acl2/native-tests.json') }}
+
+# Build the UI without a prover core; evaluation stays disabled in this preview.
+preview-acl2: build build-acl2-books
+    {{ quote(node) }} scripts/build-acl2.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/acl2/acl2.wasm') }} {{ quote(build_dir / 'build/acl2/preview') }} --frontend-only
+
+test-acl2-frontend: preview-acl2
+    {{ quote(node) }} tests/acl2-session.mjs {{ quote(precompiled) }}
+    {{ quote(node) }} tests/browser-acl2-app.mjs {{ quote(build_dir / 'build/acl2/preview') }}
+
+# Package selected math sources separately; users certify/compile in the browser.
+build-acl2-books:
+    {{ quote(node) }} scripts/build-acl2-books.mjs {{ quote(build_dir / 'build/acl2/books') }}
+
+test-acl2-books: build build-acl2-books
+    {{ quote(node) }} tests/acl2-books.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'build/acl2/books') }}
 
 # Initialize the pinned canonical Maxima sources.
 maxima-init:

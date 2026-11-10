@@ -57,11 +57,25 @@ not permit other unstable WASM or WASI features.
 
 # Other
 
-Never perform remote Git operations, including push, pull, fetch,
-clone, or submodule commands that access a remote.
+Cloning repositories into clean checkouts is generally allowed without
+asking, including clones needed for a requested submodule addition.
+Use the requested remote and keep checkouts inside this workspace;
+do not reuse repositories from other projects unless the user
+explicitly asks.
 
-Local Git operations that change repository state require the user's
-explicit approval for the specific action. This includes staging,
+Do not search, browse, or inspect folders unrelated to the project
+you are working on without explicit permission. This applies to all
+files and folders, not just Git repositories, including the user's
+home directory and other projects. Limit file discovery to the active
+project workspace and temporary directories created for the current
+task, unless the user authorizes another specific location.
+
+Other remote Git operations, including push, pull, fetch, and submodule
+updates that access a remote, require the user's explicit approval.
+
+Except for creating a clean clone, local Git operations that change
+repository state require the user's explicit approval for the specific
+action. This includes staging,
 commits, amends, rebases, merges, cherry-picks, resets, restores,
 branch changes, and worktree changes. Read-only local inspection is
 allowed. Requests to implement, integrate, publish, or deploy work do

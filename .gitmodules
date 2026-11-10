@@ -10,3 +10,9 @@
 [submodule "vendor/fricas"]
 	path = vendor/fricas
 	url = https://github.com/fricas/fricas.git
+[submodule "vendor/acl2"]
+	path = vendor/acl2
+	url = https://github.com/acl2/acl2
+[submodule "vendor/coalton"]
+	path = vendor/coalton
+	url = https://github.com/coalton-lang/coalton

@@ -243,6 +243,27 @@
     (is (equal '(nil 0) (m:evaluate vm
       '(let ((*read-suppress* t) (*read-eval* nil))
          (let ((n 0)) (list (read-from-string "#.(setq n 1)") n))))))
+    ;; CCL and ECL disagree with these nested/suppressed conditional reads.
+    ;; Assert the specified results directly instead of using the host reader
+    ;; as an oracle. A skipped conditional produces no object; READ continues.
+    (dolist (case '(("(#+absent (#+absent2 x) :kept)" (:kept))
+                    ("(#-present (#-(or a b) #+a (ignore x) #-(or a b) (error x)) :kept)" (:kept))
+                    ("(#+absent #+absent2 (x) :kept)" nil)
+                    ("(#-present #-present (x) :kept)" nil)
+                    ("(#+present (#+present x #+absent y) :kept)" ((:x) :kept))))
+      (destructuring-bind (source expected) case
+        ;; Compare in the guest to avoid transporting newly read symbols.
+        (is (eq t (m:evaluate vm
+          `(equal (let ((*features* '(:present)) (*package* (find-package "KEYWORD")))
+                    (read-from-string ,source)) ',expected)))
+            "Nested feature suppression: ~S" source)))
+    (dolist (case '(("#+present 1 2" (nil 12)) ("#+absent 1 2" (nil 12))
+                    ("#-present 1 2" (nil 13))))
+      (destructuring-bind (source expected) case
+        (is (equal expected (m:evaluate vm
+          `(let ((*read-suppress* t) (*features* '(:present)))
+             (multiple-value-list (read-from-string ,source)))))
+            "Suppressed feature result: ~S" source)))
     (dolist (source '("#<" "#)" "# " ")"))
       (is (eq t (m:evaluate vm `(handler-case
         (let ((*read-suppress* t)) (read-from-string ,source)) (reader-error () t))))))

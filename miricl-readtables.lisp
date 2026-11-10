@@ -3,8 +3,14 @@
 
 (defstruct (wat-fragment (:constructor wat-fragment (text))) text)
 
+(defvar *wat-declaration-hook* nil)
+
 (defun wat-string (form)
   "Render a WAT tree. Strings are WAT strings; WAT-FRAGMENT inserts raw text."
+  (when (and *wat-declaration-hook* (consp form) (symbolp (car form))
+             (member (car form) '("type" "rec" "global") :test #'string-equal))
+    (setf form (let ((hook *wat-declaration-hook*) (*wat-declaration-hook* nil))
+                 (funcall hook form))))
   (with-output-to-string (out)
     (labels ((emit (value)
                (typecase value

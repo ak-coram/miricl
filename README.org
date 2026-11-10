@@ -54,10 +54,12 @@ on.
 
 *** Distribution
 
-The =miricl-runtime= build artifact contains five files:
+The =miricl-runtime= build artifact contains six files:
 
 - =miricl.js=: browser adapter and Node terminal command.
 - =miricl.wasm=: interpreter and compiler for browsers and Node.
+- =miricl-interpreter.wasm=: interpreter without the compiler. Compilation
+  is a no-op. Also published as the separate =miricl-interpreter= artifact.
 - =miricl-precompiled.wasm=: import-free interpreter with the size-optimized,
   bootstrapped native compiler ready at startup, for browsers and Node.
 - =miricl-repl.wasm=: Wasmtime terminal command and precompiled compiler for Node.
@@ -102,6 +104,7 @@ Keep LF line endings in Lisp sources, including submodules. On Windows,
 CRLF conversion can break multiline =FORMAT= strings in upstream ASDF.
 
 This produces =miricl.wasm=, the import-free interpreter,
+=miricl-interpreter.wasm=, its smaller compiler-free variant,
 =miricl-precompiled.wasm=, its variant with the compiler already
 compiled to native Wasm, and =miricl-repl.wasm=, the WASI 0.3 terminal
 REPL and development command. The adapter and WASI command provide the
@@ -340,9 +343,35 @@ optimized Wasm.  Declare and supply non-Lisp resources
 separately. =compile-bundle-op= bundles only one system;
 =monolithic-compile-bundle-op= includes its dependencies.
 
+**** Saved images
+
+=miricl-core:save-image= writes the current Lisp state to a Wasm file in
+the virtual filesystem. Its optional =:toplevel= argument accepts a
+zero-argument function or its symbol. Miricl calls it after restore.
+
+#+begin_src lisp
+(miricl-core:save-image "/app-image.wasm" :toplevel #'app:start)
+#+end_src
+
+Retrieve the image with =await lisp.readFile("/app-image.wasm")= and pass
+its bytes to =Miricl.instantiate= in a browser or in Node. The image
+includes the runtime, Lisp definitions, data, and virtual files. Host
+imports are supplied when opening the image. Save from a single Lisp
+thread with no live JavaScript values in the saved data.
+
 **** Compiler
 
-The compiler is built into the runtime images and shares the
+The =miricl-interpreter.wasm= variant omits the compiler. =compile= returns
+the original interpreted function (or installs an interpreted lambda under
+the requested name), with =nil= warning and failure values. =compile-file=
+copies source bytes to its usual output pathname and returns that pathname
+and two =nil= values; it performs no reading or compile-time evaluation.
+=load= recognizes those source copies even with a =.wasm= suffix. Existing
+portable FASLs also load normally. Setting =miricl-compiler:*compile-evaluations*=
+has no effect in this image. This deliberately differs from the standard
+requirement that compilation produce compiled functions.
+
+The other runtime images include the compiler, which shares the
 interpreter's Lisp objects:
 
 =miricl-compiler:*compile-evaluations*= selects the default for local

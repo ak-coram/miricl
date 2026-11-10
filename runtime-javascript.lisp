@@ -6,7 +6,7 @@
   (:export-raw "javascript-wrap")
   #@(struct.new $javascript-value (call $allocate-object-tag (i32.const 47))
     (i32.const 0) (f64.const 0) (ref.null $digits)
-    (ref.null $obj) (ref.null $obj) (ref.null $obj) (local.get $value)))
+    (ref.null eq) (ref.null eq) (ref.null eq) (local.get $value)))
 
 (define-runtime-function $javascript-unwrap (($value :nullable-object)) (externref)
   (:export-raw "javascript-unwrap")
@@ -23,7 +23,7 @@
   #@(if (i32.eq (local.get $operation) (i32.const 1))
     (then (return (call $bool (ref.test (ref $javascript-value) (local.get $a))))))
   #@(if (ref.is_null (table.get $javascript-services (i32.const 0)))
-    (then (return (call $apply ,(clos-library-reference 'miricl-js::%unavailable) (ref.null $obj)))))
+    (then (return (call $apply ,(clos-library-reference 'miricl-js::%unavailable) (ref.null eq)))))
   #@(call_indirect $javascript-services (type $javascript-service-type) (local.get $operation)
     (extern.convert_any (local.get $a)) (extern.convert_any (local.get $b))
     (extern.convert_any (local.get $c)) (i32.const 0))
@@ -31,11 +31,11 @@
   #@(local.set $value)
   #@(if (i32.eq (local.get $failed) (i32.const 1))
     (then (return (call $apply ,(clos-library-reference 'miricl-js::%raise-error)
-      (call $cons (call $javascript-wrap (local.get $value)) (ref.null $obj))))))
+      (call $cons (call $javascript-wrap (local.get $value)) (ref.null eq))))))
   ;; A successful bridge result is a Lisp value, including NIL, not raw JS.
   #@(call $clear-values)
   #@(if (i32.eq (local.get $failed) (i32.const 2)) (then (global.set $value-count (i32.const 0))))
-  #@(ref.cast (ref null $obj) (any.convert_extern (local.get $value))))
+  #@(ref.cast (ref null eq) (any.convert_extern (local.get $value))))
 
 ;; A small reflection ABI keeps traversal and allocation loops in Wasm. Scratch
 ;; data starts at CURSOR and is consumed before reentry; existing output is safe.
@@ -49,20 +49,24 @@
   #@(if (i32.eqz (local.get $operation)) (then (return (f64.convert_i32_u (call $tag (local.get $value))))))
   #@(if (i32.eq (local.get $operation) (i32.const 1)) (then (return (call $to-float (call $real (local.get $value))))))
   #@(if (i32.eq (local.get $operation) (i32.const 3)) (then (return (f64.convert_i32_u (call $stringp-native (local.get $value))))))
-  #@(f64.convert_i32_s (struct.get $obj $n (local.get $value))))
+  #@(f64.convert_i32_s (call $value-n (local.get $value))))
 
 (define-runtime-function $javascript-data (($value :nullable-object)) (i32 i32)
   (:export-raw "javascript-data")
-  (:locals ($data :digits) ($i i32) ($length i32) ($start i32))
+  (:locals ($data (ref null $digits)) ($i i32) ($length i32) ($start i32))
   #@(if (call $stringp-native (local.get $value))
     (then (local.set $value (call $string-contents (local.get $value)))))
-  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (local.get $value))))
-  #@(local.set $length (array.len (local.get $data)))
+  #@(if (i32.eq (call $tag (local.get $value)) (i32.const 1))
+    (then (local.set $length (call $integer-length (ref.as_non_null (local.get $value)))))
+    (else (local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $value)))))
+      (local.set $length (array.len (local.get $data)))))
   (wat-fail-when #@(i32.gt_u (local.get $length) (i32.const 1073741823)) :allocation)
   #@(local.set $start (call $javascript-buffer (i32.mul (local.get $length) (i32.const 4))))
   #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $length)))
     (i32.store align=1 (i32.add (local.get $start) (i32.mul (local.get $i) (i32.const 4)))
-      (array.get $digits (local.get $data) (local.get $i)))
+      (if (result i32) (i32.eq (call $tag (local.get $value)) (i32.const 1))
+        (then (call $digit (ref.as_non_null (local.get $value)) (local.get $i)))
+        (else (array.get $digits (local.get $data) (local.get $i)))))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
   #@(local.get $start)
   #@(local.get $length))
@@ -97,8 +101,8 @@
   #@(if (i32.eq (local.get $operation) (i32.const 7)) (then (return (call $symbol-name (local.get $a)))))
   #@(if (i32.eq (local.get $operation) (i32.const 8))
     (then (local.set $result (global.get $standard-output))
-      (global.set $standard-output (ref.null $obj))
-      (if (ref.is_null (local.get $result)) (then (return (ref.null $obj))))
+      (global.set $standard-output (ref.null eq))
+      (if (ref.is_null (local.get $result)) (then (return (ref.null eq))))
       (return (call $report-text (local.get $result)))))
   ;; APPLY restores dynamic scope even when a synchronous JS callback throws
   ;; to a surrounding Lisp target. Preserve the caller's multiple values too.
@@ -113,8 +117,8 @@
   #@(type $javascript-value (sub final $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64)
     (field $digits (ref null $digits))
-    (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj)))
-    (field $c (mut (ref null $obj))) (field $external externref))))
+    (field $a (mut (ref null eq))) (field $b (mut (ref null eq)))
+    (field $c (mut (ref null eq))) (field $external externref))))
   #@(type $javascript-service-type (func (param i32 externref externref externref) (result externref i32)))
   #@(table $javascript-services (export "javascript-services") 1 1 funcref)
   ;; Host VM termination can skip JavaScript finally blocks. UNWIND resets

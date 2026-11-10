@@ -16,6 +16,7 @@
 (defvar %file-object-references nil)
 (defvar %file-object-barriers nil)
 (defvar %file-object-effects nil)
+(defvar %file-collect-object-references t)
 (define-condition %fasl-not-created (error) ())
 
 (defun %fasl-reference (object)
@@ -25,6 +26,37 @@
     (setf (gethash object %fasl-seen) index)
     (push index %fasl-work)
     index))
+(defun %fasl-hash-table-forms (object)
+  ;; Hash tables are externalizable literals. Reserve their identity before
+  ;; installing entries, so keys/values can share or refer back to the table.
+  (let ((entries nil) (entry (gensym "HASH-ENTRY-")))
+    (maphash (lambda (key value) (push (cons key value) entries)) object)
+    (values
+      (list 'make-hash-table :test (list 'quote (hash-table-test object))
+        :size (hash-table-size object) :rehash-size (hash-table-rehash-size object)
+        :rehash-threshold (hash-table-rehash-threshold object))
+      (list 'dolist (list entry (list 'quote entries))
+        (list 'setf (list 'gethash (list 'car entry) (list 'quote object)) (list 'cdr entry))))))
+
+(defun %fasl-saved-slots (object creation initialization)
+  ;; Recognize only the exact standard helper result. A user's MLF method may
+  ;; wrap or replace either form; those methods retain the general path.
+  (when (and (consp creation) (= (length creation) 2) (eq (first creation) 'allocate-instance)
+             (consp (second creation)) (equal (first (second creation)) 'quote)
+             (= (length (second creation)) 2)
+             (consp initialization) (= (length initialization) 5)
+             (eq (first initialization) '%restore-saved-slots)
+             (every (lambda (form) (and (consp form) (= (length form) 2) (eq (first form) 'quote)))
+                    (subseq initialization 1 4))
+             (eq object (second (second initialization)))
+             (integerp (fifth initialization)) (not (minusp (fifth initialization))))
+    (let ((names (second (third initialization))) (values (second (fourth initialization)))
+          (bound (fifth initialization)))
+      (when (and (listp names) (listp values) (= (length names) (length values)))
+        (list 11 (%fasl-reference (second (second creation))) (%fasl-reference names)
+          (loop for value in values for i from 0
+                collect (if (logbitp i bound) (%fasl-reference value) -1)))))))
+
 (defun %fasl-dump (object)
   ;; Reserve graph references before encoding their contents. A worklist keeps
   ;; large constants independent of the host's control-stack depth.
@@ -38,13 +70,25 @@
              ;; These forms run while reconstructing constants even when the
              ;; surrounding local function is never called. Their dependencies
              ;; belong to object creation, independently of code reachability.
-             (when (fboundp 'miricl-compiler::form-references)
+             (when (and %file-collect-object-references (fboundp 'miricl-compiler::form-references))
                (multiple-value-bind (references barriers)
                    (miricl-compiler::form-references (car (gethash object %file-load-values)) %file-load-values)
                  (setq %file-object-references (union references %file-object-references :test #'equal)
                        %file-object-barriers (union barriers %file-object-barriers :test #'equal))))
              (list 10 (%fasl-reference (car (gethash object %file-load-values)))))
             ((null object) '(0))
+            ;; Most compiler objects are conses. Handle them before the
+            ;; less common numeric, character and string type checks.
+            ((consp object) (list 5 (%fasl-reference (car object)) (%fasl-reference (cdr object)) (%%compile 8 object)))
+            ((and (floatp object)
+                  (= (logand (float-bits object)
+                       (if (typep object 'single-float) #x7f800000 #x7ff0000000000000))
+                     (if (typep object 'single-float) #x7f800000 #x7ff0000000000000)))
+             ;; Nonfinite IEEE values have no ANSI reader syntax. Reconstruct
+             ;; their bits through the existing load-time-value record, keeping
+             ;; ordinary numeric records and the portable FASL format intact.
+             (list 10 (%fasl-reference
+               (list 'bits-float (float-bits object) (if (typep object 'single-float) 0f0 0d0)))))
             ((numberp object) (let ((*read-default-float-format* 'single-float))
                                (list 1 (write-to-string object :readably t :base 10 :radix nil))))
             ((characterp object) (list 2 (char-code object)))
@@ -52,7 +96,6 @@
             ((symbolp object) (list 4 (symbol-name object)
                               (and (symbol-package object) (package-name (symbol-package object)))
                               (if (symbol-package object) 0 (%%compile 9 object))))
-            ((consp object) (list 5 (%fasl-reference (car object)) (%fasl-reference (cdr object)) (%%compile 8 object)))
             ((arrayp object)
              (let ((dimensions (array-dimensions object))
                    (type (%fasl-reference (array-element-type object))) (elements nil))
@@ -66,43 +109,55 @@
             ((packagep object) (list 8 (package-name object)))
             (t
              (setq %file-object-effects t)
-             (multiple-value-bind (creation initialization) (make-load-form object)
-               (let ((%compilation-complete t))
+             (multiple-value-bind (creation initialization)
+                 (if (hash-table-p object) (%fasl-hash-table-forms object) (make-load-form object))
+               (let ((saved (%fasl-saved-slots object creation initialization))
+                     (%compilation-complete t))
+                 (when (and saved %file-collect-object-references (fboundp 'miricl-compiler::form-references))
+                   (multiple-value-bind (references barriers)
+                       (miricl-compiler::form-references (list 'progn creation initialization) %file-load-values)
+                     (setq %file-object-references (union references %file-object-references :test #'equal)
+                           %file-object-barriers (union barriers %file-object-barriers :test #'equal))))
+                 (if saved saved
                  (let ((creation (%compile-form creation nil))
                        (initialization (%compile-form initialization nil)))
-                   (when (fboundp 'miricl-compiler::form-references)
+                   (when (and %file-collect-object-references (fboundp 'miricl-compiler::form-references))
                      (multiple-value-bind (references barriers)
                          (miricl-compiler::form-references (list 'progn creation initialization) %file-load-values)
                        (setq %file-object-references (union references %file-object-references :test #'equal)
                              %file-object-barriers (union barriers %file-object-barriers :test #'equal))))
-                   (list 9 (%fasl-reference creation) (%fasl-reference initialization))))))))))
+                   (list 9 (%fasl-reference creation) (%fasl-reference initialization)))))))))))
     root))
 
 ;; Collect instance references before constructing an initialization form.
 ;; This lets initialization wait for a creation dependency without leaving a
 ;; partially reconstructed form in the ordinary cons/vector graph.
-(defun %fasl-dependencies (index)
-  (let ((seen (make-hash-table)) (dependencies nil) (work (list index)))
-    (loop while work do
-      (let ((id (pop work)))
-        (unless (gethash id seen)
-          (setf (gethash id seen) t)
-          (let ((record (aref %fasl-records id)))
-            (case (car record)
-              ((9 10) (pushnew id dependencies))
-              (5 (push (caddr record) work) (push (cadr record) work))
-              (6 (dolist (element (reverse (cadddr record))) (push element work))
-                 (push (caddr record) work))
-              (7 (push (cadr record) work)))))))
-    (nreverse dependencies)))
+(defun %fasl-dependencies (index &optional complete-graphs)
+  (let ((dependencies (%%compile 35 index complete-graphs)))
+    (if (eq dependencies t) (error '%fasl-not-created) dependencies)))
 (defun %fasl-initialize (index)
   (when (= (aref %fasl-states index) 2)
     (setf (aref %fasl-states index) 3)
     (handler-case
       (progn
-        (dolist (dependency (%fasl-dependencies (caddr (aref %fasl-records index))))
-          (%fasl-object dependency))
-        (eval (%fasl-object (caddr (aref %fasl-records index))))
+        (let ((record (aref %fasl-records index)))
+          (if (= (first record) 11)
+              (progn
+                (dolist (dependency (%fasl-dependencies (cons (third record) (remove -1 (fourth record))) t))
+                  (%fasl-object dependency))
+                (let* ((bound 0) (i 0)
+                      (names (%fasl-object (third record)))
+                      (values (mapcar (lambda (reference)
+                        (prog1 (unless (= reference -1)
+                                 (setq bound (logior bound (ash 1 i))) (%fasl-object reference))
+                          (incf i))) (fourth record))))
+                  (unless (= (length names) (length values)) (error "Invalid saved slot layout."))
+                  (%restore-saved-slots (aref %fasl-values index) names values bound)))
+              (progn
+                (dolist (dependency (%fasl-dependencies (third record) t)) (%fasl-object dependency))
+        ;; Like FASL top-level forms, these recipes have already passed the
+        ;; file compiler. Execute them without compiling them again via EVAL.
+                (%%eval (%fasl-object (third record))))))
         (setf (aref %fasl-states index) 4))
       (%fasl-not-created () (setf (aref %fasl-states index) 2) (pushnew index %fasl-pending)))))
 (defun %fasl-object (index) (%%compile 27 index))
@@ -138,9 +193,17 @@
              (setf (logical-pathname-translations (getf parts :host)) nil))
            (apply 'make-pathname parts)))
         (8 (or (find-package (cadr record)) (error 'package-error :package (cadr record))))
+        (11
+         (let ((value (allocate-instance (%fasl-object (second record)))))
+           (unless (and (listp (fourth record))
+                        (every (lambda (ref) (and (integerp ref) (<= -1 ref) (< ref (length %fasl-records))))
+                               (fourth record)))
+             (error "Invalid saved slot reference."))
+           (setf (aref %fasl-values index) value (aref %fasl-states index) 2)
+           (%fasl-initialize index) value))
         ((9 10)
          (dolist (dependency (%fasl-dependencies (cadr record))) (%fasl-object dependency))
-         (let ((value (eval (%fasl-object (cadr record)))))
+         (let ((value (%%eval (%fasl-object (cadr record)))))
            (setf (aref %fasl-values index) value (aref %fasl-states index) 2)
            (if (= (car record) 9) (%fasl-initialize index) (setf (aref %fasl-states index) 4)) value))
         (otherwise (error "Invalid compiled object kind."))))
@@ -179,7 +242,15 @@
     (when (member operator '(defvar defparameter))
       (proclaim (list 'special (second form))))
     (when (member operator '(in-package defpackage defmacro deftype defclass defstruct define-condition))
-      (unless compile-time-too (%%compile 7 environment form)))
+      (unless compile-time-too
+        ;; DEFINE-CONDITION must establish the type during compilation. Its
+        ;; report function can be an ordinary DEFUN in this same file, which
+        ;; is available only after loading. Install the report at load time.
+        (%%compile 7 environment
+          (if (eq operator 'define-condition)
+            (append (subseq form 0 4)
+              (remove :report (nthcdr 4 form) :key #'car))
+            form))))
     (multiple-value-bind (expansion expanded) (macroexpand-1 form environment)
       (when expanded (return-from %compile-top-level (%compile-top-level expansion environment compile-time-too))))
     (case operator
@@ -282,6 +353,7 @@
          (%fasl-records (make-array 32 :adjustable t :fill-pointer 0))
          (%fasl-seen (make-hash-table :test 'eq)) (%fasl-roots nil) (%file-top-declarations nil)
          (%file-definition nil) (%file-definition-id 0) (%file-ir nil)
+         (%file-collect-object-references t)
          (warnings nil) (failure nil))
     (when verbose (format t "~&; Compiling ~A~%" *compile-file-truename*))
     (handler-bind ((warning (lambda (condition) (setq warnings t) (unless (typep condition 'style-warning) (setq failure t)))))

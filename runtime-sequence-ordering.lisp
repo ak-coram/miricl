@@ -24,7 +24,7 @@
         (then (i32.gt_u (local.get $x) (local.get $y)))
         (else (i32.lt_u (local.get $x) (local.get $y)))))))
   #@(i32.eqz (ref.is_null (call $apply (local.get $function)
-    (call $cons (local.get $a) (call $cons (local.get $b) (ref.null $obj)))))))
+    (call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq)))))))
 
 ;; Take the right element only when it is strictly before the left. Equal
 ;; elements consequently retain input order, including across MERGE inputs.
@@ -56,7 +56,7 @@
   #@(local.set $list (i32.eq (call $tag (local.get $sequence)) (i32.const 7)))
   #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $count)))
     (array.set $objects (local.get $buffer) (i32.add (local.get $offset) (local.get $i))
-      (if (result (ref null $obj)) (local.get $cells) (then (local.get $sequence))
+      (if (result (ref null eq)) (local.get $cells) (then (local.get $sequence))
         (else (call $sequence-value (local.get $sequence) (local.get $i)))))
     (if (local.get $list) (then (local.set $sequence (call $cdr (local.get $sequence)))))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next))))
@@ -64,7 +64,7 @@
 (define-runtime-function $merge-lists-native
     (($a :nullable-object) ($b :nullable-object) ($key :nullable-object) ($function :nullable-object)) (:nullable-object)
   (:locals ($head :nullable-object) ($tail :nullable-object) ($cell :nullable-object) ($id i32))
-  #@(local.set $id (i32.sub (struct.get $obj $n (local.get $function)) (i32.const 1)))
+  #@(local.set $id (i32.sub (call $value-n (local.get $function)) (i32.const 1)))
   #@(block $done (loop $next
     (br_if $done (i32.or (ref.is_null (local.get $a)) (ref.is_null (local.get $b))))
     (if (call $ordering-less (call $car (local.get $b)) (call $car (local.get $a))
@@ -72,12 +72,12 @@
       (then (local.set $cell (local.get $b)) (local.set $b (call $cdr (local.get $b))))
       (else (local.set $cell (local.get $a)) (local.set $a (call $cdr (local.get $a)))))
     (if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
-      (else (struct.set $obj $b (local.get $tail) (local.get $cell))))
+      (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
     (local.set $tail (local.get $cell)) (br $next)))
-  #@(local.set $cell (if (result (ref null $obj)) (ref.is_null (local.get $a))
+  #@(local.set $cell (if (result (ref null eq)) (ref.is_null (local.get $a))
     (then (local.get $b)) (else (local.get $a))))
   #@(if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
-    (else (struct.set $obj $b (local.get $tail) (local.get $cell))))
+    (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
   #@(call $clear-values) #@(local.get $head))
 
 (define-runtime-function $ordering-native
@@ -113,13 +113,13 @@
         (if (i32.eq (call $id (local.get $type)) (i32.const ,(runtime-symbol-id 'vector)))
           (then (local.set $result (call $vector-new (array.new_default $objects (local.get $length)))) (br $allocated)))
         (local.set $result (call $apply (call $symbol (i32.const ,(runtime-symbol-id 'make-sequence)))
-          (call $cons (local.get $type) (call $cons (call $int (local.get $length)) (ref.null $obj))))))
+          (call $cons (local.get $type) (call $cons (call $int (local.get $length)) (ref.null eq))))))
       (local.set $list (i32.eqz (call $arrayp-native (local.get $result)))))
     (else
       (if (i32.lt_u (local.get $length) (i32.const 2))
         (then (call $clear-values) (return (local.get $sequence))))
       (local.set $cells (local.get $list)) (local.set $result (local.get $sequence))))
-  #@(local.set $id (i32.sub (struct.get $obj $n (local.get $function)) (i32.const 1)))
+  #@(local.set $id (i32.sub (call $value-n (local.get $function)) (i32.const 1)))
   #@(local.set $input (array.new_default $objects (local.get $length)))
   #@(local.set $output (array.new_default $objects (local.get $length)))
   #@(call $ordering-read (local.get $sequence) (local.get $input) (i32.const 0) (local.get $count1) (local.get $cells))
@@ -148,20 +148,20 @@
     (local.set $cell (array.get $objects (local.get $input) (local.get $i)))
     (if (local.get $new-list)
       (then
-        (local.set $cell (call $cons (local.get $cell) (ref.null $obj)))
+        (local.set $cell (call $cons (local.get $cell) (ref.null eq)))
         (if (ref.is_null (local.get $scan)) (then (local.set $result (local.get $cell)))
-          (else (struct.set $obj $b (local.get $scan) (local.get $cell))))
+          (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $scan)) (local.get $cell))))
         (local.set $scan (local.get $cell)))
       (else (if (local.get $cells)
       (then
         (if (i32.eqz (local.get $i)) (then (local.set $result (local.get $cell))))
-        (struct.set $obj $b (local.get $cell)
-          (if (result (ref null $obj)) (i32.lt_u (i32.add (local.get $i) (i32.const 1)) (local.get $length))
+        (struct.set $obj $b (ref.cast (ref $obj) (local.get $cell))
+          (if (result (ref null eq)) (i32.lt_u (i32.add (local.get $i) (i32.const 1)) (local.get $length))
             (then (array.get $objects (local.get $input) (i32.add (local.get $i) (i32.const 1))))
-            (else (ref.null $obj)))))
+            (else (ref.null eq)))))
       (else
         (if (local.get $list)
-          (then (struct.set $obj $a (local.get $scan) (local.get $cell)) (local.set $scan (call $cdr (local.get $scan))))
+          (then (struct.set $obj $a (ref.cast (ref $obj) (local.get $scan)) (local.get $cell)) (local.set $scan (call $cdr (local.get $scan))))
           (else (drop (call $array-raw-element (local.get $result) (local.get $i) (local.get $cell) (i32.const 1)))))))))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $write)))
   #@(call $clear-values) #@(local.get $result))

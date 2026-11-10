@@ -14,6 +14,15 @@ vm.mountFile('portable.lisp', `
   (defparameter *package-literal* #.*package*)
   (defparameter *encoding-probe* #.(map 'string #'code-char '(0 233 20013 119070)))
   (defstruct persisted-structure (value 42))
+  (defun persisted-character () #\\))
+  (defun report-persisted-condition (condition stream)
+    (write-string (persisted-message condition) stream))
+  (define-condition persisted-condition (condition)
+    ((message :initarg :message :reader persisted-message))
+    (:report report-persisted-condition))
+  (define-condition persisted-subcondition (persisted-condition) ())
+  (eval-when (:compile-toplevel)
+    (assert (subtypep 'persisted-subcondition 'persisted-condition)))
   (defparameter *loads* 0)
   (defun aux-captures (x &aux (before (lambda () x)) (x (1+ x))
                             (between (lambda () x)) (x (1+ x)))
@@ -67,6 +76,7 @@ const check = (machine, source) => assert.equal(machine.evaluate(source, {eof: t
 check(vm, `(let ((result (multiple-value-list (compile-file "portable.lisp" :verbose nil :print nil))))
   (and (= (length result) 3) (pathnamep (first result)) (null (second result)) (null (third result))))`);
 check(vm, `(not (fboundp 'compiled-package::persisted))`);
+check(vm, `(not (fboundp 'compiled-package::report-persisted-condition))`);
 const exported = vm.evaluate(`(with-open-file (stream "portable.wasm" :element-type '(unsigned-byte 8))
   (let ((bytes (make-array (file-length stream) :element-type '(unsigned-byte 8))))
     (read-sequence bytes stream) bytes))`, {eof: true}).output;
@@ -82,6 +92,10 @@ check(fresh, `(let ((*read-eval* nil) (*read-base* 16) (*readtable* (copy-readta
   (set-macro-character (code-char 40) (lambda (stream character) (declare (ignore stream character)) (error "User reader called.")))
   (load "portable.wasm" :verbose nil :print nil))`);
 check(fresh, `(equal (compiled-package::aux-captures 40) '(40 41 42))`);
+check(fresh, `(and (eq (compiled-package::persisted-character) (code-char 41))
+  (eq (compiled-package::persisted-character) (peek-char t (make-string-input-stream " )"))))`);
+check(fresh, `(string= (format nil "~A"
+  (make-condition 'compiled-package::persisted-subcondition :message "loaded report")) "loaded report")`);
 check(fresh, `(and (compiled-function-p #'compiled-package::persisted)
   (not (fboundp 'compiled-package::increment))
   (multiple-value-bind (x y object) (compiled-package::persisted 3 :y 5)

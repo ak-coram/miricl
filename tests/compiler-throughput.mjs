@@ -92,5 +92,29 @@ try {
   vm.evaluate(`(defparameter *throughput-function* (compile-native '(lambda (n) (list ${expressions})))) (values)`);
   for (const n of [-5, 7]) check(`(equal (funcall *throughput-function* ${n})
     '(${Array.from({length: 280}, (_, i) => n + i).join(' ')}))`);
-  console.log('Compiler throughput: LEB boundaries, operand barriers, record APIs, dense value validation, changed HIR reuse and 280 live temporaries pass.');
+  // Construct the tree in Lisp so this tests frontend recursion independently
+  // of the text reader's nesting bound. Large dispatcher frames used to trap.
+  check(`(let ((form '(values x :deep)))
+    (dotimes (i 1000)
+      (setq form (list 'let '((y x)) (list 'if 'y (list 'progn form) :absent))))
+    (let ((function (compile-native (list 'lambda '(x) form))))
+      (and (equal (multiple-value-list (funcall function 17)) '(17 :deep))
+           (eq (funcall function nil) :absent))))`);
+  // Each of these formerly overflowed at 1,000 levels on the default stack.
+  // Calls must keep left-to-right effects; THE must preserve multiple values.
+  check(`(let ((form 'x))
+    (dotimes (i 2000) (setq form (list 'identity form)))
+    (let ((function (compile-native (list 'lambda '(x) form))))
+      (and (= (funcall function 42) 42) (null (funcall function nil)))))`);
+  check(`(let ((form '(values x :second)))
+    (dotimes (i 2000) (setq form (list 'the '(values integer keyword) form)))
+    (equal (multiple-value-list (funcall (compile-native (list 'lambda '(x) form)) 42))
+      '(42 :second)))`);
+  check(`(let ((form '(values)) (zero '(values)))
+    (dotimes (i 1000)
+      (setq form (list 'if 'x form zero)))
+    (let ((function (compile-native (list 'lambda '(x) form))))
+      (and (null (multiple-value-list (funcall function t)))
+           (null (multiple-value-list (funcall function nil))))))`);
+  console.log('Compiler throughput: LEB boundaries, operand barriers, record APIs, dense value validation, changed HIR reuse, 280 live temporaries and deeply nested scopes pass.');
 } finally {vm.close();}

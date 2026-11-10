@@ -127,7 +127,7 @@ try {
   assert.ok(await js('ticks > 10'), 'The UI must remain responsive.');
   await command('Network.emulateNetworkConditions', {offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
   await command('Page.reload');
-  await waitFor('!document.querySelector("#resume").disabled');
+  await waitFor('document.querySelector("#resume")?.disabled === false');
   assert.equal(await js('document.querySelector("#session-name").value'), 'Notebook λ');
   assert.equal(await js('document.querySelectorAll("#history li").length'), savedCount);
   assert.equal(await js('document.querySelector("#evaluate").disabled'), true);

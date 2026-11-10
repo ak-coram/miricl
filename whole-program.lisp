@@ -5,7 +5,7 @@
 
 (defstruct ir-node kind name source group roots references barriers effect-p details
   retained-p reason)
-(defstruct ir-unit source records roots nodes bytes output-bytes)
+(defstruct ir-unit source records roots nodes bytes output-bytes record-count file payload-start payload-end)
 (defstruct ir-program units nodes definitions)
 
 (defun symbol-key (symbol)
@@ -133,8 +133,7 @@
         (seen-data (make-hash-table :test 'eq))
         (seen-functions (make-hash-table :test 'eq)))
     (labels ((reference (kind name)
-               (when (and (symbolp name) (symbol-package name)
-                          (not (eq (symbol-package name) (find-package "KEYWORD"))))
+               (when (and (symbolp name) (symbol-package name) (not (keywordp name)))
                  (pushnew (list kind (symbol-key name)) references :test #'equal)))
              (queue (value mode) (push (list value mode functions) work))
              (global-function-p (name) (not (assoc name functions :test #'equal)))
@@ -267,62 +266,59 @@
                               (queue operator :code))
                           ;; An unbounded reflective lookup can expose every
                           ;; supplied definition. Retain them, and explain why.
-                          (when (and (global-function-p operator)
-                                     (member operator '(eval compile load compile-file read read-preserving-whitespace read-from-string)))
-                            (pushnew (symbol-name operator) barriers :test #'equal))
-                          (when (and (global-function-p operator)
-                                     (member operator '(miricl::class-direct-subclasses miricl::class-direct-superclasses
-                                       miricl::class-slots miricl::class-direct-slots miricl::class-precedence-list
-                                       miricl::generic-function-methods miricl::specializer-direct-methods)))
-                            (pushnew (symbol-name operator) barriers :test #'equal))
-                          (when (and (global-function-p operator)
-                                     (member operator '(typep subtypep make-instance coerce make-sequence concatenate map merge)))
-                            (dolist (type (case operator
-                                            ((typep coerce) (list (second args)))
-                                            (subtypep (list (first args) (second args)))
-                                            (otherwise (list (first args)))))
-                              (unless (static-type-form-p type)
-                                (pushnew (symbol-name operator) barriers :test #'equal))))
-                          (when (and (global-function-p operator) (member operator '(make-array adjust-array)))
-                            (loop for options on (if (eq operator 'make-array) (cdr args) (cddr args)) by #'cddr
-                                  while (cdr options) do
-                              (when (or (not (keywordp (car options)))
-                                        (and (eq (car options) :element-type)
-                                             (not (static-type-form-p (second options)))))
-                                (pushnew (symbol-name operator) barriers :test #'equal))))
-                          (when (and (global-function-p operator) (eq operator 'coerce)
-                                     (equal (second args) '(quote function)))
-                            (if (and (consp (first args)) (eq (caar args) 'quote)
-                                     (symbolp (cadar args)))
-                                (function-reference (cadar args) t)
-                                (pushnew (list :indirect-call "COERCE-FUNCTION") barriers :test #'equal)))
-                          (when (and (global-function-p operator) (member operator '(intern find-symbol)))
-                            (pushnew (list :symbol-input (symbol-name operator)) barriers :test #'equal))
-                          (when (and (global-function-p operator) (member operator '(funcall apply)))
-                            (when (and (consp (car args)) (eq (caar args) 'quote)
+                          (when (global-function-p operator)
+                            (when (member operator '(eval compile load compile-file read read-preserving-whitespace read-from-string))
+                              (pushnew (symbol-name operator) barriers :test #'equal))
+                            (when (member operator '(miricl::class-direct-subclasses miricl::class-direct-superclasses
+                                     miricl::class-slots miricl::class-direct-slots miricl::class-precedence-list
+                                     miricl::generic-function-methods miricl::specializer-direct-methods))
+                              (pushnew (symbol-name operator) barriers :test #'equal))
+                            (when (member operator '(typep subtypep make-instance coerce make-sequence concatenate map merge))
+                              (dolist (type (case operator
+                                              ((typep coerce) (list (second args)))
+                                              (subtypep (list (first args) (second args)))
+                                              (otherwise (list (first args)))))
+                                (unless (static-type-form-p type)
+                                  (pushnew (symbol-name operator) barriers :test #'equal))))
+                            (when (member operator '(make-array adjust-array))
+                              (loop for options on (if (eq operator 'make-array) (cdr args) (cddr args)) by #'cddr
+                                    while (cdr options) do
+                                (when (or (not (keywordp (car options)))
+                                          (and (eq (car options) :element-type)
+                                               (not (static-type-form-p (second options)))))
+                                  (pushnew (symbol-name operator) barriers :test #'equal))))
+                            (when (and (eq operator 'coerce) (equal (second args) '(quote function)))
+                              (if (and (consp (first args)) (eq (caar args) 'quote)
                                        (symbolp (cadar args)))
-                              (function-reference (cadar args) t))
-                            (unless (and (consp (car args))
-                                         (member (caar args) '(function quote lambda)))
-                              (pushnew (list :indirect-call (symbol-name operator)) barriers :test #'equal)))
-                          (when (and (global-function-p operator) (member operator '(symbol-function fdefinition macro-function find-class)))
-                            (when (and (member operator '(symbol-function fdefinition))
-                                       (consp (car args)) (eq (caar args) 'quote))
-                              (function-reference (cadar args) t))
-                            (unless (and (consp (car args)) (eq (caar args) 'quote))
-                              (pushnew (symbol-name operator) barriers :test #'equal)))
-                          (when (and (global-function-p operator) (eq operator 'fdefinition) (consp (car args))
-                                     (eq (caar args) 'quote) (consp (cadar args))
-                                     (eq (caadar args) 'setf))
-                            (pushnew (list :function (function-key (cadar args))) references :test #'equal))
-                          (when (and (global-function-p operator) (member operator '(fboundp boundp symbol-value)))
-                            (unless (and (consp (car args)) (eq (caar args) 'quote))
-                              (pushnew (symbol-name operator) barriers :test #'equal)))
+                                  (function-reference (cadar args) t)
+                                  (pushnew (list :indirect-call "COERCE-FUNCTION") barriers :test #'equal)))
+                            (when (member operator '(intern find-symbol))
+                              (pushnew (list :symbol-input (symbol-name operator)) barriers :test #'equal))
+                            (when (member operator '(funcall apply))
+                              (when (and (consp (car args)) (eq (caar args) 'quote)
+                                         (symbolp (cadar args)))
+                                (function-reference (cadar args) t))
+                              (unless (and (consp (car args))
+                                           (member (caar args) '(function quote lambda)))
+                                (pushnew (list :indirect-call (symbol-name operator)) barriers :test #'equal)))
+                            (when (member operator '(symbol-function fdefinition macro-function find-class))
+                              (when (and (member operator '(symbol-function fdefinition))
+                                         (consp (car args)) (eq (caar args) 'quote))
+                                (function-reference (cadar args) t))
+                              (unless (and (consp (car args)) (eq (caar args) 'quote))
+                                (pushnew (symbol-name operator) barriers :test #'equal)))
+                            (when (and (eq operator 'fdefinition) (consp (car args))
+                                       (eq (caar args) 'quote) (consp (cadar args))
+                                       (eq (caadar args) 'setf))
+                              (pushnew (list :function (function-key (cadar args))) references :test #'equal))
+                            (when (member operator '(fboundp boundp symbol-value))
+                              (unless (and (consp (car args)) (eq (caar args) 'quote))
+                                (pushnew (symbol-name operator) barriers :test #'equal))))
                           (body args)))))))))))
       (values references barriers))))
 
-(defun read-units (file)
-  (let ((units nil))
+(defun read-units (file &key (records t))
+  (let ((file (truename file)) (units nil))
     (with-open-file (stream file :element-type '(unsigned-byte 8))
       (dolist (byte '(0 97 115 109 1 0 0 0))
         (unless (= byte (read-byte stream)) (error "Invalid FASL header.")))
@@ -334,16 +330,29 @@
               (error "Invalid FASL section length."))
             (loop for character across "miricl.fasl" do
               (unless (= (char-code character) (read-byte stream)) (error "Unexpected FASL section.")))
-            (let ((payload (read-unit-payload stream end :metadata t)))
-              (push (make-ir-unit :roots (first payload) :records (coerce (second payload) 'vector)
-                      :nodes (third payload) :bytes (- end start)) units))
+            (let ((payload-start (file-position stream)))
+              (multiple-value-bind (payload count) (read-unit-payload stream end :metadata t :records records)
+                (push (make-ir-unit :roots (first payload) :records (and records (coerce (second payload) 'vector))
+                        :nodes (third payload) :bytes (- end start) :record-count count
+                        :file (pathname file) :payload-start payload-start :payload-end end) units)))
             (file-position stream end)))))
     (nreverse units)))
 
-(defun analyze-file (file)
+(defun read-unit-records (unit)
+  ;; Analysis needs roots and definition metadata, not the externalized object
+  ;; graph. Decode a disk-backed unit only while its graph is being processed.
+  (or (ir-unit-records unit)
+      (with-open-file (stream (ir-unit-file unit) :element-type '(unsigned-byte 8))
+        (file-position stream (ir-unit-payload-start unit))
+        (multiple-value-bind (payload count) (read-unit-payload stream (ir-unit-payload-end unit))
+          (unless (and (= count (ir-unit-record-count unit)) (equal (first payload) (ir-unit-roots unit)))
+            (error "FASL unit changed during compilation."))
+          (second payload)))))
+
+(defun analyze-file (file &key (records t))
   "Read whole-program IR without executing FILE. Units without analysis are opaque effects."
   (when (ensure-compiler) (compile-linker))
-  (let ((units (read-units file)) (nodes nil) (definitions (make-hash-table :test 'equal)))
+  (let ((units (read-units file :records records)) (nodes nil) (definitions (make-hash-table :test 'equal)))
     (dolist (unit units)
       (let* ((metadata (ir-unit-nodes unit))
              (valid (and (eq (first metadata) :miricl-ir) (= (length metadata) 3)))
@@ -540,6 +549,7 @@
       ((member kind '(5 9)) (list (second record) (third record)))
       ((= kind 6) (cons (third record) (fourth record)))
       ((member kind '(7 10)) (list (second record)))
+      ((= kind 11) (list* (second record) (third record) (remove -1 (fourth record))))
       (t (error "Unknown FASL record kind ~S." kind)))))
 
 (defun coalesce-records (records live)
@@ -662,7 +672,7 @@
     (values mapping next)))
 
 (defun compact-unit (unit &optional index-definitions)
-  (let* ((records (ir-unit-records unit)) (count (length records))
+  (let* ((records (read-unit-records unit)) (count (length records))
          (live (make-array count :initial-element nil))
          (mapping nil)
          (kept (make-hash-table)) (roots nil) (work nil) (next 0))
@@ -692,6 +702,8 @@
                 ((= kind 7) (list 7 (aref mapping (second record)) (third record)))
                 ((= kind 9) (list 9 (aref mapping (second record)) (aref mapping (third record))))
                 ((= kind 10) (list 10 (aref mapping (second record))))
+                ((= kind 11) (list 11 (aref mapping (second record)) (aref mapping (third record))
+                  (mapcar (lambda (id) (if (= id -1) -1 (aref mapping id))) (fourth record))))
                 (t record))))))
       (let ((definitions nil))
         (when index-definitions
@@ -713,7 +725,7 @@
   (when output-records
     (format stream "Graph: ~D -> ~D records.~%"
       (reduce #'+ (ir-program-units program)
-        :key (lambda (unit) (length (ir-unit-records unit))) :initial-value 0)
+        :key (lambda (unit) (or (ir-unit-record-count unit) (length (ir-unit-records unit)))) :initial-value 0)
       output-records))
   (dolist (unit (ir-program-units program))
     (format stream "UNIT ~D -> ~D bytes ~S~%" (ir-unit-bytes unit)
@@ -722,31 +734,59 @@
     (format stream "~A ~S ~S ~S: ~S~%" (if (ir-node-retained-p node) "KEEP" "DROP")
       (ir-node-kind node) (ir-node-name node) (ir-node-source node) (ir-node-reason node))))
 
+(defun fresh-program-path (output)
+  (loop for path = (make-pathname :name (format nil ".~A-~A" (or (pathname-name (pathname output)) "fasl")
+                                               (symbol-name (gensym "BUILD-")))
+                                  :defaults (pathname output))
+        unless (probe-file path) return path))
+
+(defun call-with-program-output (output writer)
+  ;; Spool validated units instead of retaining their decoded graphs. Publish
+  ;; only after the final unit succeeds, including for an in-place build.
+  (let* ((output (merge-pathnames output (truename "./")))
+         (temporary (fresh-program-path output)) (backup nil) (complete nil))
+    (ensure-directories-exist output)
+    (unwind-protect
+        (let ((result
+                (with-open-file (stream temporary :direction :output :if-exists :error
+                                        :element-type '(unsigned-byte 8))
+                  (dolist (byte '(0 97 115 109 1 0 0 0)) (write-byte byte stream))
+                  (funcall writer stream))))
+          ;; RENAME-FILE need not overwrite an existing pathname. Keep a
+          ;; backup until publication, then release the old byte storage.
+          (when (probe-file output)
+            (setq backup (fresh-program-path output))
+            (rename-file output backup))
+          (rename-file temporary output)
+          (setq complete t)
+          result)
+      (unless complete
+        (when (and backup (probe-file backup) (not (probe-file output)))
+          (rename-file backup output)))
+      (when (probe-file temporary) (delete-file temporary))
+      (when (and complete backup (probe-file backup)) (delete-file backup)))))
+
 (defun write-program (program output &key report index-definitions)
   "Compact and write an already analyzed and marked program."
   (when (and report (equal (namestring (merge-pathnames output)) (namestring (merge-pathnames report))))
     (error "The retention report and application output must be different files."))
   (let* ((before (+ 8 (reduce #'+ (ir-program-units program) :key #'ir-unit-bytes :initial-value 0)))
-         (after 0) (units nil))
-    ;; Validate every graph before replacing an existing output, including when
-    ;; optimizing in place. No malformed late unit can leave a partial file.
-    (dolist (unit (ir-program-units program))
-      (multiple-value-bind (roots records definitions) (compact-unit unit index-definitions)
-        (when roots (push (list unit roots records definitions) units))))
-    (setq units (nreverse units))
-    (ensure-directories-exist output)
-    (with-open-file (stream output :direction :output :if-exists :supersede :element-type '(unsigned-byte 8))
-      (dolist (byte '(0 97 115 109 1 0 0 0)) (write-byte byte stream))
-      (dolist (unit units)
-        (let ((start (file-position stream)))
-          (write-unit stream (second unit) (third unit) (fourth unit))
-          (setf (ir-unit-output-bytes (first unit)) (- (file-position stream) start))))
-      (setq after (file-position stream)))
+         (after 0) (output-records 0))
+    (setq after
+      (call-with-program-output output
+        (lambda (stream)
+          (dolist (unit (ir-program-units program))
+            (multiple-value-bind (roots records definitions) (compact-unit unit index-definitions)
+              (when roots
+                (incf output-records (length records))
+                (let ((start (file-position stream)))
+                  (write-unit stream roots records definitions)
+                  (setf (ir-unit-output-bytes unit) (- (file-position stream) start))))))
+          (file-position stream))))
     (when report
       (ensure-directories-exist report)
       (with-open-file (stream report :direction :output :if-exists :supersede)
-        (write-report program stream before after
-          (reduce #'+ units :key (lambda (unit) (length (third unit))) :initial-value 0))))
+        (write-report program stream before after output-records)))
     (values (pathname output) program)))
 
 (defun shake-file (input output &key entry-points keep report index-definitions (strip t))
@@ -755,7 +795,8 @@ Unbounded reflection or units without analysis conservatively retain the whole i
 OUTPUT is a loadable FASL, not yet native application code.
 With STRIP NIL, retain every definition and compact only the representation."
   (when (and strip (null entry-points)) (error "Whole-program optimization requires explicit entry points."))
-  (write-program (mark-program (analyze-file input) entry-points keep strip) output :report report :index-definitions index-definitions))
+  (write-program (mark-program (analyze-file input :records nil) entry-points keep strip)
+    output :report report :index-definitions index-definitions))
 
 (defun optimize-system (system &key output entry-points keep report index-definitions ((:native native)) (strip t) (save t))
   "Build and prune an ASDF system; NATIVE compiles its retained code to Wasm."
@@ -774,64 +815,140 @@ With STRIP NIL, retain every definition and compact only the representation."
       (when report (miricl::%%filesystem 7 (miricl::%source-path report) nil)))
     (pathname target)))
 
-(defun compile-native-bundle (input output &key progress)
+(defun prepare-native-unit (unit count progress load)
+  (let ((functions nil) (entries nil) (recipes nil) (initializer-count 0)
+        (ordinary (make-hash-table :test 'eq)) (seen (make-hash-table :test 'eq))
+        (*hir-load-time-recipes* (make-hash-table :test 'eq)))
+    (let* ((miricl::%fasl-records (coerce (read-unit-records unit) 'vector))
+           (miricl::%fasl-values (make-array (length miricl::%fasl-records)))
+           (miricl::%fasl-states (make-array (length miricl::%fasl-records) :initial-element 0))
+           (miricl::%fasl-readtable (copy-readtable nil)) (miricl::%fasl-pending nil))
+      (declare (special miricl::%fasl-records miricl::%fasl-values miricl::%fasl-states
+                        miricl::%fasl-readtable miricl::%fasl-pending))
+      (dolist (root (ir-unit-roots unit))
+        (let ((form (miricl::%fasl-object root)))
+          (miricl::%fasl-finish-initializations)
+          (incf count)
+          (when progress (funcall progress (ir-unit-source unit) count))
+          (let ((hir (compile-to-hir (list 'lambda nil form))))
+            (push (first (hir-unit-functions hir)) entries)
+            (push (hir-unit-functions hir) functions)
+            (when load
+              ;; Execute native initializers in order, retaining TCO for deep
+              ;; calls. Run the size passes on the shared output module only.
+              (multiple-value-bind (bytes literals debug)
+                  (let ((*wasm-optimize* nil)) (emit-native-module hir))
+                (declare (ignore debug))
+                (multiple-value-bind (function native) (compiler-primitive 17 bytes literals nil)
+                  (unless native (error "This host cannot execute native bundle initializers."))
+                  (funcall function)))))))
+      ;; A LOAD-TIME-VALUE can create objects that cannot be dumped,
+      ;; including closures or instances containing functions. Retain its
+      ;; creation recipe instead of imposing MAKE-LOAD-FORM on the result.
+      ;; Ordinary literal records take precedence when an LTV aliases one.
+      (progn
+        (dotimes (index (length miricl::%fasl-records))
+          (when (and (= (aref miricl::%fasl-states index) 4)
+                     (/= (car (aref miricl::%fasl-records index)) 10))
+            (setf (gethash (aref miricl::%fasl-values index) ordinary) t)))
+        (dotimes (index (length miricl::%fasl-records))
+          (let* ((record (aref miricl::%fasl-records index))
+                 (value (aref miricl::%fasl-values index)))
+            (when (and (= (car record) 10) (= (aref miricl::%fasl-states index) 4)
+                       (not (gethash value ordinary)) (not (gethash value seen))
+                       ;; Immediate values and interned symbols can also
+                       ;; occur in newly emitted module metadata.
+                       (not (or (numberp value) (characterp value)
+                                (and (symbolp value) (symbol-package value)))))
+              (setf (gethash value seen) t)
+              (push (cons value (miricl::%fasl-object (cadr record))) recipes))))))
+    (setq initializer-count (length entries))
+    (let ((pending (nreverse recipes)) (compiled nil))
+      (loop
+        (maphash (lambda (value form)
+                   (unless (or (gethash value seen) (gethash value ordinary))
+                     (setf (gethash value seen) t)
+                     (push (cons value form) pending))) *hir-load-time-recipes*)
+        (unless pending (return))
+        (let* ((recipe (pop pending)) (hir (compile-to-hir (list 'lambda nil (cdr recipe)))))
+          (push recipe compiled)
+          (push (first (hir-unit-functions hir)) entries)
+          (push (hir-unit-functions hir) functions)))
+      (setq recipes (nreverse compiled)))
+    ;; These identity sets cover the decoded input graph. They are no
+    ;; longer needed once every creation recipe has been compiled.
+    (clrhash ordinary)
+    (clrhash seen)
+    (clrhash *hir-load-time-recipes*)
+    (setq ordinary nil seen nil *hir-load-time-recipes* nil)
+    (setq entries (nreverse entries))
+    (if entries
+        (multiple-value-bind (code literals debug)
+            (emit-native-module (make-hir-unit :functions (apply #'append (nreverse functions)))
+                                :entries entries)
+          (values code literals debug (mapcar #'car recipes) initializer-count count))
+        (values nil nil nil nil initializer-count count))))
+
+(defun native-unit-records (unit count progress load)
+  ;; Return from the HIR's owning frame before building the output graph.
+  ;; Its blocks, values and source forms can then be collected during dumping.
+  (multiple-value-bind (code literals debug recipe-values initializer-count next-count)
+      (prepare-native-unit unit count progress load)
+    (let ((miricl::%fasl-records (make-array 32 :adjustable t :fill-pointer 0))
+          (miricl::%fasl-seen (make-hash-table :test 'eq))
+          (miricl::%file-load-values (make-hash-table :test 'eq))
+          ;; Native output has no dependency IR; avoid analyzing references
+          ;; that would be discarded while externalizing large literal graphs.
+          (miricl::%file-collect-object-references nil) (roots nil))
+      (declare (special miricl::%fasl-records miricl::%fasl-seen miricl::%file-load-values
+                        miricl::%file-collect-object-references))
+      (when code
+        ;; Share one module across initializers, but reconstruct each entry's
+        ;; literals only after preceding initializers ran.
+        (setq code (map 'string #'code-char code))
+        (when debug (setf (svref debug 0) code))
+        (flet ((entry-form (index literal-vector)
+                 (list 'funcall
+                   (let ((entry (list 'miricl::%%compile 17
+                                  (list 'quote (cons code index))
+                                  (list 'quote literal-vector) nil)))
+                     (if debug
+                         (list 'miricl::%%compile 34 entry (list 'quote debug)
+                           (svref (svref debug 2) index))
+                         entry)))))
+          ;; Creation recipes are native entries in the same module, invoked
+          ;; by the loader when their opaque result is first needed.
+          (loop for value in recipe-values
+                for literal-vector in (nthcdr initializer-count literals)
+                for index from initializer-count do
+            (setf (gethash value miricl::%file-load-values)
+                  (list (entry-form index literal-vector))))
+          (loop for literal-vector in literals for index from 0 below initializer-count do
+            (push (miricl::%fasl-dump (entry-form index literal-vector)) roots))))
+      ;; Record indices now preserve sharing. Release the identity tables
+      ;; before returning, including references cached in dynamic cells.
+      (let ((roots (nreverse roots))
+            (records (coerce miricl::%fasl-records 'simple-vector)))
+        (setq miricl::%fasl-records nil miricl::%fasl-seen nil miricl::%file-load-values nil)
+        (values roots records next-count)))))
+
+(defun compile-native-bundle (input output &key progress load)
   "Compile a loaded application's FASL initializers and functions to Wasm.
 Run after dependency pruning, in the build environment that loaded the system.
-The result loads without invoking the Lisp compiler."
-  (let ((program (analyze-file input)) (units nil) (count 0))
-    (dolist (unit (ir-program-units program))
-      (let ((forms nil))
-        (let* ((miricl::%fasl-records (coerce (ir-unit-records unit) 'vector))
-               (miricl::%fasl-values (make-array (length miricl::%fasl-records)))
-               (miricl::%fasl-states (make-array (length miricl::%fasl-records) :initial-element 0))
-               (miricl::%fasl-readtable (copy-readtable nil)) (miricl::%fasl-pending nil))
-          (declare (special miricl::%fasl-records miricl::%fasl-values miricl::%fasl-states
-                            miricl::%fasl-readtable miricl::%fasl-pending))
-          (dolist (root (ir-unit-roots unit))
-            (push (miricl::%fasl-object root) forms)
-            (miricl::%fasl-finish-initializations)))
-        (let ((miricl::%fasl-records (make-array 32 :adjustable t :fill-pointer 0))
-              (miricl::%fasl-seen (make-hash-table :test 'eq))
-              (miricl::%file-load-values nil) (roots nil))
-          (declare (special miricl::%fasl-records miricl::%fasl-seen miricl::%file-load-values))
-          (let ((functions nil) (entries nil))
-            (dolist (form (nreverse forms))
-              (incf count)
-              (when progress (funcall progress (ir-unit-source unit) count))
-              (let ((hir (compile-to-hir (list 'lambda nil form))))
-                (push (first (hir-unit-functions hir)) entries)
-                (push (hir-unit-functions hir) functions)))
-            (setq entries (nreverse entries))
-            (when entries
-              (multiple-value-bind (code literals debug)
-                  (emit-native-module (make-hir-unit :functions (apply #'append (nreverse functions)))
-                                      :entries entries)
-                ;; Share one module across initializers, but reconstruct each
-                ;; entry's literals only after preceding initializers ran.
-                (setq code (map 'string #'code-char code))
-                ;; Share the FASL's existing code string with debug metadata.
-                ;; The Lisp runtime packs it once when the first entry loads.
-                (when debug (setf (svref debug 0) code))
-                (loop for literal-vector in literals for index from 0 do
-                  (push (miricl::%fasl-dump
-                          (list 'funcall
-                            (let ((entry (list 'miricl::%%compile 17
-                                           (list 'quote (cons code index))
-                                           (list 'quote literal-vector) nil)))
-                              (if debug
-                                  (list 'miricl::%%compile 34 entry (list 'quote debug)
-                                    (svref (svref debug 2) index))
-                                  entry)))) roots)))))
-          ;; Native emission creates new literal vectors and initializer forms.
-          ;; Pool their immutable records and lay out their graph just as for
-          ;; interpreted units; generated module bytes and entry order stay intact.
-          (setq roots (nreverse roots))
-          (multiple-value-bind (compacted-roots records)
-              (compact-unit (make-ir-unit :roots roots :records (coerce miricl::%fasl-records 'simple-vector)
-                              :nodes (list (make-ir-node :roots roots :retained-p t))))
-            (push (list compacted-roots records) units)))))
-    (ensure-directories-exist output)
-    (with-open-file (stream output :direction :output :if-exists :supersede :element-type '(unsigned-byte 8))
-      (dolist (byte '(0 97 115 109 1 0 0 0)) (write-byte byte stream))
-      (dolist (unit (nreverse units)) (write-unit stream (first unit) (second unit) nil)))
+The result loads without invoking the Lisp compiler.
+With LOAD true, construct the build environment by executing each initializer
+as native code before decoding the next one, in the original load order."
+  (let ((program (analyze-file input :records nil)) (count 0))
+    (call-with-program-output output
+      (lambda (stream)
+        (dolist (unit (ir-program-units program))
+          (multiple-value-bind (roots records next-count)
+              (native-unit-records unit count progress load)
+            (setq count next-count)
+            ;; Dumping has returned: only encoded records remain live while
+            ;; compaction pools their immutable data and orders the graph.
+            (multiple-value-bind (compacted-roots compacted-records)
+                (compact-unit (make-ir-unit :roots roots :records records
+                                :nodes (list (make-ir-node :roots roots :retained-p t))))
+              (write-unit stream compacted-roots compacted-records nil))))))
     (pathname output)))

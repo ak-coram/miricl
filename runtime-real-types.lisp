@@ -11,7 +11,7 @@
            ($upper :nullable-object) ($flags i32) ($mask i32))
   #@(local.set $name (local.get $type))
   #@(if (i32.eq (call $tag (local.get $type)) (i32.const 23))
-    (then (local.set $name (call $car (call $property-cell (struct.get $obj $b (local.get $type))
+    (then (local.set $name (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $type)))
       (call $symbol (i32.const ,(runtime-symbol-id :name))))))))
   #@(if (i32.eq (call $tag (local.get $type)) (i32.const 7))
     (then (local.set $name (call $car (local.get $type))) (local.set $args (call $cdr (local.get $type)))))
@@ -26,16 +26,16 @@
      #@(if (local.get $coverage) (then (local.set $mask (i32.const 16)))))
     (ratio #@(if (local.get $coverage) (then (local.set $mask (i32.const 32)))))
     (complex #@(if (local.get $coverage)
-      (then (return (ref.null $obj) (ref.null $obj) (i32.const 0) (i32.const 8)))))
+      (then (return (ref.null eq) (ref.null eq) (i32.const 0) (i32.const 8)))))
     ((number atom t) #@(if (local.get $coverage) (then (local.set $mask (i32.const 7))))))
   #@(if (i32.eqz (local.get $mask))
-    (then (return (ref.null $obj) (ref.null $obj) (i32.const 0) (i32.const 0))))
+    (then (return (ref.null eq) (ref.null eq) (i32.const 0) (i32.const 0))))
   #@(call $arity (local.get $args) (i32.const 0) (i32.const 2))
   #@(if (i32.eqz (ref.is_null (local.get $args)))
     (then
       (local.set $lower (call $car (local.get $args)))
       (if (i32.eq (call $id (local.get $lower)) (i32.const ,(runtime-symbol-id '*)))
-        (then (local.set $lower (ref.null $obj)))
+        (then (local.set $lower (ref.null eq)))
         (else (if (i32.eq (call $tag (local.get $lower)) (i32.const 7))
           (then (call $arity (local.get $lower) (i32.const 1) (i32.const 1))
             (local.set $lower (call $car (local.get $lower))) (local.set $flags (i32.const 1))))
@@ -45,7 +45,7 @@
         (then
           (local.set $upper (call $car (local.get $args)))
           (if (i32.eq (call $id (local.get $upper)) (i32.const ,(runtime-symbol-id '*)))
-            (then (local.set $upper (ref.null $obj)))
+            (then (local.set $upper (ref.null eq)))
             (else (if (i32.eq (call $tag (local.get $upper)) (i32.const 7))
               (then (call $arity (local.get $upper) (i32.const 1) (i32.const 1))
                 (local.set $upper (call $car (local.get $upper)))
@@ -101,10 +101,10 @@
            ($low f64) ($high f64))
   #@(call $real-type-interval (local.get $a) (i32.const 0))
   #@(local.set $mask) #@(local.set $flags) #@(local.set $hi) #@(local.set $lo)
-  #@(if (i32.eqz (local.get $mask)) (then (return (call $two-values (ref.null $obj) (ref.null $obj)))))
+  #@(if (i32.eqz (local.get $mask)) (then (return (call $two-values (ref.null eq) (ref.null eq)))))
   #@(call $real-type-interval (local.get $b) (i32.const 1))
   #@(local.set $bmask) #@(local.set $bflags) #@(local.set $bhi) #@(local.set $blo)
-  #@(if (i32.eqz (local.get $bmask)) (then (return (call $two-values (ref.null $obj) (ref.null $obj)))))
+  #@(if (i32.eqz (local.get $bmask)) (then (return (call $two-values (ref.null eq) (ref.null eq)))))
   #@(block $not-subtype
     (block $rational-done
       (br_if $rational-done (i32.eqz (i32.and (local.get $mask) (i32.const 1))))
@@ -125,10 +125,10 @@
         (then
           ;; An interval's rational members are all ratios exactly when it
           ;; contains no integer point. Reuse exact integer bound rounding.
-          (call $integer-type-interval (local.get $a) (i32.const 1))
+          (call $integer-type-interval (local.get $a) (i32.const 1) (ref.null eq))
           (local.set $kind) (local.set $integer-high) (local.set $integer-low)
           (if (i32.ne (local.get $kind) (i32.const 1))
-            (then (return (call $two-values (ref.null $obj) (ref.null $obj)))))
+            (then (return (call $two-values (ref.null eq) (ref.null eq)))))
           (br_if $not-subtype (i32.or (ref.is_null (local.get $integer-low)) (ref.is_null (local.get $integer-high))))
           (br_if $not-subtype (i32.le_s (call $integer-endpoint-compare
             (ref.as_non_null (local.get $integer-low)) (ref.as_non_null (local.get $integer-high))) (i32.const 0)))
@@ -171,21 +171,22 @@
       (local.set $kind (i32.add (local.get $kind) (i32.const 1)))
       (br_if $formats (i32.le_u (local.get $kind) (i32.const 4))))
     (return (call $two-values (call $symbol (i32.const 1)) (call $symbol (i32.const 1)))))
-  #@(call $two-values (ref.null $obj) (call $symbol (i32.const 1))))
+  #@(call $two-values (ref.null eq) (call $symbol (i32.const 1))))
 
-(define-runtime-function $numeric-subtypep (($a :nullable-object) ($b :nullable-object)) (:nullable-object)
+(define-runtime-function $numeric-subtypep
+    (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (:nullable-object)
   (:locals ($result :nullable-object))
-  #@(local.set $result (call $integer-subtypep (local.get $a) (local.get $b)))
+  #@(local.set $result (call $integer-subtypep (local.get $a) (local.get $b) (local.get $env)))
   #@(if (i32.eqz (ref.is_null (call $car (global.get $extra-values)))) (then (return (local.get $result))))
   #@(call $real-subtypep (local.get $a) (local.get $b)))
 
 (define-runtime-function $subtype-class (($type :nullable-object)) (:nullable-object)
   #@(if (call $symbolp (local.get $type)) (then (return (call $named-class (local.get $type)))))
   #@(if (i32.eq (call $tag (local.get $type)) (i32.const 23))
-    (then (if (i32.eqz (ref.is_null (call $car (call $property-cell (struct.get $obj $b (local.get $type))
+    (then (if (i32.eqz (ref.is_null (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $type)))
         ,(clos-library-reference :class-metaobject)))))
       (then (return (local.get $type))))))
-  #@(ref.null $obj))
+  #@(ref.null eq))
 
 (define-runtime-function $cons-type-parts
     (($type :nullable-object)) (:nullable-object :nullable-object i32)
@@ -193,7 +194,7 @@
   #@(if (i32.ne (call $id (local.get $type)) (i32.const ,(runtime-symbol-id 'cons)))
     (then
       (if (i32.ne (call $operator (local.get $type)) (i32.const ,(runtime-symbol-id 'cons)))
-        (then (return (ref.null $obj) (ref.null $obj) (i32.const 0))))
+        (then (return (ref.null eq) (ref.null eq) (i32.const 0))))
       (local.set $args (call $cdr (local.get $type)))
       (call $arity (local.get $args) (i32.const 0) (i32.const 2))))
   #@(local.set $car (call $symbol (i32.const 1)))
@@ -262,7 +263,7 @@
   #@(if (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'null)))
                 (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'boolean))))
     (then
-      (if (i32.eqz (call $typep-environment (ref.null $obj) (local.get $b) (local.get $env)))
+      (if (i32.eqz (call $typep-environment (ref.null eq) (local.get $b) (local.get $env)))
         (then (return (i32.const 2))))
       (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'boolean)))
         (then (if (i32.eqz (call $typep-environment (call $symbol (i32.const 1)) (local.get $b) (local.get $env)))
@@ -283,22 +284,22 @@
   #@(if (i32.or (ref.eq (local.get $a) (local.get $b))
         (i32.or (ref.is_null (local.get $a)) (ref.eq (local.get $b) (call $symbol (i32.const 1)))))
     (then (return (call $two-values (call $symbol (i32.const 1)) (call $symbol (i32.const 1))))))
-  #@(local.set $result (call $numeric-subtypep (local.get $a) (local.get $b)))
+  #@(local.set $result (call $numeric-subtypep (local.get $a) (local.get $b) (local.get $env)))
   #@(if (i32.eqz (ref.is_null (call $car (global.get $extra-values)))) (then (return (local.get $result))))
   #@(local.set $ca (call $subtype-class (local.get $a)))
   #@(local.set $cb (call $subtype-class (local.get $b)))
   #@(if (i32.eqz (ref.is_null (local.get $ca)))
     (then
       (if (ref.is_null (local.get $b))
-        (then (return (call $two-values (ref.null $obj) (call $symbol (i32.const 1))))))
+        (then (return (call $two-values (ref.null eq) (call $symbol (i32.const 1))))))
       ;; A finalized CPL is the same metadata consulted by the Lisp fallback.
       ;; Unfinalized classes retain the generic finalization protocol.
       (if (i32.eqz (ref.is_null (local.get $cb)))
         (then
-          (if (i32.eqz (ref.is_null (call $car (call $property-cell (struct.get $obj $b (local.get $ca))
+          (if (i32.eqz (ref.is_null (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $ca)))
                 ,(clos-library-reference :finalized)))))
             (then
-              (local.set $cpl (call $car (call $property-cell (struct.get $obj $b (local.get $ca))
+              (local.set $cpl (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $ca)))
                 ,(clos-library-reference :cpl))))
               (if (i32.eqz (ref.is_null (local.get $cpl)))
                 (then (return (call $two-values (call $bool (call $member-eq (local.get $cb) (local.get $cpl)))
@@ -306,7 +307,7 @@
       (if (i32.eq (call $id (local.get $b)) (i32.const ,(runtime-symbol-id 'atom)))
         (then
           (local.set $cpl (call $car (call $property-cell
-            (struct.get $obj $b (call $named-class (call $symbol (i32.const ,(runtime-symbol-id 'cons)))))
+            (struct.get $obj $b (ref.cast (ref $obj) (call $named-class (call $symbol (i32.const ,(runtime-symbol-id 'cons))))))
             ,(clos-library-reference :cpl))))
           (return (call $two-values (call $bool (i32.eqz (call $member-eq (local.get $ca) (local.get $cpl))))
             (call $symbol (i32.const 1))))))))
@@ -325,7 +326,7 @@
     (then (return (call $two-values (call $bool (i32.eq (local.get $proof) (i32.const 1)))
       (call $symbol (i32.const 1))))))
   #@(call $apply ,(clos-library-reference '%subtypep-general)
-    (call $cons (local.get $a) (call $cons (local.get $b) (call $cons (local.get $env) (ref.null $obj))))))
+    (call $cons (local.get $a) (call $cons (local.get $b) (call $cons (local.get $env) (ref.null eq))))))
 
 (define-runtime-section real-type-runtime-wat ()
   ($real-type-interval) ($adjacent-float) ($float-interval-bound) ($real-subtypep) ($numeric-subtypep)

@@ -99,6 +99,76 @@ uncompiled library support. Once those functions are compiled, the reader and
 evaluator can become optional production extensions. Object storage, allocation,
 numeric operations, closures and conditions remain part of the runtime.
 
+** Integer representations
+
+Generic Lisp value slots use WasmGC =eqref=. Integers have three canonical
+representations, with automatic promotion and demotion according to value:
+
+- Signed 31-bit integers, from =-2^30= through =2^30-1=, use =i31ref=.
+  They occupy value slots directly and allocate no heap object.
+- Other signed 64-bit integers use a scalar object subtype with an =i64=
+  payload. It has no digit array and adds no fields to unrelated objects.
+- Larger integers use immutable sign/magnitude arrays in base =2^15=.
+
+Common Lisp =fixnum= covers both scalar representations, so its limits are
+=-2^63= and =2^63-1=. =bignum= is the complementary integer range.
+Arithmetic never silently wraps: the runtime checks scalar overflow and
+falls back to the digit kernels. Signed-minimum negation and division use
+unsigned magnitudes where necessary. Bit operations retain infinite
+two's-complement semantics across all tiers.
+
+The compiler emits small integer literals directly with =ref.i31=. For
+single-value arithmetic and comparison calls, literal values and =the=
+integer ranges can prove a safe native =i64= path. Immediate operands are
+extracted directly; wider scalar operands use the runtime unbox entry.
+Results are converted back to canonical Lisp values when they enter generic
+value slots. The compiler guards the resolved built-in function so global
+redefinition still works. Operations whose ranges may overflow use the
+runtime's promoting kernels. General integer unboxing across control-flow
+joins and function boundaries remains future work.
+
+** IEEE bit conversion
+
+The guest extensions =miricl:float-bits= and =miricl:bits-float= reinterpret
+IEEE representations directly in Wasm. =float-bits= accepts a float and returns
+its unsigned 32- or 64-bit integer representation. =bits-float= accepts an
+unsigned integer of that width and a float prototype selecting the format.
+Out-of-range bits and non-float prototypes signal a type error. Short floats
+share the single format, and long floats share the double format.
+
+Explicit bit construction accepts infinities and NaNs. Promoting a single
+float into its internal double-width slot can quiet a signaling NaN under
+Wasm's NaN rules. Ordinary arithmetic retains its invalid-result checks;
+rational conversion and decomposition reject nonfinite values. The printer
+uses descriptive unreadable representations, and signals =print-not-readable=
+when readable output is requested. Compiled files reconstruct nonfinite
+literals through the existing load-time-value record, so they need neither
+a new FASL format nor JavaScript conversion helpers.
+
+** Native tail calls
+
+The compiler recognizes calls whose complete multiple-value result flows
+directly to the function return, including through effect-free joins and local
+block returns. It emits stable Wasm =return_call= instructions to a runtime
+dispatcher, which resolves the actual callee and uses =return_call_ref= to enter
+native code. Both the caller and dispatcher frames disappear. This supports
+self recursion, mutual recursion, closures and computed function designators;
+it does not depend on recognizing a particular function name. Tail calls through
+the built-in =APPLY= and =FUNCALL= dispatchers and =MULTIPLE-VALUE-CALL= use the
+same path. Global function redefinition and argument evaluation order remain
+observable.
+
+Tail-call lowering is conservative when a call has active local dynamic bindings
+or captured nonlocal block targets, or a debug optimization level of at least 2.
+Bindings and captured targets confined to other branches do not inhibit a call;
+uncaptured lexical blocks have no runtime dynamic extent.
+Those calls retain the ordinary runtime path, as do interpreted and other
+non-native callees. Outer cleanup and handler scopes remain active around a
+tail-recursive native computation. Multiple values, dynamic binding restoration,
+nonlocal exits, argument checks and thread checkpoints retain their normal
+semantics. Connecting a debugger alone does not disable optimized tail calls;
+debug-enabled callees preserve their interactive entry path.
+
 ** Frontend and definition IR
 
 =compile-file= records a =:miricl-ir= extension
@@ -174,6 +244,14 @@ analysis metadata; the definition directory is optional. Pass =:strip nil= to
 =shake-file= or =optimize-system= (=--no-strip= on the terminal command) to
 retain every definition while compacting its representation. All graphs are
 compacted before replacing the output.
+
+The =compile-native-bundle= backend emits native initializers and closures.
+With =:load t=, it executes each initializer as native code before decoding the
+next one, so package, function, class, and load-time dependencies are available
+in their original order. Computed object literals retain native creation
+entries for their =LOAD-TIME-VALUE= recipes. This supports objects containing
+closures without requiring =MAKE-LOAD-FORM= methods for those computed values.
+The loader creates them when first needed and shares the resulting objects.
 
 ** Indexed FASL format
 

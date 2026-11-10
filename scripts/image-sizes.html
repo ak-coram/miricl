@@ -63,7 +63,7 @@
 <body>
 <main>
   <header><strong>miricl / Image sizes</strong><nav aria-label="Related pages">
-    <a href="@@REPL@@">REPL</a><a href="todo.html">TODO</a><a href="game-of-life/">Game of Life</a><a href="maxima/">Maxima</a><a href="fricas/">FriCAS</a><a href="ansi-results.html">ANSI results</a>
+    <a href="@@REPL@@">REPL</a><a href="todo.html">TODO</a><a href="game-of-life/">Game of Life</a><a href="maxima/">Maxima</a><a href="fricas/">FriCAS</a>@@ACL2@@@@COALTON@@<a href="ansi-results.html">ANSI results</a>
   </nav></header>
   <div class="workspace">
     <h1>Image sizes</h1>
@@ -78,7 +78,7 @@
       Game of Life serves four separate files: HTML, JavaScript adapter, interpreter and application FASL.
       Its total sums those files, compressing each separately. The Lisp payload row is already included in that total.
       Maxima's total includes its nine startup files, including the optimized Lisp core.
-      FriCAS's total likewise counts eleven startup files, with the complete on-demand algebra library and command help.
+      FriCAS's total likewise counts twelve startup files, with the complete on-demand algebra library and command help.
       Maxima documentation and test suites are excluded from its distribution.
       On GitHub Pages, the REPL is named <code>index.html</code>.</p>
     <p class="note"><code>miricl.wasm</code> contains the interpreter and compiler source, compiled on first use.
@@ -89,6 +89,10 @@
       conservative retention. Its size reduction comes from compaction and sharing.</p>
     <p class="note">Maxima retains its complete dynamic environment for arbitrary REPL expressions and package loading.
       The optimizer compacts constants and code and removes compiler indexes; it does not restrict the available mathematics.</p>
+    <p class="note">When an ACL2 build is present, its total includes the native compiled core, runtime and compressed system sources.
+      The native core does not yet contain an initialized logical world; prover bootstrap remains unverified.
+      Selected math book sources and their dependencies are a separate download, fetched on first access and compiled by the user on demand.
+      Each included source file is at most 2,000,000 bytes. Already compressed archives are measured as served files.</p>
     <h2>How these sizes are measured</h2>
     <p>Raw sizes are exact file lengths. Gzip uses level 9; Brotli uses quality 11.
       The web server chooses which compression to serve. 1 KiB = 1,024 bytes.</p>

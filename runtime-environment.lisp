@@ -18,12 +18,13 @@
   ;; public CAR/CDR argument checks on every lexical lookup.
   #@(block $done (loop $next
     (br_if $done (ref.is_null (local.get $env)))
-    (local.set $binding (struct.get $obj $a (local.get $env)))
-    (if (i32.and (i32.lt_u (call $tag (local.get $binding)) (i32.const 30))
-                   (i32.eq (struct.get $obj $n (local.get $binding)) (local.get $id)))
+    (local.set $binding (struct.get $obj $a (ref.cast (ref $obj) (local.get $env))))
+    (if (i32.and
+          (i32.lt_u (i32.and (struct.get $obj $tag (ref.cast (ref $obj) (local.get $binding))) (i32.const 63)) (i32.const 30))
+          (i32.eq (struct.get $obj $n (ref.cast (ref $obj) (local.get $binding))) (local.get $id)))
         (then (return (local.get $binding))))
-    (local.set $env (struct.get $obj $b (local.get $env))) (br $next)))
-  #@(ref.null $obj))
+    (local.set $env (struct.get $obj $b (ref.cast (ref $obj) (local.get $env)))) (br $next)))
+  #@(ref.null eq))
 
 (define-runtime-function $bind
     (($env :nullable-object) ($name :nullable-object) ($value :nullable-object))
@@ -32,14 +33,14 @@
   #@(call $cons (call $node (i32.const 9) (call $id (local.get $name))
     ;; The existing cell's spare C slot keeps the binding's symbol available to
     ;; the interpreter debugger, without allocating or registering a name map.
-    (call $node (i32.const 11) (i32.const 0) (local.get $value) (ref.null $obj) (local.get $name))
+    (call $node (i32.const 11) (i32.const 0) (local.get $value) (ref.null eq) (local.get $name))
     (call $symbol (i32.const 1))
     (call $bool (call $specialp (local.get $name)))) (local.get $env)))
 
 (define-runtime-function $binding-value
     (($binding :nullable-object))
     (:nullable-object)
-  #@(struct.get $obj $a (struct.get $obj $a (local.get $binding))))
+  #@(struct.get $obj $a (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding))))))
 
 (define-runtime-function $lookup
     (($env :nullable-object) ($name :nullable-object))
@@ -47,13 +48,13 @@
   (:locals ($binding :nullable-object) ($value :nullable-object))
   #@(local.set $binding (call $find (local.get $env) (call $id (local.get $name))))
   #@(if (i32.eqz (ref.is_null (local.get $binding)))
-      (then (if (ref.is_null (struct.get $obj $c (local.get $binding)))
-                (then (if (i32.eq (struct.get $obj $n (struct.get $obj $a (local.get $binding))) (i32.const 2))
+      (then (if (ref.is_null (struct.get $obj $c (ref.cast (ref $obj) (local.get $binding))))
+                (then (if (i32.eq (call $value-n (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))) (i32.const 2))
                         (then (return (call $eval (call $macroexpand-1 (local.get $name) (local.get $env)) (local.get $env)))))
-                      ,(wat-fail-when #@(struct.get $obj $n (struct.get $obj $a (local.get $binding))) :unbound-variable)
+                      ,(wat-fail-when #@(call $value-n (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))) :unbound-variable)
                       (return (call $binding-value (local.get $binding)))))
             (local.set $value (call $symbol-value (local.get $name)))
-            (call $check-type (local.get $value) (struct.get $obj $b (local.get $binding)))
+            (call $check-type (local.get $value) (struct.get $obj $b (ref.cast (ref $obj) (local.get $binding))))
             (return (local.get $value))))
   #@(if (i32.eqz (ref.is_null (global.get $symbol-macros)))
     (then (if (i32.eqz (ref.is_null (call $symbol-macro-binding (local.get $name) (local.get $env))))
@@ -67,11 +68,11 @@
   #@(call $check-variable (local.get $name))
   #@(local.set $binding (call $find (local.get $env) (call $id (local.get $name))))
   #@(if (i32.eqz (ref.is_null (local.get $binding)))
-      (then (call $check-type (local.get $value) (struct.get $obj $b (local.get $binding)))
-            (if (ref.is_null (struct.get $obj $c (local.get $binding)))
+      (then (call $check-type (local.get $value) (struct.get $obj $b (ref.cast (ref $obj) (local.get $binding))))
+            (if (ref.is_null (struct.get $obj $c (ref.cast (ref $obj) (local.get $binding))))
                 (then
-                      (struct.set $obj $a (struct.get $obj $a (local.get $binding)) (local.get $value))
-                      (struct.set $obj $n (struct.get $obj $a (local.get $binding)) (i32.const 0)) (return)))))
+                      (struct.set $obj $a (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))) (local.get $value))
+                      (struct.set $obj $n (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))) (i32.const 0)) (return)))))
   #@(drop (call $set-symbol-value (local.get $name) (local.get $value))))
 
 (define-runtime-function $declare-special
@@ -81,13 +82,13 @@
   #@(block $done (loop $next (br_if $done (ref.is_null (local.get $names)))
     (local.set $name (call $car (local.get $names)))
     (call $check-variable (local.get $name))
-    (local.set $scan (local.get $env)) (local.set $cell (ref.null $obj))
+    (local.set $scan (local.get $env)) (local.set $cell (ref.null eq))
     (block $found (loop $search (br_if $found (ref.eq (local.get $scan) (local.get $stop)))
       (local.set $binding (call $car (local.get $scan)))
       (if (i32.and (i32.lt_u (call $tag (local.get $binding)) (i32.const 30))
-                  (i32.eq (struct.get $obj $n (local.get $binding)) (call $id (local.get $name))))
-          (then (local.set $cell (struct.get $obj $a (local.get $binding)))
-                (if (i32.and (ref.is_null (struct.get $obj $c (local.get $binding)))
+                  (i32.eq (call $value-n (local.get $binding)) (call $id (local.get $name))))
+          (then (local.set $cell (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding))))
+                (if (i32.and (ref.is_null (struct.get $obj $c (ref.cast (ref $obj) (local.get $binding))))
                             (i32.eqz (ref.is_null (local.get $cell))))
                     (then (global.set $dynamic-variables (call $cons (local.get $binding) (global.get $dynamic-variables)))))
                 (br $found)))
@@ -119,7 +120,7 @@
               (local.set $names (call $cdr (call $cdr (local.get $spec)))))
         (else
               (if (ref.is_null (call $apply ,(clos-library-reference '%declaration-type-p)
-                    (call $cons (call $car (local.get $spec)) (ref.null $obj))))
+                    (call $cons (call $car (local.get $spec)) (ref.null eq))))
                 (then (local.set $specs (call $cdr (local.get $specs))) (br $next)))
               (local.set $type (call $car (local.get $spec)))
               (local.set $names (call $cdr (local.get $spec)))))
@@ -133,35 +134,35 @@
               ;; A free type declaration does not read or bind the variable.
               ;; Retain its assertion for references and assignments in scope.
               (local.set $env (call $cons (call $node (i32.const 9)
-                (call $id (call $car (local.get $names))) (ref.null $obj)
+                (call $id (call $car (local.get $names))) (ref.null eq)
                 (local.get $type) (call $symbol (i32.const 1))) (local.get $env)))
               (local.set $names (call $cdr (local.get $names))) (br $name)))))
-      (if (i32.eqz (ref.is_null (struct.get $obj $a (local.get $binding))))
-        (then (if (i32.eq (struct.get $obj $n (struct.get $obj $a (local.get $binding))) (i32.const 2))
+      (if (i32.eqz (ref.is_null (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))))
+        (then (if (i32.eq (call $value-n (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))) (i32.const 2))
           (then
             (local.set $env (call $cons (call $make-symbol-macro-binding (call $car (local.get $names))
               (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'the)))
-                (call $cons (local.get $type) (call $cons (call $binding-value (local.get $binding)) (ref.null $obj)))))
+                (call $cons (local.get $type) (call $cons (call $binding-value (local.get $binding)) (ref.null eq)))))
               (local.get $env)))
             (local.set $names (call $cdr (local.get $names))) (br $name)))))
       ;; An unbound special has no value to constrain. Free SPECIAL
       ;; declarations deliberately carry no lexical value cell.
-      (if (i32.eqz (ref.is_null (struct.get $obj $a (local.get $binding))))
-        (then (if (i32.eqz (struct.get $obj $n (struct.get $obj $a (local.get $binding))))
+      (if (i32.eqz (ref.is_null (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))))
+        (then (if (i32.eqz (call $value-n (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))))
           (then (call $check-type (call $binding-value (local.get $binding)) (local.get $type))))))
       (local.set $env (call $cons
-        (call $node (i32.const 9) (struct.get $obj $n (local.get $binding))
-          (struct.get $obj $a (local.get $binding))
+        (call $node (i32.const 9) (call $value-n (local.get $binding))
+          (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))
           (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'and)))
-            (call $cons (local.get $type) (call $cons (struct.get $obj $b (local.get $binding)) (ref.null $obj))))
-          (struct.get $obj $c (local.get $binding))) (local.get $env)))
+            (call $cons (local.get $type) (call $cons (struct.get $obj $b (ref.cast (ref $obj) (local.get $binding))) (ref.null eq))))
+          (struct.get $obj $c (ref.cast (ref $obj) (local.get $binding)))) (local.get $env)))
       (local.set $names (call $cdr (local.get $names))) (br $name)))
     (local.set $specs (call $cdr (local.get $specs))) (br $next)))
   #@(local.get $env))
 
 (define-runtime-section environment-runtime-wat ()
-  #@(global $functions (mut (ref null $obj)) (ref.null $obj))
-  #@(global $variables (mut (ref null $obj)) (ref.null $obj))
+  #@(global $functions (mut (ref null eq)) (ref.null eq))
+  #@(global $variables (mut (ref null eq)) (ref.null eq))
   ($find)
   ($bind)
   ($binding-value)

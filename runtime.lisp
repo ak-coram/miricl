@@ -2,8 +2,21 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-(defun interpreter-wat (&key wasi)
-  (let ((*compile-evaluations-default* (and *native-compiler-image* (not wasi) t))
+(defun interpreter-wat (&key wasi (compiler t))
+  (let* ((*include-compiler* compiler)
+         (*native-compiler-image* (and compiler *native-compiler-image*))
+         (*clos-library* (if compiler *clos-library* *interpreter-library*))
+         (*clos-library-symbols* (if compiler *clos-library-symbols*
+            (stable-sort (copy-list (union *clos-primitives* (runtime-library-symbols *clos-library*)))
+                         #'string< :key #'symbol-name)))
+         (*runtime-library-symbol-codes* (if compiler *runtime-library-symbol-codes*
+            (runtime-library-symbol-codes
+              (list (list *loop-library* *loop-library-symbols* 25)
+                    (list *clos-library* *clos-library-symbols* 24 *loop-library-symbols*)))))
+         (*core-types* nil)
+         (*core-roots* nil)
+         (*wat-declaration-hook* (unless wasi #'core-wat-declaration))
+         (*compile-evaluations-default* (and *native-compiler-image* (not wasi) t))
         (*runtime-function-definitions*
           (make-array 0 :adjustable t :fill-pointer 0))
         (*runtime-output-literals* (make-hash-table :test 'equal))
@@ -84,6 +97,7 @@
       ,@(when wasi (list (wasi-repl-wat)))
       ,($evaluate)
       ,@(when wasi (list (thread-native-wat)))
+      ,@(unless wasi (list (core-image-runtime-wat)))
       (data $output-literal-data ,(runtime-library-data *runtime-output-bytes*))
       ;; Use the same layout in both images, leaving room for the two raw
       ;; function declarations and the five optional WASI imports.

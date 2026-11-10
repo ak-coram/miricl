@@ -129,7 +129,7 @@ class GreenThreads {
       });
     }
   }
-  async evaluate(source, {eof = false} = {}) {
+  async evaluate(source, {eof = false} = {}, restart = false) {
     if (this.closed) throw new Error('The interpreter has been closed.');
     if (this.main) throw new Error('An evaluation is already running.');
     if (this.owner.javascript?.depth > 0) throw new Error('Cannot start an evaluation inside a Lisp callback.');
@@ -148,7 +148,7 @@ class GreenThreads {
     this.vm.error.value = 0;
     this.startSegment();
     try {
-      const length = await this.evaluateSource(bytes.length);
+      const length = await this.evaluateSource(restart ? -1 : bytes.length);
       const status = this.vm['text-status'].value;
       if (eof && status === 1) throw new MiriclError('Incomplete input.', 16);
       return {output: this.owner.text(length), incomplete: status === 1, quit: status === 2};
@@ -422,8 +422,342 @@ class DebuggerStop {
   abort() { return this.#owner.debugCommand(this, {op: 'abort'}); }
 }
 
+const coreSectionName = new TextEncoder().encode('miricl.core');
+
+class CoreWriter {
+  bytes = new Uint8Array(1024);
+  position = 0;
+  reserve(length) {
+    const end = this.position + length;
+    if (end <= this.bytes.length) return;
+    const bytes = new Uint8Array(Math.max(end, this.bytes.length * 2));
+    bytes.set(this.bytes);
+    this.bytes = bytes;
+  }
+  append(bytes) {
+    this.reserve(bytes.length);
+    this.bytes.set(bytes, this.position);
+    this.position += bytes.length;
+  }
+  word(value) {
+    this.reserve(5);
+    while (value >= 128) {
+      this.bytes[this.position++] = (value & 127) | 128;
+      value >>>= 7;
+    }
+    this.bytes[this.position++] = value;
+  }
+  wide(value) {
+    this.word(value === 0n ? 0 : 1);
+    if (value === 0n) return;
+    this.reserve(8);
+    new DataView(this.bytes.buffer).setBigInt64(this.position, value, true);
+    this.position += 8;
+  }
+  result() {return this.bytes.subarray(0, this.position);}
+}
+
+class CoreReader {
+  constructor(bytes) {
+    this.bytes = bytes;
+    this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    this.position = 0;
+  }
+  take(length) {
+    const end = this.position + length;
+    if (end > this.bytes.length) throw new Error('Truncated Miricl image.');
+    const value = this.bytes.subarray(this.position, end);
+    this.position = end;
+    return value;
+  }
+  word() {
+    const first = this.bytes[this.position++];
+    if (first < 128) return first;
+    if (first === undefined) throw new Error('Truncated Miricl image.');
+    let value = first & 127;
+    for (let shift = 7; shift <= 28; shift += 7) {
+      const byte = this.bytes[this.position++];
+      if (byte === undefined) throw new Error('Truncated Miricl image.');
+      if (shift === 28 && byte > 15) throw new Error('Invalid integer in Miricl image.');
+      value |= (byte & 127) << shift;
+      if (byte < 128) return value >>> 0;
+    }
+    throw new Error('Invalid integer in Miricl image.');
+  }
+  wide() {
+    const marker = this.word();
+    if (marker === 0) return 0n;
+    if (marker !== 1) throw new Error('Invalid numeric field in Miricl image.');
+    if (this.position + 8 > this.bytes.length) throw new Error('Truncated Miricl image.');
+    const value = this.view.getBigInt64(this.position, true);
+    this.position += 8;
+    return value;
+  }
+  field(type) {return type === 'l' || type === 'L' ? this.wide() : this.word();}
+}
+
+function* wasmSections(bytes) {
+  const reader = new CoreReader(bytes);
+  reader.take(8);
+  while (reader.position < bytes.length) {
+    const start = reader.position;
+    const kind = reader.word();
+    const payload = reader.take(reader.word());
+    yield {kind, payload, start, end: reader.position};
+  }
+}
+
+function coreImageParts(bytes) {
+  let payload, start, end;
+  for (const section of wasmSections(bytes)) {
+    if (section.kind !== 0) continue;
+    const reader = new CoreReader(section.payload);
+    const name = reader.take(reader.word());
+    if (name.length !== coreSectionName.length || !name.every((byte, i) => byte === coreSectionName[i])) continue;
+    if (payload) throw new Error('Duplicate Miricl image sections.');
+    payload = section.payload.subarray(reader.position);
+    ({start, end} = section);
+  }
+  if (!payload) return {base: bytes};
+  const base = new Uint8Array(bytes.length - (end - start));
+  base.set(bytes.subarray(0, start));
+  base.set(bytes.subarray(end), start);
+  return {base, payload};
+}
+
+const coreSigned = value => ((value << 1) ^ (value >> 31)) >>> 0;
+const coreUnsigned = value => (value >>> 1) ^ -(value & 1);
+const coreReference = type => type === 'r' || type === 'R';
+const coreEntryIndex = entry => {
+  const name = entry?.name;
+  if (!/^\d+$/.test(name) || Number(name) > 0xffffffff)
+    throw new Error('Missing Wasm function index in Miricl image.');
+  return Number(name);
+};
+
+function coreLayout(vm) {
+  const types = [];
+  let roots;
+  for (const [name, read] of Object.entries(vm)) {
+    const [prefix, key, signature] = name.split(':');
+    if (prefix === 'core-roots') roots = {signature: key, read};
+    if (signature && (prefix === 'core-array' || prefix === 'core-read')) {
+      types[Number(key)] = {signature, array: prefix === 'core-array', read: vm[`core-read:${key}`] ?? read,
+        length: prefix === 'core-array' ? read : null, create: vm[`core-new:${key}`], set: vm[`core-set:${key}`],
+        entry: signature.indexOf('e')};
+    }
+  }
+  if (!roots) throw new Error('This runtime does not support Miricl images.');
+  return {roots, types};
+}
+
+function captureCore(vm, base) {
+  const {roots, types} = coreLayout(vm);
+  const writer = new CoreWriter();
+  const objects = [];
+  const ids = new Map();
+  function field(type, value) {
+    switch (type.toLowerCase()) {
+      case 'r': {
+        if (value === null) {writer.word(0); return;}
+        if (typeof value === 'number') {writer.word(coreSigned(value) * 2 + 1); return;}
+        let id = ids.get(value);
+        if (id === undefined) {
+          objects.push(value);
+          id = objects.length;
+          ids.set(value, id);
+        }
+        writer.word(id * 2);
+        return;
+      }
+      case 'i': writer.word(coreSigned(value)); return;
+      case 'l': writer.wide(value); return;
+      case 'e': writer.word(coreEntryIndex(value)); return;
+    }
+  }
+  writer.word(1);
+  roots.read().forEach((value, i) => field(roots.signature[i], value));
+  const countOffset = writer.position;
+  writer.append(new Uint8Array(4));
+  for (let i = 0; i < objects.length; i++) {
+    const object = objects[i];
+    const kind = vm['core-object-type'](object);
+    const type = types[kind];
+    if (!type) throw new Error('The image contains a thread or a host object that cannot be restored.');
+    writer.word(kind);
+    if (type.array) {
+      const length = type.length(object);
+      writer.word(length);
+      for (let index = 0; index < length; index++) field(type.signature, type.read(object, index));
+    } else {
+      const values = type.read(object);
+      for (let index = 0; index < type.signature.length; index++) field(type.signature[index], values[index]);
+    }
+  }
+  new DataView(writer.bytes.buffer).setUint32(countOffset, objects.length, true);
+  const header = new CoreWriter();
+  header.word(0);
+  header.word(1 + coreSectionName.length + writer.position);
+  header.word(coreSectionName.length);
+  header.append(coreSectionName);
+  const output = new Uint8Array(base.length + header.position + writer.position);
+  output.set(base);
+  output.set(header.result(), base.length);
+  output.set(writer.result(), base.length + header.position);
+  return output;
+}
+
+function coreNativeEntries(vm, bytes, indices) {
+  for (const {kind, payload, start, end} of wasmSections(bytes)) {
+    if (kind !== 7) continue;
+    const previous = new CoreReader(payload);
+    const count = previous.word();
+    const exports = new CoreWriter();
+    exports.word(count + indices.size);
+    exports.append(payload.subarray(previous.position));
+    for (const index of indices) {
+      const name = new TextEncoder().encode(`core-entry-${index}`);
+      exports.word(name.length);
+      exports.append(name);
+      exports.word(0);
+      exports.word(index);
+    }
+    const patched = new CoreWriter();
+    patched.append(bytes.subarray(0, start));
+    patched.word(7);
+    patched.word(exports.position);
+    patched.append(exports.result());
+    patched.append(bytes.subarray(end));
+    const module = new WebAssembly.Module(patched.result());
+    const instance = new WebAssembly.Instance(module, {'miricl.runtime': vm});
+    return new Map([...indices].map(index => [index, instance.exports[`core-entry-${index}`]]));
+  }
+  throw new Error('A saved native module has no export section.');
+}
+
+function restoreCore(vm, payload) {
+  const {roots, types} = coreLayout(vm);
+  const reader = new CoreReader(payload);
+  const fields = signature => {
+    const values = [];
+    for (let i = 0; i < signature.length; i++) values.push(reader.field(signature[i]));
+    return values;
+  };
+  if (reader.word() !== 1) throw new Error('Unsupported Miricl image format.');
+  const rootValues = fields(roots.signature);
+  const size = reader.take(4);
+  const count = new DataView(size.buffer, size.byteOffset, 4).getUint32(0, true);
+  if (count > payload.length - reader.position) throw new Error('Invalid object count in Miricl image.');
+  const offsets = new Uint32Array(count + 1);
+  const kinds = new Uint8Array(count + 1);
+  const objects = new Array(count + 1);
+  const native = new Map();
+  for (let id = 1; id <= count; id++) {
+    const kind = reader.word(), type = types[kind];
+    if (!type) throw new Error('Invalid object type in Miricl image.');
+    kinds[id] = kind;
+    offsets[id] = reader.position;
+    if (type.array) {
+      const length = reader.word();
+      if (length > payload.length - reader.position) throw new Error('Invalid array length in Miricl image.');
+      for (let i = 0; i < length; i++) reader.field(type.signature);
+      objects[id] = type.create(length);
+    } else if (type.entry >= 0) {
+      const values = fields(type.signature);
+      // Native closures carry the code bytes in the common object's digits slot.
+      const code = values[3];
+      if (!native.has(code)) native.set(code, new Set());
+      native.get(code).add(values[type.entry]);
+    } else {
+      for (let i = 0; i < type.signature.length; i++) reader.field(type.signature[i]);
+    }
+  }
+  if (reader.position !== payload.length) throw new Error('Unexpected data after Miricl image.');
+  for (const [code, indices] of native) {
+    if (code === 0) {
+      const table = vm['core-compiler-functions'];
+      const entries = new Map();
+      for (let i = 0; table && i < table.length; i++) {
+        const entry = table.get(i);
+        entries.set(coreEntryIndex(entry), entry);
+      }
+      native.set(code, entries);
+    } else {
+      const id = code >>> 1;
+      if ((code & 1) || id > count || !types[kinds[id]].array || types[kinds[id]].signature !== 'i')
+        throw new Error('Invalid native code reference in Miricl image.');
+      reader.position = offsets[id];
+      const bytes = new Uint8Array(reader.word());
+      for (let i = 0; i < bytes.length; i++) bytes[i] = coreUnsigned(reader.word());
+      native.set(code, coreNativeEntries(vm, bytes, indices));
+    }
+  }
+  function field(type, value, values) {
+    if (coreReference(type)) {
+      if (value === 0) return null;
+      if (value & 1) return coreUnsigned(value >>> 1);
+      const object = objects[value >>> 1];
+      if (object === undefined) throw new Error('Invalid object reference in Miricl image.');
+      return object;
+    }
+    if (type === 'i' || type === 'I') return coreUnsigned(value);
+    if (type === 'e') {
+      const entry = native.get(values[3])?.get(value);
+      if (!entry) throw new Error('Invalid native entry in Miricl image.');
+      return entry;
+    }
+    return value;
+  }
+  const constructing = new Uint8Array(count + 1);
+  const pending = [];
+  for (let id = 1; id <= count; id++) {
+    if (objects[id] !== undefined) continue;
+    pending.push(id);
+    while (pending.length) {
+      const next = pending.at(-1), type = types[kinds[next]];
+      constructing[next] = 1;
+      reader.position = offsets[next];
+      const values = fields(type.signature);
+      let dependency = 0;
+      for (let i = 0; i < values.length; i++) {
+        const reference = values[i];
+        if (type.signature[i] !== 'r' || reference === 0 || reference & 1) continue;
+        if (objects[reference >>> 1] !== undefined) continue;
+        dependency = reference >>> 1;
+        if (dependency > count || constructing[dependency]) throw new Error('Invalid immutable reference in Miricl image.');
+        break;
+      }
+      if (dependency) {pending.push(dependency); continue;}
+      const args = [];
+      for (let i = 0; i < values.length; i++) {
+        const kind = type.signature[i];
+        if (kind === kind.toLowerCase()) args.push(field(kind, values[i], values));
+      }
+      objects[next] = type.create(...args);
+      constructing[next] = 0;
+      pending.pop();
+    }
+  }
+  for (let id = 1; id <= count; id++) {
+    const type = types[kinds[id]], object = objects[id];
+    reader.position = offsets[id];
+    if (type.array) {
+      const length = reader.word();
+      for (let i = 0; i < length; i++) type.set(object, i, field(type.signature, reader.field(type.signature)));
+    } else {
+      const values = fields(type.signature), args = [];
+      for (let i = 0; i < values.length; i++) {
+        const kind = type.signature[i];
+        if (kind !== kind.toLowerCase()) args.push(field(kind, values[i]));
+      }
+      type.set(object, ...args);
+    }
+  }
+  vm['core-set-roots'](...rootValues.map((value, i) => field(roots.signature[i], value)));
+}
+
 export class Miricl {
-  constructor(instance, {imports = {}, onOutput, onThreadError, onDebugger} = {}) {
+  constructor(instance, {imports = {}, onOutput, onThreadError, onDebugger} = {}, payload) {
     this.vm = instance.exports;
     this.onOutput = onOutput;
     this.onThreadError = onThreadError;
@@ -443,6 +777,7 @@ export class Miricl {
       this.vm['host-services'].set(0, bridge.exports.service);
     }
     this.vm.initialize();
+    if (payload) restoreCore(this.vm, new Uint8Array(payload));
     if (this.vm['native-services']) {
       this.nativeModules = new WeakMap();
       const bridge = new WebAssembly.Instance(nativeCompilerBridge, {host: {service: (code, literals, name) => {
@@ -451,12 +786,14 @@ export class Miricl {
         if (!compiled) {
           const [start, length] = this.vm['native-code-bytes'](code);
           const module = new WebAssembly.Module(new Uint8Array(this.vm.memory.buffer, start, length));
-          compiled = {instance: new WebAssembly.Instance(module, {'miricl.runtime': this.vm}), length};
+          compiled = {instance: new WebAssembly.Instance(module, {'miricl.runtime': this.vm}), length,
+            code: this.vm['core-native-code']?.(storage, start, length) ?? null};
           this.nativeModules.set(storage, compiled);
         }
         const index = this.vm['native-code-entry']?.(code) ?? -1;
-        return this.vm['native-function'](compiled.instance.exports[index < 0 ? 'entry' : `entry${index}`],
-          literals, name, compiled.length);
+        const install = this.vm['core-native-function'] ?? this.vm['native-function'];
+        return install(compiled.instance.exports[index < 0 ? 'entry' : `entry${index}`],
+          literals, name, compiled.length, compiled.code);
       }}});
       this.vm['native-services'].set(0, bridge.exports.service);
     }
@@ -467,7 +804,12 @@ export class Miricl {
       close: sessionId => this.debugClosed(sessionId),
     }} : {};
     if (this.vm['javascript-services'])
-      this.javascript = new JavaScriptHost(this, {...imports, ...debuggerImports});
+      this.javascript = new JavaScriptHost(this, {...imports, ...debuggerImports, miriclCore: {
+        saveImage: filename => {
+          try {this.mountFile(filename, this.saveImage()); return '';}
+          catch (error) {return error.message;}
+        },
+      }});
     if (this.vm['thread-services'] && typeof WebAssembly.Suspending === 'function')
       this.threads = new GreenThreads(this);
     if (onDebugger && this.threads && this.vm['debugger-connected'])
@@ -479,8 +821,14 @@ export class Miricl {
   }
 
   static async instantiate(bytes, options) {
-    const result = await WebAssembly.instantiate(bytes);
-    const interpreter = new Miricl(result.instance ?? result, options);
+    const isModule = Object.prototype.toString.call(bytes) === '[object WebAssembly.Module]';
+    const sections = isModule ? WebAssembly.Module.customSections(bytes, 'miricl.core') : [];
+    if (sections.length > 1) throw new Error('Duplicate Miricl image sections.');
+    const {base, payload} = isModule ? {base: bytes, payload: sections[0]} : coreImageParts(
+        ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : new Uint8Array(bytes));
+    const result = await WebAssembly.instantiate(base);
+    const interpreter = new Miricl(result.instance ?? result, options, payload);
+    if (!isModule && interpreter.vm['core-object-type']) interpreter.imageBase = base;
     if (options?.dev) {
       let filesystem;
       try {
@@ -497,7 +845,21 @@ export class Miricl {
         throw error;
       }
     }
+    if (payload) {
+      try {
+        const {output} = interpreter.vm['core-restart']
+          ? (interpreter.threads ? await interpreter.threads.evaluate('', {}, true) : interpreter.evaluate('', {}, true))
+          : await interpreter.evaluateAsync('(miricl-core::%restart-image)', {eof: true});
+        if (output) interpreter.onOutput?.(output);
+      } catch (error) {interpreter.close(); throw error;}
+    }
     return interpreter;
+  }
+
+  saveImage() {
+    if (!this.imageBase) throw new Error('Saving a Miricl image requires the original Wasm bytes.');
+    if (!this.vm['core-checkpoint-safe']()) throw new Error('Saving a Miricl image requires a single Lisp thread.');
+    return captureCore(this.vm, this.imageBase);
   }
 
   failure(cause) {
@@ -680,7 +1042,7 @@ export class Miricl {
     return this.threads ? this.threads.evaluate(source, options) : Promise.resolve(this.evaluate(source, options));
   }
 
-  evaluate(source, {eof = false} = {}) {
+  evaluate(source, {eof = false} = {}, restart = false) {
     if (this.javascript?.depth > 0)
       throw new Error('Use a Lisp callback to reenter an active interpreter.');
     if (this.threads?.main) throw new Error('An asynchronous evaluation is already running.');
@@ -695,7 +1057,7 @@ export class Miricl {
     this.activeStart = performance.now();
     this.sleepTime = 0;
     try {
-      length = this.vm['evaluate-source'](bytes.length);
+      length = this.vm['evaluate-source'](restart ? -1 : bytes.length);
     } catch (cause) {
       throw this.failure(cause);
     } finally {
