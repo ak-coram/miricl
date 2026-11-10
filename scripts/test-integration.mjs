@@ -27,7 +27,7 @@ const groups = {
     test('evaluation-policy', wasm, precompiled, repl),
     test('debugger', precompiled),
     ...['compilation', 'hir', 'whole-program', 'class-reachability', 'generic-dispatch',
-      'native-bundle', 'native-compilation', 'native-size', 'compiler-throughput',
+      'native-bundle', 'native-compilation', 'native-disassembly', 'native-size', 'compiler-throughput',
       'fasl-format', 'file-compilation', 'file-code-sharing', 'nested-backquote',
       'structure-printers', 'ansi-compiler-runner', 'ansi-runner', 'ansi-upstream-runner']
       .map(name => test(name, wasm)),

@@ -27,7 +27,7 @@
 
 (defstruct hir-unit functions)
 (define-hir-record hir-function name parent parameters environment entry blocks captures bindings values
-  (value-count 0) (block-count 0))
+  (value-count 0) (block-count 0) (debug-level 1))
 (define-hir-record hir-block id parameters instructions terminator predecessors environment)
 (define-hir-record hir-value id kind owner producer (type t))
 (define-hir-record hir-instruction opcode inputs output attributes origin effect)
@@ -39,6 +39,18 @@
 (defvar *hir-dynamic*)
 (defvar *hir-origin*)
 (defvar *hir-specials*)
+(defvar *hir-debug-level* 1)
+
+(defun native-debug-level (body inherited)
+  (when (and (stringp (car body)) (cdr body)) (setq body (cdr body)))
+  (loop while (and (consp (car body)) (eq (caar body) 'declare)) do
+    (dolist (spec (cdar body))
+      (when (eq (car spec) 'optimize)
+        (dolist (quality (cdr spec))
+          (when (eq (if (consp quality) (car quality) quality) 'debug)
+            (setq inherited (if (consp quality) (second quality) 3))))))
+    (setq body (cdr body)))
+  inherited)
 
 (defun hir-new-value (kind producer)
   (let ((value (make-hir-value :id (hir-function-value-count *hir-function*)
@@ -504,6 +516,9 @@
 
 (defun hir-form (form variables functions targets)
   (let ((*hir-origin* form))
+    (when (>= *hir-debug-level* 2)
+      (setf (hir-function-debug-level *hir-function*)
+            (max *hir-debug-level* (hir-function-debug-level *hir-function*))))
     (cond
       ((and (symbolp form) form (not (eq form t)) (not (keywordp form)))
        (unless (assoc form variables)
@@ -664,7 +679,8 @@
                       (push (cons name value) pending))))
               (dolist (binding (nreverse pending))
                 (setq local (hir-bind-value (car binding) (cdr binding) local specials)))
-              (let ((value (hir-body body (hir-shadow-specials local specials) functions targets)))
+              (let ((value (let ((*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*)))
+                             (hir-body body (hir-shadow-specials local specials) functions targets))))
                 (when (and (not (eq entry *hir-dynamic*)) (not (hir-block-terminator *hir-block*)))
                   (hir-emit :environment-restore (list entry) nil nil :control))
                 value))))
@@ -702,7 +718,8 @@
                              (list (if (consp (first definition)) (second (first definition)) (first definition))))))
                 (hir-emit :cell-write (list (hir-cell-for-binding binding) value) :single nil :write)))
             (multiple-value-bind (body specials) (hir-declarations (cddr form))
-              (hir-body body (hir-shadow-specials variables specials) local targets))))
+              (let ((*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*)))
+                (hir-body body (hir-shadow-specials variables specials) local targets)))))
          (multiple-value-call
           ;; Reuse literal APPLY inlining after exposing the complete value
           ;; group as its argument list. SETF and MULTIPLE-VALUE-BIND expansions
@@ -729,7 +746,8 @@
                 (dolist (name (second form))
                   (setq local (hir-bind-value name (hir-nth-value value index) local specials))
                   (incf index))
-                (let ((result (hir-body body (hir-shadow-specials local specials) functions targets)))
+                (let ((result (let ((*hir-debug-level* (native-debug-level (cdddr form) *hir-debug-level*)))
+                                (hir-body body (hir-shadow-specials local specials) functions targets))))
                   (when (and (not (eq entry *hir-dynamic*)) (not (hir-block-terminator *hir-block*)))
                     (hir-emit :environment-restore (list entry) nil nil :control))
                   result)))))
@@ -786,8 +804,9 @@
                 (when local (list (hir-target-block target))))
               (throw 'hir-path-ended nil))))
          (locally
-          (multiple-value-bind (body specials) (hir-declarations (cdr form))
-            (hir-body body (hir-shadow-specials variables specials) functions targets)))
+          (let ((*hir-debug-level* (native-debug-level (cdr form) *hir-debug-level*)))
+            (multiple-value-bind (body specials) (hir-declarations (cdr form))
+              (hir-body body (hir-shadow-specials variables specials) functions targets))))
          (otherwise
           (when (and (symbolp (car form)) (not (assoc (car form) functions :test #'equal)))
             (multiple-value-bind (expansion expanded) (macroexpand-1 form)
@@ -832,7 +851,9 @@
               implicit-block nil)))
     (let ((normalized (miricl::%normalize-lambda (second form) (cddr form))))
       (setq form (list* 'lambda (first normalized) (second normalized)))))
-  (let* ((*hir-function* (make-hir-function :name name :parent parent :parameters (second form)))
+  (let* ((*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*))
+         (*hir-function* (make-hir-function :name name :parent parent :parameters (second form)
+                                          :debug-level *hir-debug-level*))
          (*hir-origin* form) (*hir-block* (hir-new-block))
          (*hir-dynamic* (hir-new-value :dynamic *hir-function*)))
     (setf (hir-function-entry *hir-function*) *hir-block*)
@@ -908,7 +929,8 @@
   "Lower a lambda to object-level control/data flow without executing its body.
 Unsupported special operators and parameter syntax signal an error."
   (ensure-compiler)
-  (let ((*hir-unit* (make-hir-unit)) (*hir-specials* global-specials))
+  (let ((*hir-unit* (make-hir-unit)) (*hir-specials* global-specials)
+        (*hir-debug-level* (or (compiler-primitive 33 nil) 1)))
     (hir-lambda lambda-expression nil nil nil nil name)
     (setf (hir-unit-functions *hir-unit*) (nreverse (hir-unit-functions *hir-unit*)))
     (verify-hir *hir-unit*) *hir-unit*))

@@ -115,6 +115,8 @@ try {
   const compilation = await output();
   assert.equal((compilation.match(/Packed Lisp code: [1-9][0-9]* bytes/g) ?? []).length, 2);
   assert.equal((compilation.match(/Wasm module: [1-9][0-9]* bytes/g) ?? []).length, 2);
+  assert.equal((compilation.match(/Wasm instructions for function/g) ?? []).length, 1);
+  assert.match(compilation, /local\.get/);
   assert.equal((compilation.match(/\d+ ms real time, \d+ ms run time/g) ?? []).length, 2);
   assert.match(compilation, /First compilation \(includes compiler bootstrap\):[\s\S]*Second compilation \(compiler already bootstrapped\):/);
   assert.match(compilation, /144\n25\n$/);

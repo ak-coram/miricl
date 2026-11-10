@@ -105,6 +105,76 @@
       (if (local.get $size) (then (return (call $int (local.get $size)))))))
   #@(ref.null $obj))
 
+(define-runtime-function $native-debug-wrap
+    (($function :nullable-object) ($code :object) ($id i32)) (:object)
+  ;; Only debug-enabled modules allocate this subtype. Ordinary functions keep
+  ;; their existing layout, allocation path and calling convention.
+  #@(struct.new $native-debug-function (call $allocate-object-tag (i32.const 8)) (i32.const 0)
+    (struct.get $obj $f (local.get $function)) (ref.null $digits)
+    (struct.get $obj $a (local.get $function)) (struct.get $obj $b (local.get $function))
+    (struct.get $obj $c (local.get $function))
+    (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $function)))
+    (struct.get $native-function $code-size (ref.cast (ref $native-function) (local.get $function)))
+    (local.get $code) (local.get $id)))
+
+(define-runtime-function $native-debug-attach
+    (($function :nullable-object) ($descriptor :nullable-object) ($id i32)) (:object)
+  (:locals ($slots (ref $objects)) ($code :nullable-object) ($data :digits)
+           ($start i32) ($length i32) ($i i32) ($word i32))
+  #@(local.set $slots (call $vector-data (local.get $descriptor)))
+  #@(local.set $code (array.get $objects (local.get $slots) (i32.const 0)))
+  #@(if (i32.ne (call $tag (local.get $code)) (i32.const 9))
+    (then
+      ;; Pack the byte vector once per module. The descriptor is shared by
+      ;; entry points and closures; it never refers back to a function.
+      (call $native-code-bytes (extern.convert_any (local.get $code)))
+      (local.set $length) (local.set $start)
+      (local.set $data (array.new_default $digits
+        (i32.shr_u (i32.add (local.get $length) (i32.const 3)) (i32.const 2))))
+      (block $done (loop $pack (br_if $done (i32.eq (local.get $i) (local.get $length)))
+        (local.set $word (i32.shr_u (local.get $i) (i32.const 2)))
+        (array.set $digits (local.get $data) (local.get $word)
+          (i32.or (array.get $digits (local.get $data) (local.get $word))
+            (i32.shl (i32.load8_u (i32.add (local.get $start) (local.get $i)))
+              (i32.shl (i32.and (local.get $i) (i32.const 3)) (i32.const 3)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $pack)))
+      (local.set $code ,(wat-new-object #@(i32.const 9) :n #@(local.get $length)
+        :digits #@(local.get $data) :a #@(array.get $objects (local.get $slots) (i32.const 1))))
+      (array.set $objects (local.get $slots) (i32.const 0) (local.get $code))))
+  #@(call $native-debug-wrap (local.get $function) (ref.as_non_null (local.get $code)) (local.get $id)))
+
+(define-runtime-function $native-debug-close
+    (($function externref) ($parent externref) ($id i32)) (externref)
+  (:export-raw "native-debug-close")
+  (:locals ($owner :nullable-object))
+  #@(local.set $owner ,(native-object '(local.get $parent)))
+  #@(if (ref.test (ref $native-debug-function) (local.get $owner))
+    (then (return (extern.convert_any (call $native-debug-wrap ,(native-object '(local.get $function))
+      (struct.get $native-debug-function $debug-code (ref.cast (ref $native-debug-function) (local.get $owner)))
+      (local.get $id))))))
+  #@(local.get $function))
+
+(define-runtime-function $native-debug-info (($function :nullable-object)) (:nullable-object)
+  (:locals ($code :object) ($index :nullable-object) ($bytes (ref $objects))
+           ($data :digits) ($length i32) ($i i32))
+  #@(if (i32.eqz (ref.test (ref $native-debug-function) (local.get $function))) (then (return (ref.null $obj))))
+  #@(local.set $code (struct.get $native-debug-function $debug-code
+    (ref.cast (ref $native-debug-function) (local.get $function))))
+  #@(local.set $index (array.get $objects (call $vector-data (struct.get $obj $a (local.get $code)))
+    (struct.get $native-debug-function $debug-id (ref.cast (ref $native-debug-function) (local.get $function)))))
+  #@(if (ref.is_null (local.get $index)) (then (return (ref.null $obj))))
+  ;; Expand only while DISASSEMBLE runs, for the existing Lisp byte reader.
+  #@(local.set $length (struct.get $obj $n (local.get $code)))
+  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (local.get $code))))
+  #@(local.set $bytes (array.new_default $objects (local.get $length)))
+  #@(block $done (loop $unpack (br_if $done (i32.eq (local.get $i) (local.get $length)))
+    (array.set $objects (local.get $bytes) (local.get $i)
+      (call $int (i32.and (i32.shr_u
+        (array.get $digits (local.get $data) (i32.shr_u (local.get $i) (i32.const 2)))
+        (i32.shl (i32.and (local.get $i) (i32.const 3)) (i32.const 3))) (i32.const 255))))
+    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $unpack)))
+  #@(call $cons (call $vector-new (local.get $bytes)) (local.get $index)))
+
 (define-runtime-function $native-capture (($function externref) ($index i32)) (externref)
   (:export-raw "native-capture")
   #@(extern.convert_any (array.get $objects
@@ -808,10 +878,15 @@
   #@(global $native-environment-cache (mut (ref null $native-context)) (ref.null $native-context))
   #@(type $native-entry (func (param externref externref) (result externref)))
   #@(type $native-service (func (param externref externref externref) (result externref)))
-  #@(type $native-function (sub final $obj (struct
+  #@(type $native-function (sub $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
     (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
     (field $entry (ref $native-entry)) (field $code-size i32))))
+  #@(type $native-debug-function (sub final $native-function (struct
+    (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
+    (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
+    (field $entry (ref $native-entry)) (field $code-size i32)
+    (field $debug-code (ref $obj)) (field $debug-id i32))))
   #@(type $native-arguments (sub final $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
     (field $a (mut (ref null $obj))) (field $b (mut (ref null $obj))) (field $c (mut (ref null $obj)))
@@ -819,6 +894,7 @@
   #@(table $native-services (export "native-services") 1 funcref)
   ($compiler-image-function)
   ($native-install) ($native-function) ($native-close-with-arity) ($native-close) ($native-close-fixed) ($native-close-cached) ($native-close-static) ($native-with-arity) ($native-code-size) ($native-capture) ($native-code-storage) ($native-code-entry) ($native-code-bytes) ($native-literal)
+  ($native-debug-wrap) ($native-debug-attach) ($native-debug-close) ($native-debug-info)
   ($native-two-arguments) ($native-packed-argument) ($native-list-tail) ($native-argument) ($native-rest-argument) ($native-check-arguments) ($native-check-apply-arguments) ($native-check-apply-list) ($native-environment)
   ($native-restore-environment) ($native-bind)
   ($native-block-enter) ($native-block-environment) ($native-block-return) ($native-block-match) ($native-block-values)

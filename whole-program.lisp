@@ -803,18 +803,25 @@ The result loads without invoking the Lisp compiler."
                 (push (hir-unit-functions hir) functions)))
             (setq entries (nreverse entries))
             (when entries
-              (multiple-value-bind (code literals)
+              (multiple-value-bind (code literals debug)
                   (emit-native-module (make-hir-unit :functions (apply #'append (nreverse functions)))
                                       :entries entries)
                 ;; Share one module across initializers, but reconstruct each
                 ;; entry's literals only after preceding initializers ran.
                 (setq code (map 'string #'code-char code))
+                ;; Share the FASL's existing code string with debug metadata.
+                ;; The Lisp runtime packs it once when the first entry loads.
+                (when debug (setf (svref debug 0) code))
                 (loop for literal-vector in literals for index from 0 do
                   (push (miricl::%fasl-dump
                           (list 'funcall
-                            (list 'miricl::%%compile 17
-                              (list 'quote (cons code index))
-                              (list 'quote literal-vector) nil))) roots)))))
+                            (let ((entry (list 'miricl::%%compile 17
+                                           (list 'quote (cons code index))
+                                           (list 'quote literal-vector) nil)))
+                              (if debug
+                                  (list 'miricl::%%compile 34 entry (list 'quote debug)
+                                    (svref (svref debug 2) index))
+                                  entry)))) roots)))))
           ;; Native emission creates new literal vectors and initializer forms.
           ;; Pool their immutable records and lay out their graph just as for
           ;; interpreted units; generated module bytes and entry order stay intact.

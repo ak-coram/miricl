@@ -17,11 +17,11 @@
             (atom form) (eq (car form) 'quote))
     (return-from %compiler-evaluate (%%eval form)))
   ;; Debug definitions execute their existing forms in the interpreter. The
-  ;; native compiler has no debug policy, metadata, or instrumentation.
+  ;; native compiler retains instructions at DEBUG 2, without stepping support.
   (when (or (%debug-form-p form) (= (or (case (car form)
                  (defun (%body-debug-level (cdddr form) %debug-default-level))
                  (locally (%body-debug-level (cdr form) %debug-default-level))
-                 (otherwise %debug-default-level)) 0) 3))
+                 (otherwise %debug-default-level)) 1) 3))
     (return-from %compiler-evaluate (%%eval form)))
   (let ((operator (and (consp form) (car form))))
     (case operator

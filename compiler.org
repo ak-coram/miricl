@@ -68,6 +68,14 @@ propagated, with no automatic retry that could repeat macro or application
 effects. Bind the policy to =nil= around =eval= or =load= when interpretation
 is desired, including forms without supported native lowering.
 
+The default =debug= optimization quality is =1=. Level =0= is an explicit
+opt-in reserved for more aggressive optimizations. Levels =0= and =1= retain
+no disassembly data. Level =2= retains packed Wasm bytes shared by a module's
+functions and closures; =disassemble= decodes and prints them inside the Lisp
+runtime. Level =3= selects the interpreter at evaluation boundaries for
+interactive debugging. Local =declare= forms override an inherited policy;
+=declaim= sets the default for subsequent compilation.
+
 Regressions follow the HyperSpec's [[https://www.lispworks.com/documentation/HyperSpec/Body/f_eval.htm][EVAL]] requirements for null lexical scope,
 current dynamic bindings, all return values and literal identity, and [[https://www.lispworks.com/documentation/HyperSpec/Body/f_load.htm][LOAD]]'s
 requirement to execute each top-level form before compiling the next one.

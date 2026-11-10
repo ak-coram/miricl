@@ -19,7 +19,7 @@ for (const [file, compiled] of [[process.argv[2] ?? 'miricl.wasm', false],
 
     mode(true);
     // Policy scanning must accept dotted destructuring lists in source,
-    // including macro calls, while preserving native compilation at debug 0.
+    // including macro calls, while preserving native compilation at debug 1.
     output(`(defmacro policy-dotted-macro ((head . tail)) (list 'quote (cons head tail)))
       (defun policy-dotted-function (pair)
         (destructuring-bind (head . tail) pair (cons head tail)))`);

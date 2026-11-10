@@ -13,6 +13,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-literal-locals* nil)
 (defvar *wasm-literal-groups* nil)
 (defvar *native-functions*)
+(defvar *wasm-debug* nil)
 (defvar *native-function-indices*)
 (defvar *wasm-function-relocations* nil)
 (defvar *wasm-current-function*)
@@ -74,6 +75,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-close" (:function :object :object) :object)
     ("native-close-fixed" (:function :object :object :i32) :object)
     ("native-close-cached" (:function :object :object :i32 :i32) :object)
+    ("native-debug-close" (:object :object :i32) :object)
     ("native-capture" (:object :i32) :object)
     ("native-multiple-value-call" (:object :object :object) :object)
     ("native-call0" (:object) :object)
@@ -563,7 +565,13 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                  (setf (gethash (first attributes) *wasm-static-closures*) (hash-table-count *wasm-static-closures*))))
                (wasm-call "native-close-cached"))
              (if arity (progn (wasm-integer arity) (wasm-call "native-close-fixed"))
-                 (wasm-call "native-close")))))
+                 (wasm-call "native-close"))))
+       (when *wasm-debug*
+         (wasm-local 0)
+         ;; This stable HIR ordinal is resolved through the retained map after
+         ;; body sharing, function ordering and module pruning have finished.
+         (wasm-integer (position (first attributes) *native-functions* :test #'eq))
+         (wasm-call "native-debug-close")))
       (otherwise (error "Native lowering is not implemented for ~S." (hir-instruction-opcode instruction))))
     (when output (wasm-set output))))
 
@@ -940,6 +948,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
          (*wasm-literal-index* (make-hash-table :test 'eq))
          (*wasm-literal-groups* (and entries (native-literal-groups entries)))
          (*native-functions* (hir-unit-functions unit))
+         (*wasm-debug* (some (lambda (function) (>= (hir-function-debug-level function) 2)) *native-functions*))
          (*wasm-function-plans* (make-hash-table :test 'eq))
          (*native-function-indices* (native-function-indices *native-functions*))
          (*wasm-function-relocations* (and entries (make-hash-table :test 'eq)))
@@ -1001,17 +1010,25 @@ Bind to NIL to interpret forms, including forms without native lowering.")
              (dolist (body bodies) (wasm-u32 (length body)) (wasm-append body)))))))
     (values bytes (if entries
                      (mapcar (lambda (entry) (coerce (first (gethash entry *wasm-literal-groups*)) 'simple-vector)) entries)
-                     (coerce *wasm-literals* 'simple-vector))))))
+                     (coerce *wasm-literals* 'simple-vector))
+      (when *wasm-debug*
+        (vector bytes
+          (coerce (loop for function in *native-functions*
+                        for index = (gethash function *native-function-indices*)
+                        collect (and index (>= (hir-function-debug-level function) 2)
+                                     (+ (length *native-imports*) index))) 'simple-vector)
+          (coerce (mapcar (lambda (entry) (position entry *native-functions* :test #'eq)) entries) 'simple-vector)))))))
 
 (defun compile-native (lambda-expression &key name)
   "Compile a lambda to native Wasm using the current host's module loader."
   (ensure-compiler)
   (let ((unit (compile-to-hir lambda-expression :name name)))
-    (multiple-value-bind (bytes literals) (emit-native-module unit)
+    (multiple-value-bind (bytes literals debug) (emit-native-module unit)
       (multiple-value-bind (function native) (compiler-primitive 17 bytes literals name)
         (unless native (error "This host cannot instantiate compiled Wasm modules."))
         (let ((arity (native-fixed-arity (first (hir-unit-functions unit)))))
-          (if arity (values (compiler-primitive 30 function arity)) function))))))
+          (when arity (setq function (compiler-primitive 30 function arity)))
+          (if debug (values (compiler-primitive 34 function debug 0)) function))))))
 
 (defparameter *native-compiler-seeds*
   '(compiler-primitive
@@ -1021,7 +1038,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                    native-removable-p native-direct-cells native-forward-blocks native-live-values native-local-layout native-single-calls native-full-groups native-scalar-groups native-block-targets
                    emit-native-fixed-call emit-native-cons-access native-fixed-arity emit-native-instruction emit-native-jump-value emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant
-                   hir-capture hir-cell-for-binding hir-special-p hir-declarations hir-shadow-specials
+                   hir-capture hir-cell-for-binding hir-special-p hir-declarations hir-shadow-specials native-debug-level
                    hir-bind-value hir-read-variable hir-write-variable hir-function-reference
                    hir-small-membership hir-call-arguments hir-literal-apply-form hir-case-form hir-macro-environment hir-assert-form
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form

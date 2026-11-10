@@ -892,12 +892,11 @@
            (not (%featurep (cadr expression))))
           (t (error 'reader-error)))))
 
-(defvar %debug-default-level 0)
+(defvar %debug-default-level 1)
 (defparameter %debug-declaration '(declare (optimize (debug 3))))
 
 (defun %optimize-debug-level (qualities inherited)
-  ;; OPTIMIZE's bare quality means 3. Intermediate debug qualities currently
-  ;; have level 0 behavior; retain their declared values for lexical overrides.
+  ;; DEBUG 2 retains native instructions; DEBUG 3 enables interactive debugging.
   (dolist (quality qualities inherited)
     (let ((name (if (consp quality) (first quality) quality))
           (level (if (consp quality) (second quality) 3)))
@@ -1091,6 +1090,9 @@
                      (write-line "; Packed Lisp code size unavailable.")))
                 (size (format t "; Wasm module: ~D bytes (literal data excluded).~%" size))
                 (t (write-line "; Size unavailable for this runtime entry."))))
+        (unless source
+          (let ((code (%%compile 32 function)))
+            (when code (miricl-compiler::disassemble-native (car code) (cdr code)))))
         (when closure (write-line "; Lexical environment retained."))))
     nil))
 

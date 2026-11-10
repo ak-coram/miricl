@@ -65,6 +65,7 @@
                (:file "hir")
                (:file "wasm-compiler")
                (:file "wasm-optimizer")
+               (:file "wasm-disassembly")
                (:file "wasm-module-optimizer")
                (:static-file "environment-library.lisp")
                (:static-file "pretty-library.lisp")
