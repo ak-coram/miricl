@@ -27,7 +27,7 @@ try {
   try {
     libraryVM.mountFile('/miricl-asdf.wasm', await fs.readFile(asdf));
     assert.equal(libraryVM.evaluate(`(load "/miricl-asdf.wasm")
-      (and (equal (asdf:asdf-version) "3.3.7")
+      (and (uiop:version<= "3.3.7" (asdf:asdf-version))
         (eq (uiop:implementation-type) :miricl)
         (eq miricl-compiler::*compiler-state* :cold))`).output,
       'T\nT\n', 'The compact ASDF artifact must load without compiler startup.');

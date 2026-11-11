@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
+import {buildAsdf} from '../scripts/build-asdf.mjs';
 
 const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'miricl-asdf-build-'));
 try {
@@ -57,6 +58,12 @@ try {
   fs.writeFileSync(path.join(upstream, 'port.lisp'), 'local edit\n');
   assert.notEqual(run().status, 0, 'Local upstream edits must stop the build.');
   assert.equal(fs.readFileSync(path.join(output, 'asdf.lisp'), 'utf8'), artifact);
+  // Apply the shipped series to the actual pinned upstream, too: synthetic
+  // patches alone cannot catch conflicts introduced by a submodule update.
+  const prepared = buildAsdf(path.join(fixture, 'pinned'));
+  const source = fs.readFileSync(prepared, 'utf8');
+  const version = JSON.parse(fs.readFileSync(new URL('../vendor/asdf/version.lisp-expr', import.meta.url), 'utf8'));
+  assert.ok(source.includes(`;;; This is ASDF ${version}:`));
   console.log('ASDF preparation: ordered patches, repeatable output, clean sources, and failure recovery pass.');
 } finally {
   fs.rmSync(fixture, {recursive: true, force: true});

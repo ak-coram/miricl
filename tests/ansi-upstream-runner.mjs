@@ -21,13 +21,14 @@ sources.push(['sandbox/fixture.txt', 'fixture\n'], ['init.lsp', `
   (defun later-helper () 42)
 `]);
 const updates = [];
-const report = await runUpstream({binary, sources, timeout: 150, expectedTests: 7,
+const report = await runUpstream({binary, sources, timeout: 150,
   onProgress: current => updates.push({...current.progress})});
 assert.equal(report.error, null);
 assert.deepEqual(report.tests.map(test => test.status), ['pass', 'fail', 'fail', 'timeout', 'pass', 'pass', 'pass']);
 assert.ok(report.tests.every(test => test.file === 'fixture.lsp'));
 assert.ok(report.tests.every(test => Number.isFinite(test.elapsedMs) && test.elapsedMs >= 0));
 assert.equal(report.summary.complete, true);
+assert.equal(report.summary.expected, report.tests.length, 'Discover the total from upstream registration.');
 assert.equal(report.summary.passed, 4);
 assert.equal(report.summary.failed, 2);
 assert.equal(report.summary.timedOut, 1);
@@ -38,6 +39,13 @@ assert.equal(updates.at(-1).testsProcessed, 7);
 assert.equal(updates.at(-1).passed, 4);
 assert.equal(report.tests.at(-1).timeout, 7000);
 assert.equal(updates.at(-1).phase, 'finished');
+const expanded = await runUpstream({binary, sources: sources.map(([file, source]) => [file,
+  file === 'fixture.lsp' ? source + '\n(deftest newly-added-test (later-helper) 42)\n' : source]), timeout: 150});
+assert.equal(expanded.error, null);
+assert.equal(expanded.summary.complete, true);
+assert.equal(expanded.summary.expected, report.summary.expected + 1);
+assert.equal(expanded.summary.total, expanded.summary.expected);
+assert.equal(expanded.tests.at(-1).status, 'pass');
 const missing = await runUpstream({binary, sources, expectedTests: 8});
 assert.equal(missing.summary.complete, false);
 assert.match(missing.error, /registered 7 tests; expected 8/);

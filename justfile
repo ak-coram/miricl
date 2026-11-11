@@ -17,6 +17,10 @@ interpreter_only := build_dir / 'miricl-interpreter.wasm'
 default:
     @just --list
 
+# Initialize every submodule recursively at the revisions pinned by this repository.
+init-submodules:
+    git submodule update --init --recursive
+
 # Fetch and check out the latest upstream revision of every submodule, recursively.
 update-submodules:
     git submodule update --init --recursive --remote

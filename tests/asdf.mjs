@@ -5,6 +5,8 @@ import {Miricl} from '../scripts/miricl.mjs';
 
 const bytes = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
 const asdf = fs.readFileSync(process.argv[3] ?? 'build/asdf/asdf.lisp', 'utf8');
+const version = asdf.match(/^;;; This is ASDF ([\d.]+):/m)?.[1];
+assert.ok(version, 'The assembled source must identify its upstream ASDF version.');
 const vm = await Miricl.instantiate(bytes);
 const fresh = await Miricl.instantiate(bytes);
 const hostService = vm.hostService.bind(vm);
@@ -17,10 +19,14 @@ try {
   vm.mountFile('asdf.lisp', asdf);
   await check('(load "asdf.lisp")');
   await check('(list (asdf:asdf-version) (uiop:implementation-type) (namestring (uiop:getcwd)))',
-    '("3.3.7" :MIRICL "/")');
+    `(${JSON.stringify(version)} :MIRICL "/")`);
   await check(`(and (member :asdf3 *features*) (member :asdf-unicode *features*)
     (not (member :sbcl *features*)) (null (uiop:getenv "HOME"))
     (null (uiop:raw-command-line-arguments)))`);
+  await check(`(and (uiop:os-unix-p) (not (uiop:os-windows-p))
+    (let ((*features* '(:miricl :windows)))
+      (and (uiop:os-unix-p) (not (uiop:os-windows-p))))
+    (let ((*features* '(:linux))) (uiop:os-unix-p)))`);
   const sources = [
     ['app/dependency/dependency.asd', `(asdf:defsystem "dependency" :serial t
       :components ((:file "package") (:file "macro")))`],

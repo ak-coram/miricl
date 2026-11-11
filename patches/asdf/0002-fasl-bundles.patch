@@ -46,11 +46,11 @@ ordinary LOAD handles both individual FASLs and bundles without ASDF.
                     #+(or clasp clozure ecl) :if-exists
 --- a/uiop/lisp-build.lisp
 +++ b/uiop/lisp-build.lisp
-@@ -843,7 +843,47 @@
+@@ -828,8 +828,48 @@
    (defun combine-fasls (inputs output)
      "Combine a list of FASLs INPUTS into a single FASL OUTPUT"
--    #-(or abcl allegro clisp clozure cmucl lispworks sbcl scl xcl)
-+    #-(or miricl abcl allegro clisp clozure cmucl lispworks sbcl scl xcl)
+-    #-(or abcl allegro clasp clisp clozure cmucl lispworks sbcl scl xcl)
++    #-(or miricl abcl allegro clasp clisp clozure cmucl lispworks sbcl scl xcl)
      (not-implemented-error 'combine-fasls "~%inputs: ~S~%output: ~S" inputs output)
 +    #+miricl
 +    (labels ((uleb (stream)
@@ -94,4 +94,5 @@ ordinary LOAD handles both individual FASLs and bundles without ASDF.
 +        output))
      #+abcl (funcall 'sys::concatenate-fasls inputs output) ; requires ABCL 1.2.0
      #+(or allegro clisp cmucl sbcl scl xcl) (concatenate-files inputs output)
+     #+clasp (cmp:build-fasl output :lisp-files inputs)
      #+clozure (ccl:fasl-concatenate output inputs :if-exists :supersede)
