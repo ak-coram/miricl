@@ -63,6 +63,14 @@
 
 (defun native-read-ops (bytes &optional references-only)
   (declare (type vector bytes))
+  (let ((decoded (compiler-primitive 38 bytes references-only)))
+    (when decoded
+      (return-from native-read-ops
+        (values (svref decoded 0) (svref decoded 1) (svref decoded 2)))))
+  (native-read-ops-portable bytes references-only))
+
+(defun native-read-ops-portable (bytes &optional references-only)
+  (declare (type vector bytes))
   (let ((position 0) (offset 2) (locals 0) (ops nil))
     (declare (type (unsigned-byte 32) position offset locals))
     (multiple-value-bind (groups next) (native-read-uleb bytes position)
@@ -281,16 +289,26 @@
                    (values 2 (if (= code #x10) 1 0)))))
       (otherwise (values 0 0)))))
 
-(defun native-stackify-ops (ops &optional exceptions types)
-  (declare (type simple-vector ops) (type (or null simple-vector) types))
+(defun native-stackify-ops (ops &optional exceptions types total)
+  (declare (type simple-vector ops) (type (or null simple-vector) types)
+           (type (or null (unsigned-byte 32)) total))
   ;; Stack entries are NIL for real operands and an instruction index for a
   ;; store whose value could remain on the stack. Liveness ensures its matching
   ;; load is the last use; any earlier load invalidates the candidate.
-  (let ((stack nil) (barriers nil) (candidates (make-hash-table :test 'eql)))
-    (declare (type list stack barriers) (type hash-table candidates))
+  ;; Local numbers form a dense bounded domain. Epochs invalidate the entire
+  ;; candidate table at a control boundary without clearing or hashing it.
+  (let* ((total (or total (loop for op across ops
+                  when (member (native-op-code op) '(#x20 #x21 #x22))
+                    maximize (1+ (native-op-argument op)) into count
+                  finally (return (or count 0)))))
+         (stack nil) (barriers nil)
+         (candidates (make-array total :initial-element nil))
+         (epochs (make-array total :initial-element 0)) (epoch 1))
+    (declare (type list stack barriers) (type simple-vector candidates epochs)
+             (type (integer 1 *) epoch))
     (dotimes (i (length ops))
       (let* ((op (aref ops i)) (code (native-op-code op)) (local (native-op-argument op))
-             (store (and (eql code #x20) (gethash local candidates)))
+             (store (and (eql code #x20) (= (aref epochs local) epoch) (aref candidates local)))
              ;; Other candidate stores are not actual operands. Looking past
              ;; them lets sibling temporaries become stack operands together,
              ;; while an actual value (NIL) remains a strict ordering barrier.
@@ -301,7 +319,7 @@
              (candidate (and store (or (null barriers) (> (car store) (car barriers))) store)))
         ;; A throwing call may expose any local to a landing pad. Keeping a
         ;; value on the operand stack cannot replace that observable store.
-        (when (and exceptions (member code '(#x08 #x10 #x12))) (clrhash candidates))
+        (when (and exceptions (member code '(#x08 #x10 #x12))) (incf epoch))
         ;; Wasm's definite-initialization validation is structural, rather than
         ;; ordinary CFG liveness. Keep stores to non-defaultable typed refs even
         ;; when all runtime paths overwrite them inside nested blocks.
@@ -313,23 +331,23 @@
         (cond
           ((null code))
           ((member code '(#x00 #x02 #x03 #x04 #x05 #x08 #x0b #x0c #x0d #x0e #x0f #x1f))
-           (setq stack nil barriers nil) (clrhash candidates))
+           (setq stack nil barriers nil) (incf epoch))
           ((and (= code #x20) candidate
                 (not (and types (eql (car (aref types local)) #x64)))
                 (not (logbitp local (native-op-live-out op))))
            (setf (native-op-code (aref ops (car candidate))) nil (native-op-code op) nil)
            (push (car candidate) barriers)
-           (setf (car candidate) nil) (remhash local candidates))
+           (setf (car candidate) nil (aref epochs local) 0))
           (t
-           (when (= code #x20) (remhash local candidates))
+           (when (= code #x20) (setf (aref epochs local) 0))
            (multiple-value-bind (consumed produced) (native-op-stack op)
              (dotimes (j consumed)
                (loop while (and stack (car stack)) do
-                 (remhash (native-op-argument (aref ops (pop stack))) candidates))
+                 (setf (aref epochs (native-op-argument (aref ops (pop stack)))) 0))
                (when stack (pop stack) (pop barriers)))
-             (when (member code '(#x21 #x22)) (remhash local candidates))
+             (when (member code '(#x21 #x22)) (setf (aref epochs local) 0))
              (if (= code #x21)
-                 (progn (push i stack) (setf (gethash local candidates) stack))
+                 (progn (push i stack) (setf (aref candidates local) stack (aref epochs local) epoch))
                  (dotimes (j produced) (push nil stack) (push i barriers))))))))
   ops))
 
@@ -451,35 +469,45 @@
   (let* ((size (length ops)) (codes (map 'vector (lambda (op) (native-op-code op)) ops))
          (ends (make-array size :initial-element nil))
          (used (make-array size :initial-element nil))
-         (removed (make-array size :initial-element nil)) (scopes nil))
-    (declare (type (unsigned-byte 32) size) (type simple-vector codes ends used removed)
-             (type list scopes))
+         (removed (make-array size :initial-element nil))
+         (scopes (make-array size)) (prefix (make-array (1+ size) :initial-element 0))
+         (top 0) (changed nil))
+    (declare (type (unsigned-byte 32) size top)
+             (type simple-vector codes ends used removed scopes prefix))
     (dotimes (i size)
+      (declare (type (unsigned-byte 32) i))
       (let ((op (aref ops i)))
         (case (aref codes i)
-          ((#x02 #x03 #x04) (push i scopes))
-          (#x0b (when scopes (setf (aref ends (pop scopes)) i)))
+          ((#x02 #x03 #x04) (setf (aref scopes top) i) (incf top))
+          (#x0b (when (plusp top) (decf top) (setf (aref ends (aref scopes top)) i)))
           ((#x0c #x0d #x0e)
            (dolist (depth (if (eql (aref codes i) #x0e) (native-op-argument op)
                              (list (native-op-argument op))))
-             (let ((target (nth depth scopes)))
-               (when target (setf (aref used target) t))))))))
+             (when (< depth top)
+               (setf (aref used (aref scopes (- top depth 1))) t)))))))
     (dotimes (i size)
       (when (and (member (aref codes i) '(#x02 #x03))
                  (eql (native-op-argument (aref ops i)) #x40) (not (aref used i)))
-        (setf (aref removed i) t
+        (setf changed t (aref removed i) t
               (native-op-code (aref ops i)) nil
               (native-op-code (aref ops (aref ends i))) nil)))
-    (setq scopes nil)
+    (unless changed (return-from native-clean-scopes ops))
+    (setq top 0)
     (labels ((depth (old)
                (declare (type (unsigned-byte 32) old))
-               (- old (loop for scope in scopes for level below old
-                            count (aref removed scope)))))
+               ;; Prefix counts answer how many inner scopes disappeared in
+               ;; constant time, including branches to the implicit function
+               ;; label. Walking each branch's nesting depth was quadratic for
+               ;; large dispatcher frames and generated numerical functions.
+               (- old (- (aref prefix top) (aref prefix (max 0 (- top old)))))))
       (dotimes (i size)
+        (declare (type (unsigned-byte 32) i))
         (let ((op (aref ops i)))
           (case (aref codes i)
-            ((#x02 #x03 #x04) (push i scopes))
-            (#x0b (pop scopes))
+            ((#x02 #x03 #x04)
+             (setf (aref prefix (1+ top)) (+ (aref prefix top) (if (aref removed i) 1 0)))
+             (incf top))
+            (#x0b (when (plusp top) (decf top)))
             ((#x0c #x0d) (setf (native-op-argument op) (depth (native-op-argument op))))
             (#x0e (setf (native-op-argument op) (mapcar #'depth (native-op-argument op))))))))
     ops))
@@ -573,14 +601,14 @@
                            (gethash *wasm-current-function* *wasm-function-relocations*)))
           (new-relocations nil) (blocks nil) (mapping nil) (second-mapping nil))
       (setq blocks (native-op-liveness ops (+ offset count) exceptions))
-      (native-stackify-ops ops exceptions local-types)
+      (native-stackify-ops ops exceptions local-types (+ offset count))
       ;; Recompute liveness after eliminating stores, then color the CFG.
       (native-op-liveness ops (+ offset count) exceptions blocks)
       (multiple-value-setq (count local-types mapping)
         (native-coalesce-ops ops offset count exceptions local-types))
       (native-fold-locals ops)
       (native-op-liveness ops (+ offset count) exceptions blocks)
-      (native-stackify-ops ops exceptions local-types)
+      (native-stackify-ops ops exceptions local-types (+ offset count))
       (multiple-value-setq (count local-types second-mapping)
         (native-coalesce-ops ops offset count exceptions local-types))
       (when decoded-ops

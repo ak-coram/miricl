@@ -1362,6 +1362,8 @@
   #@(local.set $a (call $car (local.get $args)))
   #@(local.set $b (call $car (call $cdr (local.get $args))))
   #@(local.set $c (call $car (call $cdr (call $cdr (local.get $args)))))
+  #@(if (i32.eq (local.get $mode) (i32.const 38))
+    (then (return_call $native-read-ops (local.get $a) (local.get $b))))
   #@(if (i32.eq (local.get $mode) (i32.const 35))
     (then (return_call $fasl-dependencies (local.get $a) (local.get $b))))
   #@(if (i32.eq (local.get $mode) (i32.const 36))

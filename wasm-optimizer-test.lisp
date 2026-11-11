@@ -178,3 +178,16 @@
   (check-module-optimization
     "(module (func (export \"answer\") (param $n i32) (result i32) (local $zero i32)
        local.get $n drop local.get $zero))" '(0) '(97)))
+
+(test module-optimizer-deep-branch-depths
+  ;; Both an explicit result block and the implicit function label remain
+  ;; valid BR_TABLE targets after hundreds of unused inner blocks disappear.
+  (let* ((depth 384)
+         (wat (format nil "(module (func (export ~S) (param i32) (result i32)
+                  block $done (result i32) ~{~A~}
+                    i32.const 42 local.get 0 br_table $done ~D
+                  ~{~A~} unreachable end))"
+                "answer" (make-list depth :initial-element "block ") (1+ depth)
+                (make-list depth :initial-element "end "))))
+    (dolist (index '(0 1 127))
+      (check-module-optimization wat '(42) (list index)))))

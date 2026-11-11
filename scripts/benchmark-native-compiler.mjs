@@ -1,6 +1,6 @@
 // Compare native emission and frontend+emission, excluding bootstrap and loading.
 // Comparisons require byte-identical output; warm up before each timed batch.
-// Usage: node scripts/benchmark-native-compiler.mjs [--compare-size] [--large] IMAGE [COMPARISON_IMAGE ...]
+// Usage: node scripts/benchmark-native-compiler.mjs [--compare-size] [--large|--deep-control] IMAGE [COMPARISON_IMAGE ...]
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -29,7 +29,14 @@ if (process.argv.includes('--large')) {
   cases.splice(0, cases.length, ['large-initializer',
     `(lambda (n) (let (${largeBindings}) (list ${largeValues})))`, 1]);
 }
-const paths = process.argv.slice(2).filter(argument => !['--compare-size', '--large'].includes(argument));
+if (process.argv.includes('--deep-control')) {
+  const branches = Array.from({length: 384}, (_, i) =>
+    `(when (= n ${i}) (incf answer) (go done))`).join(' ');
+  cases.splice(0, cases.length, ['deep-control', `(lambda (n) (let ((answer 0))
+    (tagbody start (when (minusp n) (go done)) ${branches}
+      (decf n) (go start) done) answer))`, 1]);
+}
+const paths = process.argv.slice(2).filter(argument => !['--compare-size', '--large', '--deep-control'].includes(argument));
 if (!paths.length) paths.push('miricl.wasm');
 const variants = await Promise.all(paths.map(async file => ({file,
   image: await fs.readFile(file), measurements: []})));

@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto';
 import {Miricl} from './miricl.mjs';
 import {portAcl2Source} from '../acl2/host.mjs';
 import {execFileSync} from 'node:child_process';
+import {startWasmProfile} from './wasm-profile.mjs';
 const [imagePath = 'miricl-precompiled.wasm', input = 'build/acl2/acl2.wasm',
   output = 'build/acl2/acl2-native.wasm'] = process.argv.slice(2);
 const upstream = path.resolve('vendor/acl2');
@@ -19,8 +20,14 @@ const vm = await Miricl.instantiate(image, {imports: {acl2Build: {
 const stages = [];
 async function evaluate(name, source) {
   stage = name; console.log(`ACL2 native: ${stage}`); const start = performance.now();
-  const result = await vm.evaluateAsync(source, {eof: true});
-  stages.push({name, milliseconds: Math.round(performance.now() - start)});
+  const profile = process.env.MIRICL_ACL2_PROFILE_DIRECTORY
+    && new RegExp(process.env.MIRICL_ACL2_PROFILE_PHASE ?? 'compile native code').test(name)
+    ? await startWasmProfile(vm, image,
+      path.join(process.env.MIRICL_ACL2_PROFILE_DIRECTORY, name.replaceAll(/[^a-z0-9-]+/gi, '-'))) : null;
+  let result, milliseconds;
+  try {result = await vm.evaluateAsync(source, {eof: true}); milliseconds = Math.round(performance.now() - start);}
+  finally {if (profile) await profile();}
+  stages.push({name, milliseconds});
   return result;
 }
 try {

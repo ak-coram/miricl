@@ -406,6 +406,11 @@ use a dedicated record-block tag (10), a base record ID and a record count.
 Strings use minimal UTF-8 lengths, whole-string references, or a previously
 decoded string's prefix plus a UTF-8 suffix. Prefix lengths count characters,
 preserving Unicode boundaries; each chunk has its own dictionary.
+Byte-valued strings without a profitable prefix use tag 11 and one byte per
+character, avoiding UTF-8 expansion of native Wasm blobs. They join the same
+dictionary, so later strings can reference them or reuse their prefixes.
+Header flag bit 2 advertises this encoding; older readers reject the unit
+before executing its initializers. Readers still accept earlier UTF-8 units.
 Nil, number, character, string and symbol records have compact opcodes.
 Symbol opcode 12 reuses the preceding symbol's package and namespace within
 the block. Cons opcodes 6--8 carry the first cell's instruction flags and a
@@ -563,9 +568,32 @@ stackification indexes candidate stack cells by instruction position. Its stack
 of real-operand barriers preserves operand order without scanning sibling stores.
 Native two-argument =vector-push= and =vector-push-extend= calls append directly
 when capacity is available; growth uses the ordinary array implementation.
+Native modules emit each function once against the complete ABI. The final
+reachability pass compacts and reorders imports while relocating the existing
+bodies. Positional HIR record macros create vectors directly in hot frontend
+paths, preserving the ordinary keyword constructors and record interfaces.
+Scope removal uses an indexed control stack and prefix counts of removed
+labels. Resolving and relocating a branch is constant time in its nesting
+depth, including branches to the implicit function label.
+Acyclic entries created for immediate evaluation omit local/stack size passes:
+each instruction executes at most once. Persistent function bodies, escaped
+child closures and cyclic entries retain their ordinary optimization policy.
+The runtime decodes native bytecode into the same optimizer records directly
+in Wasm, with the portable Lisp reader retained for host compilation and
+unsupported encodings. Stackification indexes candidates by local number and
+invalidates them with epochs at control boundaries, avoiding hash lookups and
+table clearing in its instruction loop.
 
 Compare compiler throughput with
 =node scripts/benchmark-native-compiler.mjs BEFORE.wasm AFTER.wasm=.
+Compare immediate evaluation with
+=node scripts/benchmark-evaluation.mjs BEFORE.wasm AFTER.wasm=.
+For ACL2, =scripts/benchmark-acl2-startup.mjs IMAGE CORE REPORT= measures loading
+and world initialization without proof tests. Add =--profile= for attributed
+CPU samples or =--save-image= to record the initialized image size.
+The portable and native ACL2 build scripts also accept
+=MIRICL_ACL2_PROFILE_DIRECTORY= and an optional phase regular expression in
+=MIRICL_ACL2_PROFILE_PHASE=; profiling stays disabled by default.
 With a prepared FriCAS bootstrap and optimized core,
 =node scripts/benchmark-fricas-compiler.mjs BEFORE.wasm AFTER.wasm= measures
 compilation, compaction, loading and native emission for three algebra libraries.

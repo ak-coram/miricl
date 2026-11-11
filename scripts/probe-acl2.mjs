@@ -9,6 +9,7 @@ import {gzipSync, brotliCompressSync} from 'node:zlib';
 import {Worker, isMainThread, parentPort, workerData} from 'node:worker_threads';
 import {Miricl} from './miricl.mjs';
 import {portAcl2Source, acl2Adaptations} from '../acl2/host.mjs';
+import {startWasmProfile} from './wasm-profile.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const upstream = path.join(root, 'vendor/acl2');
@@ -23,8 +24,14 @@ if (!isMainThread) {
     stage = name;
     parentPort.postMessage({stage});
     const start = performance.now();
-    const result = await vm.evaluateAsync(source, {eof: true});
-    stages.push({name, milliseconds: Math.round(performance.now() - start), output: result.output});
+    const profile = process.env.MIRICL_ACL2_PROFILE_DIRECTORY
+      && new RegExp(process.env.MIRICL_ACL2_PROFILE_PHASE ?? 'load system').test(name)
+      ? await startWasmProfile(vm, fs.readFileSync(workerData.image),
+        path.join(process.env.MIRICL_ACL2_PROFILE_DIRECTORY, name.replaceAll(/[^a-z0-9-]+/gi, '-'))) : null;
+    let result, milliseconds;
+    try {result = await vm.evaluateAsync(source, {eof: true}); milliseconds = Math.round(performance.now() - start);}
+    finally {if (profile) await profile();}
+    stages.push({name, milliseconds, output: result.output});
     parentPort.postMessage({completed: stages.at(-1)});
     return result;
   };

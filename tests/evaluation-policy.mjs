@@ -86,6 +86,13 @@ for (const [file, compiled] of [[process.argv[2] ?? 'miricl.wasm', false],
     check(`(let* ((object (list 42)) (miricl-compiler:*compile-evaluations* t))
       (setf (cdr object) object)
       (eq object (eval (list 'identity (list 'quote object)))))`);
+    // A temporary evaluation entry may return persistent native closures.
+    // Their captured cells and multiple values outlive the entry invocation.
+    check(`(let ((miricl-compiler:*compile-evaluations* t))
+      (multiple-value-bind (function marker)
+          (eval '(let ((x 40)) (values (lambda (step) (incf x step)) :escaped)))
+        (and (eq marker :escaped) (compiled-function-p function)
+             (= (funcall function 2) 42) (= (funcall function 3) 45))))`);
 
     mode(true);
     output(`(defvar *policy-expansions* 0) (defvar *policy-effects* 0)

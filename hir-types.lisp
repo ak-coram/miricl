@@ -77,6 +77,10 @@
 NIL is the empty type and T is unknown. Value counts remain a separate analysis.
 Captured cells and debug-enabled functions keep conservative inferred types."
   (declare (type hir-unit unit) (type list roots))
+  ;; Explicitly requesting no facts needs no dependency or escape graph.
+  ;; Many initialization units contain no operations using inferred types.
+  (when (and rootsp (null roots))
+    (return-from infer-hir-types (make-hash-table :test 'eq)))
   (let ((facts (make-hash-table :test 'eq)) (sources (make-hash-table :test 'eq))
         (users (make-hash-table :test 'eq)) (calls (make-hash-table :test 'eq))
         (references (make-hash-table :test 'eq)) (candidates (make-hash-table :test 'eq))

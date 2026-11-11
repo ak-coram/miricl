@@ -81,6 +81,7 @@
                (:file "runtime-development")
                (:file "runtime-fasl-codec")
                (:file "runtime-native-code")
+               (:file "runtime-native-optimizer")
                (:file "runtime-sequences")
                (:file "runtime-list-operations")
                (:file "runtime-tree-operations")

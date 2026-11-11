@@ -21,7 +21,7 @@ try {
   const payload = new Uint8Array(WebAssembly.Module.customSections(await WebAssembly.compile(bytes), 'miricl.fasl')[0]);
   assert.deepEqual([...payload.subarray(0, 4)], [77, 73, 82, 70]);
   const directory = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  assert.equal(directory.getUint32(4, true), 3, 'Metadata and dense-record feature bits');
+  assert.equal(directory.getUint32(4, true), 7, 'Metadata, dense-record and byte-string feature bits');
   const entries = Array.from({length: directory.getUint32(12, true)}, (_, i) => {
     const at = 20 + 16 * i;
     return {at, kind: directory.getUint32(at, true), key: directory.getUint32(at + 4, true),
@@ -114,6 +114,45 @@ try {
           (miricl-compiler::write-binary-chunk *prefix-values* out)) t)
       (setf (symbol-function 'miricl-compiler::compiler-primitive) native)))`);
   assert.deepEqual(await vm.readFile('/prefix-portable.bin'), prefix);
+  // Native code is stored as byte-valued strings. Cover every octet, NULs,
+  // dictionary reuse and UTF-8 suffixes following a byte-encoded prefix.
+  check(`(progn
+    (defparameter *byte-string* (map 'string #'code-char
+      (loop for i below 256 collect i)))
+    (defparameter *byte-values* (vector *byte-string* (copy-seq *byte-string*)
+      (concatenate 'string *byte-string* "suffix")
+      (concatenate 'string *byte-string* "suffixλ𝄞")))
+    (with-open-file (out "/byte-strings.bin" :direction :output :element-type '(unsigned-byte 8))
+      (miricl-compiler::write-binary-chunk *byte-values* out))
+    (with-open-file (in "/byte-strings.bin" :element-type '(unsigned-byte 8))
+      (equalp (miricl-compiler::read-binary-chunk in 0 (file-length in)) *byte-values*)))`);
+  const byteStrings = await vm.readFile('/byte-strings.bin');
+  assert.deepEqual([...byteStrings.subarray(0, 5)], [8, 4, 11, 128, 2]);
+  assert.deepEqual([...byteStrings.subarray(5, 261)], Array.from({length: 256}, (_, i) => i));
+  check(`(let ((native (symbol-function 'miricl-compiler::compiler-primitive)))
+    (unwind-protect
+      (progn
+        (setf (symbol-function 'miricl-compiler::compiler-primitive)
+          (lambda (&rest args) (declare (ignore args)) (values nil nil)))
+        (with-open-file (in "/byte-strings.bin" :element-type '(unsigned-byte 8))
+          (unless (equalp (miricl-compiler::read-binary-chunk in 0 (file-length in)) *byte-values*)
+            (error "Portable byte string mismatch.")))
+        (with-open-file (out "/byte-strings-portable.bin" :direction :output :element-type '(unsigned-byte 8))
+          (miricl-compiler::write-binary-chunk *byte-values* out)) t)
+      (setf (symbol-function 'miricl-compiler::compiler-primitive) native)))`);
+  assert.deepEqual(await vm.readFile('/byte-strings-portable.bin'), byteStrings);
+  vm.mountFile('/truncated-byte-string.bin', Uint8Array.of(11, 2, 0));
+  for (const portable of [false, true]) {
+    check(`(let ((native (symbol-function 'miricl-compiler::compiler-primitive)))
+      (unwind-protect
+        (progn ${portable ? `(setf (symbol-function 'miricl-compiler::compiler-primitive)
+          (lambda (&rest args) (declare (ignore args)) (values nil nil)))` : ''}
+          (handler-case
+            (with-open-file (in "/truncated-byte-string.bin" :element-type '(unsigned-byte 8))
+              (miricl-compiler::read-binary-chunk in 0 (file-length in)) nil)
+            (error () t)))
+        (setf (symbol-function 'miricl-compiler::compiler-primitive) native)))`);
+  }
   check(`(progn
     (defparameter *packets* (make-array 0 :adjustable t :fill-pointer 0))
     (loop for run from 1 to 16 do

@@ -68,6 +68,7 @@
       ,(development-runtime-wat)
       ,(fasl-codec-runtime-wat)
       ,(native-code-runtime-wat)
+      ,(native-optimizer-runtime-wat)
       ,(sequence-runtime-wat)
       ,(list-operations-runtime-wat)
       ,(sequence-construction-runtime-wat)

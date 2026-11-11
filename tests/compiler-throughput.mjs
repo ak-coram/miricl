@@ -22,6 +22,39 @@ try {
           (list #'native-read-sleb '(191 127) -65)
           (list #'native-read-sleb '(128 128 128 128 120) -2147483648)
           (list #'native-read-sleb '(255 255 255 255 7) 2147483647)))`);
+  // Decode the emitter's complete instruction subset with both readers. Keep
+  // local layouts, signed constants, GC operands, catch tables and byte
+  // positions identical, including displaced and adjustable byte vectors.
+  check(`(let* ((bytes (coerce
+      '(2 3 127 5 111 2 64 3 64 4 64 5 11 11 11
+        8 128 1 12 0 13 1 16 128 1 18 2 32 3 33 4 34 5
+        65 64 65 192 0 65 128 128 128 128 120 65 255 255 255 255 7
+        208 111 210 255 1 14 2 0 128 1 2
+        31 64 4 0 1 2 1 3 4 2 5 3 6
+        251 2 0 1 251 20 111 251 22 111 251 23 111
+        251 26 251 27 251 28 251 29
+        0 15 26 69 70 72 74 76 78 83 85 87 89 113 124 125 126 167 172 209 11)
+      '(vector (unsigned-byte 8))))
+      (adjustable (make-array (+ 8 (length bytes)) :element-type '(unsigned-byte 8)
+        :adjustable t :fill-pointer (length bytes) :initial-element 0))
+      (storage (concatenate '(vector (unsigned-byte 8)) #(99) bytes #(99)))
+      (displaced (make-array (length bytes) :element-type '(unsigned-byte 8)
+        :displaced-to storage :displaced-index-offset 1)))
+    (replace adjustable bytes)
+    (every (lambda (source)
+      (every (lambda (references)
+        (let ((native (compiler-primitive 38 source references)))
+          (and native
+            (equalp (coerce native 'list)
+              (multiple-value-list (native-read-ops-portable source references))))))
+        '(nil t))) (list bytes adjustable displaced)))`);
+  check(`(and (null (compiler-primitive 38 #(0 16 128) nil))
+    (null (compiler-primitive 38 #(0 255) nil))
+    (null (compiler-primitive 38 #(1 1 124 11) nil))
+    (let ((bytes #(0 16 128 128 128 128 128 1 11)))
+      (and (null (compiler-primitive 38 bytes nil))
+        (equalp (multiple-value-list (native-read-ops bytes))
+          (multiple-value-list (native-read-ops-portable bytes))))))`);
   // Sibling stores may be consumed in creation order. Eliminating the older
   // store inserts a real operand below the younger one; both must stackify.
   // A temporary real operand must block them only until it is consumed.
@@ -46,6 +79,13 @@ try {
          (typep copy 'hir-value) (not (eq copy value))
          (eq (hir-value-producer copy) (hir-value-producer value))
          (= calls 1) (eq (hir-value-type copy) 'integer) (eq (hir-value-type value) t)))`);
+  check(`(let* ((calls 0)
+                (value (make-hir-value-record (incf calls) :single nil nil))
+                (instruction (make-hir-instruction-record :return nil nil nil nil :control)))
+    (and (= calls 1) (hir-value-p value)
+         (equalp value (make-hir-value :id 1 :kind :single))
+         (equalp instruction (make-hir-instruction :opcode :return :effect :control))
+         (= (hir-instruction-safety-level instruction) 1))))`);
   check(`(let* ((unit (compile-to-hir '(lambda (x) (+ x 19))))
                 (function (first (hir-unit-functions unit)))
                 (value (first (hir-function-values function))))

@@ -56,7 +56,14 @@
                (if (and (plusp prefix) (> prefix-bytes (+ (uleb-size (1- index)) (uleb-size prefix))))
                    (progn (write-byte 9 stream) (write-uleb (1- index) stream) (write-uleb prefix stream)
                      (write-uleb (- (length bytes) prefix-bytes) stream) (write-sequence bytes stream :start prefix-bytes))
-                   (progn (write-byte 3 stream) (write-uleb (length bytes) stream) (write-sequence bytes stream))))
+                   ;; Byte-valued strings include native modules. Preserve
+                   ;; their characters directly instead of expanding every
+                   ;; high byte into two UTF-8 bytes.
+                   (if (and (> (length bytes) (length value))
+                            (every (lambda (character) (< (char-code character) 256)) value))
+                       (progn (write-byte 11 stream) (write-uleb (length value) stream)
+                         (loop for character across value do (write-byte (char-code character) stream)))
+                       (progn (write-byte 3 stream) (write-uleb (length bytes) stream) (write-sequence bytes stream)))))
              (setf (gethash value *binary-strings*) index *binary-last-string* value)))))
     ((keywordp value) (write-byte 5 stream) (encode-value (symbol-name value) stream (1+ depth)))
     ((consp value)
@@ -74,7 +81,7 @@
   (let ((tag (binary-byte stream)))
    (case tag
     (0 nil) (1 (binary-uleb stream)) (2 (- (binary-uleb stream)))
-    ((3 9)
+    ((3 9 11)
      (let ((base nil) (prefix 0))
        (when (= tag 9)
          (let ((index (binary-uleb stream)))
@@ -83,7 +90,10 @@
            (unless (<= prefix (length base)) (error "Invalid FASL string prefix length."))))
        (let* ((size (binary-uleb stream)) (end (+ (file-position stream) size)))
          (when (> end *binary-limit*) (error "Truncated binary FASL string."))
-         (let ((text (payload-text stream end)))
+         (let ((text (if (= tag 11)
+                         (let ((text (make-string size)))
+                           (dotimes (i size text) (setf (char text i) (code-char (binary-byte stream)))))
+                         (payload-text stream end))))
            (file-position stream end)
            (when base (setq text (concatenate 'string (subseq base 0 prefix) text)))
            (vector-push-extend text *binary-strings*) text))))
@@ -279,9 +289,9 @@
     (write-byte 0 stream) (write-padded-uleb 0 stream) (write-byte 11 stream)
     (loop for character across "miricl.fasl" do (write-byte (char-code character) stream))
     (dolist (byte '(77 73 82 70)) (write-byte byte stream))
-    ;; Bit 1 advertises dense slot records so older readers fail at the header
-    ;; before executing any part of an unsupported unit. Bit 0 remains metadata.
-    (write-u32 (logior (if metadata 1 0) (if (find 11 records :key #'first) 2 0)) stream)
+    ;; Advertise byte-valued strings (bit 2) and dense slots (bit 1), so older
+    ;; readers reject unsupported units before executing any initializer.
+    (write-u32 (logior 4 (if metadata 1 0) (if (find 11 records :key #'first) 2 0)) stream)
     (write-u32 (length records) stream)
     (write-u32 chunks stream) (write-u32 +fasl-block-size+ stream)
     (dotimes (i (* chunks 16)) (write-byte 0 stream))
@@ -309,7 +319,7 @@
     (unless (= byte (read-byte stream)) (error "Invalid binary FASL magic.")))
   (let ((flags (read-u32 stream)) (records (read-u32 stream))
         (count (read-u32 stream)) (block-size (read-u32 stream)) (entries nil))
-    (unless (and (<= flags 3) (= block-size +fasl-block-size+)
+    (unless (and (<= flags 7) (= block-size +fasl-block-size+)
                  (<= records #x7fffffff) (<= count (floor (- end start 20) 16))
                  (<= records (- end start 20 (* count 16))))
       (error "Unsupported binary FASL header."))

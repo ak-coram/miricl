@@ -8,8 +8,9 @@
          (expanded (%compile-form (list 'function form) nil)))
     ;; Resolve macros and LOAD-TIME-VALUE in the application's environment,
     ;; retaining the actual literal objects before native HIR lowering.
-    (miricl-compiler:compile-native
-      (if (eq (car expanded) 'function) (second expanded) expanded) :name name)))
+    (let ((miricl-compiler::*wasm-single-use-entry* (null name)))
+      (miricl-compiler:compile-native
+        (if (eq (car expanded) 'function) (second expanded) expanded) :name name))))
 
 (defun %compiler-evaluate (form)
   (when (or (not miricl-compiler:*compile-evaluations*)

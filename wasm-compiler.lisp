@@ -23,6 +23,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-inline-constants* nil)
 (defvar *wasm-last-local* nil)
 (defvar *wasm-optimize* t)
+(defvar *wasm-single-use-entry* nil)
 (defvar *compiler-bootstrapping* nil)
 (defvar *wasm-used-imports*)
 (defvar *wasm-import-counts* nil)
@@ -531,8 +532,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun native-integer-width (value)
   (declare (type simple-vector value))
-  ;; Import discovery and final emission use the same HIR. Cache unknown
-  ;; widths as well as known ones, without retaining facts between emissions
+  ;; Cache unknown widths as well as known ones within an emission, without
+  ;; retaining facts between emissions
   ;; of an HIR graph which a client may have subsequently rewritten.
   (if *wasm-integer-widths*
       (let ((width (native-value-slot *wasm-integer-widths* value)))
@@ -1052,8 +1053,15 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun emit-native-function (function)
   (let ((*wasm-current-function* function))
-    (let ((body (emit-native-function-body function)))
-      (if *wasm-optimize* (native-optimize-body body) body))))
+    (let* ((body (emit-native-function-body function))
+           (plan (and *wasm-function-plans* (gethash function *wasm-function-plans*))))
+      ;; Acyclic evaluation entries execute their instructions at most once.
+      ;; Their local/stack sizing work cannot pay back during execution. Keep
+      ;; optimizing every persistent child and any entry containing a loop.
+      (if (and *wasm-optimize*
+               (not (and *wasm-single-use-entry* (eq function (first *native-functions*))
+                         plan (svref plan 1))))
+          (native-optimize-body body) body))))
 
 (defun native-loop-literals (function blocks)
   ;; Literal identity is stable for the lifetime of this function object.
@@ -1076,8 +1084,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun native-function-plan (function)
   (declare (type simple-vector function))
-  ;; HIR is unchanged between import discovery and final emission. Literal
-  ;; indices, closure objects and relocations remain per-emission state.
+  ;; Cache the lowering facts separately from the emitted literals, closure
+  ;; objects and relocation offsets.
   (let* ((targets (native-block-targets function))
         (forward (unless targets (native-forward-blocks function)))
         (blocks (or forward (hir-function-blocks function)))
@@ -1303,7 +1311,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
               (let ((entry (aref representatives index)))
                 (native-relocate-body (car entry) (cdr entry) original-indices))) order)))
 
-(defun native-prune-module (bodies entries)
+(defun native-prune-module (bodies entries &optional (prune-functions t))
   ;; RemoveUnusedModuleElements after branch/DCE cleanup. No calls or closure
   ;; entries are renumbered until body sharing and function layout are final.
   (let* ((old-count (length *native-imports*)) (used (make-array old-count :initial-element nil))
@@ -1311,7 +1319,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
          (decoded (coerce (mapcar (lambda (body) (native-read-ops body t)) bodies) 'vector))
          (live (make-array (length bodies) :initial-element nil))
          (functions (make-array (length bodies))) (function-count 0)
-         (work (if entries (mapcar (lambda (entry) (gethash entry *native-function-indices*)) entries) '(0)))
+         (work (if prune-functions
+                   (if entries (mapcar (lambda (entry) (gethash entry *native-function-indices*)) entries) '(0))
+                   (loop for i below (length bodies) collect i)))
          (imports nil) (next 0))
     ;; Only exports and function references in reachable code are roots. The
     ;; declarative element segment grants REF.FUNC permission, not reachability.
@@ -1323,12 +1333,19 @@ Bind to NIL to interpret forms, including forms without native lowering.")
             (let ((target (native-op-argument op)))
               (if (< target old-count) (setf (aref used target) t)
                   (push (- target old-count) work)))))))
-    (loop for import in *native-imports* for i from 0 do
-      (when (aref used i)
-        (setf (aref mapping i) next) (incf next) (push import imports)))
+    ;; Emit once against the complete ABI, then choose compact import indices
+    ;; from the actual surviving instructions. Frequency order keeps common
+    ;; calls within the one-byte LEB tier, including in large application units.
+    (let ((order (loop for i below old-count when (aref used i) collect i))
+          (all-imports (coerce *native-imports* 'vector)))
+      (setq order (stable-sort order #'>
+                    :key (lambda (i) (gethash (first (aref all-imports i)) *wasm-import-counts* 0))))
+      (dolist (i order)
+        (setf (aref mapping i) next) (incf next) (push (aref all-imports i) imports)))
     (dotimes (i (length bodies))
       (when (aref live i) (setf (aref functions i) function-count) (incf function-count)))
-    (when (and (= next old-count) (= function-count (length bodies)))
+    (when (and (= next old-count) (= function-count (length bodies))
+               (loop for i below old-count always (= i (aref mapping i))))
       (return-from native-prune-module bodies))
     (setq *native-imports* (nreverse imports))
     (dolist (function *native-functions*)
@@ -1391,20 +1408,13 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (let ((*wasm-inline-vector-calls* (make-hash-table :test 'eq))
           (*wasm-inline-references* (make-hash-table :test 'eq)))
     (native-plan-inline-vectors unit)
-    ;; Collect an import superset using raw emission; only final bodies need
-    ;; size analysis. Regenerate with compact indices, then prune functions and
-    ;; imports made unreachable by constant/control cleanup.
-    (mapc #'emit-native-function-body *native-functions*)
-    (let* ((type-prefix (if *wasm-object-types* 2 0))
-         (*native-imports* (stable-sort
-                           (remove-if-not (lambda (import) (member (first import) *wasm-used-imports* :test #'equal))
-                                          *native-imports*)
-                           #'> :key (lambda (import) (gethash (first import) *wasm-import-counts* 0))))
-         (*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
-         (*wasm-literal-index* (make-hash-table :test 'eq))
-         (*wasm-literal-groups* (and entries (native-literal-groups entries)))
+    ;; Local sizing, body sharing and import relocation operate on the first
+    ;; emitted bodies. Discovering imports no longer requires a throwaway
+    ;; emission of every instruction and literal in the application.
+    (let* ((*native-imports* *native-imports*)
          (bodies (emit-native-bodies entries))
-         (bodies (if *wasm-optimize* (native-prune-module bodies entries) bodies))
+         (bodies (native-prune-module bodies entries *wasm-optimize*))
+         (type-prefix (if *wasm-object-types* 2 0))
          (signatures (remove-duplicates
                        (append (mapcar #'cdr *native-imports*) (list '((:object :object) :object))
                          (when *wasm-exceptions* (list '(nil nil)))) :test #'equal))
@@ -1457,14 +1467,18 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun compile-native (lambda-expression &key name)
   "Compile a lambda to native Wasm using the current host's module loader."
-  (ensure-compiler)
-  (let ((unit (compile-to-hir lambda-expression :name name)))
-    (multiple-value-bind (bytes literals debug) (emit-native-module unit)
+  ;; Restrict the caller's one-use promise to this entry. Macroexpansion and
+  ;; bootstrap may explicitly compile other, persistent functions.
+  (let ((single-use *wasm-single-use-entry*) (*wasm-single-use-entry* nil))
+   (ensure-compiler)
+   (let ((unit (compile-to-hir lambda-expression :name name)))
+    (multiple-value-bind (bytes literals debug)
+        (let ((*wasm-single-use-entry* single-use)) (emit-native-module unit))
       (multiple-value-bind (function native) (compiler-primitive 17 bytes literals name)
         (unless native (error "This host cannot instantiate compiled Wasm modules."))
         (let ((arity (native-fixed-arity (first (hir-unit-functions unit)))))
           (when arity (setq function (compiler-primitive 30 function arity)))
-          (if debug (values (compiler-primitive 34 function debug 0)) function))))))
+          (if debug (values (compiler-primitive 34 function debug 0)) function)))))))
 
 (defun compile-native-module (definitions &key (entry-points (mapcar #'second definitions)) (inline t))
   "Compile a sealed group of DEFUN forms to one Wasm module.
@@ -1508,7 +1522,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-restart-signal-form hir-symbol-iterate-form hir-while-form
                    hir-multiple-value-call-form hir-return-from-form hir-values-form
                    hir-application-form hir-recursive-form hir-form compile-to-hir compile-module-to-hir compile-native-module
-                   make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-stack native-stackify-ops native-coalesce-ops native-fold-locals native-optimize-body
+                   make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-stack native-stackify-ops native-coalesce-ops native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
                    native-i32 native-fold-i32 native-clean-scopes native-simplify-ops native-prune-module
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info

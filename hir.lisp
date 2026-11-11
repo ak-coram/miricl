@@ -9,7 +9,16 @@
 (defmacro define-hir-record (name &rest slots)
   (let* ((package (symbol-package name))
          (predicate (intern (concatenate 'string (symbol-name name) "-P") package))
+         (constructor (intern (concatenate 'string "MAKE-" (symbol-name name) "-RECORD") package))
          (forms (list (list* 'defstruct (list name '(:type vector) :named) slots))))
+    ;; Hot compiler paths know their record layout. Expand positional creation
+    ;; to VECTOR, avoiding interpreted DEFSTRUCT construction and keyword/slot
+    ;; lookup for every SSA value and instruction. Ordinary constructors remain
+    ;; available for callers using the named keyword interface.
+    (setf (get constructor 'miricl::runtime-inline-macro) t)
+    (push (list 'defmacro constructor (cons '&optional slots)
+            (list* 'list ''vector (list 'list ''quote (list 'quote name))
+              (mapcar (lambda (slot) (if (consp slot) (car slot) slot)) slots))) forms)
     (push (list 'deftype name nil (list 'quote (list 'satisfies predicate))) forms)
     (loop for slot in slots for index from 1 do
       (let ((accessor (intern (concatenate 'string (symbol-name name) "-"
@@ -75,16 +84,16 @@
 
 (defun hir-new-value (kind producer)
   (declare (type symbol kind) (type simple-vector *hir-function*))
-  (let ((value (make-hir-value :id (hir-function-value-count *hir-function*)
-                 :kind kind :owner *hir-function* :producer producer)))
+  (let ((value (make-hir-value-record (hir-function-value-count *hir-function*)
+                 kind *hir-function* producer)))
     (incf (hir-function-value-count *hir-function*))
     (push value (hir-function-values *hir-function*)) value))
 
 (defun hir-new-block (&optional parameter-kind)
   (declare (type symbol parameter-kind) (type simple-vector *hir-function*))
-  (let ((block (make-hir-block :id (hir-function-block-count *hir-function*)
-                 :environment (when (and (boundp '*hir-dynamic*)
-                                         (eq (hir-value-owner *hir-dynamic*) *hir-function*)) *hir-dynamic*))))
+  (let ((block (make-hir-block-record (hir-function-block-count *hir-function*) nil nil nil nil
+                 (when (and (boundp '*hir-dynamic*)
+                            (eq (hir-value-owner *hir-dynamic*) *hir-function*)) *hir-dynamic*))))
     (incf (hir-function-block-count *hir-function*))
     (when parameter-kind
       (setf (hir-block-parameters block) (list (hir-new-value parameter-kind block))))
@@ -94,9 +103,8 @@
   (declare (type symbol opcode kind effect) (type list inputs attributes)
            (type simple-vector *hir-block*))
   (when (hir-block-terminator *hir-block*) (error "HIR instruction after a terminator."))
-  (let* ((instruction (make-hir-instruction :opcode opcode :inputs inputs
-                        :attributes attributes :origin *hir-origin* :effect effect
-                        :safety-level *hir-safety-level*))
+  (let* ((instruction (make-hir-instruction-record opcode inputs nil attributes *hir-origin* effect
+                        *hir-safety-level*))
          (output (and kind (hir-new-value kind instruction))))
     (setf (hir-instruction-output instruction) output)
     (when (and *hir-inline-policy* output (eq opcode :call) (not (eq (hir-value-type (second inputs)) t)))
@@ -108,8 +116,7 @@
            (type simple-vector *hir-block*))
   (when (hir-block-terminator *hir-block*) (error "Duplicate HIR terminator."))
   (setf (hir-block-terminator *hir-block*)
-    (make-hir-instruction :opcode opcode :inputs inputs :attributes attributes
-      :origin *hir-origin* :effect :control)))
+    (make-hir-instruction-record opcode inputs nil attributes *hir-origin* :control)))
 
 (defun hir-single (value)
   (declare (type simple-vector value))
@@ -283,14 +290,14 @@
 (defun hir-shadow-specials (variables specials)
   (declare (type list variables specials))
   (dolist (name specials variables)
-    (push (cons name (make-hir-binding :name name :owner *hir-function* :special-p t)) variables)))
+    (push (cons name (make-hir-binding-record name *hir-function* nil t)) variables)))
 
 (defun hir-bind-value (name value environment specials)
   (declare (type simple-vector value) (type list environment specials))
   (when (or (not (symbolp name)) (member name '(nil t)) (keywordp name))
     (error "Invalid HIR binding name ~S." name))
   (let* ((special (hir-special-p name specials))
-         (binding (make-hir-binding :name name :owner *hir-function* :special-p special)))
+         (binding (make-hir-binding-record name *hir-function* nil special)))
     (if special
         (setq *hir-dynamic* (hir-emit :dynamic-bind (list *hir-dynamic* value) :dynamic
                              (list name) :allocation))
@@ -721,7 +728,7 @@
       (when (atom item)
         (unless (or (symbolp item) (integerp item)) (error "Invalid TAGBODY tag ~S." item))
         (when (assoc item tags :test #'eql) (error "Duplicate TAGBODY tag ~S." item))
-        (let ((target (make-hir-target :name item :owner *hir-function* :block (hir-new-block))))
+        (let ((target (make-hir-target-record item *hir-function* (hir-new-block))))
           (push (cons item target) tags) (push (cons (list :tag item) target) local))))
     ;; Captured tags share TAGBODY's dynamic extent. Only the tags
     ;; actually captured allocate runtime tokens in the emitter.
@@ -759,7 +766,7 @@
     (dolist (definition (second form))
       ;; Function cells are filled after closures are created. LABELS
       ;; may capture these cells before that initialization write.
-      (let ((binding (make-hir-binding :name (first definition) :owner *hir-function* :assigned-p t)))
+      (let ((binding (make-hir-binding-record (first definition) *hir-function* nil nil nil t)))
         (setf (hir-binding-cell binding) (hir-emit :cell-new (list (hir-constant nil)) :single
                                          (list binding) :allocation))
         (push binding bindings) (push binding (hir-function-bindings *hir-function*))
@@ -834,7 +841,7 @@
 
 (defun hir-block-form (form variables functions targets)
   (let* ((join (hir-new-block :multiple))
-         (target (make-hir-target :name (second form) :owner *hir-function* :block join))
+         (target (make-hir-target-record (second form) *hir-function* join))
          (token (hir-emit :block-enter (list *hir-dynamic*) :dynamic (list target) :control)))
     (setf (hir-target-token target) token)
     (let ((*hir-dynamic* (hir-emit :block-environment (list token) :dynamic (list target) :control)))
@@ -1300,8 +1307,8 @@
   (let* ((*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*))
          (*hir-safety-level* (native-safety-level (cddr form) *hir-safety-level*))
          (*hir-types* *hir-types*)
-         (*hir-function* (make-hir-function :name name :parent parent :parameters (second form)
-                                          :debug-level *hir-debug-level*))
+         (*hir-function* (make-hir-function-record name parent (second form)
+                           nil nil nil nil nil nil 0 0 *hir-debug-level*))
          (*hir-origin* form) (*hir-block* (hir-new-block)) (*hir-inline-budget* 128)
          (*hir-dynamic* (hir-new-value :dynamic *hir-function*)))
     (setf (hir-function-entry *hir-function*) *hir-block*)
