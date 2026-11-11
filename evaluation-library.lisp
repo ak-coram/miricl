@@ -1,5 +1,6 @@
 ;;;; Browser/Node evaluation policy; forms and literals stay in the local heap.
 (defun %compile-evaluation (form name)
+  (miricl-compiler::compiler-source-form form)
   ;; Compiler helpers can themselves use EVAL. Prevent recursive automatic
   ;; compilation while preparing code; execute the resulting application
   ;; function in the caller's dynamic environment.
@@ -17,6 +18,7 @@
             miricl-compiler::*compiling-evaluation*
             (atom form) (eq (car form) 'quote))
     (return-from %compiler-evaluate (%%eval form)))
+  (miricl-compiler::compiler-source-form form)
   ;; Debug definitions execute their existing forms in the interpreter. The
   ;; native compiler retains instructions at DEBUG 2, without stepping support.
   (when (or (%debug-form-p form) (= (or (case (car form)

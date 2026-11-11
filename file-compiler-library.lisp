@@ -231,6 +231,8 @@
     (let ((%file-top-declarations (append %file-top-declarations (nreverse declarations))))
       (dolist (form body) (%compile-top-level form environment compile-time-too)))))
 (defun %compile-top-level (form environment compile-time-too)
+  (when (fboundp 'miricl-compiler::compiler-source-form)
+    (miricl-compiler::compiler-source-form form))
   ;; Defining forms establish the compilation environment before later forms
   ;; are read, without making ordinary DEFUN definitions available for use.
   (let* ((operator (and (consp form) (car form)))

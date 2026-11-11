@@ -76,7 +76,13 @@
   "Return fresh primary-value type facts keyed by HIR values and functions.
 NIL is the empty type and T is unknown. Value counts remain a separate analysis.
 Captured cells and debug-enabled functions keep conservative inferred types."
-  (declare (type hir-unit unit) (type list roots))
+  (declare (optimize (safety 3)))
+  (unless (eq unit *hir-verified-unit*) (verify-hir unit))
+  (compiler-list-length roots "type-inference roots")
+  (dolist (root roots)
+    (unless (and (%hir-value-p root) (member (hir-value-owner root) (hir-unit-functions unit) :test #'eq)
+                 (member root (hir-function-values (hir-value-owner root)) :test #'eq))
+      (compiler-input-fail "type-inference root" root "value does not belong to this HIR unit")))
   ;; Explicitly requesting no facts needs no dependency or escape graph.
   ;; Many initialization units contain no operations using inferred types.
   (when (and rootsp (null roots))

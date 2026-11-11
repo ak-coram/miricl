@@ -25,11 +25,12 @@ const groups = {
   ],
   compiler: [
     test('compiler-runtime', wasm), test('compiler-runtime', precompiled, '--precompiled'),
+    test('compiler-input', precompiled),
     test('evaluation-policy', wasm, precompiled, repl),
     test('core-image', precompiled),
     test('debugger', precompiled),
     ...['compilation', 'hir', 'whole-program', 'class-reachability', 'generic-dispatch',
-      'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-modules', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',
+      'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-input', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-modules', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',
       'fasl-format', 'fasl-hash-tables', 'fasl-shared-initialization', 'saved-slots', 'file-compilation', 'file-code-sharing', 'nested-backquote',
       'structure-printers', 'ansi-compiler-runner', 'ansi-runner', 'ansi-upstream-runner']
       .map(name => test(name, wasm)),

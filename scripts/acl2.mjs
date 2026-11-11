@@ -58,18 +58,20 @@ export async function createAcl2(image, core, files, {progress = () => {}, books
         try {
           // LD reads the submitted text itself, including colon commands.
           // Text remains stream data and is never inserted as raw Lisp code.
+          // Only LD prints results; discard the adapter's intermediate values.
           const {output} = await evaluate(`
-            (with-open-file (stream "/acl2/browser-input.lsp" :direction :output :if-exists :supersede)
-              (write-string ${lispString(source + '\n')} stream))
-            (multiple-value-bind (erp val state)
-                (acl2::ld "/acl2/browser-input.lsp" :ld-skip-proofsp nil
-                  :ld-error-action :return :ld-prompt nil :ld-pre-eval-print nil
-                  :ld-post-eval-print t :ld-verbose nil)
-              (declare (ignore state))
-              (cl-user::acl2-browser-result
-                (not (or erp (eq val :error)
-                         (and (consp val) (eq (car val) :stop-ld))))))
-            (values)`);
+            (progn
+              (with-open-file (stream "/acl2/browser-input.lsp" :direction :output :if-exists :supersede)
+                (write-string ${lispString(source + '\n')} stream))
+              (multiple-value-bind (erp val state)
+                  (acl2::ld "/acl2/browser-input.lsp" :ld-skip-proofsp nil
+                    :ld-error-action :return :ld-prompt nil :ld-pre-eval-print nil
+                    :ld-post-eval-print t :ld-verbose nil)
+                (declare (ignore state))
+                (cl-user::acl2-browser-result
+                  (not (or erp (eq val :error)
+                           (and (consp val) (eq (car val) :stop-ld))))))
+              (values))`);
           return {results: [], output, failed: !accepted, milliseconds: Math.round(performance.now() - start)};
         } catch (error) {
           // A host stack/engine trap can bypass Lisp cleanup. Require a fresh

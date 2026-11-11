@@ -1390,10 +1390,15 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun emit-native-module (unit &key entries)
   "Return Wasm bytes and literal objects; do not instantiate or run application code."
-  (declare (type hir-unit unit) (type list entries))
+  (declare (optimize (safety 3)))
+  (compiler-list-length entries "native entry points")
   (ensure-compiler)
   (verify-hir unit)
-  (let* ((*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
+  (dolist (entry entries)
+    (unless (member entry (hir-unit-functions unit) :test #'eq)
+      (compiler-input-fail "native entry point" entry "entry does not belong to this HIR unit")))
+  (let* ((*hir-verified-unit* unit)
+         (*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
          (*wasm-literal-index* (make-hash-table :test 'eq))
          (*wasm-literal-groups* (and entries (native-literal-groups entries)))
          (*native-functions* (hir-unit-functions unit))
@@ -1480,11 +1485,18 @@ Bind to NIL to interpret forms, including forms without native lowering.")
           (when arity (setq function (compiler-primitive 30 function arity)))
           (if debug (values (compiler-primitive 34 function debug 0)) function)))))))
 
-(defun compile-native-module (definitions &key (entry-points (mapcar #'second definitions)) (inline t))
+(defun compile-native-module (definitions &key (entry-points nil entriesp) (inline t))
   "Compile a sealed group of DEFUN forms to one Wasm module.
 Return an alist of ENTRY-POINTS and their native functions, module bytes, and HIR.
 Global function bindings are not changed. INLINE enables bounded small-function
 inlining; explicit local INLINE and NOTINLINE declarations take precedence."
+  (declare (optimize (safety 3)))
+  (compiler-list-length definitions "module definitions")
+  (unless entriesp
+    (dolist (definition definitions)
+      (unless (>= (compiler-list-length definition "module definition") 3)
+        (compiler-input-fail "module definition" definition "expected (DEFUN name lambda-list body...)")))
+    (setq entry-points (mapcar #'second definitions)))
   (let ((unit (compile-module-to-hir definitions :entry-points entry-points :inline inline)))
     (multiple-value-bind (bytes literals debug) (emit-native-module unit)
       (multiple-value-bind (factory native) (compiler-primitive 17 bytes literals nil)
@@ -1498,6 +1510,8 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
                    ;; These small constructors and declaration readers are
                    ;; exercised while compiling nearly every remaining kernel.
+                   compiler-input-summary compiler-input-fail compiler-list-length compiler-variable-name compiler-function-name
+                   compiler-lambda-list compiler-body compiler-source-form validate-hir-shapes
                    hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant
                    hir-special-p hir-declarations hir-intersect-types hir-type-environment hir-bound-type-environment
                    native-optimization-level native-debug-level native-safety-level

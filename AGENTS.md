@@ -28,6 +28,19 @@ for argument and return types, multiple values, copying and sharing,
 side effects, and exceptional situations before implementing them.
 Use those requirements to guide the implementation and regression tests.
 
+# Input validation
+
+Treat user input as untrusted, including source forms, macroexpansion
+results, public compiler IR, and serialized data. Validate structure,
+types, bounds, and cycles at the boundaries before passing data to
+unchecked internals, especially code compiled with safety level 0.
+Type declarations and safety 0 are not substitutes for input validation.
+
+Reject malformed input with useful Lisp conditions identifying the
+offending input and the reason. It must not cause host/Wasm traps,
+hangs from malformed structures, or corrupt subsequent compiler use.
+Add regression coverage for malformed input and recovery after rejection.
+
 # Performance
 
 Keep compiler optimizations generic: derive them from Common Lisp

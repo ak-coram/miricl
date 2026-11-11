@@ -63,6 +63,7 @@
                (:file "fasl-utilities")
                (:file "fasl-format")
                (:file "whole-program")
+               (:file "compiler-input")
                (:file "hir")
                (:file "hir-types")
                (:file "wasm-compiler")

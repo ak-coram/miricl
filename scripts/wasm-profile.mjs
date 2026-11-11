@@ -68,7 +68,11 @@ export async function startWasmProfile(vm, image, filename) {
   const session = new inspector.Session(); session.connect();
   const post = (method, params = {}) => new Promise((resolve, reject) =>
     session.post(method, params, (error, result) => error ? reject(error) : resolve(result)));
-  await post('Profiler.enable'); await post('Profiler.start');
+  await post('Profiler.enable');
+  // Long application builds otherwise exceed the inspector's JSON message
+  // limit before Profiler.stop can return its response.
+  await post('Profiler.setSamplingInterval', {interval: 10000});
+  await post('Profiler.start');
   return async () => {
     try {
       const {profile} = await post('Profiler.stop');

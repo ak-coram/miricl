@@ -42,11 +42,11 @@ try {
     progress: message => progress.push(message)});
   assert.equal(progress.at(-1), 'Ready');
   assert.match((await session.evaluate('(cdr (assoc "ACL2_SYSTEM_BOOKS" acl2::*miricl-environment* :test #\'equal))')).output, /\/acl2\/books\//);
-  assert.match((await session.evaluate('(+ 20 22)')).output, /42/);
+  assert.equal((await session.evaluate('(+ 20 22)')).output, '42\n');
   if (session.vm.vm['core-object-type']) {
     const restored = await createAcl2(session.vm.saveImage(), null, []);
     try {
-      assert.match((await restored.evaluate('(+ 20 22)')).output, /42/);
+      assert.equal((await restored.evaluate('(+ 20 22)')).output, '42\n');
       assert.match((await restored.evaluate('acl2::*initializations*')).output, /\b1\b/);
     } finally {restored.close();}
   }
