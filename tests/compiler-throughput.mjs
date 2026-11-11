@@ -33,7 +33,7 @@ try {
         31 64 4 0 1 2 1 3 4 2 5 3 6
         251 2 0 1 251 20 111 251 22 111 251 23 111
         251 26 251 27 251 28 251 29
-        0 15 26 69 70 72 74 76 78 83 85 87 89 113 124 125 126 167 172 209 11)
+        0 15 26 69 70 72 74 76 78 81 82 83 85 87 89 113 124 125 126 131 132 133 167 172 209 11)
       '(vector (unsigned-byte 8))))
       (adjustable (make-array (+ 8 (length bytes)) :element-type '(unsigned-byte 8)
         :adjustable t :fill-pointer (length bytes) :initial-element 0))
@@ -55,6 +55,28 @@ try {
       (and (null (compiler-primitive 38 bytes nil))
         (equalp (multiple-value-list (native-read-ops bytes))
           (multiple-value-list (native-read-ops-portable bytes))))))`);
+  // Compare direct and portable liveness, including backedges, exceptional
+  // reads of all locals, deleted instructions, and bitsets wider than i64.
+  for (const [bytes, total] of [
+    [[1, 2, 111, 65, 1, 33, 2, 32, 2, 15, 11], 4],
+    [[1, 2, 111, 2, 64, 32, 0, 4, 64, 32, 1, 33, 2, 5, 65, 3, 33, 2, 11, 32, 2, 26, 11, 11], 4],
+    [[1, 2, 111, 65, 0, 33, 2, 3, 64, 32, 2, 32, 0, 70, 13, 0, 11, 32, 2, 15, 11], 4],
+    [[1, 2, 111, 31, 64, 0, 65, 7, 33, 2, 16, 0, 26, 11, 32, 2, 15, 11], 4],
+    [[1, 152, 2, 111, 31, 64, 0, 32, 151, 2, 33, 150, 2, 16, 0, 26, 11, 32, 150, 2, 15, 11], 282],
+  ]) {
+    check(`(let* ((ops (native-read-ops #(${bytes.join(' ')})))
+                  (exceptions (native-op-flow ops))
+                  (reference (map 'vector #'copy-seq ops))
+                  (expected (native-op-liveness-lisp reference ${total} exceptions))
+                  (actual (native-op-liveness ops ${total} exceptions)))
+      (and (equalp expected actual) (equalp reference ops)
+        (progn
+          (native-stackify-ops ops exceptions nil ${total})
+          (setq reference (map 'vector #'copy-seq ops))
+          (equalp (native-op-liveness-lisp reference ${total} exceptions expected)
+                  (native-op-liveness ops ${total} exceptions actual)))
+        (equalp reference ops)))`);
+  }
   // Sibling stores may be consumed in creation order. Eliminating the older
   // store inserts a real operand below the younger one; both must stackify.
   // A temporary real operand must block them only until it is consumed.
@@ -68,6 +90,35 @@ try {
       (equal (loop for op across ops when (native-op-code op) collect (native-op-code op))
         '(65 65 ${barrier ? '65 26' : ''} 70 15 11)))`);
   }
+  // Compare the direct Wasm kernel with the general pass across local widths,
+  // dead stores/tees, operand barriers, branches, imports and throwing calls.
+  // A deterministic generator also exercises empty imports and wide bitsets.
+  check(`(let ((seed 1729))
+    (labels ((next (limit)
+      (setq seed (mod (+ (* seed 1664525) 1013904223) 4294967296))
+      (mod (ash seed -8) limit)))
+      (loop for trial below 48 always
+        (let* ((total (if (evenp trial) 8 280))
+               (*native-imports* (if (zerop (mod trial 3)) nil
+                 '(("zero" nil nil) ("unary" (object) object)
+                   ("binary" (object object) object))))
+               (*native-import-stack-effects* nil)
+               (exceptions (oddp trial))
+               (codes #(nil 0 2 3 4 5 8 11 12 13 14 15 16 18 26 31
+                        32 32 32 33 33 34 65 69 70 72 74 76 78
+                        83 85 87 89 113 124 125 126 167 172 208 209 210 251))
+               (ops (make-array 300)))
+          (dotimes (i (length ops))
+            (let* ((code (svref codes (next (length codes))))
+                   (op (make-native-op code
+                     (if (member code '(32 33 34)) (next total) (next 6)) i (1+ i))))
+              (setf (native-op-live-out op)
+                (logior (ash 1 (next total)) (ash 1 (next total))))
+              (setf (svref ops i) op)))
+          (let ((reference (map 'vector #'copy-seq ops)))
+            (native-stackify-ops-lisp reference exceptions nil total)
+            (native-stackify-ops ops exceptions nil total)
+            (equalp reference ops))))))`);
   // The named records retain callable predicates, type tests and shallow copy
   // semantics as well as the field macros used by the self-compiled kernels.
   check(`(let* ((unit (compile-to-hir '(lambda (x) (+ x 19))))
@@ -85,7 +136,7 @@ try {
     (and (= calls 1) (hir-value-p value)
          (equalp value (make-hir-value :id 1 :kind :single))
          (equalp instruction (make-hir-instruction :opcode :return :effect :control))
-         (= (hir-instruction-safety-level instruction) 1))))`);
+         (= (hir-instruction-safety-level instruction) 1)))`);
   check(`(let* ((unit (compile-to-hir '(lambda (x) (+ x 19))))
                 (function (first (hir-unit-functions unit)))
                 (value (first (hir-function-values function))))

@@ -15,17 +15,43 @@ try {
     assert.ok(output.length < 1500, 'Diagnostics must bound printing of malformed graphs');
     assert.equal(vm.evaluate("(funcall (compile-native '(lambda (x) (+ x 1))) 41)").output, '42\n', source);
   };
+  for (const count of [0, 1, 2, 3, 4, 1000]) {
+    assert.equal(vm.evaluate(`(compiler-list-length (make-list ${count}) "list spine")`).output,
+      `${count}\n`);
+  }
+  assert.equal(vm.evaluate(`(let ((function (compile-native
+    '(lambda (x &aux (before (lambda () x)) (x (1+ x))
+                    (between (lambda () x)) (x (1+ x)))
+       (list (funcall before) (funcall between) x)))))
+    (equal (funcall function 40) '(40 41 42)))`).output, 'T\n');
+  assert.equal(vm.evaluate(`(let ((function (compile-native
+    '(lambda (x &aux x (x (if x :bad :rebound))) x))))
+    (eq (funcall function :parameter) :rebound))`).output, 'T\n');
+  for (const input of ['17', "'(1 . 2)", "'(1 2 . 3)", '#(1 2)'])
+    reject(`(compiler-list-length ${input} "list spine")`, /dotted tail/);
+  for (const prefix of [0, 1, 2, 3]) {
+    for (const size of [1, 2, 3, 4]) {
+      reject(`(let ((cycle (make-list ${size})))
+        (setf (cdr (last cycle)) cycle)
+        (compiler-list-length (append (make-list ${prefix}) cycle) "list spine"))`, /circular list/);
+    }
+  }
   for (const [form, reason] of [
     ['42', /lambda expression/], ['#()', /lambda expression/],
     ["'(lambda)", /missing lambda list/],
     ["'(lambda (x . y) x)", /dotted tail/],
     ["'(lambda (x x) x)", /duplicate parameter/],
+    ["'(lambda (x &optional x) x)", /duplicate parameter/],
+    ["'(lambda (&optional (x nil x)) x)", /duplicate parameter/],
+    ["'(lambda (x &key ((:other x))) x)", /duplicate parameter/],
     ["'(lambda (t) t)", /nonconstant variable/],
     ["'(lambda (&rest) nil)", /REST requires/],
     ["'(lambda (&optional &optional) nil)", /repeated lambda-list keyword/],
     ["'(lambda (&rest x y) x)", /unexpected parameter/],
     ["'(lambda (&key ((:x 9))) nil)", /nonconstant variable/],
     ["'(lambda (&optional (x nil nil)) x)", /nonconstant variable/],
+    ["'(lambda (&aux (:bad 1)) nil)", /nonconstant variable/],
+    ["'(lambda (&aux (x nil supplied)) x)", /invalid parameter specification/],
     ["'(lambda () (let ((x 1 2)) x))", /binding/],
     ["'(lambda () (let ((x 1) (x 2)) x))", /duplicate variable/],
     ["'(lambda () (let ((:x 1)) :x))", /nonconstant variable/],
@@ -84,6 +110,11 @@ try {
     ${mutation} (emit-native-module unit))`, reason);
   reject(`(let ((unit (compile-to-hir '(lambda () 1))))
     (emit-native-module unit :entries (list #())))`, /native entry point/);
+  reject(`(let* ((body (list 'progn nil))
+                 (source (list 'lambda nil
+                   (list 'labels (list (list 'helper nil body))
+                     '(declare (inline helper)) '(helper)))))
+    (setf (second body) body) (compile-native source))`, /circular executable/);
 
   // Literal data and macro arguments have their own syntax. Do not mistake
   // dotted/circular data or a shared executable DAG for malformed code.

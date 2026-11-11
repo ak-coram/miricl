@@ -5,6 +5,7 @@
 ;; The module adapter supplies exact stack effects for arbitrary core-module
 ;; instructions. Native emission uses its cheaper, fixed ABI description.
 (defvar *native-module-stack-effects* nil)
+(defvar *native-import-stack-effects* nil)
 
 ;; These compiler-private records use simple vectors. Macro accessors expand
 ;; into SVREF in both hosts, including SETF places, so the self-compiled pass
@@ -123,7 +124,7 @@
                         (otherwise (error "Unexpected native GC instruction ~D." argument))))
              (multiple-value-bind (ignored next) (native-read-uleb bytes position)
                (declare (ignore ignored)) (setq position next))))
-          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #xa7 #xac #xd1)))
+          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xa7 #xac #xd1)))
            (error "Unexpected native instruction ~D." code)))
         (when (or (not references-only) (member code '(#x10 #x12 #xd2)))
           (push (make-native-op code argument start position) ops))))
@@ -206,6 +207,14 @@
 (defun native-op-liveness (ops total exceptions &optional blocks)
   (declare (type simple-vector ops) (type (unsigned-byte 32) total)
            (type (or null simple-vector) blocks))
+  (setq blocks (or blocks (native-liveness-blocks ops)))
+  (when (compiler-primitive 41 ops (vector blocks exceptions) total)
+    (return-from native-op-liveness blocks))
+  (native-op-liveness-lisp ops total exceptions blocks))
+
+(defun native-op-liveness-lisp (ops total exceptions &optional blocks)
+  (declare (type simple-vector ops) (type (unsigned-byte 32) total)
+           (type (or null simple-vector) blocks))
   ;; Handler-bearing functions conservatively read every local at each call.
   ;; This protects landing-pad state even though exceptional edges are not
   ;; represented in the normal CFG. Those functions are not coalesced.
@@ -283,13 +292,34 @@
       ((#x20 #x41 #xd0 #xd2) (values 0 1))
       ((#x21 #x1a) (values 1 0))
       ((#x22 #x45 #xa7 #xac #xd1 #xfb) (values 1 1))
-      ((#x46 #x48 #x4a #x4c #x4e #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e) (values 2 1))
+      ((#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85) (values 2 1))
       ((#x10 #x12) (let ((import (nth (native-op-argument op) *native-imports*)))
                (if import (values (length (second import)) (if (and (= code #x10) (third import)) 1 0))
                    (values 2 (if (= code #x10) 1 0)))))
       (otherwise (values 0 0)))))
 
 (defun native-stackify-ops (ops &optional exceptions types total)
+  (declare (type simple-vector ops) (type (or null simple-vector) types)
+           (type (or null (unsigned-byte 32)) total))
+  ;; The native emitter has defaultable locals and a fixed calling convention.
+  ;; Arbitrary core modules retain the general, typed implementation below.
+  (when (and (null types) (null *native-module-stack-effects*))
+    (unless total
+      (setq total (loop for op across ops
+                    when (member (native-op-code op) '(#x20 #x21 #x22))
+                      maximize (1+ (native-op-argument op)) into count
+                    finally (return (or count 0)))))
+    (unless (and *native-import-stack-effects*
+                 (eq (car *native-import-stack-effects*) *native-imports*))
+      (setq *native-import-stack-effects*
+        (cons *native-imports*
+          (map 'simple-vector (lambda (import)
+            (+ (* 2 (length (second import))) (if (third import) 1 0))) *native-imports*))))
+    (when (compiler-primitive 39 ops (vector exceptions (cdr *native-import-stack-effects*)) total)
+      (return-from native-stackify-ops ops)))
+  (native-stackify-ops-lisp ops exceptions types total))
+
+(defun native-stackify-ops-lisp (ops &optional exceptions types total)
   (declare (type simple-vector ops) (type (or null simple-vector) types)
            (type (or null (unsigned-byte 32)) total))
   ;; Stack entries are NIL for real operands and an instruction index for a
@@ -305,10 +335,12 @@
          (candidates (make-array total :initial-element nil))
          (epochs (make-array total :initial-element 0)) (epoch 1))
     (declare (type list stack barriers) (type simple-vector candidates epochs)
-             (type (integer 1 *) epoch))
+             (type (unsigned-byte 32) total) (type (unsigned-byte 33) epoch))
     (dotimes (i (length ops))
+      (declare (type (unsigned-byte 32) i))
       (let* ((op (aref ops i)) (code (native-op-code op)) (local (native-op-argument op))
-             (store (and (eql code #x20) (= (aref epochs local) epoch) (aref candidates local)))
+             (store (and (eql code #x20) (= (aref epochs (the (unsigned-byte 32) local)) epoch)
+                         (aref candidates (the (unsigned-byte 32) local))))
              ;; Other candidate stores are not actual operands. Looking past
              ;; them lets sibling temporaries become stack operands together,
              ;; while an actual value (NIL) remains a strict ordering barrier.
@@ -316,7 +348,11 @@
              ;; most recent real operand is available without scanning its
              ;; sibling stores. Turning a store into an operand inserts its
              ;; original position as a barrier, leaving younger stores usable.
-             (candidate (and store (or (null barriers) (> (car store) (car barriers))) store)))
+             (candidate (and store (or (null barriers)
+                                      (> (the (unsigned-byte 32) (car store))
+                                         (the (unsigned-byte 32) (car barriers)))) store)))
+        (declare (type simple-vector op) (type (or null (unsigned-byte 8)) code)
+                 (type list store candidate))
         ;; A throwing call may expose any local to a landing pad. Keeping a
         ;; value on the operand stack cannot replace that observable store.
         (when (and exceptions (member code '(#x08 #x10 #x12))) (incf epoch))
@@ -341,6 +377,7 @@
           (t
            (when (= code #x20) (setf (aref epochs local) 0))
            (multiple-value-bind (consumed produced) (native-op-stack op)
+             (declare (type (unsigned-byte 32) consumed produced))
              (dotimes (j consumed)
                (loop while (and stack (car stack)) do
                  (setf (aref epochs (native-op-argument (aref ops (pop stack)))) 0))

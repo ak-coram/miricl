@@ -682,6 +682,21 @@
         (incf position length)))
     (is (= position (length bytes)))))
 
+(test private-library-case-data
+  (dolist (operator '(case ecase ccase typecase etypecase ctypecase))
+    (let ((key (if (member operator '(case ecase ccase))
+                   '(null not) '(or null (cons null t)))))
+      (is (equal
+        (m::lower-runtime-library
+          `(,operator (null input)
+             (,key (null value))
+             (null (null other) :result)
+             (t (when flag (null final)))))
+        `(,operator (not input)
+           (,key (not value))
+           (null (not other) :result)
+           (t (if flag (progn (not final))))))))))
+
 (test private-library-form-prefixes
   (dolist (entry (remove-if-not #'fourth m::*runtime-library-prefixes*))
     (destructuring-bind (tag symbol length namespace) entry

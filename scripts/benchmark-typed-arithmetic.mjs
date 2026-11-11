@@ -26,10 +26,12 @@ try {
       sizes: await measureWasm(imagePath), kernels: []};
     variants.push({vm, record});
     vm.evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
-    for (const type of ['fixnum', '(signed-byte 16)', 't']) {
+    for (const [type, inline] of [['fixnum', false], ['(signed-byte 16)', false], ['t', false],
+                                ['(signed-byte 16)', true]]) {
       for (const [operator, answer] of [['+', 16], ['-', -2], ['*', 63]]) {
         const index = record.kernels.length, symbol = `typed-benchmark-${index}`;
-        const source = `(lambda (a b count) (declare (type ${type} a b))
+        const source = `(lambda (a b count) (declare (type ${type} a b)
+          ${inline ? `(optimize (safety 0)) (inline ${operator})` : ''})
           (let ((result nil))
             (dotimes (i count result) (setq result (${operator} a b)))))`;
         const compilation = timed(vm, `(progn (multiple-value-bind (bytes literals)
@@ -43,17 +45,19 @@ try {
         const imports = WebAssembly.Module.imports(await WebAssembly.compile(bytes)).map(entry => entry.name);
         const call = `(${symbol} 7 9 ${iterations})`, expected = `${answer}\n`;
         assert.equal(timed(vm, call).output, expected); // Warmup, excluded.
-        const kernel = {operator, type, source, bytes: bytes.length, imports, compilation, samples: []};
+        const kernel = {operator, type, inline, source, bytes: bytes.length, imports, compilation, samples: []};
         record.kernels.push(kernel);
         jobs.push({vm, kernel, call, expected});
       }
     }
   }
+  const kernelsPerVariant = variants[0].record.kernels.length;
+  assert.equal(variants[1].record.kernels.length, kernelsPerVariant);
   for (let round = 0; round < rounds; round++) {
     // Alternate images to reduce drift from JIT warmup and other local jobs.
-    for (let index = 0; index < 9; index++) {
+    for (let index = 0; index < kernelsPerVariant; index++) {
       for (const variant of round % 2 ? [1, 0] : [0, 1]) {
-        const {vm, kernel, call, expected} = jobs[index + 9 * variant];
+        const {vm, kernel, call, expected} = jobs[index + kernelsPerVariant * variant];
         const sample = timed(vm, call);
         assert.equal(sample.output, expected); delete sample.output;
         kernel.samples.push(sample);
@@ -69,8 +73,8 @@ try {
     node: process.version, platform: process.platform, architecture: process.arch,
     scope: 'Arithmetic microbenchmark; does not establish application-level improvements',
     iterations, rounds, variants: variants.map(({record}) => record)}, null, 2) + '\n');
-  for (let index = 0; index < 9; index++) {
+  for (let index = 0; index < kernelsPerVariant; index++) {
     const left = variants[0].record.kernels[index], right = variants[1].record.kernels[index];
-    console.log(`${right.operator} ${right.type}: ${left.median.cpuMs.toFixed(1)} -> ${right.median.cpuMs.toFixed(1)} ms CPU; ${left.bytes} -> ${right.bytes} bytes`);
+    console.log(`${right.operator} ${right.type}${right.inline ? ' INLINE' : ''}: ${left.median.cpuMs.toFixed(1)} -> ${right.median.cpuMs.toFixed(1)} ms CPU; ${left.bytes} -> ${right.bytes} bytes`);
   }
 } finally {for (const {vm} of variants) vm.close();}

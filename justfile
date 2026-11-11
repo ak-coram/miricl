@@ -33,10 +33,10 @@ build:
 size: build
     {{ quote(node) }} scripts/wasm-size.mjs {{ quote(interpreter) }} {{ quote(interpreter_only) }} {{ quote(precompiled) }} {{ quote(wasi_repl) }}
 
-# Benchmark the native compiler recompiling its own fixed source corpus.
+# Compile the compiler once, then measure it compiling the original source.
 benchmark-self-compiler output='build/compiler-benchmark': build
     {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'corpus') }} {{ quote(interpreter) }} --extract
-    {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'native') }} {{ quote(precompiled) }} {{ quote(output / 'corpus/sources.lisp') }}
+    {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'native') }} {{ quote(precompiled) }} {{ quote(output / 'corpus/sources.lisp') }} --module
 
 # Build a self-contained browser REPL (miricl.html), including the interpreter.
 build-html:

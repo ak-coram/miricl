@@ -111,6 +111,27 @@ try {
     assert.ok(!(await imports(`(lambda (a b) (list (${operator} a b)))`)).includes(entry));
   }
   console.log(`PASS typed signed-i64 arithmetic and promotion (${3 * boundaryValues.length ** 2} BigInt checks)`);
+  const bitValues = [-(1n << 63n), -(1n << 31n), -1n, 0n, 1n, (1n << 31n) - 1n,
+    1n << 32n, (1n << 63n) - 1n];
+  for (const [operator, operation, shifts] of [
+    ['logand', (a, b) => a & b, bitValues],
+    ['logior', (a, b) => a | b, bitValues],
+    ['logxor', (a, b) => a ^ b, bitValues],
+    ['ash', (a, b) => a << b, [-128n, -65n, -64n, -63n, -1n, 0n, 1n, 31n, 63n, 64n, 65n, 128n]],
+  ]) {
+    const source = `(lambda (a b) (declare (fixnum a b)) (list (${operator} a b)))`;
+    assert.ok((await imports(source)).includes(`native-${operator}-int64`), source);
+    vm.evaluate(`(defparameter *typed-function* (compile-native '${source})) (values)`);
+    for (const a of bitValues) for (const b of shifts)
+      assert.equal(vm.evaluate(`(funcall *typed-function* ${a} ${b})`).output, `(${operation(a, b)})\n`);
+    check(`(let ((original (symbol-function '${operator})))
+      (unwind-protect
+        (progn (setf (symbol-function '${operator}) (lambda (a b) (values (list b a) :extra)))
+          (equal (funcall *typed-function* 7 9) '((9 7))))
+        (setf (symbol-function '${operator}) original)))`);
+    assert.ok(!(await imports(`(lambda (a b) (declare (fixnum a b) (notinline ${operator}))
+      (list (${operator} a b)))`)).includes(`native-${operator}-int64`));
+  }
   vm.evaluate(`(defun typed-result (x) (values x :extra))`);
   for (const source of [
     `(lambda (x) (declare (ftype (function (t) (values (unsigned-byte 40) keyword)) typed-result))

@@ -53,6 +53,12 @@
 
 (defun compiler-list-length (object context)
   (declare (optimize (safety 3)))
+  (multiple-value-bind (count native) (compiler-primitive 40 object)
+    (when native
+      (case count
+        (-1 (compiler-input-fail context object "expected a proper list; found a dotted tail"))
+        (-2 (compiler-input-fail context object "circular list"))
+        (otherwise (return-from compiler-list-length count)))))
   ;; Floyd's algorithm checks both dotted tails and cycles without recursion,
   ;; allocation or relying on a declared LIST type for caller-supplied data.
   (let ((fast object) (slow object) (size 0))
@@ -86,9 +92,12 @@
   (let ((mode :required) (seen nil) (markers nil))
     (labels ((variable (name)
                (compiler-variable-name name "lambda parameter")
-               (when (member name seen)
-                 (compiler-input-fail "lambda parameter" name "duplicate parameter name"))
-               (push name seen)))
+               ;; &AUX introduces sequential LET*-style bindings, which may
+               ;; shadow parameters and earlier auxiliary bindings.
+               (unless (eq mode :aux)
+                 (when (member name seen)
+                   (compiler-input-fail "lambda parameter" name "duplicate parameter name"))
+                 (push name seen))))
       (loop while parameters for parameter = (pop parameters) do
         (cond
           ((member parameter lambda-list-keywords)

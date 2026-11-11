@@ -15,6 +15,42 @@ try {
     const module = await WebAssembly.compile(await vm.readFile('/flow.wasm'));
     return WebAssembly.Module.imports(module).map(entry => entry.name);
   };
+  for (const [source, args, expected, entry = 'native-add-int64'] of [
+    [`(lambda (x) (declare (type (unsigned-byte 8) x) (inline +))
+       (list (* (+ x 1) 2)))`, '255', '(512)\n', 'native-mul-int64'],
+    [`(lambda (x) (declare (type (integer -4 7) x) (inline -))
+       (list (* (- x 7) 2)))`, '-4', '(-22)\n', 'native-mul-int64'],
+    [`(lambda (x) (declare (type (signed-byte 16) x) (inline *))
+       (list (+ (* x 3) 1)))`, '-32768', '(-98303)\n'],
+    [`(lambda (v) (declare (type simple-vector v) (inline length)) (list (+ (length v) 1)))`, '#(a b)', '(3)\n'],
+    [`(lambda (x) (declare (fixnum x) (inline logand)) (list (+ (logand x 127) 1)))`, '-1', '(128)\n'],
+    [`(lambda (x) (declare (inline logand)) (list (+ (logand x 127) 1)))`, '1208925819614629174706303', '(128)\n'],
+    [`(lambda (x) (declare (inline logand)) (list (+ (logand 127 x) 1)))`, '-1208925819614629174706177', '(128)\n'],
+    [`(lambda (x) (declare (inline logior)) (list (+ (logior x -128) 1)))`, '1208925819614629174706176', '(-127)\n'],
+    [`(lambda (x) (declare (inline logior)) (list (+ (logior -128 x) 1)))`, '-1208925819614629174706177', '(0)\n'],
+    [`(lambda (x) (declare (type (unsigned-byte 8) x) (inline logior)) (list (+ (logior x 128) 1)))`, '127', '(256)\n'],
+    [`(lambda (x) (declare (type (unsigned-byte 8) x) (inline logxor)) (list (+ (logxor x 255) 1)))`, '255', '(1)\n'],
+    [`(lambda (x) (declare (type (unsigned-byte 32) x) (inline ash)) (list (+ (ash x -7) 1)))`, '4294967295', '(33554432)\n'],
+  ]) {
+    const imports = await compile(source);
+    assert.ok(imports.includes(entry), source);
+    assert.equal(vm.evaluate(`(funcall *flow-function* ${args})`).output, expected, source);
+  }
+  await compile(`(lambda (x) (declare (fixnum x) (inline +)) (list (+ (+ x 1) 1)))`);
+  check(`(equal (funcall *flow-function* 9223372036854775807) '(9223372036854775809))`);
+  // Repeated interval growth must terminate without asserting a false bound.
+  await compile(`(lambda (n) (declare (inline +))
+    (let ((x 0)) (dotimes (i n) (setq x (+ x 1))) (list (+ x 1))))`);
+  check(`(and (equal (funcall *flow-function* 0) '(1))
+    (equal (funcall *flow-function* 100) '(101)))`);
+  assert.ok((await compile(`(lambda (n) (declare (inline +) (type (unsigned-byte 8) n))
+    (let ((x 0)) (declare (type (unsigned-byte 16) x))
+      (dotimes (i n) (setq x (+ x 1))) (list (+ x 1))))`)).includes('native-add-int64'));
+  check(`(equal (funcall *flow-function* 255) '(256))`);
+  // Result range inference must keep operand errors and evaluation effects.
+  await compile(`(lambda (x) (declare (inline logand))
+    (list (+ (logand x 0) 1)))`);
+  check(`(handler-case (progn (funcall *flow-function* :bad) nil) (type-error () t))`);
   for (const [source, args, expected] of [
     [`(lambda (flag) (list (+ (if flag 1 2) 3)))`, 't', '(4)\n'],
     [`(lambda () (let ((x 7)) (list (+ x 1))))`, '', '(8)\n'],

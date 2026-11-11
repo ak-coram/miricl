@@ -28,6 +28,12 @@ try {
     (and (= (funcall (cdar entries) 41) 42) (= (length (hir-unit-functions unit)) 3)))`);
   check(`(multiple-value-bind (entries bytes unit)
     (compile-native-module '((defun helper (x) (+ x 1))
+                            (defun entry (x) (declare (inline helper)) (helper x)))
+      :entry-points '(entry) :inline nil)
+    (declare (ignore bytes))
+    (and (= (funcall (cdar entries) 41) 42) (= (length (hir-unit-functions unit)) 2)))`);
+  check(`(multiple-value-bind (entries bytes unit)
+    (compile-native-module '((defun helper (x) (+ x 1))
                             (defun entry () #'helper)) :entry-points '(entry))
     (declare (ignore bytes))
     (and (= (funcall (funcall (cdar entries)) 41) 42) (= (length (hir-unit-functions unit)) 3)))`);
@@ -49,12 +55,25 @@ try {
        (declare (inline helper)) (let ((f (helper 42))) (setq x 43) (funcall f))))`, '1', '43\n'],
     [`(lambda (x) (labels ((helper (n) (if (zerop n) x (helper (1- n)))))
        (declare (inline helper)) (helper 10)))`, '42', '42\n'],
+    [`(lambda (n)
+       (labels ((a (x) (if (zerop x) 42 (b (1- x))))
+                (b (x) (if (zerop x) 42 (a (1- x)))))
+         (declare (inline a b)) (a n)))`, '17', '42\n'],
+    [`(lambda (x)
+       (labels ((helper (n) (if (zerop n) x (funcall (lambda () (helper (1- n)))))))
+         (declare (inline helper)) (helper 10)))`, '42', '42\n'],
     [`(lambda () (block done (flet ((helper () 42)) (return-from done (helper)))))`, '', '42\n'],
     [`(lambda () (flet ((unused () (error "Unreachable"))) 42))`, '', '42\n'],
   ]) {
     vm.evaluate(`(defparameter *module-test* (compile-native '${source}))`);
     assert.equal(vm.evaluate(`(funcall *module-test* ${args})`).output, expected, source);
   }
+  // Two definitions can share executable conses without a structural cycle.
+  check(`(let* ((body '(if (zerop n) :done (b (1- n))))
+               (source (list 'lambda '(n)
+                 (list 'labels (list (list 'a '(n) body) (list 'b '(n) body))
+                   '(declare (inline a b)) '(a n)))))
+    (eq (funcall (compile-native source) 10) :done))`);
   check(`(let ((f (compile-native '(lambda () (let ((x 0))
     (flet ((helper (a) a)) (declare (inline helper))
       (handler-case (helper (incf x) (incf x)) (program-error () x))))))))

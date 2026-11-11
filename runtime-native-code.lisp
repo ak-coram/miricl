@@ -693,6 +693,35 @@
 (define-native-integer-entry $native-add-int64 "native-add-int64" + i64.add $int64)
 (define-native-integer-entry $native-sub-int64 "native-sub-int64" - i64.sub $int64)
 (define-native-integer-entry $native-mul-int64 "native-mul-int64" * i64.mul $int64)
+(define-native-integer-entry $native-logand-int64 "native-logand-int64" logand i64.and $int64)
+(define-native-integer-entry $native-logior-int64 "native-logior-int64" logior i64.or $int64)
+(define-native-integer-entry $native-logxor-int64 "native-logxor-int64" logxor i64.xor $int64)
+
+(define-runtime-function $native-ash-int64
+    (($function externref) ($left i64) ($right i64)) (externref)
+  (:export-raw "native-ash-int64")
+  (:locals ($computed i64))
+  #@(if (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
+                (i32.const ,(1+ (runtime-symbol-id 'ash))))
+    (then
+      (if (i64.lt_s (local.get $right) (i64.const 0))
+        (then
+          ;; Wasm masks shift counts; Lisp saturates an arithmetic right
+          ;; shift once every value bit has been shifted out.
+          (return (extern.convert_any (call $int64
+            (if (result i64) (i64.le_s (local.get $right) (i64.const -64))
+              (then (select (i64.const -1) (i64.const 0) (i64.lt_s (local.get $left) (i64.const 0))))
+              (else (i64.shr_s (local.get $left) (i64.sub (i64.const 0) (local.get $right))))))))))
+      (if (i64.eqz (local.get $left)) (then (return (extern.convert_any (call $int (i32.const 0))))))
+      (if (i64.lt_u (local.get $right) (i64.const 64))
+        (then
+          (local.set $computed (i64.shl (local.get $left) (local.get $right)))
+          (if (i64.eq (i64.shr_s (local.get $computed) (local.get $right)) (local.get $left))
+            (then (return (extern.convert_any (call $int64 (local.get $computed))))))))))
+  ;; Positive shifts that overflow i64 use arbitrary-precision arithmetic.
+  #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
+    (call $cons (call $int64 (local.get $left))
+      (call $cons (call $int64 (local.get $right)) (ref.null eq))))))
 (define-native-integer-entry $native-add-int64-checked "native-add-int64-checked" + i64.add $int64 t)
 (define-native-integer-entry $native-sub-int64-checked "native-sub-int64-checked" - i64.sub $int64 t)
 (define-native-integer-entry $native-mul-int64-checked "native-mul-int64-checked" * i64.mul $int64 t)
@@ -777,9 +806,76 @@
   (:export-raw "native-cdr-list")
   (native-list-entry-wat 'cdr 'rest '$b))
 
+(define-runtime-function $native-car-list-inline (($list externref)) (externref)
+  (:export-raw "native-car-list-inline")
+  #@(if (ref.is_null ,(native-object '(local.get $list))) (then (return (ref.null extern))))
+  #@(extern.convert_any (struct.get $obj $a
+    (ref.cast (ref $obj) ,(native-object '(local.get $list))))))
+
+(define-runtime-function $native-cdr-list-inline (($list externref)) (externref)
+  (:export-raw "native-cdr-list-inline")
+  #@(if (ref.is_null ,(native-object '(local.get $list))) (then (return (ref.null extern))))
+  #@(extern.convert_any (struct.get $obj $b
+    (ref.cast (ref $obj) ,(native-object '(local.get $list))))))
+
 (define-runtime-function $native-boolean (($value i32)) (externref)
   (:export-raw "native-boolean")
   #@(extern.convert_any (call $bool (local.get $value))))
+
+(define-runtime-function $native-eq-inline (($left externref) ($right externref)) (externref)
+  (:export-raw "native-eq-inline")
+  #@(extern.convert_any (call $bool (ref.eq ,(native-object '(local.get $left)) ,(native-object '(local.get $right))))))
+
+(define-runtime-function $native-eql-inline (($left externref) ($right externref)) (externref)
+  (:export-raw "native-eql-inline")
+  #@(extern.convert_any (call $bool (call $eql ,(native-object '(local.get $left)) ,(native-object '(local.get $right))))))
+
+(define-runtime-function $native-length-inline (($sequence externref)) (externref)
+  (:export-raw "native-length-inline")
+  #@(extern.convert_any (call $int (call $proper-sequence-length
+    ,(native-object '(local.get $sequence))))))
+
+(define-runtime-function $native-vector-length-inline (($vector externref)) (externref)
+  (:export-raw "native-vector-length-inline")
+  #@(extern.convert_any (call $int (array.len (call $vector-data
+    ,(native-object '(local.get $vector)))))))
+
+(define-runtime-function $native-gethash-inline
+    (($key externref) ($table externref) ($default externref) ($full i32)) (externref)
+  (:export-raw "native-gethash-inline")
+  (:locals ($cell :nullable-object) ($value :nullable-object))
+  #@(local.set $cell (call $hash-cell-native
+    ,(native-object '(local.get $key)) ,(native-object '(local.get $table))))
+  #@(local.set $value (if (result (ref null eq)) (ref.is_null (local.get $cell))
+    (then ,(native-object '(local.get $default))) (else (call $cdr (local.get $cell)))))
+  #@(if (local.get $full)
+    (then (local.set $value (call $cons (local.get $value)
+      (call $cons (call $bool (i32.eqz (ref.is_null (local.get $cell)))) (ref.null eq))))))
+  #@(extern.convert_any (local.get $value)))
+
+(define-runtime-function $native-gethash-primary-inline (($key externref) ($table externref)) (externref)
+  (:export-raw "native-gethash-primary-inline")
+  (:locals ($cell :nullable-object))
+  #@(local.set $cell (call $hash-cell-native
+    ,(native-object '(local.get $key)) ,(native-object '(local.get $table))))
+  #@(extern.convert_any (if (result (ref null eq)) (ref.is_null (local.get $cell))
+    (then (ref.null eq)) (else (call $cdr (local.get $cell))))))
+
+(define-runtime-function $native-puthash-inline
+    (($value externref) ($key externref) ($table externref)) (externref)
+  (:export-raw "native-puthash-inline")
+  #@(extern.convert_any (call $puthash-native ,(native-object '(local.get $key))
+    ,(native-object '(local.get $table)) ,(native-object '(local.get $value)))))
+
+(define-runtime-function $native-consp-inline (($value externref)) (externref)
+  (:export-raw "native-consp-inline")
+  #@(extern.convert_any (call $bool (i32.eq
+    (call $tag ,(native-object '(local.get $value))) (i32.const 7)))))
+
+(define-runtime-function $native-simple-vector-p-inline (($value externref)) (externref)
+  (:export-raw "native-simple-vector-p-inline")
+  #@(extern.convert_any (call $bool (i32.eq
+    (call $tag ,(native-object '(local.get $value))) (i32.const 34)))))
 
 (define-runtime-function $native-primary-apply
     (($function :nullable-object) ($args :nullable-object)) (:nullable-object)
@@ -1121,10 +1217,15 @@
   ($native-call) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1)
   ($native-int64) ($native-unbox-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)
+  ($native-logand-int64) ($native-logior-int64) ($native-logxor-int64) ($native-ash-int64)
   ($native-add-int64-checked) ($native-sub-int64-checked) ($native-mul-int64-checked)
   ($native-lt-int64) ($native-gt-int64) ($native-le-int64) ($native-ge-int64) ($native-eq-int64) ($native-ne-int64)
   ($native-vector-ref) ($native-boolean)
+  ($native-eq-inline) ($native-eql-inline) ($native-length-inline) ($native-vector-length-inline)
+  ($native-gethash-inline) ($native-gethash-primary-inline) ($native-puthash-inline)
+  ($native-consp-inline) ($native-simple-vector-p-inline)
   ($native-vector-ref-trusted) ($native-car-list) ($native-cdr-list)
+  ($native-car-list-inline) ($native-cdr-list-inline)
   ($native-vector-ref-trusted64)
   ($native-vector-ref-inline)
   ($native-vector-set-inline)

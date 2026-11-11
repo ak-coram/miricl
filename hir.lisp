@@ -60,7 +60,6 @@
 (defvar *hir-debug-level* 1)
 (defvar *hir-safety-level* 1)
 (defvar *hir-source-path* nil)
-(defvar *hir-verified-unit* nil)
 
 (defun native-optimization-level (body quality-name inherited)
   (declare (type list body) (type symbol quality-name) (type (integer 0 3) inherited))
@@ -245,6 +244,14 @@
 
 (defun hir-inline-candidate (name arguments functions)
   (declare (type list arguments functions))
+  ;; Global INLINE names are symbols or SETF names; local declarations use
+  ;; binding records. With automatic inlining disabled, avoid a linear scan
+  ;; of the entire lexical function group unless a local INLINE is in scope.
+  (when (or (>= *hir-debug-level* 2)
+            (not (or *hir-inline-small-functions*
+                     (loop for entry in *hir-inline-policy* thereis
+                       (and (eq (cdr entry) 'inline) (simple-vector-p (car entry)))))))
+    (return-from hir-inline-candidate nil))
   (let* ((binding (cdr (assoc name functions :test #'equal)))
          (info (and binding (hir-binding-local binding)))
          (definition (and info (hir-local-definition info)))
@@ -258,7 +265,14 @@
                         (and (symbolp parameter) parameter (not (eq parameter t)) (not (keywordp parameter))
                              (not (member parameter lambda-list-keywords)))) parameters)
                (= (length parameters) (length (remove-duplicates parameters)))
-               (hir-inline-size (cddr definition) (min *hir-inline-budget* (if (eq policy 'inline) 128 16))))
+               (hir-inline-size (cddr definition) (min *hir-inline-budget* (if (eq policy 'inline) 128 16)))
+               ;; A recursive call can revisit its definition's source while
+               ;; that definition is being lowered out of line. Distinct
+               ;; definitions may also share body conses. Keep such calls
+               ;; instead of presenting semantic inlining recursion as a
+               ;; structural source cycle to HIR-FORM's input guard.
+               (not (loop for form in (cddr definition) thereis
+                      (member form *hir-source-path* :test #'eq))))
       binding)))
 
 (defun hir-inline-body (binding arguments)
@@ -1451,11 +1465,21 @@ global definitions. Internal calls refer to this group's lexical definitions."
         (compiler-input-fail "HIR function list" function "duplicate function"))
       (setf (gethash function owners) t (gethash function producers) function))
     (dolist (function functions)
-      (compiler-list-length (hir-function-values function) "HIR values")
-      (compiler-list-length (hir-function-blocks function) "HIR blocks")
+      (let ((values (compiler-list-length (hir-function-values function) "HIR values"))
+            (blocks (compiler-list-length (hir-function-blocks function) "HIR blocks")))
+        (unless (and (typep (hir-function-value-count function) '(unsigned-byte 32))
+                     (= (hir-function-value-count function) values)
+                     (typep (hir-function-block-count function) '(unsigned-byte 32))
+                     (= (hir-function-block-count function) blocks)
+                     (typep (hir-function-debug-level function) '(integer 0 3)))
+          (compiler-input-fail "HIR function" function "invalid value/block counts or debug level")))
       (dolist (item (hir-function-values function))
         (unless (%hir-value-p item) (compiler-input-fail "HIR value" item "invalid value record"))
         (when (gethash item value-owners) (compiler-input-fail "HIR value" item "duplicate value"))
+        (unless (and (eq (hir-value-owner item) function)
+                     (typep (hir-value-id item) '(unsigned-byte 32))
+                     (member (hir-value-kind item) '(:single :multiple :dynamic)))
+          (compiler-input-fail "HIR value" item "invalid value record, owner, ID or kind"))
         (setf (gethash item value-owners) function))
       (dolist (block (hir-function-blocks function))
         (unless (%hir-block-p block) (compiler-input-fail "HIR block" block "invalid block record"))
@@ -1463,10 +1487,10 @@ global definitions. Internal calls refer to this group's lexical definitions."
         (setf (gethash block block-owners) function)))
     (labels
         ((value (object)
-           (unless (and (%hir-value-p object) (gethash object value-owners)
-                        (eq (gethash object value-owners) (hir-value-owner object))
-                        (typep (hir-value-id object) '(unsigned-byte 32))
-                        (member (hir-value-kind object) '(:single :multiple :dynamic)))
+           ;; Registration checked each canonical record once. Repeated
+           ;; operands need only prove membership in this validation's table;
+           ;; no certificate survives the call or a later client mutation.
+           (unless (gethash object value-owners)
              (compiler-input-fail "HIR value" object "invalid value record, owner, ID or kind")))
          (binding (object)
            (unless (and (%hir-binding-p object) (gethash (hir-binding-owner object) owners))
@@ -1549,17 +1573,9 @@ global definitions. Internal calls refer to this group's lexical definitions."
                  (unless (%hir-block-p block)
                    (compiler-input-fail "HIR successor" block "invalid block record")))))))
       (dolist (function functions)
-        (compiler-list-length (hir-function-blocks function) "HIR blocks")
-        (compiler-list-length (hir-function-values function) "HIR values")
         (compiler-list-length (hir-function-bindings function) "HIR bindings")
         (compiler-list-length (hir-function-captures function) "HIR captures")
         (compiler-lambda-list (hir-function-parameters function))
-        (unless (and (typep (hir-function-value-count function) '(unsigned-byte 32))
-                     (= (hir-function-value-count function) (length (hir-function-values function)))
-                     (typep (hir-function-block-count function) '(unsigned-byte 32))
-                     (= (hir-function-block-count function) (length (hir-function-blocks function)))
-                     (typep (hir-function-debug-level function) '(integer 0 3)))
-          (compiler-input-fail "HIR function" function "invalid value/block counts or debug level"))
         (let ((parent function) (depth 0))
           (loop while parent do
             (unless (gethash parent owners)
@@ -1609,6 +1625,13 @@ global definitions. Internal calls refer to this group's lexical definitions."
 (defun verify-hir (unit)
   (declare (optimize (safety 3)))
   (validate-hir-shapes unit)
+  (verify-hir-contents unit))
+
+(defun verify-hir-contents (unit)
+  ;; Only VERIFY-HIR calls this kernel, after validating every record shape,
+  ;; list spine, ownership field and allocation count. Keep the semantic
+  ;; checks below, including checking IDs before indexing the value vector.
+  (declare (type hir-unit unit))
   (dolist (function (hir-unit-functions unit))
     (let ((blocks (hir-function-blocks function)) (index (make-hash-table :test 'eq)) (id 0)
           (values (make-array (hir-function-value-count function) :initial-element nil)) (count 0))

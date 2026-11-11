@@ -152,6 +152,19 @@ conservative. Unknown global calls retain unknown results. Multiple-value
 cardinality remains a separate analysis, so inferred primary types cannot
 discard extra values or turn zero values into one value.
 
+Explicitly inlined canonical built-ins provide further result facts: =cons=
+returns a cons, simple-vector =length= returns a bounded nonnegative integer,
+and bit operations propagate integer ranges. A nonnegative =logand= mask or
+negative =logior= operand bounds successful results even when the other
+operand can be a bignum. Operand evaluation and type errors remain observable.
+At safety 0, proven list and simple-vector operands permit direct inlined
+accesses. Inlined =cons= and general =length= use direct runtime entries;
+general length retains proper-sequence checks and fill-pointer semantics.
+Canonical inlined predicates and hash-table accesses also bypass function
+lookup and argument-list dispatch. Hash reads use a compact primary-value
+entry when other values are unobserved, and retain the presence flag otherwise.
+Hash defaults and setter operands keep their evaluation order and table checks.
+
 The analysis uses dependencies and a worklist. Lowering requests only facts
 needed by its current numeric and vector optimizations; clients may also
 request facts for an entire HIR unit. Inferred facts never overwrite source
@@ -228,14 +241,13 @@ Identical native bodies can share code while keeping distinct literal/capture
 contexts. Known lexical tail callees use direct Wasm =return_call= instructions,
 with the existing debugger dispatch fallback and scheduling checkpoints.
 
-=scripts/benchmark-self-compiler.mjs OUTPUT IMAGE [SOURCES.lisp]= records
-separate frontend, emission, and Wasm installation timings over a fixed source
-corpus. It installs the emitted compiler generation and checks native compilation
-with it. =--extract= saves a corpus from a source-bearing image; =--module=
-first compiles and installs that corpus as a module. Reports include corpus and
-image hashes, emitted module bytes, and raw/gzip/Brotli image sizes. Module bytes
-exclude literals and must not be confused with linked distribution size.
-=--profile= also records an emission CPU profile.
+=just benchmark-self-compiler= builds the precompiled compiler image, captures
+the original source, then measures that compiler compiling the source. Reports
+record separate frontend, emission, and Wasm instantiation timings over three
+rounds after warmup. The measured output is validated and
+instantiated without installing it as another compiler generation. Reports
+include corpus and image hashes, emitted module bytes, and raw/gzip/Brotli
+sizes. Module bytes exclude literals and differ from linked distribution size.
 
 First-use bootstrap compiles the small HIR constructors and declaration readers
 immediately after the byte-emission primitives. They are used while compiling
@@ -566,6 +578,13 @@ Byte emission appends encoded ranges with =replace= instead of dispatching once
 per byte. The decoder handles single-byte instruction operands directly, and
 stackification indexes candidate stack cells by instruction position. Its stack
 of real-operand barriers preserves operand order without scanning sibling stores.
+For native emission, a direct Wasm stackification kernel uses unboxed candidate,
+epoch, operand and barrier arrays. General core modules retain the Lisp pass
+for arbitrary instruction stack effects and non-defaultable reference locals.
+Liveness likewise has a direct Wasm kernel over the shared records, retaining
+arbitrary-width integer bitmaps, cyclic CFG iteration and exceptional-call
+conservatism. The Lisp implementations remain available for host compilation
+and differential regression checks.
 Native two-argument =vector-push= and =vector-push-extend= calls append directly
 when capacity is available; growth uses the ordinary array implementation.
 Native modules emit each function once against the complete ABI. The final

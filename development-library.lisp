@@ -671,7 +671,7 @@
               (list (list* '%%symbol-iterate var state
                       (if tags (list (cons 'tagbody scan)) scan))
                     (list 'setq var nil) result)))))))
-    (if (or declarations tags)
+    (let ((expansion (if (or declarations tags)
       (list 'block nil
         (list 'let (if counting (list (list state (list 'the 'integer source)) (list counter 0))
                                (list (list state source)))
@@ -690,6 +690,12 @@
             (list (cons 'progn body) (list 'setq (if counting var state)
               (list (if counting '1+ 'cdr) (if counting var state))))))
           (if counting result (list 'progn (list 'setq var nil) result)))))))
+      (unless counting
+        ;; DOLIST's private traversal cursor always denotes a remaining list
+        ;; tail. Preserve that type through its assignments and macro temps.
+        (let ((binding (third expansion)))
+          (setf (cddr binding) (cons (list 'declare (list 'type 'list state)) (cddr binding)))))
+      expansion)))
 (defmacro dolist ((var list &optional result) &body body)
   (%iteration-expansion var list result body nil))
 (defmacro dotimes ((var count &optional result) &body body)

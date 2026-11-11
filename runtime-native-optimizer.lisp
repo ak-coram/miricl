@@ -140,7 +140,7 @@
               (local.set $count (i32.sub (local.get $count) (i32.const 1))) (br $gc-next)))
             (br $decoded)))
         (br_if $unsupported (i32.eqz ,(wat-native-op-member
-          '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #xa7 #xac #xd1)))))
+          '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xa7 #xac #xd1)))))
       (if (i32.or (ref.is_null (local.get $references))
                   ,(wat-native-op-member '(#x10 #x12 #xd2)))
         (then
@@ -165,5 +165,304 @@
       (call $vector-new (local.get $grown)) (call $int (local.get $offset)) (call $int (local.get $locals))))))
   #@(ref.null eq))
 
+;; This kernel only consumes the native emitter's private decoded records,
+;; after source/HIR validation. Core modules with other stack effects or
+;; non-defaultable local types use the general Lisp pass. Dense stacks hold
+;; instruction indices plus one (zero denotes an actual operand), avoiding
+;; allocation and Lisp dispatch for each simulated stack operation.
+(define-runtime-function $native-stackify-ops
+    (($source :nullable-object) ($configuration :nullable-object) ($total i32)) (:nullable-object)
+  (:locals ($ops (ref $objects)) ($config (ref $objects)) ($effects (ref $objects))
+           ($op (ref $objects)) ($store-op (ref $objects))
+           ($stack :digits) ($barriers :digits) ($candidates :digits) ($epochs :digits)
+           ($i i32) ($code i32) ($local i32) ($epoch i32) ($sp i32) ($bp i32)
+           ($store i32) ($candidate i32) ($slot i32) ($consumed i32) ($produced i32)
+           ($effect i32) ($argument i32) ($exceptions i32) ($value :nullable-object))
+  #@(local.set $ops (call $vector-data (local.get $source)))
+  #@(local.set $config (call $vector-data (local.get $configuration)))
+  #@(local.set $exceptions (i32.eqz (ref.is_null
+    (array.get $objects (local.get $config) (i32.const 0)))))
+  #@(local.set $effects (call $vector-data (array.get $objects (local.get $config) (i32.const 1))))
+  #@(local.set $stack (array.new_default $digits (array.len (local.get $ops))))
+  #@(local.set $barriers (array.new_default $digits (array.len (local.get $ops))))
+  #@(local.set $candidates (array.new_default $digits (local.get $total)))
+  #@(local.set $epochs (array.new_default $digits (local.get $total)))
+  #@(local.set $epoch (i32.const 1))
+  #@(block $done (loop $next
+    (br_if $done (i32.ge_u (local.get $i) (array.len (local.get $ops))))
+    (block $continue
+      (local.set $op (call $vector-data (array.get $objects (local.get $ops) (local.get $i))))
+      (local.set $value (array.get $objects (local.get $op) (i32.const 0)))
+      (br_if $continue (ref.is_null (local.get $value)))
+      (local.set $code (call $natural-count (local.get $value)))
+      (local.set $candidate (i32.const 0))
+      (if ,(wat-native-op-member '(#x20 #x21 #x22))
+        (then (local.set $local (call $natural-count
+          (array.get $objects (local.get $op) (i32.const 1))))))
+      (if (i32.eq (local.get $code) (i32.const 32))
+        (then
+          (if (i32.eq (array.get $digits (local.get $epochs) (local.get $local)) (local.get $epoch))
+            (then
+              (local.set $slot (array.get $digits (local.get $candidates) (local.get $local)))
+              (local.set $store (array.get $digits (local.get $stack) (local.get $slot)))
+              (if (i32.eqz (local.get $bp))
+                (then (local.set $candidate (local.get $store)))
+                (else (if (i32.gt_u (local.get $store)
+                    (array.get $digits (local.get $barriers) (i32.sub (local.get $bp) (i32.const 1))))
+                  (then (local.set $candidate (local.get $store))))))))))
+      (if (i32.and (local.get $exceptions) ,(wat-native-op-member '(#x08 #x10 #x12)))
+        (then (local.set $epoch (i32.add (local.get $epoch) (i32.const 1)))))
+      (if ,(wat-native-op-member '(#x21 #x22))
+        (then
+          (if (ref.is_null (call $logbitp-native (call $int (local.get $local))
+                (array.get $objects (local.get $op) (i32.const 6))))
+            (then
+              (if (i32.eq (local.get $code) (i32.const 34))
+                (then
+                  (array.set $objects (local.get $op) (i32.const 0) (ref.null eq))
+                  (br $continue)))
+              (local.set $code (i32.const 26))
+              (array.set $objects (local.get $op) (i32.const 0) (call $int (local.get $code)))))))
+      (if ,(wat-native-op-member '(#x00 #x02 #x03 #x04 #x05 #x08 #x0b #x0c #x0d #x0e #x0f #x1f))
+        (then
+          (local.set $sp (i32.const 0)) (local.set $bp (i32.const 0))
+          (local.set $epoch (i32.add (local.get $epoch) (i32.const 1))) (br $continue)))
+      (if (i32.and (i32.eq (local.get $code) (i32.const 32))
+                  (i32.ne (local.get $candidate) (i32.const 0)))
+        (then
+          (if (ref.is_null (call $logbitp-native (call $int (local.get $local))
+                (array.get $objects (local.get $op) (i32.const 6))))
+            (then
+              (local.set $store-op (call $vector-data (array.get $objects (local.get $ops)
+                (i32.sub (local.get $candidate) (i32.const 1)))))
+              (array.set $objects (local.get $store-op) (i32.const 0) (ref.null eq))
+              (array.set $objects (local.get $op) (i32.const 0) (ref.null eq))
+              (array.set $digits (local.get $barriers) (local.get $bp) (local.get $candidate))
+              (local.set $bp (i32.add (local.get $bp) (i32.const 1)))
+              (array.set $digits (local.get $stack) (local.get $slot) (i32.const 0))
+              (array.set $digits (local.get $epochs) (local.get $local) (i32.const 0))
+              (br $continue)))))
+      (if (i32.eq (local.get $code) (i32.const 32))
+        (then (array.set $digits (local.get $epochs) (local.get $local) (i32.const 0))))
+      (local.set $consumed (i32.const 0)) (local.set $produced (i32.const 0))
+      (block $effect-done
+        (if ,(wat-native-op-member '(#x20 #x41 #xd0 #xd2))
+          (then (local.set $produced (i32.const 1)) (br $effect-done)))
+        (if ,(wat-native-op-member '(#x21 #x1a))
+          (then (local.set $consumed (i32.const 1)) (br $effect-done)))
+        (if ,(wat-native-op-member '(#x22 #x45 #xa7 #xac #xd1 #xfb))
+          (then (local.set $consumed (i32.const 1)) (local.set $produced (i32.const 1)) (br $effect-done)))
+        (if ,(wat-native-op-member '(#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85))
+          (then (local.set $consumed (i32.const 2)) (local.set $produced (i32.const 1)) (br $effect-done)))
+        (if ,(wat-native-op-member '(#x10 #x12))
+          (then
+            (local.set $argument (call $natural-count (array.get $objects (local.get $op) (i32.const 1))))
+            (local.set $produced (i32.eq (local.get $code) (i32.const 16)))
+            (local.set $consumed (i32.const 2))
+            (if (i32.lt_u (local.get $argument) (array.len (local.get $effects)))
+              (then
+                (local.set $effect (call $natural-count (array.get $objects (local.get $effects) (local.get $argument))))
+                (local.set $consumed (i32.shr_u (local.get $effect) (i32.const 1)))
+                (local.set $produced (i32.and (local.get $produced) (local.get $effect))))))))
+      (block $consumed (loop $consume
+        (br_if $consumed (i32.eqz (local.get $consumed)))
+        (block $operand (loop $skip-store
+          (br_if $operand (i32.eqz (local.get $sp)))
+          (local.set $store (array.get $digits (local.get $stack) (i32.sub (local.get $sp) (i32.const 1))))
+          (br_if $operand (i32.eqz (local.get $store)))
+          (local.set $store-op (call $vector-data (array.get $objects (local.get $ops)
+            (i32.sub (local.get $store) (i32.const 1)))))
+          (array.set $digits (local.get $epochs)
+            (call $natural-count (array.get $objects (local.get $store-op) (i32.const 1))) (i32.const 0))
+          (local.set $sp (i32.sub (local.get $sp) (i32.const 1))) (br $skip-store)))
+        (if (local.get $sp)
+          (then (local.set $sp (i32.sub (local.get $sp) (i32.const 1)))
+            (local.set $bp (i32.sub (local.get $bp) (i32.const 1)))))
+        (local.set $consumed (i32.sub (local.get $consumed) (i32.const 1))) (br $consume)))
+      (if ,(wat-native-op-member '(#x21 #x22))
+        (then (array.set $digits (local.get $epochs) (local.get $local) (i32.const 0))))
+      (if (i32.eq (local.get $code) (i32.const 33))
+        (then
+          (array.set $digits (local.get $stack) (local.get $sp) (i32.add (local.get $i) (i32.const 1)))
+          (array.set $digits (local.get $candidates) (local.get $local) (local.get $sp))
+          (array.set $digits (local.get $epochs) (local.get $local) (local.get $epoch))
+          (local.set $sp (i32.add (local.get $sp) (i32.const 1))))
+        (else (if (local.get $produced)
+          (then
+            (array.set $digits (local.get $stack) (local.get $sp) (i32.const 0))
+            (array.set $digits (local.get $barriers) (local.get $bp) (i32.add (local.get $i) (i32.const 1)))
+            (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
+            (local.set $bp (i32.add (local.get $bp) (i32.const 1))))))))
+    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
+  #@(call $bool (i32.const 1)))
+
+;; Validate untrusted list spines before any unchecked Lisp traversal. Return
+;; an integer count or a private negative status; the Lisp boundary supplies
+;; its context and signals COMPILER-INPUT-ERROR. Floyd's algorithm allocates
+;; nothing while traversing and never follows an unchecked dotted tail.
+(define-runtime-function $compiler-list-length (($fast :nullable-object)) (:nullable-object)
+  (:locals ($slow :nullable-object) ($count i64))
+  #@(local.set $slow (local.get $fast))
+  #@(loop $next
+    (if (ref.is_null (local.get $fast)) (then (return (call $int64 (local.get $count)))))
+    (if (i32.ne (call $tag (local.get $fast)) (i32.const 7))
+      (then (return (call $int (i32.const -1)))))
+    (local.set $fast (call $cdr (local.get $fast)))
+    (local.set $count (i64.add (local.get $count) (i64.const 1)))
+    (if (ref.is_null (local.get $fast)) (then (return (call $int64 (local.get $count)))))
+    (if (i32.ne (call $tag (local.get $fast)) (i32.const 7))
+      (then (return (call $int (i32.const -1)))))
+    (local.set $fast (call $cdr (local.get $fast)))
+    (local.set $slow (call $cdr (local.get $slow)))
+    (local.set $count (i64.add (local.get $count) (i64.const 1)))
+    (if (ref.eq (local.get $fast) (local.get $slow))
+      (then (return (call $int (i32.const -2)))))
+    (br $next))
+  #@(unreachable))
+
+;; The bit-operation selectors are the runtime-bits.lisp truth tables: OR=14,
+;; ANDC2=4, NOT(first)=3. Keep arbitrary-width Lisp integers for liveness sets.
+(defun wat-native-bitmap (operation left right)
+  `(call $boole-native (i32.const ,operation) ,left ,right (i32.const 0)))
+
+(defun wat-native-op-code ()
+  '(local.set $code (if (result i32)
+    (ref.is_null (array.get $objects (local.get $op) (i32.const 0)))
+    (then (i32.const -1))
+    (else (call $natural-count (array.get $objects (local.get $op) (i32.const 0)))))))
+
+;; Same block summaries and backwards equations as NATIVE-OP-LIVENESS-LISP.
+;; Private decoded ops use fields 5/6 for live-in/out and 7/8 for uses/defs;
+;; block records use fields 3/4 for uses/defs and 5/6 for live-in/out.
+(define-runtime-function $native-op-liveness
+    (($source :nullable-object) ($configuration :nullable-object) ($total i32)) (:nullable-object)
+  (:locals ($ops (ref $objects)) ($config (ref $objects)) ($blocks (ref $objects))
+           ($block (ref $objects)) ($next-block (ref $objects)) ($op (ref $objects))
+           ($zero :nullable-object) ($all :nullable-object) ($uses :nullable-object)
+           ($definitions :nullable-object) ($in :nullable-object) ($out :nullable-object)
+           ($scan :nullable-object) ($b i32) ($i i32) ($stop i32) ($start i32)
+           ($code i32) ($local i32) ($exceptions i32) ($cyclic i32) ($changed i32))
+  #@(local.set $ops (call $vector-data (local.get $source)))
+  #@(local.set $config (call $vector-data (local.get $configuration)))
+  #@(local.set $blocks (call $vector-data (array.get $objects (local.get $config) (i32.const 0))))
+  #@(local.set $exceptions (i32.eqz (ref.is_null (array.get $objects (local.get $config) (i32.const 1)))))
+  #@(local.set $zero (call $int (i32.const 0)))
+  #@(local.set $all (local.get $zero))
+  #@(if (local.get $exceptions)
+    (then (local.set $all ,(wat-native-bitmap 3
+      '(call $ash-native (call $int (i32.const -1)) (call $int (local.get $total))) '(local.get $zero)))))
+  #@(block $summaries-done (loop $summary
+    (br_if $summaries-done (i32.ge_u (local.get $b) (array.len (local.get $blocks))))
+    (local.set $block (call $vector-data (array.get $objects (local.get $blocks) (local.get $b))))
+    (local.set $scan (array.get $objects (local.get $block) (i32.const 2)))
+    (block $edges-done (loop $edge
+      (br_if $edges-done (ref.is_null (local.get $scan)))
+      (if (i32.le_u (call $natural-count (call $car (local.get $scan))) (local.get $b))
+        (then (local.set $cyclic (i32.const 1))))
+      (local.set $scan (call $cdr (local.get $scan))) (br $edge)))
+    (array.set $objects (local.get $block) (i32.const 3) (local.get $zero))
+    (array.set $objects (local.get $block) (i32.const 4) (local.get $zero))
+    (array.set $objects (local.get $block) (i32.const 5) (local.get $zero))
+    (array.set $objects (local.get $block) (i32.const 6) (local.get $zero))
+    (local.set $i (call $natural-count (array.get $objects (local.get $block) (i32.const 0))))
+    (local.set $stop (call $natural-count (array.get $objects (local.get $block) (i32.const 1))))
+    (block $ops-done (loop $operation
+      (br_if $ops-done (i32.ge_u (local.get $i) (local.get $stop)))
+      (local.set $op (call $vector-data (array.get $objects (local.get $ops) (local.get $i))))
+      ,(wat-native-op-code)
+      (local.set $uses (local.get $zero)) (local.set $definitions (local.get $zero))
+      (if ,(wat-native-op-member '(#x20 #x21 #x22))
+        (then (local.set $local (call $natural-count (array.get $objects (local.get $op) (i32.const 1))))))
+      (if (i32.eq (local.get $code) (i32.const 32))
+        (then (local.set $uses (call $ash-native (call $int (i32.const 1)) (call $int (local.get $local)))))
+        (else (if (i32.and (local.get $exceptions) ,(wat-native-op-member '(#x08 #x10 #x12)))
+          (then (local.set $uses (local.get $all))))))
+      (if ,(wat-native-op-member '(#x21 #x22))
+        (then (local.set $definitions (call $ash-native (call $int (i32.const 1)) (call $int (local.get $local))))))
+      (array.set $objects (local.get $op) (i32.const 7) (local.get $uses))
+      (array.set $objects (local.get $op) (i32.const 8) (local.get $definitions))
+      (if (i32.eq (local.get $code) (i32.const 32))
+        (then
+          (if (i32.and
+                (ref.is_null (call $logbitp-native (call $int (local.get $local))
+                  (array.get $objects (local.get $block) (i32.const 4))))
+                (ref.is_null (call $logbitp-native (call $int (local.get $local))
+                  (array.get $objects (local.get $block) (i32.const 3)))))
+            (then (array.set $objects (local.get $block) (i32.const 3)
+              ,(wat-native-bitmap 14 '(array.get $objects (local.get $block) (i32.const 3)) '(local.get $uses))))))
+        (else (if (i32.eqz (ref.eq (local.get $uses) (local.get $zero)))
+          (then (array.set $objects (local.get $block) (i32.const 3)
+            ,(wat-native-bitmap 14 '(array.get $objects (local.get $block) (i32.const 3))
+              (wat-native-bitmap 4 '(local.get $uses) '(array.get $objects (local.get $block) (i32.const 4)))))))))
+      (if (i32.eqz (ref.eq (local.get $definitions) (local.get $zero)))
+        (then (if (ref.is_null (call $logbitp-native (call $int (local.get $local))
+                    (array.get $objects (local.get $block) (i32.const 4))))
+          (then (array.set $objects (local.get $block) (i32.const 4)
+            ,(wat-native-bitmap 14 '(array.get $objects (local.get $block) (i32.const 4)) '(local.get $definitions)))))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $operation)))
+    (local.set $b (i32.add (local.get $b) (i32.const 1))) (br $summary)))
+  #@(local.set $changed (i32.const 1))
+  #@(loop $solve
+    (local.set $changed (i32.const 0))
+    (local.set $b (array.len (local.get $blocks)))
+    (block $blocks-done (loop $backward
+      (br_if $blocks-done (i32.eqz (local.get $b)))
+      (local.set $b (i32.sub (local.get $b) (i32.const 1)))
+      (local.set $block (call $vector-data (array.get $objects (local.get $blocks) (local.get $b))))
+      (local.set $out (local.get $zero))
+      (local.set $scan (array.get $objects (local.get $block) (i32.const 2)))
+      (block $successors-done (loop $successor
+        (br_if $successors-done (ref.is_null (local.get $scan)))
+        (local.set $next-block (call $vector-data (array.get $objects (local.get $blocks)
+          (call $natural-count (call $car (local.get $scan))))))
+        (local.set $out ,(wat-native-bitmap 14 '(local.get $out)
+          '(array.get $objects (local.get $next-block) (i32.const 5))))
+        (local.set $scan (call $cdr (local.get $scan))) (br $successor)))
+      (local.set $in ,(wat-native-bitmap 14 '(array.get $objects (local.get $block) (i32.const 3))
+        (wat-native-bitmap 4 '(local.get $out) '(array.get $objects (local.get $block) (i32.const 4)))))
+      (if (i32.eqz (i32.and
+            (call $eql (local.get $in) (array.get $objects (local.get $block) (i32.const 5)))
+            (call $eql (local.get $out) (array.get $objects (local.get $block) (i32.const 6)))))
+        (then
+          (local.set $changed (local.get $cyclic))
+          (array.set $objects (local.get $block) (i32.const 5) (local.get $in))
+          (array.set $objects (local.get $block) (i32.const 6) (local.get $out))))
+      (br $backward)))
+    (br_if $solve (local.get $changed)))
+  #@(local.set $b (i32.const 0))
+  #@(block $instructions-done (loop $instruction-block
+    (br_if $instructions-done (i32.ge_u (local.get $b) (array.len (local.get $blocks))))
+    (local.set $block (call $vector-data (array.get $objects (local.get $blocks) (local.get $b))))
+    (local.set $out (array.get $objects (local.get $block) (i32.const 6)))
+    (local.set $start (call $natural-count (array.get $objects (local.get $block) (i32.const 0))))
+    (local.set $i (call $natural-count (array.get $objects (local.get $block) (i32.const 1))))
+    (block $block-done (loop $instruction
+      (br_if $block-done (i32.le_u (local.get $i) (local.get $start)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (local.set $op (call $vector-data (array.get $objects (local.get $ops) (local.get $i))))
+      ,(wat-native-op-code)
+      (array.set $objects (local.get $op) (i32.const 6) (local.get $out))
+      (local.set $uses (array.get $objects (local.get $op) (i32.const 7)))
+      (local.set $definitions (array.get $objects (local.get $op) (i32.const 8)))
+      (if (i32.eqz (ref.eq (local.get $definitions) (local.get $zero)))
+        (then
+          (local.set $local (call $natural-count (array.get $objects (local.get $op) (i32.const 1))))
+          (if (i32.eqz (ref.is_null (call $logbitp-native (call $int (local.get $local)) (local.get $out))))
+            (then (local.set $out ,(wat-native-bitmap 4 '(local.get $out) '(local.get $definitions)))))))
+      (if (i32.eqz (ref.eq (local.get $uses) (local.get $zero)))
+        (then
+          (block $already-live
+            (if (i32.eq (local.get $code) (i32.const 32))
+              (then
+                (local.set $local (call $natural-count (array.get $objects (local.get $op) (i32.const 1))))
+                (br_if $already-live (i32.eqz (ref.is_null
+                  (call $logbitp-native (call $int (local.get $local)) (local.get $out)))))))
+            (local.set $out ,(wat-native-bitmap 14 '(local.get $out) '(local.get $uses))))))
+      (array.set $objects (local.get $op) (i32.const 5) (local.get $out))
+      (br $instruction)))
+    (local.set $b (i32.add (local.get $b) (i32.const 1))) (br $instruction-block)))
+  #@(call $bool (i32.const 1)))
+
 (define-runtime-section native-optimizer-runtime-wat ()
-  ($native-op-operand) ($native-read-ops))
+  ($native-op-operand) ($native-read-ops) ($native-stackify-ops) ($compiler-list-length)
+  ($native-op-liveness))

@@ -148,6 +148,8 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
             case 0x4a: instructions.push('i32.gt_s'); break;
             case 0x4c: instructions.push('i32.le_s'); break;
             case 0x4e: instructions.push('i32.ge_s'); break;
+            case 0x51: instructions.push('i64.eq'); break;
+            case 0x52: instructions.push('i64.ne'); break;
             case 0x53: instructions.push('i64.lt_s'); break;
             case 0x55: instructions.push('i64.gt_s'); break;
             case 0x57: instructions.push('i64.le_s'); break;
@@ -156,6 +158,9 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
             case 0x7c: instructions.push('i64.add'); break;
             case 0x7d: instructions.push('i64.sub'); break;
             case 0x7e: instructions.push('i64.mul'); break;
+            case 0x83: instructions.push('i64.and'); break;
+            case 0x84: instructions.push('i64.or'); break;
+            case 0x85: instructions.push('i64.xor'); break;
             case 0xa7: instructions.push('i32.wrap_i64'); break;
             case 0xac: instructions.push('i64.extend_i32_s'); break;
             case 0xd0: assert.equal(byte(), 0x6f); instructions.push('ref.null extern'); break;

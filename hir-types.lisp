@@ -60,7 +60,7 @@
   (cond ((integerp value) (list 'integer value value))
         ((null value) 'null) ((symbolp value) 'symbol)
         ((typep value 'simple-vector) 'simple-vector)
-        ((characterp value) 'character) ((stringp value) 'string)
+        ((consp value) 'cons) ((characterp value) 'character) ((stringp value) 'string)
         ((floatp value) 'float) (t t)))
 
 (defun hir-type-cell (value)
@@ -72,29 +72,122 @@
         (:capture (let ((binding (second (hir-instruction-attributes producer))))
                     (when (%hir-binding-p binding) (hir-binding-cell binding))))))))
 
+(defun hir-inline-primitive (instruction cache)
+  (declare (type simple-vector instruction) (type hash-table cache))
+  (let* ((reference (second (hir-instruction-inputs instruction)))
+         (producer (hir-value-producer reference))
+         (attributes (and (%hir-instruction-p producer)
+                          (eq (hir-instruction-opcode producer) :function-reference)
+                          (hir-instruction-attributes producer)))
+         (name (first attributes)))
+    ;; INLINE is the contract that permits relying on the definition selected
+    ;; at compilation. Ordinary calls retain their unrestricted result types.
+    (when (and (eq (second attributes) 'inline) (member name '(length cons + - * logand logior logxor ash)))
+      (multiple-value-bind (canonical found) (gethash name cache)
+        (unless found
+          (setq canonical
+            (and (fboundp name)
+                 (multiple-value-bind (actual native) (compiler-primitive 19 name)
+                   (or (not native) (= actual (native-canonical-builtin-code name))))))
+          (setf (gethash name cache) canonical))
+        (and canonical name)))))
+
+(defun hir-inline-result-type (name types)
+  (declare (type symbol name) (type list types))
+  (when (member nil types) (return-from hir-inline-result-type nil))
+  (when (and (eq name 'cons) (= (length types) 2))
+    (return-from hir-inline-result-type 'cons))
+  (when (and (eq name 'length) (= (length types) 1))
+    (let ((type (first types)))
+      (when (or (eq type 'simple-vector) (and (consp type) (eq (first type) 'simple-vector)))
+        ;; A simple vector has no fill pointer. Its WasmGC backing array uses
+        ;; a nonnegative signed-i32 length; sized vectors can be more precise.
+        (let ((size (and (consp type) (second type))))
+          (return-from hir-inline-result-type
+            (if (typep size '(integer 0 2147483647)) (list 'integer size size) '(integer 0 2147483647)))))))
+  (when (= (length types) 2)
+    (multiple-value-bind (a b integer-a) (hir-integer-bounds (first types))
+      (multiple-value-bind (c d integer-b) (hir-integer-bounds (second types))
+        ;; A finite mask bounds the result even when the other integer is a
+        ;; bignum or has no declaration. These describe successful returns;
+        ;; the original call still checks its operands and signals errors.
+        (when (eq name 'logand)
+          (let ((left (and integer-a (<= 0 a b 9223372036854775807) b))
+                (right (and integer-b (<= 0 c d 9223372036854775807) d)))
+            (when (or left right)
+              (return-from hir-inline-result-type
+                (list 'integer 0 (if (and left right) (min left right) (or left right)))))))
+        ;; In two's complement, OR can only set bits: a negative operand
+        ;; bounds the result between that operand and -1, at any other width.
+        (when (eq name 'logior)
+          (let ((left (and integer-a (<= -9223372036854775808 a b -1) a))
+                (right (and integer-b (<= -9223372036854775808 c d -1) c)))
+            (when (or left right)
+              (return-from hir-inline-result-type
+                (list 'integer (if (and left right) (max left right) (or left right)) -1)))))
+        (when (and integer-a integer-b (<= -9223372036854775808 a b 9223372036854775807)
+                   (<= -9223372036854775808 c d 9223372036854775807))
+          (when (member name '(+ - *))
+            (let ((low nil) (high nil))
+              (case name
+                (+ (setq low (+ a c) high (+ b d)))
+                (- (setq low (- a d) high (- b c)))
+                (* (let ((ac (* a c)) (ad (* a d)) (bc (* b c)) (bd (* b d)))
+                     (setq low (min ac ad bc bd) high (max ac ad bc bd)))))
+              ;; Leaving i64 is a loss of scalar information, never wrapping
+              ;; arithmetic. The ordinary call still promotes to a bignum.
+              (return-from hir-inline-result-type
+                (if (<= -9223372036854775808 low high 9223372036854775807)
+                    (list 'integer low high) t))))
+          (let ((bits (max (integer-length a) (integer-length b) (integer-length c) (integer-length d))))
+            (case name
+              (logand
+               (return-from hir-inline-result-type
+                 (cond ((and (>= a 0) (>= c 0)) (list 'integer 0 (min b d)))
+                       ((>= a 0) (list 'integer 0 b)) ((>= c 0) (list 'integer 0 d))
+                       (t (list 'signed-byte (1+ bits))))))
+              ((logior logxor)
+               (return-from hir-inline-result-type
+                 (if (and (>= a 0) (>= c 0)) (list 'integer 0 (1- (ash 1 bits)))
+                     (list 'signed-byte (1+ bits)))))
+              (ash
+               (when (and (= c d) (<= -64 c 64))
+                 (let ((low (ash a c)) (high (ash b c)))
+                   (when (<= -9223372036854775808 low high 9223372036854775807)
+                     (return-from hir-inline-result-type (list 'integer low high))))))))))))
+  ;; Stop expanding interval chains once they leave the scalar domain. This
+  ;; keeps inference terminating for loops such as X := (ASH X 1).
+  t)
+
 (defun infer-hir-types (unit &key (roots nil rootsp))
   "Return fresh primary-value type facts keyed by HIR values and functions.
 NIL is the empty type and T is unknown. Value counts remain a separate analysis.
 Captured cells and debug-enabled functions keep conservative inferred types."
   (declare (optimize (safety 3)))
-  (unless (eq unit *hir-verified-unit*) (verify-hir unit))
+  (verify-hir unit)
   (compiler-list-length roots "type-inference roots")
   (dolist (root roots)
     (unless (and (%hir-value-p root) (member (hir-value-owner root) (hir-unit-functions unit) :test #'eq)
                  (member root (hir-function-values (hir-value-owner root)) :test #'eq))
       (compiler-input-fail "type-inference root" root "value does not belong to this HIR unit")))
+  (infer-hir-types-checked unit roots rootsp))
+
+(defun infer-hir-types-checked (unit roots rootsp)
+  "Internal inference kernel; UNIT and ROOTS have passed the public boundary."
+  (declare (type hir-unit unit) (type list roots))
   ;; Explicitly requesting no facts needs no dependency or escape graph.
   ;; Many initialization units contain no operations using inferred types.
   (when (and rootsp (null roots))
-    (return-from infer-hir-types (make-hash-table :test 'eq)))
+    (return-from infer-hir-types-checked (make-hash-table :test 'eq)))
   (let ((facts (make-hash-table :test 'eq)) (sources (make-hash-table :test 'eq))
         (users (make-hash-table :test 'eq)) (calls (make-hash-table :test 'eq))
         (references (make-hash-table :test 'eq)) (candidates (make-hash-table :test 'eq))
         (escaped (make-hash-table :test 'eq)) (sites (make-hash-table :test 'eq))
         (opaque (make-hash-table :test 'eq)) (queued (make-hash-table :test 'eq))
-        (required (make-hash-table :test 'eq)) (work nil))
+        (required (make-hash-table :test 'eq)) (growth (make-hash-table :test 'eq)) (work nil)
+        (primitives (make-hash-table :test 'eq)) (intrinsics (make-hash-table :test 'eq)))
     (declare (type hash-table facts sources users calls references candidates escaped
-                   sites opaque queued required)
+                   sites opaque queued required growth)
              (type list work))
     (labels ((edge (source destination)
                (when (and source destination)
@@ -169,7 +262,11 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                    (edge (second inputs) (hir-type-cell (first inputs))))
                   (:call
                    (let ((target (native-known-callee (second inputs))))
-                     (when target (setf (gethash value calls) target) (edge target value)))))))))
+                     (if target (progn (setf (gethash value calls) target) (edge target value))
+                         (let ((primitive (hir-inline-primitive producer primitives)))
+                           (when primitive
+                             (setf (gethash value intrinsics) primitive)
+                             (dolist (input (cddr inputs)) (edge input value))))))))))))
         (dolist (block (hir-function-blocks function))
           (let* ((terminator (hir-block-terminator block)) (inputs (hir-instruction-inputs terminator))
                  (opcode (hir-instruction-opcode terminator))
@@ -216,13 +313,29 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                                    (hir-value-type-at (hir-value-type group) index))))
                             (:closure 'function)
                             (:call
-                             (if (gethash value calls) (joined value)
-                                 (hir-value-type-at (hir-function-result-type (hir-value-type (second inputs))) 0)))
+                             (cond ((gethash value calls) (joined value))
+                                   ((gethash value intrinsics)
+                                    (hir-inline-result-type (gethash value intrinsics)
+                                      (mapcar (lambda (input) (gethash input facts)) (cddr inputs))))
+                                   (t (hir-value-type-at (hir-function-result-type (hir-value-type (second inputs))) 0))))
                             (otherwise t))))))
                (next (hir-type-join previous
                        (if function derived (hir-type-restrict derived (hir-value-type value))))))
           (remhash value queued)
           (unless (equal previous next)
+            ;; Backedges can grow an interval one integer at a time. At
+            ;; repeatedly changing multi-input nodes, widen to the source
+            ;; assertion (or unknown) after four strict range expansions.
+            ;; Initial facts retain precise intervals; source declarations
+            ;; remain usable when repeated joins require widening.
+            (when (and previous (cdr (gethash value sources)))
+              (multiple-value-bind (old-low old-high old-integer) (hir-integer-bounds previous)
+                (multiple-value-bind (low high integer) (hir-integer-bounds next)
+                  (when (and old-integer integer (or (< low old-low) (> high old-high)))
+                    (let ((count (1+ (gethash value growth 0))))
+                      (setf (gethash value growth) count)
+                      (when (>= count 4)
+                        (setq next (if function t (hir-type-restrict t (hir-value-type value))))))))))
             (setf (gethash value facts) next)
             (dolist (user (gethash value users)) (enqueue user)))))
       facts)))

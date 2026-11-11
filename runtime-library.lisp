@@ -18,6 +18,15 @@
                   (macroexpand-1 form)
                   (case (car form)
                 (quote (return-from lower-runtime-library form))
+                ((case ecase ccase typecase etypecase ctypecase)
+                 ;; Clause keys and type specifiers are data. Recursing into
+                 ;; them as calls would turn (NULL NOT) into (NOT NOT), or
+                 ;; rewrite a NULL type clause and discard its body.
+                 (return-from lower-runtime-library
+                   (list* (car form) (lower-runtime-library (second form))
+                     (mapcar (lambda (clause)
+                               (cons (car clause) (mapcar #'lower-runtime-library (cdr clause))))
+                             (cddr form)))))
                 (cond (if (cdr form)
                           `(if ,(caadr form) (progn ,@(cdadr form))
                                (cond ,@(cddr form))) nil))
