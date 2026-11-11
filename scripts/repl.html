@@ -1,53 +1,55 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A self-contained Common Lisp REPL, running locally in WebAssembly.">
-  <link rel="icon" href="data:,">
-  <title>miricl — Common Lisp REPL</title>
-  <style>
-    /* Acme / Plan 9: pale yellow text, cyan tags, purple window borders.
-       https://github.com/9fans/plan9port/blob/master/src/cmd/acme/acme.c */
-    :root { color-scheme: light; --paper: #ffffea; --tag: #eaffff; --select: #eeee9e;
-      --border: #8888cc; --ink: #000; --muted: #454557; --error: #8b2020; }
-    * { box-sizing: border-box; }
-    body { margin: 0; padding: 20px; background: var(--border); color: var(--ink);
-      font: 15px/1.5 "Lucida Console", "DejaVu Sans Mono", monospace; }
-    ::selection { background: var(--select); color: var(--ink); }
-    button, select, textarea { font: inherit; color: inherit; border-radius: 0; }
-    button { padding: 2px 8px; border: 1px solid black; background: var(--tag); cursor: pointer; }
-    button:hover:enabled, select:hover { background: var(--paper); }
-    button:disabled { opacity: .45; cursor: default; }
-    :focus-visible { outline: 2px solid #000099; outline-offset: 2px; }
-    main { background: var(--paper); border: 1px solid black; min-height: calc(100dvh - 40px);
-      display: flex; flex-direction: column; }
-    header, .tag, footer { background: var(--tag); }
-    header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px;
-      border-bottom: 1px solid black; padding: 8px 14px; }
-    h1 { font: inherit; font-weight: bold; margin: 0; }
-    header p { margin: 0; color: var(--muted); }
-    #status { margin-left: auto; }
-    .workspace { display: grid; grid-template-columns: 1fr 1fr; flex: 1; min-height: 0; }
-    .pane { display: flex; flex-direction: column; min-width: 0; }
-    .pane + .pane { border-left: 3px solid var(--border); }
-    .tag { border-bottom: 1px solid black; display: flex; flex-wrap: wrap;
-      align-items: center; gap: 4px; padding: 5px 8px; }
-    .handle { width: 12px; height: 18px; background: var(--border); border: 1px solid black; margin-right: 4px; }
-    .filename { margin-right: auto; }
-    select { background: var(--tag); border: 1px solid var(--border); padding: 2px; max-width: 100%; }
-    textarea { display: block; background: var(--paper); border: 0; padding: 18px;
-      width: 100%; flex: 1; min-height: 300px; resize: none; line-height: 1.65; tab-size: 2; }
-    textarea:focus-visible { outline-offset: -3px; }
-    .hint { margin: 0; padding: 8px 14px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--select); }
-    #transcript { padding: 18px; height: calc(100dvh - 210px); min-height: 300px;
-      overflow: auto; overflow-wrap: anywhere; }
-    pre { font: inherit; white-space: pre-wrap; margin: 0 0 12px; }
-    .input { color: #000099; }
-    .error { color: var(--error); }
-    .notice { color: var(--muted); }
-    footer { padding: 8px 14px; border-top: 1px solid black; color: var(--muted); font-size: 12px; }
-    kbd { font: inherit; color: var(--ink); }
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#9999cc">
+<link rel="icon" href="data:,">
+<meta name="description" content="A standalone Common Lisp REPL with a debugger, saved sessions and examples, running locally in WebAssembly.">
+<title>Common Lisp / miricl</title>
+<style>
+  :root {--paper:#ffffea;--ink:#222;--select:#eeee9e;--border:#8888cc;color-scheme:light;font:13px/1.55 "Lucida Console","Courier New",monospace;color:#222;background:#9999cc}
+  * {box-sizing:border-box} body {margin:0;padding:28px 24px} button,input,textarea,select {font:inherit;color:inherit}
+  button,a,input,textarea,summary {touch-action:manipulation} button {border:1px solid #222;background:#ffffea;padding:5px 10px;cursor:pointer}
+  button:hover:not(:disabled),button[aria-pressed="true"] {background:#cccc88} button:disabled {opacity:.45;cursor:wait}
+  :focus-visible {outline:2px solid #0055aa;outline-offset:3px} a {color:#005580;text-underline-offset:3px}
+  .desktop {max-width:1260px;margin:auto} .window {border:1px solid #222;background:#ffffea;box-shadow:4px 4px 0 #555588}
+  .titlebar {display:flex;align-items:center;gap:10px;padding:7px 11px;background:#eaffff;border-bottom:1px solid #222;font-size:12px}
+  .handle {width:13px;height:13px;border:1px solid #222;background:#8888cc;flex:none}
+  .titlebar .right {margin-left:auto} .masthead {padding:22px 24px 18px;display:flex;align-items:flex-end;justify-content:space-between;gap:20px}
+  h1 {font-size:30px;line-height:1.2;font-weight:normal;margin:0 0 7px} .eyebrow {font-size:10px;letter-spacing:2px;margin:0 0 8px}
+  .intro {margin:0;color:#555;max-width:62ch} .masthead nav {display:flex;gap:14px;font-size:12px;white-space:nowrap}
+  .workspace {display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:18px;margin-top:18px}
+  .worksheet {min-width:0} .toolbar {display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:9px 12px;border-bottom:1px solid #aaa97b;background:#eeeecc}
+  #session-name {border:0;border-bottom:1px solid #aaa97b;background:transparent;width:230px;min-width:0;flex:1;padding:4px 2px}
+  .toolbar button {font-size:11px} #history {list-style:none;margin:0;padding:0 20px;max-height:55vh;min-height:230px;overflow:auto;scrollbar-color:#9999cc #ffffea}
+  #history li {padding:17px 0;border-bottom:1px solid #dddda8} #history li:last-child {border-bottom:0}
+  .entry-head {display:flex;align-items:center;gap:9px;font-size:10px;color:#666;margin-bottom:6px}
+  .entry-head button {margin-left:auto;font-size:10px;padding:1px 6px} pre {white-space:pre-wrap;overflow-wrap:anywhere;margin:7px 0;line-height:1.65}
+  #history pre:not(.input) {white-space:pre;overflow-x:auto;overflow-wrap:normal}
+  .input {color:#555} .result {color:#004b50} .error {color:#a02020} .entry-time {color:#777;font-size:10px}
+  #empty {padding:30px 24px;color:#555;border-bottom:1px solid #dddda8} #empty strong {display:block;color:#222;font-weight:normal;margin-bottom:8px}
+  #form {padding:16px 20px 12px;border-top:1px solid #aaa97b} .editor-label {display:flex;justify-content:space-between;gap:10px;margin-bottom:7px}
+  .editor-label small {color:#666} textarea {width:100%;resize:vertical;background:#fffff4;border:1px solid #777;padding:10px;line-height:1.65;tab-size:2}
+  .actions {display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px} #evaluate {background:#eaffff;padding:6px 24px}
+  #status {font-size:11px;color:#555;margin-left:auto} details {font-size:11px;margin-top:10px} summary {cursor:pointer;color:#555}
+  #answers {margin-top:8px} .sidebar {display:flex;flex-direction:column;gap:18px;min-width:0} .panel-content {padding:14px}
+  .panel-content p {margin:0 0 12px;color:#555;font-size:11px} .examples {display:grid;gap:7px}
+  .example {text-align:left;padding:9px 10px;background:#ffffea}.example span {display:block;font-size:10px;color:#666;margin-bottom:2px}
+  #example-note {margin:9px 0 0;font-size:11px;color:#555} #example-note a {display:inline-block;margin-top:4px}
+  #sessions {list-style:none;margin:0;padding:0;display:grid;gap:8px} #sessions button {width:100%;text-align:left;padding:8px;overflow-wrap:anywhere}
+  #sessions li {display:flex;gap:6px} #sessions .session-open {flex:1;min-width:0}
+  #sessions .session-copy {width:auto;flex:none;font-size:10px;padding:4px 6px;text-align:center}
+  #sessions small {display:block;color:#666;font-size:10px} #sessions button[aria-current="true"] {background:#eeeecc}
+  #save-status {font-size:10px;color:#666;margin:10px 0 0} .reference {background:#eeeecc;font-size:11px}
+  .reference dl {display:grid;grid-template-columns:65px 1fr;gap:7px 10px;margin:0}.reference dt {color:#005580}.reference dd {margin:0}
+  #resume-bar {padding:12px 20px;background:#eeeecc;border-top:1px solid #aaa97b} #resume-bar p {margin:0 0 8px;font-size:11px}
+  #prompt {margin:0 20px 16px;border:1px solid #222;background:#eaffff;padding:12px} #question {white-space:pre-wrap;margin:0 0 10px}
+  #answer-text {border:1px solid #777;background:#ffffea;padding:5px;max-width:100%;width:170px}.answer-row {display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  footer {font-size:10px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:14px 2px;color:#222}
+  [hidden] {display:none!important}
+  @media(max-width:850px) {body{padding:14px 10px}.workspace{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr;align-items:start}.reference{grid-column:1/-1}.masthead{align-items:start;flex-direction:column;padding:18px}#history{max-height:55vh}}
+  @media(max-width:500px) {.sidebar{display:flex}.masthead nav{gap:10px;flex-wrap:wrap}h1{font-size:25px}#form{padding:14px}#history{padding:0 14px}.editor-label small{font-size:10px}.toolbar{gap:6px}#status{width:100%;margin:2px 0}body{padding:10px 8px}}
     #debugger { width: min(900px, calc(100vw - 32px)); max-height: 90dvh; padding: 0;
       border: 2px solid black; background: var(--paper); color: var(--ink); }
     #debugger::backdrop { background: rgb(0 0 0 / 35%); }
@@ -66,57 +68,41 @@
     #debug-frame { width: 100%; margin-bottom: 8px; }
     #debugger input { font: inherit; width: 100%; padding: 5px; }
     .debug-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
-    noscript p { margin: 16px; }
-    @media (max-width: 720px) {
-      body { padding: 6px; font-size: 14px; }
-      main { min-height: calc(100dvh - 12px); }
-      .workspace { grid-template-columns: 1fr; }
-      .pane + .pane { border-left: 0; border-top: 3px solid var(--border); }
-      textarea { min-height: 240px; }
-      #transcript { height: 360px; min-height: 180px; }
-      #status { margin-left: 0; }
-    }
-  </style>
+    #debugger .tag {display:flex;align-items:center;gap:8px;padding:8px;background:#eaffff;border-bottom:1px solid black}
+    #debugger .filename {margin-right:auto} #debugger button {border-color:#000}
+    .masthead {flex-wrap:wrap} .masthead > div {min-width:0;flex:1 1 auto} .masthead h1 {max-width:28ch}
+    .masthead .applications {margin-top:14px;flex-wrap:wrap} .notice {color:#666}
+</style>
 </head>
 <body>
-<main>
-  <header>
-    <h1>miricl</h1>
-    <p>Common Lisp / WebAssembly</p>
-    <span id="status" role="status">Loading interpreter…</span>
-  </header>
-  <noscript><p>Enable JavaScript to run this Common Lisp REPL.</p></noscript>
+<main class="desktop">
+  <section class="window" aria-label="Common Lisp REPL">
+    <div class="titlebar"><span class="handle" aria-hidden="true"></span><span>common-lisp</span><span class="right">miricl</span></div>
+    <div class="masthead"><div><p class="eyebrow">COMMON LISP / WEBASSEMBLY</p><h1><q>The quote special operator just returns object.</q></h1><p class="intro">Common Lisp HyperSpec</p>
+      <nav class="applications" aria-label="Applications"><a href="maxima/">Maxima</a><a href="fricas/">FriCAS</a><a href="acl2/">ACL2</a><a href="coalton/">Coalton</a></nav></div>
+      <nav aria-label="Resources"><a href="https://www.lispworks.com/documentation/HyperSpec/Front/index.htm" target="_blank" rel="noopener">HyperSpec ↗</a><a href="image-sizes.html">Image sizes</a><a href="https://github.com/ak-coram/miricl" target="_blank" rel="noopener">miricl GitHub ↗</a></nav></div>
+  </section>
+  <section id="startup-panel" class="window" aria-label="Session startup" style="margin-top:18px"><div class="titlebar"><span class="handle" aria-hidden="true"></span><span>session startup</span></div><div class="panel-content"><p id="startup-message" role="status">Starting Common Lisp…</p><details id="startup-details" hidden><summary>Loading output</summary><pre id="startup-output"></pre></details></div></section>
   <div class="workspace">
-    <section class="pane" aria-label="Lisp editor">
-      <div class="tag">
-        <span class="handle" aria-hidden="true"></span><label class="filename" for="source">scratch.lisp</label>
-        <select id="examples" aria-label="Load an example">
-          <option value="">Examples</option>
-          <option value="arithmetic">Arithmetic</option>
-          <option value="function">Functions</option>
-          <option value="compilation">Compilation &amp; code size</option>
-          <option value="debugger">Debugger: price an order &amp; thread break</option>
-          <option value="loop">Loops &amp; output</option>
-          <option value="environment">Browser environment</option>
-          <option value="timeout">Callback with setTimeout</option>
-        </select>
-        <button id="run" disabled title="Run selection or the whole editor (Ctrl/Cmd+Enter)">Run</button>
-        <button id="stop" disabled title="Stop evaluation and reset the Lisp session">Stop</button>
-      </div>
-      <textarea id="source" aria-label="Common Lisp source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off">;; Welcome to miricl. Edit a form, then press Run.
-(+ 1 2)
-
-(loop for n from 1 to 8 collect (* n n))</textarea>
-      <p class="hint"><kbd>Ctrl/Cmd+Enter</kbd> Run selection or editor · <kbd>Alt+↑/↓</kbd> History<br>Enter inserts a new line. Definitions persist in this session.</p>
+    <section class="window worksheet" aria-label="Worksheet">
+      <div class="titlebar"><span class="handle" aria-hidden="true"></span><span>worksheet</span><span class="right" id="entry-count">0 inputs</span></div>
+      <div class="toolbar"><input id="session-name" aria-label="Session name" value="Untitled session" maxlength="100"><button id="new" type="button">New</button><button id="record" type="button" aria-pressed="true">Recording</button><button id="export" type="button">Export</button><button id="clear" type="button" title="Clear the transcript; keep Lisp definitions">Clear</button><button id="share" type="button" title="Copy share link" aria-label="Copy link to current session">Copy link</button></div>
+      <div id="empty"><strong>Start with an expression.</strong>Try <code>(+ 20 22)</code> or pick an example from the shelf.</div>
+      <ol id="history" aria-live="polite" aria-label="REPL history"></ol>
+      <div id="resume-bar" hidden><p>This is a saved transcript. Resume re-runs completed inputs and their recorded answers to restore your definitions.</p><button id="resume" type="button" disabled>Resume session</button><button id="remove" type="button">Delete saved session</button></div>
+      <form id="form"><div class="editor-label"><label for="source">Input</label><small>Ctrl / ⌘ + Enter · Alt + ↑ / ↓ history</small></div>
+        <textarea id="source" rows="4" spellcheck="false" autocapitalize="off" autocomplete="off">(mapcar (lambda (x) (* x x)) '(1 2 3 4 5))</textarea>
+        <div class="actions"><button id="evaluate" disabled>Evaluate</button><button id="stop" type="button" disabled title="Cancel evaluation and start a fresh Lisp session">Stop</button><button id="restart" type="button" title="Start a fresh Lisp session">Restart</button><span id="status" role="status" aria-live="polite">Loading assets…</span></div>
+        <details hidden><summary>Provide answers in advance</summary><textarea id="answers" rows="2" spellcheck="false" aria-label="Answers" placeholder="pos; integer;"></textarea></details>
+        <p id="example-note" hidden></p>
+      </form>
+      <section id="prompt" hidden aria-label="Lisp question"><p id="question"></p><div class="answer-row"><label for="answer-text">Answer</label><input id="answer-text" autocomplete="off"><button id="answer" type="button">Send answer</button></div></section>
     </section>
-    <section class="pane" aria-label="REPL output">
-      <div class="tag">
-        <span class="handle" aria-hidden="true"></span><span class="filename">+repl</span>
-        <button id="clear" title="Clear the transcript; keep Lisp definitions">Clear</button>
-        <button id="reset" title="Start a fresh Lisp session; discard definitions">Reset</button>
-      </div>
-      <div id="transcript" role="log" aria-label="REPL transcript" aria-live="polite" tabindex="0"></div>
-    </section>
+    <aside class="sidebar">
+      <section class="window"><div class="titlebar"><span class="handle" aria-hidden="true"></span><span>examples / Common Lisp</span></div><div class="panel-content"><p>Choose an example, edit it and evaluate it in your session.</p><div class="examples" id="examples"></div></div></section>
+      <section class="window"><div class="titlebar"><span class="handle" aria-hidden="true"></span><span>saved sessions</span></div><div class="panel-content"><p>Kept in this browser. Open a transcript to read or resume it.</p><ul id="sessions"></ul><p id="save-status" role="status">Recording is on.</p></div></section>
+      <section class="window reference"><div class="titlebar"><span class="handle" aria-hidden="true"></span><span>a few useful marks</span></div><div class="panel-content"><dl><dt>defun</dt><dd>Define a function</dd><dt>values</dt><dd>Return multiple values</dd><dt>compile</dt><dd>Compile a Lisp function</dd><dt>debug 3</dt><dd>Keep inspectable frames for the debugger</dd><dt>Stop</dt><dd>Cancel evaluation and start fresh</dd></dl></div></section>
+    </aside>
   </div>
   <dialog id="debugger" hidden aria-label="Lisp debugger">
     <div class="tag"><span class="filename" id="debug-title">Debugger</span>
@@ -143,15 +129,9 @@
       <details id="debug-stack-details" open><summary>Stack trace</summary><pre id="debug-stack"></pre></details>
     </div>
   </dialog>
-  <footer>Runs entirely in your browser. No server or network needed. Stop and Reset discard Lisp definitions. Reloading starts a fresh session.
-    <a href="todo.html">CLOS TODO example</a> ·
-    <a href="maxima/">Maxima workbench</a> ·
-    <a href="fricas/">FriCAS workbench</a> ·
-    <a href="acl2/">ACL2 preview</a> ·
-    <a href="coalton/">Coalton tour</a> ·
-    <a href="image-sizes.html">Image sizes</a> ·
-    <a href="ansi-results.html">Full ANSI test results</a></footer>
+  <footer><span>Common Lisp · miricl / Wasm</span><span>Runs entirely in your browser, including offline. Restart starts fresh; Resume restores saved inputs.</span><span><a href="todo.html">CLOS TODO example</a> · <a href="ansi-results.html">Full ANSI test results</a></span></footer>
 </main>
+<noscript>This REPL needs JavaScript and WebAssembly.</noscript>
 <script id="miricl-wasm" type="application/octet-stream">@@MIRICL_WASM@@</script>
 <script id="miricl-worker" type="text/plain">
 @@MIRICL_ADAPTER@@
@@ -182,429 +162,24 @@ self.onmessage = async ({data}) => {
       const start = performance.now();
       const result = await interpreter.evaluateAsync(data.source);
       if (result.quit) interpreter.close();
-      self.postMessage({type: 'result', ...result, elapsed: performance.now() - start});
+      self.postMessage({type: 'result', ...result, milliseconds: Math.round(performance.now() - start),
+        ...(result.incomplete ? {failed: true, status: 'Waiting for complete input',
+          errorMessage: 'Incomplete input. Finish the form in the editor and evaluate it again.'} : {}),
+        ...(result.quit ? {status: 'Session ended', notice: 'Session ended. Press Restart to start again.'} : {})});
     }
   } catch (error) {
-    self.postMessage({type: data.type === 'initialize' ? 'fatal' : data.type === 'debug-command' ? 'debug-command-error' : 'error',
-      sessionId: data.sessionId, stopId: data.stopId, message: error.message, output: error.output ?? '', backtrace: error.backtrace ?? ''});
+    self.postMessage({type: data.type === 'initialize' ? 'error' : data.type === 'debug-command' ? 'debug-command-error' : 'error',
+      sessionId: data.sessionId, stopId: data.stopId, message: data.type === 'evaluate' ? 'Error: ' + error.message : error.message,
+      fatal: data.type === 'initialize', output: error.output ?? '', backtrace: error.backtrace ?? ''});
   }
 };
 </script>
-<script>
-'use strict';
-const source = document.getElementById('source');
-const transcript = document.getElementById('transcript');
-const status = document.getElementById('status');
-const run = document.getElementById('run');
-const stop = document.getElementById('stop');
-const reset = document.getElementById('reset');
-const examples = document.getElementById('examples');
-const history = [];
-let historyIndex = 0;
-let draft = '';
-let worker;
-let workerURL;
-let busy = false;
-let debuggerState;
-const debuggerSessions = new Map();
-const debuggerPane = document.getElementById('debugger');
-const debugFrame = document.getElementById('debug-frame');
-const debugThreads = document.getElementById('debug-threads');
-const debugViews = new Map();
-
-function debugView(sessionId = debuggerState?.sessionId) {
-  if (!debugViews.has(sessionId)) debugViews.set(sessionId, {history: [], expression: '', arguments: ''});
-  return debugViews.get(sessionId);
-}
-function saveDebugView() {
-  if (!debuggerState) return;
-  Object.assign(debugView(), {frame: debugFrame.value,
-    expression: document.getElementById('debug-expression').value,
-    arguments: document.getElementById('debug-arguments').value});
-}
-function showDebugFrame() {
-  const frame = debuggerState?.frames.find(frame => frame.id === Number(debugFrame.value));
-  document.getElementById('debug-form').textContent = frame?.form ?? '';
-  document.getElementById('debug-locals').textContent = frame
-    ? frame.locals.map(({name, value}) => `  ${name} = ${value}`).join('\n') : '';
-  if (debuggerState) debugView().frame = debugFrame.value;
-}
-function showDebugHistory() {
-  document.getElementById('debug-result').replaceChildren(...debugView().history.map(entry => {
-    const item = document.createElement('div'); item.className = 'debug-evaluation';
-    const input = document.createElement('pre'); input.className = 'input';
-    input.textContent = `> ${entry.source}`;
-    const result = document.createElement('pre');
-    result.textContent = entry.result === undefined ? 'Evaluating…' : entry.result;
-    item.append(input, result); return item;
-  }));
-}
-function showDebugError() {
-  const error = debugView().error;
-  const message = document.getElementById('debug-command-error');
-  message.hidden = !error;
-  message.textContent = error ? `${error.op === 'restart' ? 'Restart failed' : 'Debugger command failed'}: ${error.message}` : '';
-  document.getElementById('debug-arguments').setAttribute('aria-invalid', String(error?.op === 'restart'));
-}
-function updateDebugControls() {
-  const waiting = !!debugView().command;
-  for (const button of document.querySelectorAll('#debug-restarts button, [data-debug], #debug-abort'))
-    button.disabled = waiting;
-  document.getElementById('debug-evaluate').disabled = waiting || !debuggerState.frames.some(frame => frame.inspectable);
-}
-function debugCommand(command) {
-  if (!debuggerState || debugView().command) return;
-  const view = debugView();
-  view.command = {...command, stopId: debuggerState.stopId};
-  view.error = undefined;
-  showDebugError();
-  if (command.op === 'eval') {
-    const entry = {source: command.source};
-    view.history.push(entry); view.pending = entry;
-    showDebugHistory();
-  }
-  updateDebugControls();
-  worker.postMessage({type: 'debug-command', sessionId: debuggerState.sessionId,
-    stopId: debuggerState.stopId, command});
-}
-function threadSessions() {
-  const threads = new Map();
-  for (const state of debuggerSessions.values()) {
-    if (!threads.has(state.threadId) || threads.get(state.threadId).level < state.level)
-      threads.set(state.threadId, state);
-  }
-  return [...threads.values()];
-}
-function showDebugger(state) {
-  saveDebugView();
-  const wasPaused = !!debuggerState;
-  debuggerState = state;
-  debuggerPane.hidden = !state;
-  if (!state) {
-    debugThreads.replaceChildren();
-    if (debuggerPane.open) debuggerPane.close();
-    if (wasPaused) status.textContent = busy ? 'Running…' : 'Ready';
-    return;
-  }
-  const view = debugView();
-  if (!debuggerPane.open) debuggerPane.showModal();
-  document.getElementById('debug-title').textContent = `Debugger · level ${state.level}`;
-  debugThreads.replaceChildren(...threadSessions().map(thread => {
-    const button = document.createElement('button');
-    button.id = `debug-thread-${thread.threadId}`;
-    button.setAttribute('role', 'tab');
-    button.setAttribute('aria-controls', 'debug-panel');
-    button.setAttribute('aria-selected', String(thread.threadId === state.threadId));
-    button.tabIndex = thread.threadId === state.threadId ? 0 : -1;
-    button.textContent = `${thread.threadName} (#${thread.threadId})`;
-    button.onclick = () => showDebugger(debuggerSessions.get(thread.sessionId));
-    button.onkeydown = event => {
-      const tabs = [...debugThreads.children], index = tabs.indexOf(button);
-      const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length
-        : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length
-        : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
-      if (next >= 0) { event.preventDefault(); tabs[next].click(); debugThreads.children[next].focus(); }
-    };
-    return button;
-  }));
-  document.getElementById('debug-panel').setAttribute('aria-labelledby', `debug-thread-${state.threadId}`);
-  document.getElementById('debug-condition').textContent = `${state.condition.type}: ${state.condition.message}`;
-  document.getElementById('debug-stack').textContent = state.backtrace;
-  const inspectable = state.frames.filter(frame => frame.inspectable);
-  debugFrame.replaceChildren(...inspectable.map(({id, name}) => {
-    const option = document.createElement('option');
-    option.value = String(id); option.textContent = `${String(id).padStart(2, ' ')}: ${name}`; return option;
-  }));
-  if (inspectable.some(frame => String(frame.id) === view.frame)) debugFrame.value = view.frame;
-  document.getElementById('debug-unavailable').hidden = inspectable.length > 0;
-  document.getElementById('debug-steps').hidden = !state.canStep;
-  document.getElementById('debug-expression').value = view.expression;
-  document.getElementById('debug-arguments').value = view.arguments;
-  showDebugHistory();
-  showDebugError();
-  document.getElementById('debug-restarts').replaceChildren(...state.restarts.map(({id, name, description}) => {
-    const button = document.createElement('button');
-    button.textContent = `${String(id).padStart(2, ' ')}: ${name} — ${description}`;
-    button.onclick = () => debugCommand({op: 'restart', frame: id, source: document.getElementById('debug-arguments').value});
-    return button;
-  }));
-  showDebugFrame();
-  updateDebugControls();
-  status.textContent = `Paused · ${state.threadName} · debugger level ${state.level}`;
-}
-function debuggerEvent(event) {
-  let selected = debuggerState?.sessionId;
-  if (event.type === 'stopped') {
-    debuggerSessions.set(event.stop.sessionId, event.stop);
-    const view = debugViews.get(event.stop.sessionId);
-    if (view && event.stop.result) {
-      const result = event.stop.result;
-      if (view.pending) {
-        view.pending.result = [result.output, result.error ? `Error: ${result.error}` : result.values.join('\n')]
-          .filter(Boolean).join('\n');
-        view.pending = undefined;
-      } else if (result.error) {
-        view.error = {op: view.command?.op ?? view.error?.op, message: result.error};
-      }
-      view.command = undefined;
-    }
-    if (selected === undefined || event.stop.parentSessionId === selected) selected = event.stop.sessionId;
-  } else {
-    debuggerSessions.delete(event.sessionId);
-    if (selected === event.sessionId) selected = event.parentSessionId;
-  }
-  showDebugger(debuggerSessions.get(selected) ?? threadSessions()[0]);
-  if (event.type === 'closed') debugViews.delete(event.sessionId);
-}
-debuggerPane.oncancel = event => event.preventDefault();
-debugFrame.onchange = showDebugFrame;
-document.getElementById('debug-abort').onclick = () => debugCommand({op: 'abort'});
-document.getElementById('debug-evaluate').onclick = () => debugCommand({op: 'eval',
-  frame: Number(debugFrame.value), source: document.getElementById('debug-expression').value});
-for (const button of document.querySelectorAll('[data-debug]'))
-  button.onclick = () => debugCommand({op: button.dataset.debug});
-const exampleSources = {
-  debugger: `;; Debug 3 keeps these definitions in the interpreter.
-;; Press Run. Each pause opens the debugger dialog.
-;; 1. Pause a worker thread with BREAK. The main thread keeps running.
-;;    Select its tab, inspect MESSAGE, or evaluate (string-upcase message).
-;;    Click CONTINUE to let the worker finish.
-(defun debug-worker ()
-  (declare (optimize (debug 3)))
-  (let ((message "Hello from the worker"))
-    (break "The worker is paused. Inspect MESSAGE, then continue.")
-    (format t "~A~%" message)))
-
-(miricl-threads:make-thread #'debug-worker :name "Greeting worker")
-
-(defun debug-price (unit-price quantity discount)
-  (declare (optimize (debug 3)))
-  (let ((subtotal (* unit-price quantity)))
-    (restart-case
-        (unless (<= 0 discount 100)
-          (error "Discount ~A must be between 0 and 100." discount))
-      (use-discount (replacement)
-        :report "Supply a replacement discount, then finish the calculation."
-        (setf discount replacement)))
-    (* subtotal (- 1 (/ discount 100)))))
-
-(defun debug-order (quantity)
-  (declare (optimize (debug 3)))
-  (let ((unit-price 12))
-    (debug-price unit-price quantity 150)))
-
-;; 2. This error pauses the main thread too: the dialog now has two tabs.
-;;    Switch between the main thread and Greeting worker.
-;;    Inspect DEBUG-PRICE's locals and its current expression.
-;;    Evaluate (list subtotal discount), or (incf subtotal 5).
-;;    Select DEBUG-ORDER to inspect its separate lexical environment.
-;;    Enter (list 10) as restart arguments, then click USE-DISCOUNT.
-(format t "Recovered total: ~A~%" (debug-order 3))`,
-  arithmetic: '(+ 1/3 2/3)\n(expt 2 100)\n(values "hello λ 🙂" #c(1 2))',
-  function: '(defun factorial (n)\n  (if (zerop n)\n      1\n      (* n (factorial (1- n)))))\n\n(factorial 30)',
-  compilation: `;; Press Reset first to measure a cold compiler. Reruns reuse it.
-;; DEBUG 2 keeps optimized Wasm bytes for DISASSEMBLE.
-(defun square (x)
-  (declare (optimize (debug 2)))
-  (* x x))
-;; DEBUG 1 is the default; it retains no disassembly data.
-(defun sum-of-squares (x y)
-  (declare (optimize (debug 1)))
-  (+ (* x x) (* y y)))
-
-;; Inspect the Lisp code and its packed size before compilation.
-(disassemble #'square)
-(disassemble #'sum-of-squares)
-
-;; The first native compilation also bootstraps the compiler with itself.
-(format t "First compilation (includes compiler bootstrap):~%")
-(time
-  (setf (symbol-function 'square)
-    (miricl-compiler:compile-native
-      (function-lambda-expression #'square) :name 'square)))
-
-(format t "Second compilation (compiler already bootstrapped):~%")
-(time
-  (setf (symbol-function 'sum-of-squares)
-    (miricl-compiler:compile-native
-      (function-lambda-expression #'sum-of-squares) :name 'sum-of-squares)))
-
-;; Native sizes measure each Wasm module, including its imports.
-;; SQUARE also shows its Wasm instructions, enabled by DEBUG 2.
-(disassemble #'square)
-(disassemble #'sum-of-squares)
-(values (square 12) (sum-of-squares 3 4))`,
-  loop: '(loop for n from 1 to 5\n      do (format t "~D squared is ~D~%" n (* n n))\n      collect (* n n))',
-  environment: `;; Open your browser's developer console to inspect the logged object.
-(let* ((navigator (js:global "navigator"))
-       (formatter (js:new (js:property (js:global "Intl") "DateTimeFormat")))
-       (options (js:invoke formatter "resolvedOptions"))
-       (info (js:new (js:global "Object"))))
-  (dolist (key '("timeZone" "locale" "calendar" "numberingSystem"))
-    (setf (js:property info key) (js:property options key)))
-  (setf (js:property info "preferredLocales") (js:property navigator "languages"))
-  (dolist (key '("language" "userAgent" "hardwareConcurrency" "onLine"))
-    (setf (js:property info key) (js:property navigator key)))
-  (setf (js:property info "origin") (js:property (js:global "location") "origin"))
-  (setf (js:property info "isSecureContext") (js:global "isSecureContext"))
-  (setf (js:property info "crossOriginIsolated") (js:global "crossOriginIsolated"))
-  (js:invoke (js:global "console") "log" "Browser environment" info)
-  (format t "Browser environment (also logged to the browser console):~%~A~%"
-    (js:from-js (js:invoke (js:global "JSON") "stringify" info js:+null+ 2)))
-  (values))`,
-  timeout: `;; The timer returns immediately; the Lisp closure runs one second later.
-(let ((message "Hello from a Lisp callback!"))
-  (js:call (js:global "setTimeout")
-    (js:callback (lambda ()
-      (format t "~A~%" message)
-      (js:invoke (js:global "console") "log" message)
-      js:+undefined+))
-    1000)
-  (format t "Timer scheduled. You can keep using the REPL while it waits.~%")
-  (values))`
-};
-
-function append(text, kind = '') {
-  if (!text) return;
-  const entry = document.createElement('pre');
-  entry.className = kind;
-  entry.textContent = text;
-  transcript.append(entry);
-  transcript.scrollTop = transcript.scrollHeight;
-}
-
-function setState(message, ready = false, running = false) {
-  status.textContent = debuggerState
-    ? `Paused · ${debuggerState.threadName} · debugger level ${debuggerState.level}` : message;
-  run.disabled = !ready;
-  stop.disabled = !running;
-  busy = running;
-  transcript.setAttribute('aria-busy', String(running));
-}
-
-function disposeWorker() {
-  showDebugger(undefined); debuggerSessions.clear(); debugViews.clear();
-  if (worker) worker.terminate();
-  worker = undefined;
-  if (workerURL) URL.revokeObjectURL(workerURL);
-  workerURL = undefined;
-}
-
-function fail(message) {
-  disposeWorker();
-  setState('Interpreter unavailable');
-  append(message, 'error');
-}
-
-function startSession(message) {
-  disposeWorker();
-  setState('Loading interpreter…');
-  if (message) append(message, 'notice');
-  try {
-    const encoded = document.getElementById('miricl-wasm').textContent.trim();
-    const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
-    workerURL = URL.createObjectURL(new Blob(
-      [document.getElementById('miricl-worker').textContent], {type: 'text/javascript'}));
-    const activeWorker = new Worker(workerURL);
-    worker = activeWorker;
-    activeWorker.onerror = event => {
-      event.preventDefault();
-      if (worker === activeWorker) fail(`Could not start the interpreter: ${event.message || 'Worker failed.'} This browser must support WebAssembly GC and exception handling.`);
-    };
-    activeWorker.onmessage = ({data}) => {
-      if (worker !== activeWorker) return;
-      if (data.type === 'ready') {
-        URL.revokeObjectURL(workerURL);
-        workerURL = undefined;
-        setState('Ready', true);
-      } else if (data.type === 'debugger') {
-        debuggerEvent(data.event);
-      } else if (data.type === 'debug-command-error') {
-        const view = debugViews.get(data.sessionId);
-        // Lisp command errors also arrive in a refreshed stop. Ignore the
-        // duplicate rejection, and replies belonging to an older command.
-        if (!view?.command || view.command.stopId !== data.stopId) return;
-        if (view.pending) { view.pending.result = `Error: ${data.message}`; view.pending = undefined; }
-        else view.error = {op: view.command.op, message: data.message};
-        view.command = undefined;
-        if (debuggerState?.sessionId === data.sessionId) {
-          showDebugHistory(); showDebugError(); updateDebugControls();
-        }
-      } else if (data.type === 'fatal') {
-        fail(`Could not load the interpreter: ${data.message}\nUse a browser with WebAssembly GC and exception handling support.`);
-      } else if (data.type === 'output') {
-        append(data.output);
-      } else if (data.type === 'error') {
-        if (!debuggerSessions.size) showDebugger(undefined);
-        append(data.output);
-        append(`Error: ${data.message}`, 'error');
-        if (data.backtrace) append(data.backtrace, 'error');
-        setState('Ready · evaluation failed', true);
-      } else if (data.type === 'result') {
-        if (!debuggerSessions.size) showDebugger(undefined);
-        append(data.output);
-        if (data.incomplete) {
-          append('Incomplete input. Finish the form in the editor and run it again.', 'notice');
-          setState('Waiting for complete input', true);
-        } else if (data.quit) {
-          append('Session ended. Press Reset to start again.', 'notice');
-          disposeWorker();
-          setState('Session ended');
-        } else {
-          setState(`Ready · ${data.elapsed.toFixed(1)} ms`, true);
-        }
-      }
-    };
-    activeWorker.postMessage({type: 'initialize', bytes: bytes.buffer}, [bytes.buffer]);
-  } catch (error) {
-    fail(`Could not start the interpreter: ${error.message}\nUse a browser with WebAssembly GC, exception handling, and Web Workers.`);
-  }
-}
-
-function evaluate() {
-  if (run.disabled || busy) return;
-  const selection = source.value.slice(source.selectionStart, source.selectionEnd);
-  const input = selection || source.value;
-  if (!input.trim()) return;
-  if (history.at(-1) !== input) history.push(input);
-  historyIndex = history.length;
-  draft = source.value;
-  append(`miricl> ${input}`, 'input');
-  setState('Evaluating…', false, true);
-  worker.postMessage({type: 'evaluate', source: input});
-}
-
-run.addEventListener('click', evaluate);
-stop.addEventListener('click', () => startSession('Evaluation stopped. Started a fresh Lisp session.'));
-reset.addEventListener('click', () => startSession('Started a fresh Lisp session.'));
-document.getElementById('clear').addEventListener('click', () => transcript.replaceChildren());
-examples.addEventListener('change', () => {
-  if (!examples.value) return;
-  source.value = exampleSources[examples.value];
-  examples.value = '';
-  source.focus();
-});
-source.addEventListener('keydown', event => {
-  if (event.isComposing) return;
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-    event.preventDefault();
-    evaluate();
-  } else if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-    event.preventDefault();
-    if (!history.length) return;
-    if (historyIndex === history.length) draft = source.value;
-    historyIndex = Math.max(0, Math.min(history.length,
-      historyIndex + (event.key === 'ArrowUp' ? -1 : 1)));
-    source.value = historyIndex === history.length ? draft : history[historyIndex];
-    source.setSelectionRange(source.value.length, source.value.length);
-  }
-});
-window.addEventListener('pagehide', disposeWorker);
-window.addEventListener('pageshow', event => {
-  if (event.persisted) startSession('Started a fresh Lisp session.');
-});
-append('miricl — Common Lisp in WebAssembly\nRun the scratch buffer, or choose an example. Results appear here.', 'notice');
-startSession();
+<script type="module">
+@@MIRICL_SESSION_STORE@@
+@@MIRICL_REPL_EXAMPLES@@
+@@MIRICL_REPL_DEBUGGER@@
+@@MIRICL_REPL_CLIENT@@
+@@MIRICL_SESSION_APP@@
 </script>
 </body>
 </html>

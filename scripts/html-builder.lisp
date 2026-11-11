@@ -18,6 +18,19 @@
 (defparameter *browser-page-root*
   (uiop:pathname-parent-directory-pathname (uiop:pathname-directory-pathname *load-truename*)))
 
+(defun browser-inline-module (pathname)
+  "Embed these project modules together, resolving their static imports locally."
+  (let ((source
+          (with-output-to-string (out)
+            (dolist (line (uiop:read-file-lines pathname :external-format :utf-8))
+              (unless (uiop:string-prefix-p "import " line)
+                (write-line (if (uiop:string-prefix-p "export " line)
+                                (subseq line (length "export ")) line)
+                            out))))))
+    (when (search "</script" source :test #'char-equal)
+      (error "Embedded module ~A contains an HTML script terminator." pathname))
+    source))
+
 (defun build-browser-page (template-name output-name output-directory)
   (let* ((root *browser-page-root*)
          (output (uiop:ensure-directory-pathname output-directory))
@@ -45,6 +58,14 @@
         (let ((start (search (car replacement) template)))
           (unless (and start (not (search (car replacement) template :start2 (1+ start))))
             (error "Expected exactly one ~A marker in the HTML template." (car replacement)))))
+      (dolist (entry '(("@@MIRICL_SESSION_STORE@@" . "maxima/session-store.mjs")
+                       ("@@MIRICL_REPL_EXAMPLES@@" . "scripts/repl-examples.mjs")
+                       ("@@MIRICL_REPL_DEBUGGER@@" . "scripts/repl-debugger.mjs")
+                       ("@@MIRICL_REPL_CLIENT@@" . "scripts/repl-client.mjs")
+                       ("@@MIRICL_SESSION_APP@@" . "maxima/app.mjs")))
+        (when (search (car entry) template)
+          (push (cons (car entry) (browser-inline-module (merge-pathnames (cdr entry) root)))
+                replacements)))
       (ensure-directories-exist path)
       (with-open-file (out path :direction :output :if-exists :supersede
                                :external-format :utf-8)

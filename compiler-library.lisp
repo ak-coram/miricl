@@ -6,6 +6,7 @@
 (defvar %file-lexical-names nil)
 
 (defun %file-lexical-name (index)
+  (declare (type (unsigned-byte 32) index) (type vector %file-lexical-names))
   (loop while (>= index (length %file-lexical-names)) do
     (vector-push-extend (make-symbol (format nil "L~D" (length %file-lexical-names))) %file-lexical-names))
   (aref %file-lexical-names index))
@@ -19,10 +20,12 @@
     result))
 
 (defun %file-lexical-bind (name environment specials)
+  (declare (type list environment specials))
   (acons name (if (or (member name specials) (%%compile 18 name)) name
                  (%file-lexical-name (length environment))) environment))
 
 (defun %file-lexical-reference (name environment)
+  (declare (type list environment))
   (let ((binding (assoc name environment :test #'equal))) (if binding (cdr binding) name)))
 
 (defun %file-code-cons (original operator args)
@@ -30,10 +33,12 @@
     (if (plusp flags) (%%compile flags operator args) (cons operator args))))
 
 (defun %file-lexical-forms (forms variables functions blocks tags)
+  (declare (type list variables functions blocks tags))
   (dolist (name (%file-lexical-specials forms)) (push (cons name name) variables))
   (mapcar (lambda (form) (%file-lexical-form form variables functions blocks tags)) forms))
 
 (defun %file-lexical-function (form name variables functions blocks tags)
+  (declare (type list variables functions blocks tags))
   (let* ((body (cddr form)) (specials (%file-lexical-specials body)) (parameters nil))
     ;; Local functions acquire an implicit block when the loader creates their
     ;; closures. Keep RETURN-FROM paired with that block after renaming the
@@ -52,6 +57,7 @@
       (cons (nreverse parameters) (%file-lexical-forms body variables functions blocks tags)))))
 
 (defun %file-lexical-call (form variables functions blocks tags)
+  (declare (type list variables functions blocks tags))
   ;; Ordinary expression trees can be arbitrarily deep after macro expansion.
   ;; Binding constructs carry their scope on the worklist too; generated code
   ;; can nest LET/LET* and LOCALLY as deeply as calls and conditionals.
@@ -103,6 +109,7 @@
     (car result)))
 
 (defun %file-lexical-form (form variables functions blocks tags)
+  (declare (type list variables functions blocks tags))
   ;; Alpha-convert only executable binding syntax. Quoted objects keep their
   ;; original identities, including quoted symbols which also name bindings.
   ;; Canonical names are private uninterned symbols shared within this file;
@@ -245,9 +252,11 @@
                (otherwise (%file-lexical-forms forms variables functions blocks tags)))))))
       (otherwise (%file-lexical-call form variables functions blocks tags)))))
 (defun %compile-place-form (place environment)
+  (declare (type list environment))
   (let ((expanded (macroexpand place environment)))
     (if (consp expanded) (cons (car expanded) (%compile-forms (cdr expanded) environment)) expanded)))
 (defun %compile-parallel-places (operator args environment)
+  (declare (type symbol operator) (type list environment))
   (let ((mode (car args)) (forms (cdr args)) (compiled nil))
     (case mode
       (3 (list operator mode (car forms) (%compile-form (cadr forms) environment)))
@@ -262,6 +271,7 @@
           (when (= mode 0) (push (%compile-form (pop forms) environment) compiled)))
         (list* operator mode (nreverse compiled))))))
 (defun %compile-loop-collector (operator args environment)
+  (declare (type symbol operator) (type list environment))
   (let ((compiled nil) (local (%%compile 3 environment (cadr args))) (size (length args)) (index 0))
     (dolist (form args)
       (push (if (or (= index 3) (= index (1- size))
@@ -270,10 +280,12 @@
       (incf index))
     (cons operator (nreverse compiled))))
 (defun %compile-forms (forms environment)
+  (declare (type list environment))
   (let ((result nil))
     (dolist (form forms) (push (%compile-form form environment) result))
     (nreverse result)))
 (defun %compile-body (body environment)
+  (declare (type list environment))
   (let ((declarations nil))
     (when (and (stringp (car body)) (cdr body)) (push (pop body) declarations))
     (loop while (and (consp (car body)) (eq (caar body) 'declare)) do
@@ -284,6 +296,7 @@
         (push form declarations)))
     (append (nreverse declarations) (%compile-forms body environment))))
 (defun %compile-lambda-parts (params body environment)
+  (declare (type list environment))
   (when (intersection params '(&optional &key &aux))
     (let ((normalized (%normalize-lambda params body)))
       (setq params (car normalized) body (cadr normalized))))
@@ -300,15 +313,18 @@
                        (cons declaration body)))))
     (cons params (%compile-body body environment))))
 (defun %compile-lambda-form (params body environment)
+  (declare (type list environment))
   (let ((parts (%compile-lambda-parts params body environment)))
     (if %compilation-complete (%%compile 2 'lambda parts)
         (list 'function (cons 'lambda parts)))))
 (defun %compile-closure (params body environment)
+  (declare (type list environment))
   (let ((%compilation-complete t))
     (let ((parts (%compile-lambda-parts params body environment)))
       ;; Existing closures have already normalized their parameter lists.
       (cons %compilation-complete (cdr parts)))))
 (defun %compile-bindings (operator bindings body environment)
+  (declare (type symbol operator) (type list environment))
   (let ((new-environment environment) (compiled nil) (specials nil))
     (dolist (binding bindings)
       (let ((name (if (consp binding) (car binding) binding))
@@ -319,6 +335,7 @@
     (when specials (push (list 'declare (cons 'special (nreverse specials))) body))
     (list* operator (nreverse compiled) (%compile-body body new-environment))))
 (defun %compile-local-functions (operator definitions body environment)
+  (declare (type symbol operator) (type list environment))
   (let ((new-environment environment) (compiled nil))
     (dolist (definition definitions)
       (setq new-environment (%%compile 4 new-environment (car definition))))
@@ -356,6 +373,7 @@
          (setq form (cdr form)))
     (cons 'append (nreverse (cons (%expand-backquote form) parts)))))
 (defun %compile-backquote (form environment depth)
+  (declare (type list environment) (type fixnum depth))
   (when (typep form 'simple-vector)
     (return-from %compile-backquote
       (%%compile 1 'apply (list '(function vector)
@@ -383,11 +401,13 @@
       (%%compile 1 'cons (list (%compile-backquote (car form) environment depth)
                               (%compile-backquote (cdr form) environment depth)))))
 (defun %compile-option-function (form environment)
+  (declare (type list environment))
   (cond ((symbolp form) form)
         ((and (consp form) (eq (car form) 'lambda))
          (%compile-lambda-form (cadr form) (cddr form) environment))
         (t (%compile-form form environment))))
 (defun %compile-condition (operator args environment)
+  (declare (type symbol operator) (type list environment))
   (let ((compiled nil))
     (case operator
       (define-condition
@@ -455,6 +475,7 @@
       (otherwise (setq %compilation-complete nil compiled args)))
     (list* '%%condition-form operator compiled)))
 (defun %compile-form (form environment)
+  (declare (type list environment))
   ;; Macro expansions routinely contain much deeper trees than their source.
   ;; Keep pending conversions on the heap, preserving expansion order and the
   ;; lexical environment of each initializer and body.
@@ -516,6 +537,7 @@
       (car result))))
 
 (defun %compile-recursive-form (form environment)
+  (declare (type list environment))
   (multiple-value-bind (expansion expanded) (macroexpand form environment)
     (when expanded (return-from %compile-recursive-form (%compile-form expansion environment))))
   (unless (consp form) (return-from %compile-recursive-form form))

@@ -43,11 +43,18 @@ const acl2Image = [
 ];
 const booksArtifact = {file: 'build/acl2/books/filesystem.bin.gz',
   description: 'ACL2 — selected math book sources and dependencies, separate on-demand download; no precompiled books', kind: 'data'};
+const coaltonScripts = ['index.html', 'client.mjs', 'repl-debugger.mjs', 'app.mjs', 'worker.mjs', 'examples.mjs', 'session-store.mjs', 'coalton.mjs',
+  'miricl.mjs', 'build.json'];
 const coaltonArtifacts = [
-  {file: 'coalton/', description: 'Coalton — interactive whirlwind tour, scripts, interpreter and native compiled compiler and standard library (7 files)',
-    kind: 'application', files: ['index.html', 'app.mjs', 'worker.mjs', 'coalton.mjs',
-      'miricl.mjs', 'miricl.wasm', 'coalton.wasm'].map(file => `build/coalton/site/${file}`)},
+  {file: 'coalton/', description: 'Lisp and Coalton REPL — scripts, examples, interpreter and native compiler and standard library',
+    kind: 'application', files: [...coaltonScripts, 'miricl.wasm', 'coalton.wasm'].map(file => `build/coalton/site/${file}`)},
   {file: 'build/coalton/site/coalton.wasm', description: 'Coalton — native compiled compiler and standard library (included in total above)', kind: 'wasm'},
+];
+const coaltonImageFile = 'coalton-image.wasm.gz';
+const coaltonImage = [
+  {file: 'coalton/', description: 'Lisp and Coalton REPL — scripts, examples and initialized native compiler and standard library',
+    kind: 'application', files: [...coaltonScripts, coaltonImageFile].map(file => `build/coalton/site/${file}`)},
+  {file: `build/coalton/site/${coaltonImageFile}`, description: 'Coalton — compressed initialized compiler, standard library and runtime (included in total above)', kind: 'data'},
 ];
 const escape = value => String(value ?? '').replace(/[&<>"']/g,
   char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
@@ -90,13 +97,24 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
         description: `ACL2 — initialized world and runtime, ${number(imageBytes)} bytes before gzip (archive included in total above)`}];
     }
   }
+  let selectedCoalton = [];
+  const coaltonManifest = path.join(coaltonDirectory, 'build.json');
+  if (fs.existsSync(coaltonManifest)) {
+    selectedCoalton = coaltonArtifacts;
+    if (fs.existsSync(path.join(coaltonDirectory, coaltonImageFile))) {
+      const {snapshotBytes} = JSON.parse(fs.readFileSync(coaltonManifest, 'utf8'));
+      if (!Number.isSafeInteger(snapshotBytes) || snapshotBytes < 1) throw new Error('Expected the uncompressed Coalton image size.');
+      const [application, archive] = coaltonImage;
+      selectedCoalton = [application, {...archive, uncompressedBytes: snapshotBytes}];
+    }
+  }
   return {schemaVersion: 1, generatedAt, commit, runURL,
     compression: {gzipLevel: 9, brotliQuality: 11},
     tools: {node: process.versions.node, zlib: process.versions.zlib},
     artifacts: [...artifacts,
       ...acl2Artifacts,
       ...(fs.existsSync(path.join(acl2BooksDirectory, 'manifest.json')) ? [booksArtifact] : []),
-      ...(fs.existsSync(path.join(coaltonDirectory, 'build.json')) ? coaltonArtifacts : []),
+      ...selectedCoalton,
     ].map(({files: names, ...artifact}) => {
       if (!names) return {...measure(artifact.file, artifact.kind), ...artifact};
       const files = names.map(name => measure(name));
@@ -107,7 +125,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
 }
 
 export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = 'image-sizes.json'} = {}) {
-  const known = [...artifacts, ...acl2Preview, ...acl2Image, booksArtifact, ...coaltonArtifacts].map(artifact => artifact.file);
+  const known = [...artifacts, ...acl2Preview, ...acl2Image, booksArtifact, ...coaltonArtifacts, ...coaltonImage].map(artifact => artifact.file);
   if (report.schemaVersion !== 1 || !Array.isArray(report.artifacts)
     || artifacts.some(required => !report.artifacts.some(artifact => artifact.file === required.file))
     || report.artifacts.some(artifact => !known.includes(artifact.file))
@@ -163,7 +181,7 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
   const replacements = {'@@ROWS@@': rows, '@@SECTIONS@@': sections, '@@METADATA@@': metadata,
     '@@ACL2@@': report.artifacts.some(artifact => artifact.file === 'acl2/')
       ? `<a href="acl2/">${initializedAcl2 ? 'ACL2' : 'ACL2 preview'}</a>` : '',
-    '@@COALTON@@': report.artifacts.some(artifact => artifact.file === 'coalton/') ? '<a href="coalton/">Coalton tour</a>' : '',
+    '@@COALTON@@': report.artifacts.some(artifact => artifact.file === 'coalton/') ? '<a href="coalton/">Lisp + Coalton REPL</a>' : '',
     '@@REPL@@': escape(replPage), '@@JSON@@': escape(jsonPage)};
   const template = fs.readFileSync(new URL('./image-sizes.html', import.meta.url), 'utf8');
   return template.replace(/@@[A-Z0-9]+@@/g, marker => {

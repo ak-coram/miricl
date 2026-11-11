@@ -2,11 +2,12 @@ import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {createCoalton, coaltonInput} from '../scripts/coalton.mjs';
 const image = await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm');
-const core = await fs.readFile(process.argv[3] ?? 'build/coalton/coalton.wasm');
+const snapshot = process.argv.includes('--snapshot');
+const core = snapshot ? null : await fs.readFile(process.argv[3] ?? 'build/coalton/coalton.wasm');
 assert.throws(() => coaltonInput('42', 'invalid'), /mode/);
 const start = performance.now();
 const session = await createCoalton(image, core);
-console.log(`Coalton fresh native bundle startup: ${Math.round(performance.now() - start)} ms`);
+console.log(`Coalton ${snapshot ? 'snapshot restore' : 'fresh native bundle'} startup: ${Math.round(performance.now() - start)} ms`);
 try {
   const check = async (source, expected, mode = 'lisp') => {
     const result = await session.evaluate(source, {mode});

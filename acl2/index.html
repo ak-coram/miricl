@@ -36,6 +36,8 @@
   .example {text-align:left;padding:9px 10px;background:#ffffea}.example span {display:block;font-size:10px;color:#666;margin-bottom:2px}
   #example-note {margin:9px 0 0;font-size:11px;color:#555} #example-note a {display:inline-block;margin-top:4px}
   #sessions {list-style:none;margin:0;padding:0;display:grid;gap:8px} #sessions button {width:100%;text-align:left;padding:8px;overflow-wrap:anywhere}
+  #sessions li {display:flex;gap:6px} #sessions .session-open {flex:1;min-width:0}
+  #sessions .session-copy {width:auto;flex:none;font-size:10px;padding:4px 6px;text-align:center}
   #sessions small {display:block;color:#666;font-size:10px} #sessions button[aria-current="true"] {background:#eeeecc}
   #save-status {font-size:10px;color:#666;margin:10px 0 0} .reference {background:#eeeecc;font-size:11px}
   .reference dl {display:grid;grid-template-columns:65px 1fr;gap:7px 10px;margin:0}.reference dt {color:#005580}.reference dd {margin:0}
@@ -55,13 +57,13 @@
   <section class="window" aria-label="ACL2 theorem proving workbench">
     <div class="titlebar"><span class="handle" aria-hidden="true"></span><span>acl2</span><span class="right">miricl</span></div>
     <div class="masthead"><div><p class="eyebrow">LOGIC &amp; THEOREM PROVING</p><h1>Programs, with proofs.</h1><p class="intro">An ACL2 session in your browser.</p></div>
-      <nav aria-label="Resources"><a href="https://www.cs.utexas.edu/users/moore/acl2/manuals/current/manual/" target="_blank" rel="noopener">Manual ↗</a><a href="https://github.com/acl2/acl2" target="_blank" rel="noopener">Sources ↗</a><a href="LICENSE">License</a></nav></div>
+      <nav aria-label="Resources"><a href="https://www.cs.utexas.edu/users/moore/acl2/manuals/current/manual/" target="_blank" rel="noopener">Manual ↗</a><a href="https://github.com/acl2/acl2" target="_blank" rel="noopener">Sources ↗</a><a href="LICENSE">License</a><a href="https://github.com/ak-coram/miricl" target="_blank" rel="noopener">miricl GitHub ↗</a></nav></div>
   </section>
   <!-- STARTUP-NOTE -->
   <div class="workspace">
     <section class="window worksheet" aria-label="Worksheet">
       <div class="titlebar"><span class="handle" aria-hidden="true"></span><span>ACL2 transcript</span><span class="right" id="entry-count">0 inputs</span></div>
-      <div class="toolbar"><input id="session-name" aria-label="Session name" value="Untitled session" maxlength="100"><button id="new" type="button">New</button><button id="record" type="button" aria-pressed="true">Recording</button><button id="export" type="button">Export</button></div>
+      <div class="toolbar"><input id="session-name" aria-label="Session name" value="Untitled session" maxlength="100"><button id="new" type="button">New</button><button id="record" type="button" aria-pressed="true">Recording</button><button id="export" type="button">Export</button><button id="share" type="button" title="Copy share link" aria-label="Copy link to current session">Copy link</button></div>
       <div id="empty"><strong>Start with an expression or a conjecture.</strong>Try <code>(+ 1 2)</code> or choose an example.</div>
       <section id="startup-panel" aria-label="ACL2 startup"><p id="startup-message" role="status">Starting ACL2…</p><details id="startup-details" hidden><summary>Startup details</summary><pre id="startup-output"></pre></details></section>
       <ol id="history" aria-live="polite" aria-label="ACL2 transcript"></ol>

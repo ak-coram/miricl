@@ -1364,6 +1364,13 @@
   #@(local.set $c (call $car (call $cdr (call $cdr (local.get $args)))))
   #@(if (i32.eq (local.get $mode) (i32.const 35))
     (then (return_call $fasl-dependencies (local.get $a) (local.get $b))))
+  #@(if (i32.eq (local.get $mode) (i32.const 36))
+    (then (return (call $symbol-value ,(clos-library-reference '%safety-default-level)))))
+  #@(if (i32.eq (local.get $mode) (i32.const 37))
+    (then (return (call $int
+      (if (result i32) (call $symbolp (local.get $a))
+        (then (i32.add (call $id (local.get $a)) (i32.const 1)))
+        (else (i32.sub (i32.const -1) (call $id (call $car (call $cdr (local.get $a)))))))))))
   #@(if (i32.eq (local.get $mode) (i32.const 32))
     (then (return (call $native-debug-info (local.get $a)))))
   #@(if (i32.eq (local.get $mode) (i32.const 33))

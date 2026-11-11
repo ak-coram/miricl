@@ -261,7 +261,7 @@ jobs:
           if-no-files-found: ignore
 
   acl2:
-    name: ACL2 native prover and math sources
+    name: Application / acl2
     needs: runtime
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -350,7 +350,7 @@ jobs:
           if-no-files-found: ignore
 
   coalton:
-    name: Coalton native compiler and browser tour
+    name: Application / coalton
     needs: runtime
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -372,11 +372,11 @@ jobs:
         with:
           path: build/coalton/deps
           key: coalton-dependencies-v1-${{ runner.os }}-${{ hashFiles('coalton/dependencies.json', 'scripts/prepare-coalton.mjs') }}
-      - name: Prepare dependencies and check host support and tour examples
+      - name: Prepare dependencies and check host support and REPL examples
         run: |
           node scripts/prepare-coalton.mjs
           node tests/coalton-host.mjs miricl-precompiled.wasm
-          node tests/coalton-tour.mjs
+          node tests/coalton-examples.mjs
       - name: Cache native Coalton compiler and standard library
         id: core
         uses: actions/cache@v4
@@ -387,7 +387,7 @@ jobs:
             build/coalton/compile.json
             build/coalton/optimization.json
             build/coalton/retention.txt
-          key: coalton-native-v1-${{ runner.os }}-${{ steps.source.outputs.revision }}-${{ hashFiles('miricl-precompiled.wasm', 'miricl-asdf.wasm', 'coalton/**', 'scripts/coalton*.mjs', 'scripts/probe-coalton.mjs', 'scripts/optimize-coalton.mjs', 'scripts/ports/named-readtables.lisp') }}
+          key: coalton-native-v2-${{ runner.os }}-${{ steps.source.outputs.revision }}-${{ hashFiles('miricl-precompiled.wasm', 'miricl-asdf.wasm', 'coalton/ports.mjs', 'coalton/float-features.lisp', 'coalton/dependencies.json', 'scripts/coalton-files.mjs', 'scripts/probe-coalton.mjs', 'scripts/optimize-coalton.mjs', 'scripts/ports/named-readtables.lisp') }}
       - name: Compile Coalton and its standard library on the default stack
         if: steps.core.outputs.cache-hit != 'true'
         run: |
@@ -395,10 +395,22 @@ jobs:
           MIRICL_COALTON_SCOPE=compiler node scripts/optimize-coalton.mjs miricl-precompiled.wasm build/coalton/bootstrap/compiler-portable.wasm build/coalton/bootstrap/compiler.wasm
           MIRICL_COALTON_BOOTSTRAP=build/coalton/bootstrap/compiler.wasm node scripts/probe-coalton.mjs miricl-precompiled.wasm build/coalton/compile.json
           MIRICL_COALTON_BOOTSTRAP=build/coalton/bootstrap/compiler.wasm node scripts/optimize-coalton.mjs miricl-precompiled.wasm
-      - name: Package and test the native browser tour
+      - name: Cache initialized Coalton snapshot
+        id: snapshot
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/coalton/coalton-image.wasm
+            build/coalton/coalton-image.wasm.json
+          key: coalton-image-v1-${{ runner.os }}-${{ hashFiles('miricl-precompiled.wasm', 'build/coalton/coalton.wasm', 'scripts/miricl.mjs', 'scripts/coalton.mjs', 'scripts/snapshot-coalton.mjs') }}
+      - name: Save and validate initialized Coalton snapshot
+        if: steps.snapshot.outputs.cache-hit != 'true'
+        run: node scripts/snapshot-coalton.mjs miricl-precompiled.wasm build/coalton/coalton.wasm build/coalton/coalton-image.wasm
+      - name: Package and test the Lisp and Coalton REPL
         run: |
-          node scripts/build-coalton.mjs miricl-precompiled.wasm build/coalton/coalton.wasm build/coalton/site
-          node tests/coalton-session.mjs miricl-precompiled.wasm build/coalton/coalton.wasm
+          node scripts/build-coalton.mjs miricl-precompiled.wasm build/coalton/coalton.wasm build/coalton/site --initialized-image build/coalton/coalton-image.wasm build/coalton/coalton-image.wasm.json
+          node tests/coalton-session.mjs build/coalton/coalton-image.wasm --snapshot
+          node tests/coalton-repl-session.mjs build/coalton/coalton-image.wasm --snapshot
           node tests/browser-coalton.mjs build/coalton/site
       - uses: actions/upload-artifact@v4
         with:
@@ -416,6 +428,7 @@ jobs:
             build/coalton/optimization-failure.json
             build/coalton/compile.json
             build/coalton/optimization.json
+            build/coalton/coalton-image.wasm.json
             build/coalton/retention.txt
             build/coalton/site/browser-test.json
             build/coalton/site/preview-*.png

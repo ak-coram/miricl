@@ -1,4 +1,4 @@
-// Exercise the production tour, worker, native compiler and standard library.
+// Exercise the Lisp/Coalton REPL, shared session UI and actual native compiler.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -6,6 +6,8 @@ import os from 'node:os';
 import http from 'node:http';
 import {spawn} from 'node:child_process';
 const root = path.resolve(process.argv[2] ?? 'build/coalton/site');
+const build = JSON.parse(await fs.readFile(path.join(root, 'build.json'), 'utf8'));
+const requested = new Set();
 // Startup includes loading the complete compiler and standard library. The CI
 // session probe currently takes about three minutes before evaluating input.
 const startupTimeout = 300000;
@@ -13,6 +15,7 @@ const prefix = '/miricl/coalton';
 const server = http.createServer(async (request, response) => {
   try {
     const pathname = new URL(request.url, 'http://localhost').pathname;
+    requested.add(pathname);
     if (!pathname.startsWith(prefix + '/')) {response.writeHead(404).end(); return;}
     const relative = decodeURIComponent(pathname.slice(prefix.length));
     const file = path.resolve(root, '.' + (relative === '/' ? '/index.html' : relative));
@@ -79,52 +82,109 @@ try {
   await command('Emulation.setDeviceMetricsOverride', {width: 1200, height: 900, deviceScaleFactor: 1, mobile: false});
   const start = performance.now();
   await command('Page.navigate', {url: `http://127.0.0.1:${server.address().port}${prefix}/`});
-  await waitFor('document.querySelector(".run")?.disabled === false', startupTimeout);
+  await waitFor('document.querySelector("#evaluate")?.disabled === false', startupTimeout);
   const startupMilliseconds = Math.round(performance.now() - start);
-  console.log(`Coalton browser startup: ${startupMilliseconds} ms`);
-  assert.equal(await js('document.querySelectorAll(".cell").length'), 139);
-  const run = async (id, source, mode = 'lisp', failed = false) => {
-    if (source !== null) await js(`document.querySelector('#${id} textarea').value = ${JSON.stringify(source)};
-      document.querySelector('#${id} .mode').value = ${JSON.stringify(mode)}`);
-    await js(`document.querySelector('#${id} .run').click()`);
-    await waitFor(`document.querySelector('#${id} .timing').textContent !== 'Running…' && !document.querySelector('#${id} .run').disabled`);
-    assert.equal(await js(`document.querySelector('#${id} .result').classList.contains('error')`), failed);
-    return js(`document.querySelector('#${id} .result').textContent`);
+  console.log(`Coalton REPL browser startup: ${startupMilliseconds} ms`);
+  if (build.initializedImage) {
+    assert.ok(requested.has(`${prefix}/coalton-image.wasm.gz`));
+    assert.ok(!requested.has(`${prefix}/coalton.wasm`), 'Snapshot startup must not replay the native bundle.');
+    assert.ok(!requested.has(`${prefix}/miricl.wasm`), 'The snapshot includes its matching runtime.');
+  }
+  assert.equal(await js('document.querySelectorAll("#examples .example").length'), 6);
+  assert.equal(await js('document.querySelectorAll("#source").length'), 1);
+  const run = async (source, mode, failed = false) => {
+    const count = await js('document.querySelectorAll("#history li").length');
+    if (source !== null) await js(`document.querySelector("#source").value = ${JSON.stringify(source)}`);
+    if (mode !== undefined) await js(`document.querySelector("#mode").value = ${JSON.stringify(mode)}`);
+    await js('document.querySelector("#evaluate").click()');
+    await waitFor(`document.querySelectorAll("#history li").length === ${count + 1} &&
+      document.querySelector("#evaluate")?.disabled === false`);
+    assert.equal(await js('!!document.querySelector("#history li:last-child .error")'), failed);
+    return js('[...document.querySelectorAll("#history li:last-child pre:not(.input)")].map(node => node.textContent).join("\\n")');
   };
-  assert.match(await run('example-1', '(+ 20 22)', 'expression'), /42/u);
-  assert.match(await run('example-1', '(cl:+ 10 11) (cl:+ 20 22)'), /21\s+42/u);
-  await run('example-13', null);
-  assert.match(await run('example-14', null), /1\.0/u);
-  await run('example-2', '(define (browser-square x) (* x x))', 'definitions');
-  assert.match(await run('example-3', '(browser-square 12)', 'expression'), /144/u);
-  await run('example-4', '(+ 1 "text")', 'expression', true);
-  assert.match(await run('example-3', '(browser-square 7)', 'expression'), /49/u);
+  assert.match(await run('(+ 20 22)', 'lisp'), /42/u);
+  assert.match(await run('(values 20 22) (values) (values 42)', 'lisp'), /20\s+22\s+42/u);
+  await run('(defun browser-square (x) (* x x))', 'lisp');
+  assert.match(await run('(browser-square 12)', 'lisp'), /144/u);
+  await run('(defpackage :browser-lisp (:use :cl)) (in-package :browser-lisp)', 'lisp');
+  await run('(defparameter *counter* 40)', 'lisp');
+  assert.match(await run('(incf *counter* 2)', 'lisp'), /42/u);
+  await run('(in-package :cl-user)', 'lisp');
+  await run('(define (browser-coalton-square x) (* x x))', 'definitions');
+  assert.match(await run('(browser-coalton-square 12)', 'expression'), /144/u);
+  await run('(+ 1 "text")', 'expression', true);
+  assert.match(await run('(browser-square 7)', 'lisp'), /49/u);
+  await js('document.querySelector("[data-example=fibonacci]").click()');
+  assert.equal(await js('document.querySelector("#mode").value'), 'expression');
+  assert.match(await run(null), /354224848179261915075/u);
+  await js('document.querySelector("[data-example=tree]").click()');
+  assert.match(await run(null), /150/u);
+  assert.match(await run('(+ 20 22)', 'lisp'), /42/u);
   await command('Network.emulateNetworkConditions', {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
-  assert.match(await run('example-1', '(+ 40 2)', 'expression'), /42/u);
+  assert.match(await run('(browser-coalton-square 7)', 'expression'), /49/u);
   await command('Network.emulateNetworkConditions', {offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
-  await js(`document.querySelector('#example-1 .restore').click()`);
-  assert.match(await js('document.querySelector("#example-1 textarea").value'), /asdf:defsystem/u);
-  await js(`document.querySelector('#example-1 textarea').value = '(cl:loop)';
-    document.querySelector('#example-1 .mode').value = 'lisp';
-    document.querySelector('#example-1 .run').click()`);
-  await waitFor('!document.querySelector("#cancel").hidden');
-  await js('globalThis.ticks=0; setInterval(()=>ticks++,20)');
+  await js('document.querySelector("#source").value = "(browser-square 8)"; document.querySelector("#source").dispatchEvent(new Event("input")); document.querySelector("#mode").value = "lisp"; document.querySelector("#mode").dispatchEvent(new Event("change")); globalThis.__coaltonTestReload = true');
+  await command('Page.reload');
+  await waitFor('globalThis.__coaltonTestReload !== true && document.querySelector("#resume")?.disabled === false', startupTimeout);
+  assert.equal(await js('document.querySelector("#source").value'), '(browser-square 8)');
+  assert.equal(await js('document.querySelector("#mode").value'), 'lisp');
+  assert.equal(await js('document.querySelector("#resume-bar").hidden'), false);
+  await js('document.querySelector("#resume").click()');
+  await waitFor('document.querySelector("#evaluate")?.disabled === false', startupTimeout);
+  assert.match(await run(null), /64/u);
+  assert.match(await run('(browser-coalton-square 9)', 'expression'), /81/u);
+  console.log('Coalton REPL browser: Lisp and Coalton, package persistence, examples, errors, offline evaluation, saved draft and mixed-mode session replay passed.');
+  await run(`(defun browser-debug-price (quantity)
+    (declare (optimize (debug 3)))
+    (let ((subtotal (* 12 quantity)))
+      (restart-case (error "Choose a discount")
+        (use-discount (discount) (* subtotal (- 1 (/ discount 100)))))))`, 'lisp');
+  await js(`document.querySelector('#source').value = '(browser-debug-price 3)';
+    document.querySelector('#evaluate').click()`);
+  await waitFor('document.querySelector("#debugger").open && document.querySelector("#debug-condition").textContent.includes("Choose a discount")', 15000);
+  await js(`const frames = document.querySelector('#debug-frame');
+    frames.selectedIndex = [...frames.options].findIndex(option => option.textContent.includes('BROWSER-DEBUG-PRICE'));
+    frames.dispatchEvent(new Event('change'))`);
+  assert.match(await js('document.querySelector("#debug-locals").textContent'), /SUBTOTAL = 36/u);
+  await js(`document.querySelector('#debug-expression').value = '(values subtotal quantity)';
+    document.querySelector('#debug-evaluate').click()`);
+  await waitFor('document.querySelector("#debug-result .debug-evaluation pre:last-child")?.textContent === "36\\n3"');
+  await js(`document.querySelector('#debug-arguments').value = '10';
+    [...document.querySelectorAll('#debug-restarts button')].find(button => button.textContent.includes('USE-DISCOUNT')).click()`);
+  await waitFor('!document.querySelector("#debug-command-error").hidden && !document.querySelector("#debug-restarts button").disabled');
+  assert.match(await js('document.querySelector("#debug-command-error").textContent'), /Restart failed/u);
+  await js(`document.querySelector('#debug-arguments').value = '(list 10)';
+    [...document.querySelectorAll('#debug-restarts button')].find(button => button.textContent.includes('USE-DISCOUNT')).click()`);
+  await waitFor('!document.querySelector("#debugger").open && !document.querySelector("#evaluate").disabled');
+  assert.match(await js('document.querySelector("#history li:last-child").textContent'), /162\/5/u);
+  // Native code retains its calling Lisp frame when the user requests DEBUG 3.
+  await js(`document.querySelector('#source').value = ${JSON.stringify(`(cl:in-package :coalton-user)
+    (cl:locally (cl:declare (cl:optimize (cl:debug 3)))
+      (coalton (lisp (-> Integer) () (cl:break "Coalton inline Lisp breakpoint") 42)))
+    (cl:in-package :cl-user)`)};
+    document.querySelector('#mode').value = 'lisp'; document.querySelector('#evaluate').click()`);
+  await waitFor('document.querySelector("#debugger").open && document.querySelector("#debug-condition").textContent.includes("Coalton inline Lisp breakpoint")', 15000);
+  await js(`[...document.querySelectorAll('#debug-restarts button')].find(button => button.textContent.includes('CONTINUE')).click()`);
+  await waitFor('!document.querySelector("#debugger").open && !document.querySelector("#evaluate").disabled');
+  assert.match(await js('document.querySelector("#history li:last-child").textContent'), /42/u);
+  console.log('Coalton debugger: Lisp frames and locals, frame evaluation, failed restart recovery and continuing from compiled Coalton inline Lisp passed.');
+  await js('document.querySelector("#source").value = "(cl:loop)"; document.querySelector("#mode").value = "lisp"; document.querySelector("#evaluate").click(); globalThis.ticks=0; setInterval(()=>ticks++,20)');
+  await waitFor('document.querySelector("#evaluate").disabled === true');
   await new Promise(resolve => setTimeout(resolve, 200));
   assert.ok(await js('ticks >= 3'), 'Evaluation must not block the page.');
-  await js('document.querySelector("#cancel").click()');
-  await waitFor('!document.querySelector(".run").disabled', startupTimeout);
-  await run('example-3', '(browser-square 7)', 'expression', true);
-  await command('Page.reload'); await waitFor('!document.querySelector(".run").disabled', startupTimeout);
-  assert.equal(await js('document.querySelector("#example-3 textarea").value'), '(browser-square 7)');
-  await run('example-1', '(+ 20 22)', 'expression');
+  await js('document.querySelector("#restart").click()');
+  await waitFor('document.querySelector("#evaluate")?.disabled === false', startupTimeout);
+  await run('(browser-square 7)', 'lisp', true);
+  assert.match(await run('(+ 20 22)', 'lisp'), /42/u);
   const desktop = await command('Page.captureScreenshot', {format: 'png'});
   await fs.writeFile(path.join(root, 'preview-desktop.png'), Buffer.from(desktop.data, 'base64'));
   await command('Emulation.setDeviceMetricsOverride', {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
   assert.equal(await js('document.documentElement.scrollWidth <= innerWidth'), true);
   const mobile = await command('Page.captureScreenshot', {format: 'png'});
   await fs.writeFile(path.join(root, 'preview-mobile.png'), Buffer.from(mobile.data, 'base64'));
-  await fs.writeFile(path.join(root, 'browser-test.json'), JSON.stringify({passed: true, startupMilliseconds}) + '\n');
-  console.log('Coalton browser: real tour examples, native compiler, type errors, shared definitions, offline evaluation, saved edits, restore, cancellation, restart and mobile layout passed.');
+  await fs.writeFile(path.join(root, 'browser-test.json'), JSON.stringify({passed: true, startupMilliseconds,
+    initializedImage: Boolean(build.initializedImage)}) + '\n');
+  console.log('Coalton browser: Lisp/Coalton input, documentation examples, saved sessions, cancellation, restart and mobile layout passed.');
 } finally {
   fail(new Error('Browser test finished.'));
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

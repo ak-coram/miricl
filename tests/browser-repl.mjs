@@ -88,29 +88,39 @@ try {
     }
     throw new Error(`Timed out waiting for ${expression}: ${await js('document.body.innerText')}\n${JSON.stringify(browserLogs)}`);
   }
-  const ready = "!document.getElementById('run').disabled";
+  const ready = "!document.getElementById('evaluate').disabled";
   const completed = "document.getElementById('stop').disabled";
-  const output = () => js("Array.from(document.querySelectorAll('#transcript pre')).filter(p => !p.className).map(p => p.textContent).join('')");
+  const output = () => js("Array.from(document.querySelectorAll('#history pre')).filter(p => !p.className).map(p => p.textContent).join('')");
   async function input(source, selection) {
     await js(`document.getElementById('clear').click();
       document.getElementById('source').value = ${JSON.stringify(source)};
       document.getElementById('source').setSelectionRange(${selection ? selection.join(',') : '0, 0'});
-      document.getElementById('run').click()`);
+      document.getElementById('evaluate').click()`);
     await waitFor(completed);
     return output();
   }
 
   await command('Page.enable');
+  await command('Page.addScriptToEvaluateOnNewDocument', {source: `
+    globalThis.workerStarts = 0;
+    const OriginalWorker = Worker;
+    globalThis.Worker = class extends OriginalWorker {
+      constructor(...args) {super(...args); workerStarts++;}
+    };`});
   await command('Target.setAutoAttach', {autoAttach: true, waitForDebuggerOnStart: false, flatten: true});
   await command('Runtime.enable');
   await command('Log.enable');
   await command('Network.enable');
   await command('Network.emulateNetworkConditions', {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
   await command('Page.navigate', {url: pathToFileURL(html).href});
-  await waitFor(`document.getElementById('run') && ${ready}`);
+  await waitFor(`document.getElementById('evaluate') && ${ready}`);
   assert.equal(await input('(+ 1 2)'), '3\n');
   assert.equal(await input('miricl-compiler::*compiler-state*'), ':COLD\n');
-  await js("document.getElementById('examples').value = 'compilation'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
+  await js("document.querySelector('[data-example=compilation]').click(); document.getElementById('evaluate').click()");
+  await waitFor(`Array.from(document.querySelectorAll('#history pre:not(.input)')).some(p =>
+    p.textContent.includes('First compilation (includes compiler bootstrap):'))`, 60000);
+  assert.equal(await js("document.getElementById('stop').disabled"), false,
+    'The compilation progress label must reach the page while compilation is still running.');
   await waitFor(completed, 60000);
   const compilation = await output();
   assert.equal((compilation.match(/Packed Lisp code: [1-9][0-9]* bytes/g) ?? []).length, 2);
@@ -124,7 +134,7 @@ try {
   for (const [name, source] of threadCases)
     assert.equal(await input(source), 'T\n', `Browser green threads: ${name}`);
   assert.match(await input('(progn (miricl-threads:make-thread (lambda () (sleep 0.02) (format t "background-thread-output~%"))) (values))'), /^(?:background-thread-output\n)?$/);
-  await waitFor("Array.from(document.querySelectorAll('#transcript pre')).filter(p => !p.className).some(p => p.textContent.includes('background-thread-output\\n'))");
+  await waitFor("Array.from(document.querySelectorAll('#history pre')).filter(p => !p.className).some(p => p.textContent.includes('background-thread-output\\n'))");
   assert.equal(await input(`(and (js:available-p)
     (= (js:from-js (js:invoke (js:global "Math") "sqrt" 81)) 9)
     (handler-case (js:call (js:global "notAFunction")) (js:javascript-error () t)))`), 'T\n');
@@ -134,14 +144,14 @@ try {
   assert.equal(await input(`(let* ((a (make-random-state)) (b (make-random-state a)))
     (and (random-state-p a) (loop repeat 50 always (= (random 100000 a) (random 100000 b)))))`), 'T\n');
   assert.equal(await input('(progn (format t "before λ~%") (error "after"))'), 'before λ\n');
-  assert.match(await js("document.getElementById('transcript').innerText"), /Error: after/);
+  assert.match(await js("document.getElementById('history').innerText"), /Error: after/);
   await input('(defun browser-trace () (error "browser trace"))');
   await input('(browser-trace)');
-  assert.match(await js("document.getElementById('transcript').innerText"),
+  assert.match(await js("document.getElementById('history').innerText"),
     /Error: browser trace[\s\S]*Backtrace \(most recent call first\):\n   0: COMMON-LISP:ERROR\n   1: COMMON-LISP-USER::BROWSER-TRACE/);
   assert.equal(await input('(browser-double 3)'), '6\n');
   // The shipped example exercises the debugger using the visible controls.
-  await js("document.getElementById('clear').click(); document.getElementById('examples').value = 'debugger'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
+  await js("document.getElementById('clear').click(); document.querySelector('[data-example=debugger]').click(); document.getElementById('evaluate').click()");
   await waitFor("document.getElementById('debugger').open && document.querySelectorAll('#debug-threads [role=tab]').length === 2");
   await js(`Array.from(document.querySelectorAll('#debug-threads [role=tab]')).find(tab => !tab.textContent.includes('Greeting worker')).click()`);
   await waitFor("document.getElementById('debugger').open && document.getElementById('debug-condition').textContent.includes('Discount 150')");
@@ -182,7 +192,7 @@ try {
     Array.from(document.querySelectorAll('#debug-restarts button')).find(button => button.textContent.includes('USE-DISCOUNT')).click()`);
   await waitFor("document.getElementById('debugger').open && document.getElementById('debug-condition').textContent.includes('worker is paused')");
   await waitFor("document.querySelectorAll('#debug-threads [role=tab]').length === 1");
-  await waitFor("document.getElementById('transcript').textContent.includes('Recovered total: 162/5')");
+  await waitFor("document.getElementById('history').textContent.includes('Recovered total: 162/5')");
   assert.match(await output(), /Recovered total: 162\/5/);
   assert.equal(await js("document.getElementById('debug-command-error').hidden"), true);
   assert.match(await js("document.getElementById('debug-threads').textContent"), /Greeting worker/);
@@ -190,7 +200,7 @@ try {
   assert.equal(await js("document.getElementById('debug-steps').hidden"), true);
   await js(`Array.from(document.querySelectorAll('#debug-restarts button')).find(button => button.textContent.includes('CONTINUE')).click()`);
   await waitFor("!document.getElementById('debugger').open");
-  await waitFor("document.getElementById('transcript').textContent.includes('Hello from the worker')");
+  await waitFor("document.getElementById('history').textContent.includes('Hello from the worker')");
   await waitFor(completed);
   assert.equal(await js("document.getElementById('debugger').hidden"), true);
 
@@ -222,7 +232,7 @@ try {
   assert.equal(await input('(defparameter *browser-incomplete* 42)\n(+ *browser-incomplete* 1)'), '*BROWSER-INCOMPLETE*\n43\n');
   assert.equal(await input('(+ 2 3)\n(error "must not run")', [0, 7]), '5\n');
   assert.equal(await input('(format t "<img src=x onerror=alert(1)>")'), '<img src=x onerror=alert(1)>NIL\n');
-  assert.equal(await js("document.querySelectorAll('#transcript img').length"), 0);
+  assert.equal(await js("document.querySelectorAll('#history img').length"), 0);
   await js("document.getElementById('source').value = '(+ 8 9)'; document.getElementById('source').setSelectionRange(0, 0); document.getElementById('source').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', ctrlKey: true, bubbles: true}))");
   await waitFor(completed);
   assert.match(await output(), /17\n$/);
@@ -231,29 +241,29 @@ try {
   await js("document.getElementById('source').dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', altKey: true, bubbles: true}))");
   assert.equal(await js("document.getElementById('source').value"), 'draft');
   await js("document.getElementById('clear').click()");
-  assert.equal(await js("document.getElementById('transcript').textContent"), '');
+  assert.equal(await js("document.getElementById('history').textContent"), '');
   assert.equal(await input('(browser-double 5)'), '10\n');
 
   // An infinite WASM loop must leave Stop and the rest of the page usable.
-  await js("document.getElementById('source').value = '(loop)'; document.getElementById('source').setSelectionRange(0, 0); document.getElementById('run').click()");
+  await js("document.getElementById('source').value = '(loop)'; document.getElementById('source').setSelectionRange(0, 0); document.getElementById('evaluate').click()");
   await waitFor("!document.getElementById('stop').disabled");
   await js("document.getElementById('stop').click()");
   await waitFor(ready);
   assert.equal(await input("(fboundp 'browser-double)"), 'NIL\n');
   assert.equal(await input('(defparameter *reset-me* 9)'), '*RESET-ME*\n');
-  await js("document.getElementById('reset').click()");
+  await js("document.getElementById('restart').click()");
   await waitFor(ready);
   assert.equal(await input("(boundp '*reset-me*)"), 'NIL\n');
   await input(':quit');
-  assert.equal(await js("document.getElementById('run').disabled"), true);
-  await js("document.getElementById('reset').click()");
+  assert.equal(await js("document.getElementById('evaluate').disabled"), true);
+  await js("document.getElementById('restart').click()");
   await waitFor(ready);
   assert.equal(await input('(+ 20 22)'), '42\n');
-  await js("document.getElementById('examples').value = 'function'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
+  await js("document.querySelector('[data-example=function]').click(); document.getElementById('evaluate').click()");
   await waitFor(completed);
   assert.match(await output(), /FACTORIAL\n265252859812191058636308480000000\n$/);
 
-  await js("document.getElementById('clear').click(); document.getElementById('examples').value = 'environment'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
+  await js("document.getElementById('clear').click(); document.querySelector('[data-example=environment]').click(); document.getElementById('evaluate').click()");
   await waitFor(completed);
   const environmentOutput = await output();
   const environmentHeading = 'Browser environment (also logged to the browser console):\n';
@@ -280,11 +290,11 @@ try {
   const workerOrigin = await send('Runtime.evaluate', {expression: 'location.origin', returnByValue: true}, environmentLog.sessionId);
   assert.equal(environment.origin, workerOrigin.result.value);
 
-  await js("document.getElementById('clear').click(); document.getElementById('examples').value = 'timeout'; document.getElementById('examples').dispatchEvent(new Event('change')); document.getElementById('run').click()");
+  await js("document.getElementById('clear').click(); document.querySelector('[data-example=timeout]').click(); document.getElementById('evaluate').click()");
   await waitFor(completed);
   assert.equal(await output(), 'Timer scheduled. You can keep using the REPL while it waits.\n');
-  assert.equal(await js("document.getElementById('run').disabled"), false);
-  await waitFor("Array.from(document.querySelectorAll('#transcript pre')).some(p => !p.className && p.textContent.includes('Hello from a Lisp callback!'))");
+  assert.equal(await js("document.getElementById('evaluate').disabled"), false);
+  await waitFor("Array.from(document.querySelectorAll('#history pre')).some(p => !p.className && p.textContent.includes('Hello from a Lisp callback!'))");
   assert.equal(await output(), 'Timer scheduled. You can keep using the REPL while it waits.\nHello from a Lisp callback!\n');
   assert.ok(consoleCalls.some(call => call.type === 'log' && call.args[0]?.value === 'Hello from a Lisp callback!'));
   assert.equal(await input('(+ 20 22)'), '42\n');
@@ -310,6 +320,31 @@ try {
     domMiricl.evaluate('(= *dom-clicks* 1)').output`), 'T\n');
   await js(`domMiricl.evaluate('(js:invoke *dom-button* "remove")'); delete globalThis.domMiricl`);
 
+  // The standalone page embeds the same named-session and sharing workflow.
+  await js("document.getElementById('restart').click()"); await waitFor(ready);
+  assert.match(await input('(defun replay-double (x) (* 2 x)) (replay-double 21)'), /42\n$/u);
+  await js(`document.querySelector('#session-name').value = 'Common Lisp notebook λ🙂';
+    document.querySelector('#session-name').dispatchEvent(new Event('input'));
+    document.querySelector('#source').value = '(replay-double 9)';
+    document.querySelector('#source').dispatchEvent(new Event('input'))`);
+  await command('Page.reload');
+  await waitFor('document.querySelector("#resume")?.disabled === false');
+  assert.equal(await js('document.querySelector("#session-name").value'), 'Common Lisp notebook λ🙂');
+  assert.equal(await js('document.querySelector("#source").value'), '(replay-double 9)');
+  assert.equal(await js('document.querySelector("#evaluate").disabled'), true);
+  await js(`Object.defineProperty(navigator, 'clipboard', {value:{writeText:()=>Promise.reject(new Error('Denied'))}});
+    document.querySelector('#share').click()`);
+  await waitFor('!!document.querySelector("#share-link")?.value');
+  const sharedURL = await js('document.querySelector("#share-link").value');
+  await js('document.querySelector("#remove").click()'); await waitFor(ready);
+  assert.equal(await js('workerStarts'), 1, 'Deleting the unopened transcript must keep the initialized VM.');
+  assert.equal(await input("(fboundp 'replay-double)"), 'NIL\n', 'Reading a saved transcript must not evaluate it.');
+  await command('Page.navigate', {url: sharedURL});
+  await waitFor('document.querySelector("#resume-bar").hidden === false && !document.querySelector("#resume").disabled');
+  assert.equal(await js('document.querySelector("#session-name").value'), 'Common Lisp notebook λ🙂');
+  await js('document.querySelector("#resume").click()'); await waitFor(ready);
+  assert.equal(await input('(replay-double 9)'), '18\n');
+
   await command('Emulation.setDeviceMetricsOverride', {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
   assert.equal(await js('document.documentElement.scrollWidth <= innerWidth'), true, 'Mobile page must fit the viewport');
   assert.deepEqual(exceptions, []);
@@ -319,7 +354,7 @@ try {
     const {data} = await command('Page.captureScreenshot', {format: 'png'});
     await fs.writeFile(process.env.MIRICL_BROWSER_SCREENSHOT, Buffer.from(data, 'base64'));
   }
-  console.log('Browser REPL: offline file:// startup, persistent Lisp, Unicode, errors, incomplete input, selection, history, clear, stop, reset, quit, debugger dialog, thread tabs, evaluation history, and mobile layout pass.');
+  console.log('Browser REPL: offline startup, streaming compiler output, named/shared sessions, replay, worker reuse, Lisp, errors, selection, history, cancellation, debugger threads and mobile layout pass.');
 } finally {
   const exited = new Promise(resolve => browser.once('exit', resolve));
   if (browser.exitCode === null && browser.signalCode === null) {

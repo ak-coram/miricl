@@ -2,11 +2,13 @@
 (in-package #:miricl-compiler)
 
 (defun native-disassembly-name (bytes position)
+  (declare (type vector bytes) (type (unsigned-byte 32) position))
   (multiple-value-bind (length next) (native-read-uleb bytes position)
     ;; Native module/import names are the compiler's ASCII ABI identifiers.
     (values (map 'string #'code-char (subseq bytes next (+ next length))) (+ next length))))
 
 (defun native-disassembly-body (bytes index)
+  (declare (type vector bytes) (type (unsigned-byte 32) index))
   (let ((position 8) (imports nil))
     (loop while (< position (length bytes)) do
       (let ((section (aref bytes position)) (size nil))
@@ -37,17 +39,19 @@
     (error "Native function ~D has no retained body." index)))
 
 (defun native-disassembly-target (index imports)
+  (declare (type (unsigned-byte 32) index) (type vector imports))
   (if (< index (length imports)) (format nil "$~A" (second (aref imports index)))
       (format nil "$function~D" index)))
 
 (defun native-disassembly-instruction (op bytes imports)
+  (declare (type simple-vector op) (type vector bytes imports))
   (let* ((code (native-op-code op)) (argument (native-op-argument op))
          (plain (cdr (assoc code '((#x00 . "unreachable") (#x05 . "else") (#x0b . "end")
            (#x0f . "return") (#x1a . "drop") (#x45 . "i32.eqz") (#x46 . "i32.eq")
            (#x48 . "i32.lt_s") (#x4a . "i32.gt_s") (#x4c . "i32.le_s") (#x4e . "i32.ge_s")
            (#x53 . "i64.lt_s") (#x55 . "i64.gt_s") (#x57 . "i64.le_s") (#x59 . "i64.ge_s")
            (#x71 . "i32.and") (#x7c . "i64.add") (#x7d . "i64.sub") (#x7e . "i64.mul")
-           (#xac . "i64.extend_i32_s") (#xd1 . "ref.is_null")))))
+           (#xa7 . "i32.wrap_i64") (#xac . "i64.extend_i32_s") (#xd1 . "ref.is_null")))))
          (indexed (cdr (assoc code '((#x08 . "throw") (#x0c . "br") (#x0d . "br_if")
            (#x20 . "local.get") (#x21 . "local.set") (#x22 . "local.tee") (#x41 . "i32.const"))))))
     (cond (plain plain)
@@ -93,6 +97,7 @@
           (t (error "Unexpected native instruction ~D." code)))))
 
 (defun disassemble-native (bytes index)
+  (declare (type vector bytes) (type (unsigned-byte 32) index))
   (multiple-value-bind (body imports offset) (native-disassembly-body bytes index)
     ;; Share the optimizer's decoder, including instruction boundaries and
     ;; signed immediates. No recompilation or execution of the target is needed.

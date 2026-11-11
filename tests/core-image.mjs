@@ -43,6 +43,9 @@ try {
   assert.deepEqual(restarts, [true]);
   assert.deepEqual(await restored.readFile('/persistent.bin'), Uint8Array.of(0, 128, 255));
   const check = await restored.evaluateAsync(`(and
+    (typep (miricl-threads:current-thread) 'miricl-threads:thread)
+    (string= (miricl-threads:thread-name (miricl-threads:current-thread)) "Main thread")
+    (eq (class-of (miricl-threads:current-thread)) (find-class 'miricl-threads:thread))
     (eq *package* (find-package :core-test))
     (eq (find-package :kernel) (find-package :miricl-core))
     (= (example-value *example*) (ash 1 80))

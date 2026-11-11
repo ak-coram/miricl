@@ -85,7 +85,9 @@ export async function runFull({binary, records, sources, timeout = 10000, heapLi
     worker = new Worker(new URL('./ansi-worker.mjs', import.meta.url), {
       workerData: {binary, sources, seed, execution}, resourceLimits: {maxOldGenerationSizeMb: heapLimitMb},
     });
-    const ready = await request(null, 30_000);
+    // Compiler mode bootstraps every native kernel before running any test.
+    // Keep that budget separate from individual test deadlines.
+    const ready = await request(null, execution === 'compiler' ? 180_000 : 30_000);
     if (!ready.ready) throw new Error(`ANSI worker initialization failed: ${ready.error}`);
     if (ready.compilerBootstrap) report.compilerBootstrap = ready.compilerBootstrap;
     let replayedOperations = 0;

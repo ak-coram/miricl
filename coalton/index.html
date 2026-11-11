@@ -1,5 +1,132 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#9999cc"><title>A Whirlwind Tour of Coalton / miricl</title>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#9999cc">
+<title>Lisp + Coalton / miricl</title>
 <style>
-:root{color-scheme:light;font:14px/1.7 "Lucida Console","Courier New",monospace;color:#222;background:#9999cc}*{box-sizing:border-box}body{margin:0;padding:28px 20px}main{max-width:1040px;margin:auto}.window{border:1px solid #222;background:#ffffea;box-shadow:4px 4px 0 #555588}.titlebar{padding:7px 12px;background:#eaffff;border-bottom:1px solid #222;font-size:12px;display:flex;justify-content:space-between}header{padding:25px 30px}h1{font-size:30px;font-weight:normal;line-height:1.25;margin:0 0 15px}h2{font-size:23px;font-weight:normal;border-top:1px solid #aaa97b;margin-top:55px;padding-top:22px}h3{font-size:18px;font-weight:normal;margin-top:35px}a{color:#005580;text-underline-offset:3px}nav{display:flex;gap:17px;flex-wrap:wrap;font-size:12px}.intro{color:#555;max-width:80ch}.toolbar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 20px;background:#eeeecc;border-top:1px solid #aaa97b;border-bottom:1px solid #aaa97b;font-size:12px}button,input,textarea,select{font:inherit;color:inherit}button,select{border:1px solid #555;background:#ffffea;padding:5px 9px}button{cursor:pointer}button:hover:not(:disabled){background:#cccc88}button:disabled{opacity:.45;cursor:wait}:focus-visible{outline:2px solid #0055aa;outline-offset:3px}#status{margin-left:auto}#startup{margin:0;padding:12px 30px;max-height:220px;overflow:auto;font-size:11px;color:#555}article{padding:0 30px 32px;overflow-wrap:anywhere}p{margin:18px 0}.cell{border:1px solid #aaa97b;margin:20px 0 27px;background:#fffff4;scroll-margin-top:90px}.cell-heading{display:flex;gap:15px;justify-content:space-between;padding:6px 10px;background:#eeeecc;border-bottom:1px solid #aaa97b;font-size:10px;color:#555}.cell-heading a{white-space:nowrap}textarea{display:block;resize:vertical;width:100%;border:0;border-bottom:1px solid #dddda8;background:#fffff4;padding:12px;line-height:1.6;tab-size:2;max-height:65vh;font-size:13px}.cell-actions{padding:8px 10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11px}.run{background:#eaffff}.timing{margin-left:auto;color:#666}.result{border-top:1px solid #dddda8;padding:12px;color:#004b50;margin:0}.result.error{color:#a02020}.cell-note{padding:7px 12px;margin:0;font-size:11px;color:#666}pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}code{font:inherit;background:#eeeecc;padding:0 2px}.tour-output{background:#eeeecc;padding:12px;font-size:12px}details{padding:5px 10px;font-size:11px}summary{cursor:pointer}.note{border-left:3px solid #9999cc;background:#eeeecc;padding:12px 15px;font-size:12px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}footer{font-size:11px;padding:18px 2px;color:#222}[hidden]{display:none!important}@media(max-width:600px){body{padding:10px 8px}header{padding:20px 16px}h1{font-size:24px}article{padding:0 14px 22px}.toolbar{padding:8px 14px}textarea{font-size:12px}.cell-heading{display:block}.cell-heading span{display:block}#status{width:100%;margin:0}h2{font-size:20px}}
-</style></head><body><main><div class="window"><div class="titlebar"><span>coalton / a whirlwind tour</span><span>miricl / Wasm</span></div><header><h1>A Whirlwind Tour of Coalton</h1><p class="intro">Read, edit, and evaluate the tour in your browser. Examples share one Coalton session; each evaluation starts in <code>coalton-user</code>. Edits are saved in this browser.</p><nav><a href="../">Lisp REPL</a><a href="https://github.com/coalton-lang/coalton">Coalton sources ↗</a><a href="tour.md">Tour source</a><a href="../image-sizes.html">Image sizes</a><a href="LICENSE.txt">License</a></nav></header><div class="toolbar"><button id="restart" type="button">Restart session</button><button id="cancel" type="button" hidden>Cancel and restart</button><span>Ctrl / ⌘ + Enter to evaluate a cell</span><span id="status" role="status">Loading Coalton…</span></div><pre id="startup" hidden></pre><article id="tour">@@TOUR@@</article></div><footer>@@COUNT@@ editable examples · <span id="revision">@@REVISION@@</span> · Definitions last until restart. Intentional errors and incomplete sketches are part of the tour.</footer></main><noscript>This interactive tour needs JavaScript and WebAssembly.</noscript><script type="module" src="./app.mjs"></script></body></html>
+  :root {--paper:#ffffea;--ink:#222;--select:#eeee9e;--border:#8888cc;color-scheme:light;font:13px/1.55 "Lucida Console","Courier New",monospace;color:#222;background:#9999cc}
+  * {box-sizing:border-box} body {margin:0;padding:28px 24px} button,input,textarea,select {font:inherit;color:inherit}
+  button,a,input,textarea,summary {touch-action:manipulation} button {border:1px solid #222;background:#ffffea;padding:5px 10px;cursor:pointer}
+  button:hover:not(:disabled),button[aria-pressed="true"] {background:#cccc88} button:disabled {opacity:.45;cursor:wait}
+  :focus-visible {outline:2px solid #0055aa;outline-offset:3px} a {color:#005580;text-underline-offset:3px}
+  .desktop {max-width:1260px;margin:auto} .window {border:1px solid #222;background:#ffffea;box-shadow:4px 4px 0 #555588}
+  .titlebar {display:flex;align-items:center;gap:10px;padding:7px 11px;background:#eaffff;border-bottom:1px solid #222;font-size:12px}
+  .handle {width:13px;height:13px;border:1px solid #222;background:#8888cc;flex:none}
+  .titlebar .right {margin-left:auto} .masthead {padding:22px 24px 18px;display:flex;align-items:flex-end;justify-content:space-between;gap:20px}
+  h1 {font-size:30px;line-height:1.2;font-weight:normal;margin:0 0 7px} .eyebrow {font-size:10px;letter-spacing:2px;margin:0 0 8px}
+  .intro {margin:0;color:#555;max-width:62ch} .masthead nav {display:flex;gap:14px;font-size:12px;white-space:nowrap}
+  .workspace {display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:18px;margin-top:18px}
+  .worksheet {min-width:0} .toolbar {display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:9px 12px;border-bottom:1px solid #aaa97b;background:#eeeecc}
+  #session-name {border:0;border-bottom:1px solid #aaa97b;background:transparent;width:230px;min-width:0;flex:1;padding:4px 2px}
+  .toolbar button {font-size:11px} #history {list-style:none;margin:0;padding:0 20px;max-height:55vh;min-height:230px;overflow:auto;scrollbar-color:#9999cc #ffffea}
+  #history li {padding:17px 0;border-bottom:1px solid #dddda8} #history li:last-child {border-bottom:0}
+  .entry-head {display:flex;align-items:center;gap:9px;font-size:10px;color:#666;margin-bottom:6px}
+  .entry-head button {margin-left:auto;font-size:10px;padding:1px 6px} pre {white-space:pre-wrap;overflow-wrap:anywhere;margin:7px 0;line-height:1.65}
+  #history pre:not(.input) {white-space:pre;overflow-x:auto;overflow-wrap:normal}
+  .input {color:#555} .result {color:#004b50} .error {color:#a02020} .entry-time {color:#777;font-size:10px}
+  #empty {padding:30px 24px;color:#555;border-bottom:1px solid #dddda8} #empty strong {display:block;color:#222;font-weight:normal;margin-bottom:8px}
+  #form {padding:16px 20px 12px;border-top:1px solid #aaa97b} .editor-label {display:flex;justify-content:space-between;gap:10px;margin-bottom:7px}
+  .editor-label small {color:#666} textarea {width:100%;resize:vertical;background:#fffff4;border:1px solid #777;padding:10px;line-height:1.65;tab-size:2}
+  .actions {display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px} #evaluate {background:#eaffff;padding:6px 24px}
+  #status {font-size:11px;color:#555;margin-left:auto} details {font-size:11px;margin-top:10px} summary {cursor:pointer;color:#555}
+  #answers {margin-top:8px} .sidebar {display:flex;flex-direction:column;gap:18px;min-width:0} .panel-content {padding:14px}
+  .panel-content p {margin:0 0 12px;color:#555;font-size:11px} .examples {display:grid;gap:7px}
+  .example {text-align:left;padding:9px 10px;background:#ffffea}.example span {display:block;font-size:10px;color:#666;margin-bottom:2px}
+  #example-note {margin:9px 0 0;font-size:11px;color:#555} #example-note a {display:inline-block;margin-top:4px}
+  #sessions {list-style:none;margin:0;padding:0;display:grid;gap:8px} #sessions button {width:100%;text-align:left;padding:8px;overflow-wrap:anywhere}
+  #sessions li {display:flex;gap:6px} #sessions .session-open {flex:1;min-width:0}
+  #sessions .session-copy {width:auto;flex:none;font-size:10px;padding:4px 6px;text-align:center}
+  #sessions small {display:block;color:#666;font-size:10px} #sessions button[aria-current="true"] {background:#eeeecc}
+  #save-status {font-size:10px;color:#666;margin:10px 0 0} .reference {background:#eeeecc;font-size:11px}
+  .reference dl {display:grid;grid-template-columns:65px 1fr;gap:7px 10px;margin:0}.reference dt {color:#005580}.reference dd {margin:0}
+  #resume-bar {padding:12px 20px;background:#eeeecc;border-top:1px solid #aaa97b} #resume-bar p {margin:0 0 8px;font-size:11px}
+  #prompt {margin:0 20px 16px;border:1px solid #222;background:#eaffff;padding:12px} #question {white-space:pre-wrap;margin:0 0 10px}
+  #answer-text {border:1px solid #777;background:#ffffea;padding:5px;max-width:100%;width:170px}.answer-row {display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  footer {font-size:10px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:14px 2px;color:#222}
+  [hidden] {display:none!important}
+  @media(max-width:850px) {body{padding:14px 10px}.workspace{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr;align-items:start}.reference{grid-column:1/-1}.masthead{align-items:start;flex-direction:column;padding:18px}#history{max-height:55vh}}
+  @media(max-width:500px) {.sidebar{display:flex}.masthead nav{gap:10px;flex-wrap:wrap}h1{font-size:25px}#form{padding:14px}#history{padding:0 14px}.editor-label small{font-size:10px}.toolbar{gap:6px}#status{width:100%;margin:2px 0}body{padding:10px 8px}}
+    #debugger { width: min(900px, calc(100vw - 32px)); max-height: 90dvh; padding: 0;
+      border: 2px solid black; background: var(--paper); color: var(--ink); }
+    #debugger::backdrop { background: rgb(0 0 0 / 35%); }
+    #debug-threads { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; border-bottom: 1px solid black; }
+    #debug-threads [aria-selected="true"] { background: var(--select); font-weight: bold; }
+    .debug-evaluation { border-top: 1px solid var(--border); padding: 10px 0; }
+    .debug-evaluation pre { margin: 0; }
+    .debug-evaluation .input { margin-bottom: 6px; }
+    #debug-result { margin-top: 12px; }
+    #debug-stack-details { border-top: 1px solid black; margin-top: 12px; padding-top: 8px; }
+    #debug-stack { margin-top: 8px; }
+    #debugger[hidden] { display: none; }
+    .debug-content { padding: 12px 18px; }
+    #debugger textarea { min-height: 70px; padding: 8px; border: 1px solid var(--border); resize: vertical; }
+    #debugger pre { max-height: 240px; overflow: auto; }
+    #debug-frame { width: 100%; margin-bottom: 8px; }
+    #debugger input { font: inherit; width: 100%; padding: 5px; }
+    .debug-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+    #debugger .tag {display:flex;gap:8px;align-items:center;padding:8px;background:#eaffff;border-bottom:1px solid black}
+    #debugger .filename {margin-right:auto} #debugger button {border-color:#000}
+</style>
+</head>
+<body>
+<main class="desktop">
+  <section class="window" aria-label="Common Lisp and Coalton REPL">
+    <div class="titlebar"><span class="handle" aria-hidden="true"></span><span>coalton</span><span class="right">miricl</span></div>
+    <div class="masthead"><div><p class="eyebrow"><q>Don't drink and derive</q></p><h1>Common Lisp + Coalton</h1><p class="intro">A persistent Common Lisp session with Coalton and its standard library ready to use.</p></div>
+      <nav aria-label="Resources"><a href="https://coalton-lang.github.io/manual/" target="_blank" rel="noopener">Documentation ↗</a><a href="../image-sizes.html">Image sizes</a><a href="LICENSE.txt">License</a><a href="https://github.com/ak-coram/miricl" target="_blank" rel="noopener">miricl GitHub ↗</a></nav></div>
+  </section>
+  <section id="startup-panel" class="window" aria-label="Session startup" style="margin-top:18px"><div class="titlebar"><span class="handle" aria-hidden="true"></span><span>session startup</span></div><div class="panel-content"><p id="startup-message" role="status">Starting Lisp and Coalton…</p><details id="startup-details" hidden><summary>Loading output</summary><pre id="startup-output"></pre></details></div></section>
+  <div class="workspace">
+    <section class="window worksheet" aria-label="Worksheet">
+      <div class="titlebar"><span class="handle" aria-hidden="true"></span><span>worksheet</span><span class="right" id="entry-count">0 inputs</span></div>
+      <div class="toolbar"><input id="session-name" aria-label="Session name" value="Untitled session" maxlength="100"><button id="new" type="button">New</button><button id="record" type="button" aria-pressed="true">Recording</button><button id="export" type="button">Export</button><button id="share" type="button" title="Copy share link" aria-label="Copy link to current session">Copy link</button></div>
+      <div id="empty"><strong>Start with an expression.</strong>Try <code>(+ 20 22)</code> or pick an example from the shelf.</div>
+      <ol id="history" aria-live="polite" aria-label="REPL history"></ol>
+      <div id="resume-bar" hidden><p>This is a saved transcript. Resume re-runs completed inputs and their recorded answers to restore your definitions.</p><button id="resume" type="button" disabled>Resume session</button><button id="remove" type="button">Delete saved session</button></div>
+      <form id="form"><div class="editor-label"><label for="source">Input</label><small>Ctrl / ⌘ + Enter to evaluate</small></div>
+        <textarea id="source" rows="4" spellcheck="false" autocapitalize="off" autocomplete="off">(mapcar (lambda (x) (* x x)) '(1 2 3 4 5))</textarea>
+        <div class="actions"><label for="mode">Input</label><select id="mode"><option value="lisp">Lisp forms</option><option value="expression">Coalton expression</option><option value="definitions">Coalton definitions</option></select><button id="evaluate" disabled>Evaluate</button><button id="restart" type="button">Restart</button><span id="status" role="status" aria-live="polite">Loading assets…</span></div>
+        <details hidden><summary>Provide answers in advance</summary><textarea id="answers" rows="2" spellcheck="false" aria-label="Answers" placeholder="pos; integer;"></textarea></details>
+        <p id="example-note" hidden></p>
+      </form>
+      <section id="prompt" hidden aria-label="Lisp + Coalton question"><p id="question"></p><div class="answer-row"><label for="answer-text">Answer</label><input id="answer-text" autocomplete="off"><button id="answer" type="button">Send answer</button></div></section>
+    </section>
+    <aside class="sidebar">
+      <section class="window"><div class="titlebar"><span class="handle" aria-hidden="true"></span><span>examples / from the manual</span></div><div class="panel-content"><p>Self-contained examples from the Coalton manual. Choose one to put its code in the editor.</p><div class="examples" id="examples"></div></div></section>
+      <section class="window"><div class="titlebar"><span class="handle" aria-hidden="true"></span><span>saved sessions</span></div><div class="panel-content"><p>Kept in this browser. Open a transcript to read or resume it.</p><ul id="sessions"></ul><p id="save-status" role="status">Recording is on.</p></div></section>
+      <section class="window reference"><div class="titlebar"><span class="handle" aria-hidden="true"></span><span>a few useful marks</span></div><div class="panel-content"><dl><dt>Lisp</dt><dd>Start in <code>CL-USER</code>. Packages and definitions persist.</dd><dt>Coalton</dt><dd>Expression and definition modes read in <code>COALTON-USER</code>.</dd><dt>defun</dt><dd>Define a Common Lisp function</dd><dt>define</dt><dd>Define a Coalton value or function</dd><dt>*package*</dt><dd>Inspect the current Lisp package</dd></dl></div></section>
+    </aside>
+  </div>
+  <dialog id="debugger" hidden aria-label="Lisp debugger">
+    <div class="tag"><span class="filename" id="debug-title">Debugger</span>
+      <button id="debug-abort">Abort evaluation</button></div>
+    <div id="debug-threads" role="tablist" aria-label="Paused threads"></div>
+    <div class="debug-content" id="debug-panel" role="tabpanel">
+      <pre id="debug-condition"></pre>
+      <label for="debug-frame">Inspectable interpreter frames</label>
+      <select id="debug-frame" aria-label="Debug frame"></select>
+      <pre id="debug-form"></pre><pre id="debug-locals"></pre>
+      <p id="debug-unavailable" class="notice" hidden>For local variables and stepping, reevaluate the definition with (declare (optimize (debug 3))).</p>
+      <div class="debug-actions" id="debug-steps">
+        <button data-debug="into">Step into</button><button data-debug="over">Step over</button>
+        <button data-debug="out">Step out</button><button data-debug="resume">Resume</button>
+      </div>
+      <label for="debug-arguments">Restart arguments (an expression returning a list; optional)</label>
+      <input id="debug-arguments" value="" placeholder="(list replacement-value)" aria-describedby="debug-command-error">
+      <p id="debug-command-error" class="error" role="alert" hidden></p>
+      <div class="debug-actions" id="debug-restarts"></div>
+      <label for="debug-expression">Evaluate in the selected frame</label>
+      <textarea id="debug-expression" rows="2" spellcheck="false"></textarea>
+      <button id="debug-evaluate">Evaluate in frame</button>
+      <div id="debug-result" role="log" aria-label="Frame evaluation history"></div>
+      <details id="debug-stack-details" open><summary>Stack trace</summary><pre id="debug-stack"></pre></details>
+    </div>
+  </dialog>
+  <footer><span>Common Lisp · Coalton · miricl / Wasm</span><span>Evaluation runs in your browser. Restart cancels evaluation and starts a fresh session.</span></footer>
+</main>
+<noscript>This REPL needs JavaScript and WebAssembly.</noscript>
+<script type="module" src="./client.mjs"></script>
+</body>
+</html>

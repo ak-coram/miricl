@@ -128,19 +128,22 @@ try {
   }
   for (let start = 0; start < bitChecks.length; start += 100)
     evaluate(bitChecks.slice(start, start + 100).join('\n') + '\n(values)');
-  for (const [operator, width, instruction, a, b, expected] of [
-    ['*', 31, 'i64.mul', 1073741823n, -1073741824n, -1152921503533105152n],
-    ['*', 32, 'i64.mul', -(1n << 31n), -(1n << 31n), 1n << 62n],
-    ['+', 63, 'i64.add', (1n << 62n) - 1n, (1n << 62n) - 1n, (1n << 63n) - 2n],
-    ['-', 63, 'i64.sub', -(1n << 62n), (1n << 62n) - 1n, -(1n << 63n) + 1n],
-    ['<', 64, 'i64.lt_s', -(1n << 63n), (1n << 63n) - 1n, 't'],
+  // Both inline operations and scalar runtime entries are native paths. The
+  // shared entries retain redefinition guards without duplicating each guard
+  // in the caller; a generic native-call2 does not satisfy this check.
+  for (const [operator, width, instruction, entry, a, b, expected] of [
+    ['*', 31, 'i64.mul', 'native-mul-int64', 1073741823n, -1073741824n, -1152921503533105152n],
+    ['*', 32, 'i64.mul', 'native-mul-int64', -(1n << 31n), -(1n << 31n), 1n << 62n],
+    ['+', 63, 'i64.add', 'native-add-int64', (1n << 62n) - 1n, (1n << 62n) - 1n, (1n << 63n) - 2n],
+    ['-', 63, 'i64.sub', 'native-sub-int64', -(1n << 62n), (1n << 62n) - 1n, -(1n << 63n) + 1n],
+    ['<', 64, 'i64.lt_s', 'native-lt-int64', -(1n << 63n), (1n << 63n) - 1n, 't'],
   ]) {
     evaluate(`(defparameter *tier-typed* (miricl-compiler:compile-native
       '(lambda (a b) (declare (optimize (debug 2)))
         (values (${operator} (the (signed-byte ${width}) a) (the (signed-byte ${width}) b)))))) (values)`);
     check(`(equal (funcall *tier-typed* ${a} ${b}) '${expected})`);
-    check(`(not (null (search "${instruction}"
-      (with-output-to-string (*standard-output*) (disassemble *tier-typed*)))))`);
+    check(`(let ((text (with-output-to-string (*standard-output*) (disassemble *tier-typed*))))
+      (not (null (or (search "${instruction}" text) (search "call $${entry}" text)))))`);
     check(`(let ((original (symbol-function '${operator})))
       (unwind-protect
         (progn (setf (symbol-function '${operator}) (lambda (a b) (declare (ignore a b)) :replacement))

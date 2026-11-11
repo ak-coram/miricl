@@ -14,6 +14,10 @@ programs dynamically at runtime.
 The Common Lisp type system shall be used for optimization and for
 generating smaller binaries.
 
+The long-term goal is a compiler with advanced type analysis and
+inference. Build type-based optimizations as foundations that become
+more useful as declared and inferred type information improves.
+
 Full ANSI Common Lisp compliance is important.
 
 # Common Lisp semantics
@@ -30,6 +34,12 @@ Keep compiler optimizations generic: derive them from Common Lisp
 semantics, types, values, and control/data flow. Libraries and
 applications, including Game of Life, Maxima and FriCAS are benchmarks
 rather than compiler special cases.
+
+Retain useful, correct type-based optimizations when image-size growth is
+modest, even if existing tests or mostly untyped workloads show no immediate
+speedup. Evaluate their benefits on sufficiently typed code and larger
+applications. Keep measuring compilation time, application performance and
+image size, and report the tradeoffs.
 
 Prefer direct Wasm implementations for performance-critical functions,
 especially frequently used primitives and allocation or traversal
@@ -56,6 +66,10 @@ support in the WASI adapter are accepted for now. This exception does
 not permit other unstable WASM or WASI features.
 
 # Other
+
+Do not use Python or introduce Python dependencies. Use the project's
+Common Lisp and JavaScript/Node.js tooling for implementation, tests, and
+benchmarking.
 
 Cloning repositories into clean checkouts is generally allowed without
 asking, including clones needed for a requested submodule addition.

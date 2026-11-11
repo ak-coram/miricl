@@ -10,7 +10,7 @@ const vm = await Miricl.instantiate(await fs.readFile(bootstrap));
 try {
   vm.evaluate(`(in-package :miricl-compiler)
     (defparameter *image-sources* (mapcar (lambda (name)
-      (list name (function-lambda-expression (symbol-function name)))) *native-compiler-seeds*))
+      (list name (compiler-source-policy (function-lambda-expression (symbol-function name))))) *native-compiler-seeds*))
     (multiple-value-bind (installed unsupported) (compile-compiler)
       (unless (and (= (length installed) (length *image-sources*)) (null unsupported))
         (error "Compiler bootstrap failed: ~S" unsupported)))
@@ -21,13 +21,21 @@ try {
             (dump (symbol-function (compiler-primitive 10 1 "%FASL-DUMP"))))
         ;; This second compilation uses the already self-compiled frontend and emitter.
         (dolist (entry *image-sources*)
-          (let ((unit (compile-to-hir (second entry) :name (first entry))))
-            (multiple-value-bind (code literals) (emit-native-module unit)
-              (push (list (and (symbol-package (first entry)) (package-name (symbol-package (first entry))))
-                          (symbol-name (first entry))) names)
-              (push (coerce code 'list) codes)
-              (push (funcall dump (list (first entry) literals
-                (native-fixed-arity (first (hir-unit-functions unit))))) roots))))
+          (push (list (and (symbol-package (first entry)) (package-name (symbol-package (first entry))))
+                      (symbol-name (first entry))) names))
+        (let ((unit (compile-module-to-hir
+                      (mapcar (lambda (entry) (list* 'defun (first entry) (cdr (second entry)))) *image-sources*)
+                      :inline nil)))
+          (multiple-value-bind (code literals) (emit-native-module unit)
+            ;; One factory shares the module's literals and closes over its
+            ;; internal function bindings. Preserve only its literal graph;
+            ;; runtime startup creates and installs the native entry points.
+            (let ((entries (funcall (compiler-primitive 17 code literals nil))))
+              (dolist (entry entries) (setf (symbol-function (car entry)) (cdr entry))))
+            (unless (= 42 (funcall (compile-native '(lambda (x) (+ x 2))) 40))
+              (error "Module-compiled compiler failed its compilation check"))
+            (push (coerce code 'list) codes)
+            (push (funcall dump (list :module literals)) roots)))
         (with-open-file (out "/compiler-image.lisp" :direction :output :if-exists :supersede)
           (let ((*print-readably* t) (*print-pretty* nil) (*print-circle* t) (*print-base* 10) (*print-radix* nil))
             (write (list (nreverse names) (nreverse codes) (nreverse roots)
@@ -45,15 +53,17 @@ try {
             (unless first (write-string ",")) (princ byte)) (write-string "]"))
         (write-string "]"))) (values))`, {eof: true}).output;
   const codes = JSON.parse(codeOutput);
-  const declarations = [], entries = [];
-  const wat = codes.map((code, index) => nativeModuleToWat(Uint8Array.from(code), index, declarations, entries)).join('\n');
+  const declarations = [], entries = [], callCounts = new Map();
+  const wat = codes.map((code, index) => nativeModuleToWat(Uint8Array.from(code), index, declarations, entries, callCounts)).join('\n');
   const functions = [...new Set([...entries, ...declarations])];
   await fs.writeFile(`${output}.wat`, `${wat}\n(table $compiler-entries (export "core-compiler-functions") ${functions.length} ${functions.length} funcref)\n(elem (table $compiler-entries) (i32.const 0) func ${functions.join(' ')})\n`);
   await fs.writeFile(`${output}.lisp`, image);
-  console.log(`Self-compiled compiler: ${codes.length} functions, ${codes.reduce((n, code) => n + code.length, 0)} module bytes before linking.`);
+  console.log(`Self-compiled compiler: ${codes.length} module, ${declarations.length} bodies, ${codes.reduce((n, code) => n + code.length, 0)} module bytes before linking.`);
+  console.log(`Compiler typed call sites: ${JSON.stringify(Object.fromEntries([...callCounts]
+    .filter(([name]) => /^(?:native-vector-(?:ref|set)|native-car-list|native-cdr-list|native-(?:add|sub|mul)-int64)/u.test(name))))}`);
 } finally {vm.close();}
 
-function nativeModuleToWat(bytes, moduleIndex, declarations, entries) {
+function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts) {
   assert.ok(WebAssembly.validate(bytes), `Invalid compiler module ${moduleIndex}`);
   let position = 8;
   const byte = () => {assert.ok(position < bytes.length, 'Truncated native module'); return bytes[position++];};
@@ -121,7 +131,11 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries) {
               instructions.push(`br_table ${targets.join(' ')}`); break;
             }
             case 0x0f: instructions.push('return'); break;
-            case 0x10: instructions.push(`call ${functionName(unsigned())}`); break;
+            case 0x10: {
+              const index = unsigned();
+              if (index < imports.length) callCounts.set(imports[index], (callCounts.get(imports[index]) ?? 0) + 1);
+              instructions.push(`call ${functionName(index)}`); break;
+            }
             case 0x12: instructions.push(`return_call ${functionName(unsigned())}`); break;
             case 0x1a: instructions.push('drop'); break;
             case 0x20: instructions.push(`local.get ${unsigned()}`); break;
@@ -142,6 +156,7 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries) {
             case 0x7c: instructions.push('i64.add'); break;
             case 0x7d: instructions.push('i64.sub'); break;
             case 0x7e: instructions.push('i64.mul'); break;
+            case 0xa7: instructions.push('i32.wrap_i64'); break;
             case 0xac: instructions.push('i64.extend_i32_s'); break;
             case 0xd0: assert.equal(byte(), 0x6f); instructions.push('ref.null extern'); break;
             case 0xd1: instructions.push('ref.is_null'); break;

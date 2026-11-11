@@ -9,6 +9,7 @@
 (defstruct ir-program units nodes definitions)
 
 (defun symbol-key (symbol)
+  (declare (type symbol symbol))
   (list (symbol-name symbol)
         (and (symbol-package symbol) (package-name (symbol-package symbol)))))
 
@@ -386,6 +387,7 @@
       program)))
 
 (defun index-generated-bindings (program)
+  (declare (type ir-program program))
   ;; One defining form owns its generated constructors/accessors as well as its
   ;; type name. Include inherited DEFSTRUCT slots even when their parent lives
   ;; in another compilation unit. An external parent's unknown slots keep the
@@ -443,6 +445,7 @@
         (t (error "Invalid entry point: ~S." entry))))
 
 (defun mark-program (program entries keep &optional (strip t))
+  (declare (type ir-program program) (type list entries keep))
   (unless strip
     (dolist (node (ir-program-nodes program))
       (setf (ir-node-retained-p node) t (ir-node-reason node) '(:no-strip)))
@@ -553,6 +556,7 @@
       (t (error "Unknown FASL record kind ~S." kind)))))
 
 (defun coalesce-records (records live)
+  (declare (type vector records) (type simple-vector live))
   ;; COMPILE-FILE may coalesce similar constants within a compilation unit
   ;; (CLHS 3.2.4.4). Resolved code is immutable too. Hash-cons its graph in
   ;; postorder, using canonical child IDs rather than recursively hashing Lisp
@@ -564,6 +568,8 @@
     (when native (return-from coalesce-records mapping)))
   (let* ((count (length records)) (states (make-array count :initial-element 0))
          (mapping (make-array count)) (table (make-hash-table :test 'equal)))
+    (declare (type (unsigned-byte 32) count) (type simple-vector states mapping)
+             (type hash-table table))
     (dotimes (i count) (setf (aref mapping i) i))
     (dotimes (root count)
       (when (and (aref live root) (zerop (aref states root)))
@@ -602,6 +608,7 @@
     mapping))
 
 (defun pool-record-less-p (records left right)
+  (declare (type vector records) (type (unsigned-byte 32) left right))
   (let* ((a (aref records left)) (b (aref records right)) (kind (first a)))
     (unless (= kind (first b)) (return-from pool-record-less-p (< kind (first b))))
     (case kind
@@ -616,12 +623,16 @@
       (otherwise (< left right)))))
 
 (defun layout-records (records live canonical roots)
+  (declare (type vector records) (type simple-vector live canonical) (type list roots))
   ;; Put frequently referenced atoms and shared graphs in a small pool, then lay out list spines
   ;; before their CAR subgraphs. Adjacent CDRs can be represented implicitly in
   ;; the binary stream. This changes addresses, never sharing or literal identities.
   (let* ((count (length records)) (frequency (make-array count :initial-element 0))
          (cars (make-array count :initial-element 0)) (nil-id nil) (edges 0)
          (mapping (make-array count :initial-element nil)) (pool nil) (next 0))
+    (declare (type (unsigned-byte 32) count next) (type (integer 0 *) edges)
+             (type simple-vector frequency cars mapping) (type list pool)
+             (type (or null (unsigned-byte 32)) nil-id))
     (dotimes (i count)
       (when (and (aref live i) (= i (aref canonical i)))
         (let ((record (aref records i)))
@@ -648,6 +659,7 @@
     ;; similar names within each wider tier for prefix encoding. No reference
     ;; acquires a wider absolute ID merely to save symbol-name bytes.
     (let ((rest pool) (groups nil) (position 0))
+      (declare (type list rest groups) (type (unsigned-byte 32) position))
       (dolist (limit (list 64 128 8192 16384 1048576 2097152 134217728 268435456 count))
         (when rest
           (let ((group nil))
@@ -672,10 +684,14 @@
     (values mapping next)))
 
 (defun compact-unit (unit &optional index-definitions)
+  (declare (type ir-unit unit))
   (let* ((records (read-unit-records unit)) (count (length records))
          (live (make-array count :initial-element nil))
          (mapping nil)
          (kept (make-hash-table)) (roots nil) (work nil) (next 0))
+    (declare (type vector records) (type simple-vector live)
+             (type (or null simple-vector) mapping) (type hash-table kept)
+             (type list roots work) (type (unsigned-byte 32) count next))
     (dolist (node (ir-unit-nodes unit))
       (when (ir-node-retained-p node)
         (dolist (root (ir-node-roots node)) (setf (gethash root kept) t))))
@@ -715,9 +731,12 @@
           (and index-definitions (list (ir-unit-source unit) (nreverse definitions))))))))
 
 (defun write-unit (stream roots records &optional definitions)
+  (declare (type stream stream) (type list roots) (type vector records))
   (write-indexed-unit stream roots records :definitions definitions))
 
 (defun write-report (program stream before after &optional output-records)
+  (declare (type ir-program program) (type stream stream)
+           (type (integer 0 *) before after))
   (format stream "MIRICL whole-program reachability (FASL graph)~%")
   (format stream "Input: ~D bytes; output: ~D bytes.~%" before after)
   (format stream "Retained ~D of ~D definition/initialization nodes.~%"
@@ -816,9 +835,12 @@ With STRIP NIL, retain every definition and compact only the representation."
     (pathname target)))
 
 (defun prepare-native-unit (unit count progress load)
+  (declare (type ir-unit unit) (type (unsigned-byte 32) count))
   (let ((functions nil) (entries nil) (recipes nil) (initializer-count 0)
         (ordinary (make-hash-table :test 'eq)) (seen (make-hash-table :test 'eq))
         (*hir-load-time-recipes* (make-hash-table :test 'eq)))
+    (declare (type list functions entries recipes) (type (unsigned-byte 32) initializer-count)
+             (type hash-table ordinary seen *hir-load-time-recipes*))
     (let* ((miricl::%fasl-records (coerce (read-unit-records unit) 'vector))
            (miricl::%fasl-values (make-array (length miricl::%fasl-records)))
            (miricl::%fasl-states (make-array (length miricl::%fasl-records) :initial-element 0))
@@ -890,6 +912,7 @@ With STRIP NIL, retain every definition and compact only the representation."
         (values nil nil nil nil initializer-count count))))
 
 (defun native-unit-records (unit count progress load)
+  (declare (type ir-unit unit) (type (unsigned-byte 32) count))
   ;; Return from the HIR's owning frame before building the output graph.
   ;; Its blocks, values and source forms can then be collected during dumping.
   (multiple-value-bind (code literals debug recipe-values initializer-count next-count)

@@ -61,12 +61,12 @@ browser.stdio[4].on('data', chunk => {
     else request.resolve(message.result);
   }
 });
-function send(method, params = {}, sessionId) {
+function send(method, params = {}, sessionId, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
     const id = ++nextId;
-    // Cold self-compilation includes the optimizer kernels and can exceed 30s
-    // in Chromium under the inspector. Keep a finite bound for stalled calls.
-    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`Timed out: ${method}. ${diagnostics}`));}, 60000);
+    // Keep ordinary CDP calls bounded. Cold self-compilation gets a separate
+    // budget below because it compiles every kernel under Chromium's inspector.
+    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`Timed out: ${method}. ${diagnostics}`));}, timeoutMs);
     pending.set(id, {resolve, reject, timer});
     browser.stdio[3].write(JSON.stringify({id, method, params, sessionId}) + '\0');
   });
@@ -76,13 +76,13 @@ try {
   console.log(`Chromium: ${version.product}`);
   const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
   const {sessionId} = await send('Target.attachToTarget', {targetId, flatten: true});
-  const command = (method, params) => send(method, params, sessionId);
-  const js = async expression => {
-    const result = await command('Runtime.evaluate', {expression, awaitPromise: true, returnByValue: true});
+  const command = (method, params, timeoutMs) => send(method, params, sessionId, timeoutMs);
+  const js = async (expression, timeoutMs) => {
+    const result = await command('Runtime.evaluate', {expression, awaitPromise: true, returnByValue: true}, timeoutMs);
     assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
-  const evaluate = source => js(`app.evaluate(${JSON.stringify(source)}, {eof: true}).output`);
+  const evaluate = (source, timeoutMs) => js(`app.evaluate(${JSON.stringify(source)}, {eof: true}).output`, timeoutMs);
   await command('Page.enable'); await command('Runtime.enable'); await command('Network.enable');
   await command('Page.navigate', {url: `http://127.0.0.1:${server.address().port}/`});
   const deadline = Date.now() + 15000;
@@ -115,13 +115,17 @@ try {
   assert.equal(requests.some(url => url.includes('miricl-compiler.wasm')), false);
   // All subsequent compilation happens offline in this browser instance.
   await command('Network.emulateNetworkConditions', {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
-  if (!precompiled) assert.equal(await evaluate(`(progn (miricl-compiler::ensure-compiler)
+  if (!precompiled) {
+    const bootstrapStarted = performance.now();
+    assert.equal(await evaluate(`(progn (miricl-compiler::ensure-compiler)
     (multiple-value-bind (installed unsupported)
       (miricl-compiler::compile-compiler)
     (and (>= (length installed) 93) (null unsupported)
       (every (lambda (name) (null (function-lambda-expression (symbol-function name))))
         '(miricl-compiler::hir-form miricl-compiler:compile-to-hir
-          miricl-compiler::emit-native-module miricl-compiler:compile-native)))))`), 'T\n');
+          miricl-compiler::emit-native-module miricl-compiler:compile-native)))))`, 180000), 'T\n');
+    console.log(`Browser compiler self-bootstrap: ${Math.round(performance.now() - bootstrapStarted)} ms`);
+  }
   for (const [name, source] of compilerSmokeCases) assert.equal(await evaluate(source), 'T\n', name);
   assert.equal(await evaluate(`(let ((function (miricl-compiler:compile-native
       '(lambda (x) (js:from-js (js:invoke (js:global "Math") "sqrt" x))))))

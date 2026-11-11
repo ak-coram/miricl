@@ -17,7 +17,9 @@ For the REPL deliverable, Host Common Lisp assembles a temporary seed containing
 the compiler's Lisp source. The build runs that seed in Node, compiles the compiler,
 then uses the native frontend and emitter to compile its core functions again,
 including the optimizer's graph traversal kernels.
-The generated Wasm functions are linked into the REPL runtime with their literal graphs.
+The second compilation lowers the compiler definitions as one sealed module.
+Its factory creates native entry functions sharing one literal graph and their
+lexical function bindings. The generated Wasm functions are linked into the REPL runtime.
 There is no separate compiler artifact or compiler fetch on startup. ASDF remains
 an explicitly loaded, separate artifact.
 
@@ -123,9 +125,136 @@ integer ranges can prove a safe native =i64= path. Immediate operands are
 extracted directly; wider scalar operands use the runtime unbox entry.
 Results are converted back to canonical Lisp values when they enter generic
 value slots. The compiler guards the resolved built-in function so global
-redefinition still works. Operations whose ranges may overflow use the
-runtime's promoting kernels. General integer unboxing across control-flow
+redefinition still works. When both operands fit signed =i64= but the result
+may overflow, checked scalar entries promote through the runtime's ordinary
+integer arithmetic. Narrower proven ranges retain entries without overflow
+checks. General integer unboxing across control-flow
 joins and function boundaries remains future work.
+
+** Declarations and sealed modules
+
+Local =type= declarations, their abbreviated forms, and =the= retain type facts
+in HIR. Facts follow lexical binding identities, including captured and assigned
+bindings, rather than variable names. Nested declarations intersect; a rebinding
+starts a new scope. Bound declarations follow their bindings into subsequent
+=let*= and lambda-list initializers; free declarations start at the body.
+Local =ftype= declarations describe call result types,
+including multiple values, without changing the number of values returned.
+Recognized bounded integer facts select scalar arithmetic. Full-width =fixnum=
+sums, differences and products use overflow checks and retain bignum promotion.
+
+=infer-hir-types= computes fresh primary-value facts for each emission. It
+propagates constant intervals through lexical assignments and control-flow
+joins, including captured nonlocal exits. It infers local function return
+types and propagates argument types when all callers are known and the
+function has not escaped. Captured cells and debugger-visible bindings stay
+conservative. Unknown global calls retain unknown results. Multiple-value
+cardinality remains a separate analysis, so inferred primary types cannot
+discard extra values or turn zero values into one value.
+
+The analysis uses dependencies and a worklist. Lowering requests only facts
+needed by its current numeric and vector optimizations; clients may also
+request facts for an entire HIR unit. Inferred facts never overwrite source
+assertions, and emitting a rewritten HIR graph recomputes them.
+Scalar arithmetic entries accept proven =i64= operands and share the actual
+built-in function guard. Redefined functions use the ordinary Lisp call path.
+The overflow checks are shared in the runtime rather than copied at each call
+site. =scripts/benchmark-typed-arithmetic.mjs OUTPUT BEFORE AFTER= compares
+these paths with narrow and unrestricted operand controls, recording emitted
+bytes, imports and CPU timings. This microbenchmark supplements the larger
+application measurements; it does not establish an application-level speedup.
+=scripts/benchmark-typed-vectors.mjs OUTPUT BEFORE AFTER= compares reads,
+writes and copies with untyped, typed and explicitly inlined controls. It
+alternates the images across five measured rounds and records kernel sizes,
+imports, compilation time and execution CPU time.
+
+=safety= defaults to =1=, retaining the existing checked access and promoting
+arithmetic paths. =(declare (optimize (safety 0)))= enables trusted operations
+where type declarations provide the required facts. Incorrect declarations
+have undefined consequences. Typed list reads omit generic argument dispatch;
+typed simple-vector accesses omit Lisp bounds diagnostics. WasmGC still checks
+the lowered 32-bit indices; invalid Lisp indices have undefined consequences.
+Calls retain global function redefinition unless explicitly
+inlined; =notinline= prevents these substitutions.
+Declaring arithmetic operands =fixnum= alone still allows bignum results;
+omitting overflow checks also requires a result assertion that fits =i64=.
+
+Safety policy follows lexical scope, including deferred frontend work,
+initializers, closures and inline function definitions. =proclaim=/=declaim=
+can change the default for subsequent compilations. =compiler-source-policy=
+adds =safety 0= to compiler kernels during both first-use bootstrap and image
+generation, without changing the application default. The compiler's source
+declares internal record/table representations, byte and index ranges, and
+lexical environments. Liveness bitmaps remain arbitrary nonnegative integers.
+
+An explicit =inline= declaration permits snapshotting the current builtin
+=svref=, =aref= or =row-major-aref= implementation, including their =setf=
+functions, when safety is zero and the
+operands prove a simple vector and a bounded integer index. These calls use a
+direct Wasm entry without function lookup or dynamic function/argument dispatch.
+The compiler verifies the canonical builtin at emission time; a replacement
+already installed before compilation is never mistaken for that builtin.
+Subsequent redefinition does not change the inlined call. Unused function
+references disappear, while first-class references and ordinary calls keep
+their dynamic behavior. Writes mutate the original vector, preserve operand
+evaluation order, and return exactly the stored primary value. Compiler kernels
+explicitly inline these vector accesses. General and specialized arrays keep
+their ordinary access paths.
+
+=compile-module-to-hir= accepts a list of =defun= forms and explicit
+=:entry-points=. =compile-native-module= lowers and instantiates that group,
+returning an alist of entry names and native functions, the module bytes, and HIR.
+Neither operation installs global function bindings. Within the group, ordinary
+calls and =function= references resolve to the group's lexical definitions;
+symbol function designators retain their ordinary global lookup semantics.
+Compile-time top-level effects and file loading remain outside this API.
+
+#+begin_src lisp
+(miricl-compiler:compile-native-module
+  '((defun successor (x) (+ x 1))
+    (defun answer (x) (successor x)))
+  :entry-points '(answer))
+#+end_src
+
+Small fixed-arity local functions can be inlined with a bounded expansion budget.
+Arguments are evaluated in the caller, then bodies are lowered in their original
+lexical environment. Local =inline= and =notinline= declarations control the
+choice; =:inline nil= disables automatic small-function inlining for a module.
+Unused local function objects and bodies are omitted, including helpers whose
+calls were all inlined. Escaped functions and recursive calls retain native
+entries. The compiler image disables automatic inlining because its bootstrap
+entry functions remain exposed and shared code avoids duplicating their bodies.
+Identical native bodies can share code while keeping distinct literal/capture
+contexts. Known lexical tail callees use direct Wasm =return_call= instructions,
+with the existing debugger dispatch fallback and scheduling checkpoints.
+
+=scripts/benchmark-self-compiler.mjs OUTPUT IMAGE [SOURCES.lisp]= records
+separate frontend, emission, and Wasm installation timings over a fixed source
+corpus. It installs the emitted compiler generation and checks native compilation
+with it. =--extract= saves a corpus from a source-bearing image; =--module=
+first compiles and installs that corpus as a module. Reports include corpus and
+image hashes, emitted module bytes, and raw/gzip/Brotli image sizes. Module bytes
+exclude literals and must not be confused with linked distribution size.
+=--profile= also records an emission CPU profile.
+
+First-use bootstrap compiles the small HIR constructors and declaration readers
+immediately after the byte-emission primitives. They are used while compiling
+almost every remaining kernel. Bootstrap ordering is measured independently of
+steady-state compilation; moving the large frontend dispatchers earlier was
+slower in the local comparison.
+
+=scripts/benchmark-applications.mjs OUTPUT BEFORE AFTER [APP ...]= compares
+complete Maxima, FriCAS, ACL2 and Coalton builds. It records input and runtime
+hashes, elapsed and CPU times, peak resident memory, compressed output sizes,
+and separate correctness runs. All timing helpers use Node.js. The default
+single paired run is exploratory; repeated samples are needed before claiming
+small performance differences. FriCAS calculation measurements explicitly
+include lazy algebra compilation. ACL2 validation includes theorem admission,
+false-theorem rejection and recovery.
+Keep ACL2's portable input consistent with the host adaptations used during
+validation: logical-world initialization rereads its sources. Rebuild that input
+after changing the adaptations; matching the upstream revision alone does not
+establish consistency.
 
 ** IEEE bit conversion
 

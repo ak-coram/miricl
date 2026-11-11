@@ -893,6 +893,7 @@
           (t (error 'reader-error)))))
 
 (defvar %debug-default-level 1)
+(defvar %safety-default-level 1)
 (defparameter %debug-declaration '(declare (optimize (debug 3))))
 
 (defun %optimize-debug-level (qualities inherited)
@@ -914,6 +915,13 @@
     (setq body (cdr body)))
   inherited)
 
+(defun %optimize-safety-level (qualities inherited)
+  ;; The shared validator accepts only ANSI optimization quality levels.
+  (%optimize-debug-level qualities 1)
+  (dolist (quality qualities inherited)
+    (when (eq (if (consp quality) (first quality) quality) 'safety)
+      (setq inherited (if (consp quality) (second quality) 3)))))
+
 (defun %debug-form-p (form)
   ;; An interpreted debug region cannot expose a containing native frame.
   ;; Select interpretation for the containing evaluation as well. Quoted data
@@ -931,7 +939,10 @@
       (unless (and (consp spec) (symbolp (car spec)) (list-length spec))
         (error 'program-error))
       (case (car spec)
-        (optimize (setq %debug-default-level (%optimize-debug-level (cdr spec) %debug-default-level)))
+        (optimize
+          (let ((debug (%optimize-debug-level (cdr spec) %debug-default-level))
+                (safety (%optimize-safety-level (cdr spec) %safety-default-level)))
+            (setq %debug-default-level debug %safety-default-level safety)))
         (special
           (let ((names (cdr spec)))
             (%%while names (%%proclaim-variable (pop names)))))

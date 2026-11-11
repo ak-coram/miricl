@@ -64,6 +64,7 @@
                (:file "fasl-format")
                (:file "whole-program")
                (:file "hir")
+               (:file "hir-types")
                (:file "wasm-compiler")
                (:file "wasm-optimizer")
                (:file "wasm-disassembly")

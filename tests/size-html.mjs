@@ -11,13 +11,15 @@ import {collectImageSizes, renderImageSizes} from '../scripts/build-size-html.mj
 
 function checkMeasurements(report, directory) {
   const initializedAcl2 = fs.existsSync(path.join(directory, 'build/acl2/site/acl2-image.wasm.gz'));
+  const initializedCoalton = fs.existsSync(path.join(directory, 'build/coalton/site/coalton-image.wasm.gz'));
   assert.deepEqual(report.artifacts.map(artifact => artifact.file),
     ['miricl.wasm', 'miricl-interpreter.wasm', 'miricl-precompiled.wasm', 'miricl-repl.wasm', 'miricl-asdf.wasm', 'miricl.html', 'todo.html',
       'game-of-life/', 'game-of-life/build/game-of-life.wasm', 'maxima/', 'build/maxima/site/maxima.core', 'fricas/', 'build/fricas/site/fricas.wasm',
       ...(fs.existsSync(path.join(directory, 'build/acl2/site/build.json')) ? ['acl2/', ...(initializedAcl2
         ? ['build/acl2/site/acl2-image.wasm.gz'] : ['build/acl2/site/acl2.wasm', 'build/acl2/site/filesystem.bin.gz'])] : []),
       ...(fs.existsSync(path.join(directory, 'build/acl2/books/manifest.json')) ? ['build/acl2/books/filesystem.bin.gz'] : []),
-      ...(fs.existsSync(path.join(directory, 'build/coalton/site/build.json')) ? ['coalton/', 'build/coalton/site/coalton.wasm'] : [])]);
+      ...(fs.existsSync(path.join(directory, 'build/coalton/site/build.json')) ? ['coalton/',
+        `build/coalton/site/${initializedCoalton ? 'coalton-image.wasm.gz' : 'coalton.wasm'}`] : [])]);
   for (const artifact of report.artifacts) {
     if (artifact.kind === 'application') {
       assert.deepEqual(artifact.files.map(file => file.file), artifact.file === 'game-of-life/'
@@ -28,8 +30,8 @@ function checkMeasurements(report, directory) {
           : artifact.file === 'acl2/' ? ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
             'miricl.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs',
             ...(initializedAcl2 ? ['acl2-image.wasm.gz'] : ['miricl.wasm', 'acl2.wasm', 'filesystem.bin.gz'])].map(file => `build/acl2/site/${file}`)
-          : artifact.file === 'coalton/' ? ['index.html', 'app.mjs', 'worker.mjs', 'coalton.mjs',
-            'miricl.mjs', 'miricl.wasm', 'coalton.wasm'].map(file => `build/coalton/site/${file}`)
+          : artifact.file === 'coalton/' ? ['index.html', 'client.mjs', 'repl-debugger.mjs', 'app.mjs', 'worker.mjs', 'examples.mjs', 'session-store.mjs', 'coalton.mjs',
+            'miricl.mjs', 'build.json', ...(initializedCoalton ? ['coalton-image.wasm.gz'] : ['miricl.wasm', 'coalton.wasm'])].map(file => `build/coalton/site/${file}`)
           : ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs', 'miricl.mjs', 'fricas.mjs',
             'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`));
       const sizes = {rawBytes: 0, gzipBytes: 0, brotliBytes: 0};
@@ -131,7 +133,7 @@ try {
   fs.writeFileSync(path.join(directory, 'build/acl2/books/manifest.json'), '{}');
   fs.writeFileSync(path.join(directory, 'build/acl2/books/filesystem.bin.gz'), gzipSync('book sources'));
   fs.mkdirSync(path.join(directory, 'build/coalton/site'), {recursive: true});
-  for (const file of ['index.html', 'app.mjs', 'worker.mjs', 'coalton.mjs', 'miricl.mjs', 'build.json'])
+  for (const file of ['index.html', 'client.mjs', 'repl-debugger.mjs', 'app.mjs', 'worker.mjs', 'examples.mjs', 'session-store.mjs', 'coalton.mjs', 'miricl.mjs', 'build.json'])
     fs.writeFileSync(path.join(directory, 'build/coalton/site', file), 'Coalton fixture λ🙂'.repeat(20));
   for (const file of ['miricl.wasm', 'coalton.wasm'])
     fs.writeFileSync(path.join(directory, 'build/coalton/site', file), repeatedSections);
@@ -148,6 +150,15 @@ try {
     repeatedSections.length);
   assert.match(renderImageSizes(restoredReport), /<a href="acl2\/">ACL2<\/a>/);
   fs.rmSync(checkpoint);
+  const coaltonCheckpoint = path.join(directory, 'build/coalton/site/coalton-image.wasm.gz');
+  fs.writeFileSync(coaltonCheckpoint, gzipSync(repeatedSections));
+  fs.writeFileSync(path.join(directory, 'build/coalton/site/build.json'), JSON.stringify({snapshotBytes: repeatedSections.length}));
+  const restoredCoalton = collectImageSizes(directory);
+  checkMeasurements(restoredCoalton, directory);
+  assert.equal(restoredCoalton.artifacts.find(artifact => artifact.file.endsWith('/coalton-image.wasm.gz')).uncompressedBytes,
+    repeatedSections.length);
+  assert.doesNotThrow(() => renderImageSizes(restoredCoalton));
+  fs.rmSync(coaltonCheckpoint);
   const withoutAcl2 = {...report, artifacts: report.artifacts.filter(a => a.file !== 'acl2/' && !a.file.startsWith('build/acl2/'))};
   assert.doesNotThrow(() => renderImageSizes(withoutAcl2), 'Existing CI builds can omit the development ACL2 artifacts');
   assert.doesNotThrow(() => renderImageSizes({...withoutAcl2,

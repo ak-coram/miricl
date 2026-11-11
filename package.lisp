@@ -44,8 +44,9 @@
   (:use #:cl)
   (:export #:analyze-file #:shake-file #:optimize-system
            #:*compile-evaluations*
-           #:compile-to-hir #:verify-hir #:hir-unit #:hir-unit-functions
+           #:compile-to-hir #:verify-hir #:infer-hir-types #:hir-unit #:hir-unit-functions
            #:emit-native-module #:compile-native #:compile-native-bundle
+           #:compile-module-to-hir #:compile-native-module
            #:ir-program #:ir-program-nodes #:ir-program-units
            #:ir-node #:ir-node-kind #:ir-node-name #:ir-node-source
            #:ir-node-references #:ir-node-reason #:ir-node-retained-p))

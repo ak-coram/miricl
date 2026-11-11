@@ -17,6 +17,10 @@ interpreter_only := build_dir / 'miricl-interpreter.wasm'
 default:
     @just --list
 
+# Fetch and check out the latest upstream revision of every submodule, recursively.
+update-submodules:
+    git submodule update --init --recursive --remote
+
 # Build the runtime, compiler-free interpreter, precompiled compiler and WASI REPL.
 build:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-wasm.lisp {{ quote(build_dir) }}
@@ -24,6 +28,11 @@ build:
 # Report raw, gzip, Brotli, and per-section sizes for all runtime images.
 size: build
     {{ quote(node) }} scripts/wasm-size.mjs {{ quote(interpreter) }} {{ quote(interpreter_only) }} {{ quote(precompiled) }} {{ quote(wasi_repl) }}
+
+# Benchmark the native compiler recompiling its own fixed source corpus.
+benchmark-self-compiler output='build/compiler-benchmark': build
+    {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'corpus') }} {{ quote(interpreter) }} --extract
+    {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'native') }} {{ quote(precompiled) }} {{ quote(output / 'corpus/sources.lisp') }}
 
 # Build a self-contained browser REPL (miricl.html), including the interpreter.
 build-html:
@@ -57,11 +66,14 @@ prepare-coalton:
 build-coalton: build build-asdf prepare-coalton
     {{ quote(node) }} scripts/probe-coalton.mjs {{ quote(precompiled) }} build/coalton/compile.json
     {{ quote(node) }} scripts/optimize-coalton.mjs {{ quote(precompiled) }}
-    {{ quote(node) }} scripts/build-coalton.mjs {{ quote(precompiled) }}
+    {{ quote(node) }} scripts/snapshot-coalton.mjs {{ quote(precompiled) }} build/coalton/coalton.wasm build/coalton/coalton-image.wasm
+    {{ quote(node) }} scripts/build-coalton.mjs {{ quote(precompiled) }} build/coalton/coalton.wasm build/coalton/site --initialized-image build/coalton/coalton-image.wasm build/coalton/coalton-image.wasm.json
 
 test-coalton:
+    {{ quote(node) }} tests/coalton-examples.mjs
     {{ quote(node) }} tests/coalton-host.mjs {{ quote(precompiled) }}
-    {{ quote(node) }} tests/coalton-session.mjs {{ quote(precompiled) }} build/coalton/coalton.wasm
+    {{ quote(node) }} tests/coalton-session.mjs build/coalton/coalton-image.wasm --snapshot
+    {{ quote(node) }} tests/coalton-repl-session.mjs build/coalton/coalton-image.wasm --snapshot
 
 # Build raw, gzip and Brotli size reports for the Wasm images and HTML pages.
 build-sizes: build build-asdf build-html build-todo build-game-of-life build-maxima build-fricas

@@ -110,7 +110,7 @@ try {
   for (const example of examples) {
     await js(`document.querySelector('[data-example="${example.id}"]').click()`);
     assert.equal(await js('document.querySelector("#source").value'), example.code);
-    assert.ok(await js('document.querySelector("#example-note a").getAttribute("href").startsWith("https://github.com/fricas/fricas/blob/")'));
+    assert.equal(await js('document.querySelector("#example-note a").href'), 'https://fricas.github.io/');
     const output = await run(example.code, new RegExp(example.expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     for (const text of example.checks ?? []) assert.ok(output.includes(text), `${example.id}: missing ${text}`);
     if (example.pattern) assert.match(output, new RegExp(example.pattern));

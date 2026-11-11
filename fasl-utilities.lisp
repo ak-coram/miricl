@@ -2,6 +2,7 @@
 (in-package :miricl-compiler)
 
 (defun compiler-primitive (operation &rest arguments)
+  (declare (type (unsigned-byte 32) operation) (type list arguments))
   ;; This is a private bootstrap primitive, deliberately not interned in the
   ;; guest MIRICL package. Its identity is carried by the bootstrap/FASL ABI.
   (when (fboundp 'miricl::%%compile)
@@ -9,6 +10,7 @@
   (values nil nil))
 
 (defun utf8-bytes (text)
+  (declare (type string text))
   (multiple-value-bind (bytes native) (compiler-primitive 12 text)
     (when native (return-from utf8-bytes bytes)))
   (let ((bytes (make-array 128 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
@@ -27,6 +29,8 @@
     bytes))
 
 (defun payload-text (stream end)
+  ;; END is an absolute file position, including preceding bundle units.
+  (declare (type stream stream) (type (integer 0 *) end))
   (multiple-value-bind (text native) (compiler-primitive 14 stream (file-position stream) end)
     (when native (return-from payload-text text)))
   (let ((text (make-array 128 :element-type 'character :adjustable t :fill-pointer 0)))
@@ -47,6 +51,7 @@
     text))
 
 (defun read-uleb (stream)
+  (declare (type stream stream))
   (loop with value = 0 for shift from 0 below 35 by 7 for byte = (read-byte stream) do
     (when (and (= shift 28) (> byte 15)) (error "Invalid FASL length."))
     (setq value (logior value (ash (logand byte 127) shift)))
@@ -54,5 +59,6 @@
   (error "Invalid FASL length."))
 
 (defun write-uleb (number stream)
+  (declare (type (unsigned-byte 32) number) (type stream stream))
   (loop (write-byte (logior (logand number 127) (if (> number 127) 128 0)) stream)
         (setq number (ash number -7)) (when (zerop number) (return))))

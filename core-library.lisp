@@ -23,6 +23,11 @@
       (setf (car *image-toplevel*) previous))))
 
 (defun %restart-image ()
+  ;; Scheduler state belongs to this process. INITIALIZE made its public main
+  ;; thread before restoring the saved heap; its class and slot keys therefore
+  ;; refer to the bootstrap heap. Rebuild it against the restored definitions.
+  (miricl-threads::%thread 2 (miricl-threads::%thread 0)
+    (miricl-threads::%new-thread (miricl-threads::%thread 0) "Main thread"))
   (let ((function (car *image-toplevel*)))
     (setf (car *image-toplevel*) nil)
     (when function (funcall function)))

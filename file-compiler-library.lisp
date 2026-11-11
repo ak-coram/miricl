@@ -20,6 +20,8 @@
 (define-condition %fasl-not-created (error) ())
 
 (defun %fasl-reference (object)
+  (declare (type hash-table %fasl-seen) (type vector %fasl-records)
+           (type list %fasl-work))
   (multiple-value-bind (index found) (gethash object %fasl-seen)
     (when found (return-from %fasl-reference index)))
   (let ((index (vector-push-extend object %fasl-records)))

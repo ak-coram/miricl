@@ -9,43 +9,52 @@
 ;; These compiler-private records use simple vectors. Macro accessors expand
 ;; into SVREF in both hosts, including SETF places, so the self-compiled pass
 ;; never invokes interpreted DEFSTRUCT accessor/constructor closures per op.
-(defmacro native-op-code (op) (list 'svref op 0))
-(defmacro native-op-argument (op) (list 'svref op 1))
-(defmacro native-op-start (op) (list 'svref op 2))
-(defmacro native-op-end (op) (list 'svref op 3))
-(defmacro native-op-successors (op) (list 'svref op 4))
-(defmacro native-op-live-in (op) (list 'svref op 5))
-(defmacro native-op-live-out (op) (list 'svref op 6))
-(defmacro native-op-uses (op) (list 'svref op 7))
-(defmacro native-op-definitions (op) (list 'svref op 8))
-(defmacro native-flow-start (block) (list 'svref block 0))
-(defmacro native-flow-end (block) (list 'svref block 1))
-(defmacro native-flow-successors (block) (list 'svref block 2))
-(defmacro native-flow-uses (block) (list 'svref block 3))
-(defmacro native-flow-definitions (block) (list 'svref block 4))
-(defmacro native-flow-in (block) (list 'svref block 5))
-(defmacro native-flow-out (block) (list 'svref block 6))
+(defmacro native-op-code (op) (list 'svref (list 'the 'simple-vector op) 0))
+(defmacro native-op-argument (op) (list 'svref (list 'the 'simple-vector op) 1))
+(defmacro native-op-start (op) (list 'svref (list 'the 'simple-vector op) 2))
+(defmacro native-op-end (op) (list 'svref (list 'the 'simple-vector op) 3))
+(defmacro native-op-successors (op) (list 'svref (list 'the 'simple-vector op) 4))
+(defmacro native-op-live-in (op) (list 'svref (list 'the 'simple-vector op) 5))
+(defmacro native-op-live-out (op) (list 'svref (list 'the 'simple-vector op) 6))
+(defmacro native-op-uses (op) (list 'svref (list 'the 'simple-vector op) 7))
+(defmacro native-op-definitions (op) (list 'svref (list 'the 'simple-vector op) 8))
+(defmacro native-flow-start (block) (list 'svref (list 'the 'simple-vector block) 0))
+(defmacro native-flow-end (block) (list 'svref (list 'the 'simple-vector block) 1))
+(defmacro native-flow-successors (block) (list 'svref (list 'the 'simple-vector block) 2))
+(defmacro native-flow-uses (block) (list 'svref (list 'the 'simple-vector block) 3))
+(defmacro native-flow-definitions (block) (list 'svref (list 'the 'simple-vector block) 4))
+(defmacro native-flow-in (block) (list 'svref (list 'the 'simple-vector block) 5))
+(defmacro native-flow-out (block) (list 'svref (list 'the 'simple-vector block) 6))
 
 (defun make-native-op (code argument start end)
+  (declare (type (or null (unsigned-byte 8)) code) (type (unsigned-byte 32) start end))
   (vector code argument start end nil 0 0 0 0))
-(defun make-native-flow (start) (vector start nil nil 0 0 0 0))
+(defun make-native-flow (start)
+  (declare (type (unsigned-byte 32) start))
+  (vector start nil nil 0 0 0 0))
 
 (defun native-read-uleb (bytes position)
+  (declare (type vector bytes) (type (unsigned-byte 32) position))
   ;; Most operands are a single byte, including opcodes, small indices and
   ;; block types. Avoid entering the general shift/accumulate loop for them.
   (let ((byte (aref bytes position)))
+    (declare (type (unsigned-byte 8) byte))
     (when (< byte 128) (return-from native-read-uleb (values byte (1+ position)))))
   (let ((value 0) (shift 0))
+    (declare (type (integer 0 *) value) (type fixnum shift))
     (loop for byte = (aref bytes position) do
       (incf position) (setq value (logior value (ash (logand byte 127) shift)))
       (when (< byte 128) (return (values value position))) (incf shift 7))))
 
 (defun native-read-sleb (bytes position)
+  (declare (type vector bytes) (type (unsigned-byte 32) position))
   (let ((byte (aref bytes position)))
+    (declare (type (unsigned-byte 8) byte))
     (when (< byte 128)
       (return-from native-read-sleb
         (values (if (< byte 64) byte (- byte 128)) (1+ position)))))
   (let ((value 0) (shift 0))
+    (declare (type (integer 0 *) value) (type fixnum shift))
     (loop for byte = (aref bytes position) do
       (incf position) (setq value (logior value (ash (logand byte 127) shift)))
       (incf shift 7)
@@ -53,7 +62,9 @@
         (return (values (if (logbitp 6 byte) (- value (ash 1 shift)) value) position))))))
 
 (defun native-read-ops (bytes &optional references-only)
+  (declare (type vector bytes))
   (let ((position 0) (offset 2) (locals 0) (ops nil))
+    (declare (type (unsigned-byte 32) position offset locals))
     (multiple-value-bind (groups next) (native-read-uleb bytes position)
       (setq position next)
       (dotimes (i groups)
@@ -66,6 +77,7 @@
           (incf position))))
     (loop while (< position (length bytes)) do
       (let* ((start position) (code (aref bytes position)) (argument nil))
+        (declare (type (unsigned-byte 32) start) (type (unsigned-byte 8) code))
         (incf position)
         (cond
           ((member code '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x41 #xd0 #xd2))
@@ -73,6 +85,7 @@
            ;; Decode the common one-byte case here, avoiding a helper call
            ;; and multiple-value packet for nearly every instruction operand.
            (let ((byte (aref bytes position)))
+             (declare (type (unsigned-byte 8) byte))
              (if (< byte 128)
                  (progn (setq argument (if (and (= code #x41) (>= byte 64)) (- byte 128) byte))
                    (incf position))
@@ -102,21 +115,24 @@
                         (otherwise (error "Unexpected native GC instruction ~D." argument))))
              (multiple-value-bind (ignored next) (native-read-uleb bytes position)
                (declare (ignore ignored)) (setq position next))))
-          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #xac #xd1)))
+          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #xa7 #xac #xd1)))
            (error "Unexpected native instruction ~D." code)))
         (when (or (not references-only) (member code '(#x10 #x12 #xd2)))
           (push (make-native-op code argument start position) ops))))
     (values (coerce (nreverse ops) 'simple-vector) offset locals)))
 
 (defun native-op-target (depth scopes ends ops)
+  (declare (type (unsigned-byte 32) depth) (type list scopes) (type simple-vector ends ops))
   (let ((scope (nth depth scopes)))
     (when scope
       (if (= (native-op-code (aref ops scope)) #x03) (1+ scope)
           (1+ (aref ends scope))))))
 
 (defun native-control-matches (ops)
+  (declare (type simple-vector ops))
   (let* ((size (length ops)) (ends (make-array size :initial-element nil))
          (elses (make-array size :initial-element nil)) (scopes nil))
+    (declare (type (unsigned-byte 32) size) (type simple-vector ends elses) (type list scopes))
     (dotimes (i size)
       (case (native-op-code (aref ops i))
         ((#x02 #x03 #x04 #x1f) (push i scopes))
@@ -125,8 +141,11 @@
     (values ends elses)))
 
 (defun native-op-flow (ops)
+  (declare (type simple-vector ops))
   (multiple-value-bind (ends elses) (native-control-matches ops)
+   (declare (type simple-vector ends elses))
    (let ((size (length ops)) (scopes nil) (exceptions nil))
+    (declare (type (unsigned-byte 32) size) (type list scopes))
     (dotimes (i size)
       (let* ((op (aref ops i)) (code (native-op-code op)) (next (and (< (1+ i) size) (1+ i)))
              (successors (and next (list next))))
@@ -150,10 +169,13 @@
     exceptions)))
 
 (defun native-liveness-blocks (ops)
+  (declare (type simple-vector ops))
   ;; Stackification and coloring change local reads/writes, never CFG edges.
   ;; Build the block topology once and reuse it across all liveness passes.
   (let* ((size (length ops)) (leaders (make-array size :initial-element nil))
          (owners (make-array size)) (blocks nil) (block nil) (count -1))
+    (declare (type (unsigned-byte 32) size) (type simple-vector leaders owners)
+             (type (or list simple-vector) blocks) (type fixnum count))
     (setf (aref leaders 0) t)
     (dotimes (i size)
       (let ((successors (native-op-successors (aref ops i))))
@@ -174,11 +196,14 @@
     blocks))
 
 (defun native-op-liveness (ops total exceptions &optional blocks)
+  (declare (type simple-vector ops) (type (unsigned-byte 32) total)
+           (type (or null simple-vector) blocks))
   ;; Handler-bearing functions conservatively read every local at each call.
   ;; This protects landing-pad state even though exceptional edges are not
   ;; represented in the normal CFG. Those functions are not coalesced.
   (let ((all (1- (ash 1 total))) (blocks (or blocks (native-liveness-blocks ops)))
         (cyclic nil) (changed t))
+    (declare (type (integer 0 *) all) (type simple-vector blocks))
     (loop for block across blocks for index from 0 do
       (when (some (lambda (next) (<= next index)) (native-flow-successors block))
         (setq cyclic t))
@@ -213,6 +238,8 @@
       (setq changed nil)
       (loop for i downfrom (1- (length blocks)) to 0 do
         (let* ((block (aref blocks i)) (out 0) (in nil))
+          (declare (type simple-vector block) (type (integer 0 *) out)
+                   (type (or null (integer 0 *)) in))
           (dolist (next (native-flow-successors block))
             (setq out (logior out (native-flow-in (aref blocks next)))))
           (setq in (logior (native-flow-uses block) (logandc2 out (native-flow-definitions block))))
@@ -221,6 +248,7 @@
             (setf (native-flow-in block) in (native-flow-out block) out)))))
     (loop for block across blocks do
       (let ((out (native-flow-out block)))
+        (declare (type (integer 0 *) out))
         (loop for i downfrom (1- (native-flow-end block)) to (native-flow-start block) do
           (let ((op (aref ops i)))
             (setf (native-op-live-out op) out)
@@ -235,6 +263,7 @@
     blocks))
 
 (defun native-op-stack (op)
+  (declare (type simple-vector op))
   ;; Values consumed/produced by the backend's instruction subset. Scopes are
   ;; barriers; no expression is moved or duplicated across a side effect.
   (let ((code (native-op-code op)))
@@ -245,7 +274,7 @@
     (case code
       ((#x20 #x41 #xd0 #xd2) (values 0 1))
       ((#x21 #x1a) (values 1 0))
-      ((#x22 #x45 #xac #xd1 #xfb) (values 1 1))
+      ((#x22 #x45 #xa7 #xac #xd1 #xfb) (values 1 1))
       ((#x46 #x48 #x4a #x4c #x4e #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e) (values 2 1))
       ((#x10 #x12) (let ((import (nth (native-op-argument op) *native-imports*)))
                (if import (values (length (second import)) (if (and (= code #x10) (third import)) 1 0))
@@ -253,10 +282,12 @@
       (otherwise (values 0 0)))))
 
 (defun native-stackify-ops (ops &optional exceptions types)
+  (declare (type simple-vector ops) (type (or null simple-vector) types))
   ;; Stack entries are NIL for real operands and an instruction index for a
   ;; store whose value could remain on the stack. Liveness ensures its matching
   ;; load is the last use; any earlier load invalidates the candidate.
   (let ((stack nil) (barriers nil) (candidates (make-hash-table :test 'eql)))
+    (declare (type list stack barriers) (type hash-table candidates))
     (dotimes (i (length ops))
       (let* ((op (aref ops i)) (code (native-op-code op)) (local (native-op-argument op))
              (store (and (eql code #x20) (gethash local candidates)))
@@ -303,12 +334,18 @@
   ops))
 
 (defun native-coalesce-ops (ops offset count exceptions &optional types)
+  (declare (type simple-vector ops) (type (unsigned-byte 32) offset count)
+           (type (or null simple-vector) types))
   (let* ((total (+ offset count)) (conflicts (make-array total :initial-element 0))
          (uses (make-array total :initial-element 0)) (mapping (make-array total :initial-element nil))
          (colors (make-array total :initial-element 0))
          (color-conflicts (make-array total :initial-element 0))
          (color-types (and types (make-array total))) (order nil) (next offset)
          (entry-live (native-op-live-in (aref ops 0))))
+    (declare (type (unsigned-byte 32) total next)
+             (type simple-vector conflicts uses mapping colors color-conflicts)
+             (type (or null simple-vector) color-types) (type list order)
+             (type (integer 0 *) entry-live))
     (dotimes (i offset) (setf (aref mapping i) i))
     (loop for op across ops do
       (when (member (native-op-code op) '(#x20 #x21 #x22))
@@ -319,6 +356,7 @@
           ;; its dense call-site cliques just to assign distinct colors below.
           (when (and (not exceptions) (member (native-op-code op) '(#x21 #x22)))
             (let* ((bit (ash 1 local)) (live (logandc2 (native-op-live-out op) bit)))
+              (declare (type (integer 0 *) bit live))
               (setf (aref conflicts local) (logior (aref conflicts local) live)))))))
     ;; Precolor parameters (and the native dispatch PC), but permit ordinary
     ;; locals to reuse dead parameter slots of the exact same type. Locals
@@ -331,6 +369,7 @@
     (dolist (local order)
       (let ((color (cond ((or exceptions (and types (eql (car (aref types local)) #x64))) next)
                          ((logbitp local entry-live) offset) (t 0))))
+        (declare (type (unsigned-byte 32) color))
         ;; Keep the directed store/live-out graph. Testing both its outgoing
         ;; neighbors and the union of a color's outgoing neighbors gives the
         ;; same symmetric interference test without expanding every live bit
@@ -358,6 +397,7 @@
             mapping)))
 
 (defun native-fold-locals (ops)
+  (declare (type simple-vector ops))
   (let ((previous nil))
     (loop for op across ops for code = (native-op-code op) do
       (when code
@@ -373,10 +413,13 @@
   ops)
 
 (defun native-i32 (value)
+  (declare (type integer value))
   (let ((bits (ldb (byte 32 0) value)))
+    (declare (type (unsigned-byte 32) bits))
     (if (logbitp 31 bits) (- bits (ash 1 32)) bits)))
 
 (defun native-fold-i32 (code left right)
+  (declare (type (unsigned-byte 8) code) (type (signed-byte 32) left right))
   ;; Deliberately exclude division, conversions and GC casts: their traps are
   ;; observable. Integer operations below have exact modular Wasm semantics.
   (native-i32
@@ -396,6 +439,7 @@
       (#x76 (ash (ldb (byte 32 0) left) (- (logand right 31)))))))
 
 (defun native-clean-scopes (ops bytes)
+  (declare (type simple-vector ops) (type vector bytes))
   ;; MergeBlocks/RemoveUnusedBrs: an untargeted void block/loop contributes no
   ;; execution or values. Retain if scopes and all exception/cast branch scopes.
   ;; Rewrite depths against the original scope stack when wrappers disappear.
@@ -408,6 +452,8 @@
          (ends (make-array size :initial-element nil))
          (used (make-array size :initial-element nil))
          (removed (make-array size :initial-element nil)) (scopes nil))
+    (declare (type (unsigned-byte 32) size) (type simple-vector codes ends used removed)
+             (type list scopes))
     (dotimes (i size)
       (let ((op (aref ops i)))
         (case (aref codes i)
@@ -426,6 +472,7 @@
               (native-op-code (aref ops (aref ends i))) nil)))
     (setq scopes nil)
     (labels ((depth (old)
+               (declare (type (unsigned-byte 32) old))
                (- old (loop for scope in scopes for level below old
                             count (aref removed scope)))))
       (dotimes (i size)
@@ -438,11 +485,14 @@
     ops))
 
 (defun native-simplify-ops (ops bytes &optional (clean-scopes t))
+  (declare (type simple-vector ops) (type vector bytes))
   ;; Precompute, Vacuum and DCE on the linear instruction stream. Replacements
   ;; preserve operand evaluation, and control frames stay until depths can be
   ;; rewritten together. No computation is speculated across a branch.
   (let* ((size (length ops)) (ends nil) (elses nil)
          (active (make-array size)) (top 0) (dead nil) (void-scopes nil))
+    (declare (type (unsigned-byte 32) size top) (type simple-vector active)
+             (type (or null simple-vector) ends elses))
     (dotimes (i size)
       (let* ((op (aref ops i)) (code (native-op-code op))
              (previous (and (plusp top) (aref ops (aref active (1- top)))))
@@ -512,8 +562,11 @@
     (remove-if-not (lambda (op) (native-op-code op)) ops)))
 
 (defun native-optimize-body (bytes &optional decoded-ops parameter-count local-count local-types)
+  (declare (type vector bytes) (type (or null simple-vector) decoded-ops local-types)
+           (type (or null (unsigned-byte 32)) parameter-count local-count))
   (multiple-value-bind (ops offset count)
       (if decoded-ops (values decoded-ops parameter-count local-count) (native-read-ops bytes))
+    (declare (type simple-vector ops) (type (unsigned-byte 32) offset count))
     (setq ops (native-simplify-ops ops bytes))
     (let ((exceptions (native-op-flow ops))
           (relocations (and *wasm-function-relocations*
@@ -567,7 +620,7 @@
                              (loop for i from (1+ (native-op-start op)) below (native-op-end op)
                                    do (wasm-byte (aref bytes i))))
                             (t
-                             (when (= code #xd2)
+                             (when (member code '(#xd2 #x10 #x12))
                                (let ((entry (assoc (1+ (native-op-start op)) relocations)))
                                  (when entry (push (list (1+ (length *wasm-bytes*)) (second entry)) new-relocations))))
                              (loop for i from (native-op-start op) below (native-op-end op)

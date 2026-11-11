@@ -646,6 +646,137 @@
   (:export-raw "native-unbox-int64")
   #@(call $scalar-integer-value (ref.as_non_null ,(native-object '(local.get $value)))))
 
+(defun native-integer-fit-wat (function)
+  ;; The computed result has wrapped i64 bits. Test whether the mathematical
+  ;; result fits before boxing it; the ordinary arithmetic path promotes.
+  (runtime-wat-sequence (ecase function
+    (+ #@(i64.ge_s (i64.and
+          (i64.xor (local.get $left) (local.get $computed))
+          (i64.xor (local.get $right) (local.get $computed))) (i64.const 0)))
+    (- #@(i64.ge_s (i64.and
+          (i64.xor (local.get $left) (local.get $right))
+          (i64.xor (local.get $left) (local.get $computed))) (i64.const 0)))
+    (* ;; Unsigned magnitudes also represent ABS(MIN-I64). Guard zero before
+       ;; division, and allow magnitude 2^63 only for a negative product.
+       #@(if (result i32) (i64.eqz (local.get $right)) (then (i32.const 1))
+         (else (i64.le_u
+           (select (i64.sub (i64.const 0) (local.get $left)) (local.get $left)
+             (i64.lt_s (local.get $left) (i64.const 0)))
+           (i64.div_u
+             (select (i64.const -9223372036854775808) (i64.const 9223372036854775807)
+               (i64.lt_s (i64.xor (local.get $left) (local.get $right)) (i64.const 0)))
+             (select (i64.sub (i64.const 0) (local.get $right)) (local.get $right)
+               (i64.lt_s (local.get $right) (i64.const 0)))))))))))
+
+(defun native-integer-entry-wat (function opcode result &optional checked)
+  (runtime-wat-sequence
+    #@(if (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
+                  (i32.const ,(1+ (runtime-symbol-id function))))
+      (then ,(runtime-wat-sequence (if checked
+        #@(block $overflow
+          (local.set $computed (,opcode (local.get $left) (local.get $right)))
+          (br_if $overflow (i32.eqz ,(native-integer-fit-wat function)))
+          (return (extern.convert_any (call ,result (local.get $computed)))))
+        #@(return (extern.convert_any (call ,result (,opcode (local.get $left) (local.get $right)))))))))
+    ;; Integer identity is EQL value identity. Only the redefined function path
+    ;; and overflow need boxed arguments; the common path stays scalar.
+    #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
+      (call $cons (call $int64 (local.get $left))
+        (call $cons (call $int64 (local.get $right)) (ref.null eq)))))))
+
+(defmacro define-native-integer-entry (name export function opcode result &optional checked)
+  `(define-runtime-function ,name (($function externref) ($left i64) ($right i64)) (externref)
+     (:export-raw ,export)
+     ,@(when checked '((:locals ($computed i64))))
+     (native-integer-entry-wat ',function ',opcode ',result ,checked)))
+
+(define-native-integer-entry $native-add-int64 "native-add-int64" + i64.add $int64)
+(define-native-integer-entry $native-sub-int64 "native-sub-int64" - i64.sub $int64)
+(define-native-integer-entry $native-mul-int64 "native-mul-int64" * i64.mul $int64)
+(define-native-integer-entry $native-add-int64-checked "native-add-int64-checked" + i64.add $int64 t)
+(define-native-integer-entry $native-sub-int64-checked "native-sub-int64-checked" - i64.sub $int64 t)
+(define-native-integer-entry $native-mul-int64-checked "native-mul-int64-checked" * i64.mul $int64 t)
+(define-native-integer-entry $native-lt-int64 "native-lt-int64" < i64.lt_s $bool)
+(define-native-integer-entry $native-gt-int64 "native-gt-int64" > i64.gt_s $bool)
+(define-native-integer-entry $native-le-int64 "native-le-int64" <= i64.le_s $bool)
+(define-native-integer-entry $native-ge-int64 "native-ge-int64" >= i64.ge_s $bool)
+(define-native-integer-entry $native-eq-int64 "native-eq-int64" = i64.eq $bool)
+(define-native-integer-entry $native-ne-int64 "native-ne-int64" /= i64.ne $bool)
+
+(define-runtime-function $native-vector-ref
+    (($function externref) ($vector externref) ($index i32) ($code i32)) (externref)
+  (:export-raw "native-vector-ref")
+  (:locals ($data (ref $objects)))
+  ;; A declaration proves the vector representation and immediate index.
+  ;; Bounds errors retain the ordinary Lisp condition and offending datum.
+  ;; Share the redefinition guard rather than repeating it at each field read.
+  #@(if (i32.ne (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (local.get $code))
+    (then (return (extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
+      (call $cons ,(native-object '(local.get $vector)) (call $cons (call $int (local.get $index)) (ref.null eq))))))))
+  #@(local.set $data (call $vector-data ,(native-object '(local.get $vector))))
+  #@(if (i32.ge_u (local.get $index) (array.len (local.get $data)))
+    (then (return (extern.convert_any (call $vector-element ,(native-object '(local.get $vector))
+      (call $int (local.get $index)) (ref.null eq) (i32.const 0))))))
+  #@(extern.convert_any (array.get $objects (local.get $data) (local.get $index))))
+
+(define-runtime-function $native-vector-ref-trusted
+    (($function externref) ($vector externref) ($index i32) ($code i32)) (externref)
+  (:export-raw "native-vector-ref-trusted")
+  ;; SAFETY 0: declarations and the access preconditions are trusted. WasmGC
+  ;; casts and intrinsic array bounds still trap rather than corrupt memory.
+  #@(if (i32.ne (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (local.get $code))
+    (then (return (extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
+      (call $cons ,(native-object '(local.get $vector)) (call $cons (call $int (local.get $index)) (ref.null eq))))))))
+  #@(extern.convert_any (array.get $objects
+    (call $vector-data ,(native-object '(local.get $vector))) (local.get $index))))
+
+(defun native-list-entry-wat (first second field)
+  (runtime-wat-sequence
+    #@(if (i32.or
+      (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
+        (i32.const ,(1+ (runtime-symbol-id first))))
+      (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
+        (i32.const ,(1+ (runtime-symbol-id second)))))
+      (then
+        (if (ref.is_null (local.get $list)) (then (return (ref.null extern))))
+        (return (extern.convert_any
+          (struct.get $obj ,field (ref.cast (ref $obj) ,(native-object '(local.get $list))))))))
+    #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
+      (call $cons ,(native-object '(local.get $list)) (ref.null eq))))))
+
+(define-runtime-function $native-vector-ref-trusted64
+    (($function externref) ($vector externref) ($index i64) ($code i32)) (externref)
+  (:export-raw "native-vector-ref-trusted64")
+  ;; Keep the entire integer for a redefined function's ordinary call. Only
+  ;; the built-in unsafe access uses Wasm's unsigned i32 array index.
+  #@(if (i32.ne (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (local.get $code))
+    (then (return (extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
+      (call $cons ,(native-object '(local.get $vector)) (call $cons (call $int64 (local.get $index)) (ref.null eq))))))))
+  #@(extern.convert_any (array.get $objects
+    (call $vector-data ,(native-object '(local.get $vector))) (i32.wrap_i64 (local.get $index)))))
+
+(define-runtime-function $native-car-list (($function externref) ($list externref)) (externref)
+  (:export-raw "native-car-list")
+  (native-list-entry-wat 'car 'first '$a))
+
+(define-runtime-function $native-vector-ref-inline (($vector externref) ($index i64)) (externref)
+  (:export-raw "native-vector-ref-inline")
+  ;; The compiler proved the representation and captured the canonical
+  ;; built-in definition under INLINE. No function or argument dispatch.
+  #@(extern.convert_any (array.get $objects
+    (call $vector-data ,(native-object '(local.get $vector))) (i32.wrap_i64 (local.get $index)))))
+
+(define-runtime-function $native-vector-set-inline
+    (($value externref) ($vector externref) ($index i64)) (externref)
+  (:export-raw "native-vector-set-inline")
+  #@(array.set $objects (call $vector-data ,(native-object '(local.get $vector)))
+    (i32.wrap_i64 (local.get $index)) ,(native-object '(local.get $value)))
+  #@(local.get $value))
+
+(define-runtime-function $native-cdr-list (($function externref) ($list externref)) (externref)
+  (:export-raw "native-cdr-list")
+  (native-list-entry-wat 'cdr 'rest '$b))
+
 (define-runtime-function $native-boolean (($value i32)) (externref)
   (:export-raw "native-boolean")
   #@(extern.convert_any (call $bool (local.get $value))))
@@ -668,6 +799,25 @@
 (define-runtime-function $native-poll () ()
   (:export-raw "native-poll")
   #@(call $thread-checkpoint))
+
+(define-runtime-function $native-tail-enter (($function externref)) (externref)
+  (:export-raw "native-tail-enter")
+  ;; Match the dispatcher's checkpoint, frame and multiple-value setup.
+  #@(call $thread-checkpoint)
+  #@(if (global.get $backtrace-depth)
+    (then (array.set $objects (global.get $backtrace-frames)
+      (i32.and (i32.sub (global.get $backtrace-depth) (i32.const 1)) (i32.const 63))
+      ,(native-object '(local.get $function)))))
+  #@(call $clear-values)
+  #@(local.get $function))
+
+(define-runtime-function $native-tail-direct (($function externref)) (i32)
+  (:export-raw "native-tail-direct")
+  #@(if (i32.or (global.get $debug-evaluating)
+                (ref.test (ref $native-debug-function) ,(native-object '(local.get $function))))
+    (then (return (i32.const 0))))
+  #@(drop (call $native-tail-enter (local.get $function)))
+  #@(i32.const 1))
 
 (define-runtime-function $native-tail-call (($function externref) ($arguments externref)) (externref)
   (:export-raw "native-tail-call")
@@ -970,6 +1120,13 @@
   ($native-cons) ($native-cell) ($native-primary) ($native-cell-read) ($native-cell-write)
   ($native-call) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1)
-  ($native-int64) ($native-unbox-int64) ($native-boolean)
-  ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-tail-call)
+  ($native-int64) ($native-unbox-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)
+  ($native-add-int64-checked) ($native-sub-int64-checked) ($native-mul-int64-checked)
+  ($native-lt-int64) ($native-gt-int64) ($native-le-int64) ($native-ge-int64) ($native-eq-int64) ($native-ne-int64)
+  ($native-vector-ref) ($native-boolean)
+  ($native-vector-ref-trusted) ($native-car-list) ($native-cdr-list)
+  ($native-vector-ref-trusted64)
+  ($native-vector-ref-inline)
+  ($native-vector-set-inline)
+  ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-tail-enter) ($native-tail-direct) ($native-tail-call)
   ($native-call0) ($native-call1) ($native-call2) ($native-call3) ($native-call4))
