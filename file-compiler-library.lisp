@@ -285,7 +285,18 @@
                    (body (if %file-top-declarations
                            (cons 'locally (append %file-top-declarations (list compiled))) compiled))
                    (body (if %compilation-complete (%file-lexical-form body nil nil nil nil) body))
-                   (root (%fasl-dump body)))
+                   (root (%fasl-dump
+                     (case miricl-compiler::*fasl-code-format*
+                       (:source body)
+                       (:hir
+                        (let ((hir (miricl-compiler:compile-to-hir (list 'lambda nil body))))
+                          (if (some (lambda (function)
+                                      (= (miricl-compiler::hir-function-debug-level function) 3))
+                                    (miricl-compiler:hir-unit-functions hir))
+                              body
+                              (list 'funcall (list 'miricl-compiler:load-hir-code
+                                (list 'quote (miricl-compiler:emit-hir-code hir)))))))
+                       (otherwise (error "Unknown FASL code format ~S." miricl-compiler::*fasl-code-format*))))))
               (push root %fasl-roots)
               (when (fboundp 'miricl-compiler::form-references)
                 (multiple-value-bind (references barriers)

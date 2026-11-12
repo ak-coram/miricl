@@ -1374,6 +1374,23 @@
       (call $natural-count (local.get $c)))))
   #@(if (i32.eq (local.get $mode) (i32.const 42))
     (then (return_call $native-simplify-ops (local.get $a) (local.get $b))))
+  #@(if (i32.eq (local.get $mode) (i32.const 45))
+    (then (return_call $hir-read-instruction-primitive (local.get $args))))
+  #@(if (i32.eq (local.get $mode) (i32.const 46))
+    (then (return_call $hir-unpack-blocks (local.get $a))))
+  #@(if (i32.or (i32.eq (local.get $mode) (i32.const 43)) (i32.eq (local.get $mode) (i32.const 44)))
+    (then
+      (if (i32.eq (call $tag (local.get $a)) (i32.const 8))
+        (then (if (i32.and (i32.eq (call $value-n (local.get $a)) (i32.const 2147483641))
+                    (i32.or (i32.eq (local.get $mode) (i32.const 44))
+                      (f64.eq (struct.get $obj $f (ref.cast (ref $obj) (local.get $a))) (f64.const 0))))
+          (then (local.set $compiled (call $apply ,(clos-library-reference 'miricl-compiler::copy-hir-code)
+                  (call $cons (struct.get $obj $a (ref.cast (ref $obj) (local.get $a))) (ref.null eq))))
+            (if (i32.eq (local.get $mode) (i32.const 44))
+              (then (return (call $cons (local.get $compiled) (call $int
+                (i32.trunc_f64_u (struct.get $obj $f (ref.cast (ref $obj) (local.get $a)))))))))
+            (return (local.get $compiled))))))
+      (return (ref.null eq))))
   #@(if (i32.eq (local.get $mode) (i32.const 35))
     (then (return_call $fasl-dependencies (local.get $a) (local.get $b))))
   #@(if (i32.eq (local.get $mode) (i32.const 36))
@@ -1483,7 +1500,12 @@
           (if (if (result i32) (i32.eq (local.get $mode) (i32.const 9))
               (then (ref.eq (local.get $compiled) (local.get $a)))
               (else (i32.and (i32.eq (call $natural-count (local.get $a)) (local.get $namespace))
-                (call $string-equal (call $symbol-name (local.get $compiled)) (local.get $b)))))
+                (i32.and
+                  ;; FASL namespace records represent uninterned bootstrap
+                  ;; identities. An interned keyword or package symbol can
+                  ;; have the same name and must not win this lookup.
+                  (ref.is_null (struct.get $obj $b (ref.cast (ref $obj) (local.get $compiled))))
+                  (call $string-equal (call $symbol-name (local.get $compiled)) (local.get $b))))))
             (then (return (if (result (ref null eq)) (i32.eq (local.get $mode) (i32.const 9))
               (then (call $int (local.get $namespace))) (else (local.get $compiled))))))
           (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))

@@ -31,6 +31,7 @@ const groups = {
     test('ansi-report-check'),
   ],
   compiler: [
+    test('hir-interpreter', precompiled, image('miricl-interpreter.wasm')),
     test('compiler-runtime', wasm), test('compiler-runtime', precompiled, '--precompiled'),
     test('compiler-input', precompiled),
     test('evaluation-policy', wasm, precompiled, repl),

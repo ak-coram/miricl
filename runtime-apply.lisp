@@ -85,6 +85,8 @@
         (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $name)))))))))
   ;; The resolved function has one immutable dispatch code.
   #@(local.set $code (struct.get $obj $n (ref.cast (ref $obj) (local.get $name))))
+  #@(if (i32.eq (local.get $code) (i32.const 2147483641))
+    (then (return_call $hir-apply (local.get $name) (local.get $args))))
   #@(if (i32.eq (local.get $code) (i32.const 2147483642))
     (then ,(wat-arity 1 2147483647)
       (return (call $formatter-call (call $car (local.get $args))
@@ -100,7 +102,7 @@
           (call $arity (call $cdr (call $car (local.get $args))) (i32.const 0) (i32.const 0))))
       (return (struct.get $obj $a (ref.cast (ref $obj) (local.get $name))))))
   #@(if (i32.and (i32.ge_u (local.get $code) (i32.const ,+clos-primitive-base+))
-                 (i32.lt_u (local.get $code) (i32.const 2147483642)))
+                 (i32.lt_u (local.get $code) (i32.const 2147483641)))
       (then (return (call $clos-primitive
         (i32.sub (local.get $code) (i32.const ,+clos-primitive-base+)) (local.get $args)))))
   #@(if (i32.eq (local.get $code) (i32.const 2147483645))

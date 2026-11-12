@@ -444,6 +444,73 @@ entries for their =LOAD-TIME-VALUE= recipes. This supports objects containing
 closures without requiring =MAKE-LOAD-FORM= methods for those computed values.
 The loader creates them when first needed and shares the resulting objects.
 
+** Executable HIR and interpreter migration
+
+=compile-hir= lowers a lambda with the compiler frontend and executes compact
+HIR in a Wasm register loop. =emit-hir-code= and =load-hir-code= expose the code
+boundary. Each function has one byte string containing its basic-block table
+and instructions. Register operands use ULEB128; instruction headers retain
+safety policy, and function references retain INLINE/NOTINLINE policy. Literal
+identity and creation order still belong to the existing FASL object graph.
+Type annotations are Common Lisp type declarations; optimization facts are
+recomputed when =compile-native-hir= reconstructs semantic HIR for native output.
+
+The Wasm block and instruction readers are shared by validation, interpreter
+execution, native compilation, and HIR disassembly. The host Lisp fallbacks are
+excluded from both browser images. Readers reject truncated data, excessive
+counts, invalid opcodes and operands; the loader privately copies executable
+containers. Before native lowering, checks also establish internal operand
+representations and SSA dominance, including lexical exit landing edges.
+
+The execution model resolves lexical accesses before execution, avoids
+boxes for immutable private bindings, specializes small calls, and
+constructs capture vectors directly. The Wasm loop reads operands
+directly from decoded register indices rather than copying every
+instruction's inputs into another object array. Primary calls with up
+to four arguments reuse the native backend's checked call
+helpers. These inspect actual function objects, preserving global
+function redefinition. Multiple-value consumers retain the full call
+path, and debugger evaluation keeps the general application path and
+its frame handling.
+
+The shared decoder has a checked fast path for one-byte operands and writes
+each attribute slot once, including clearing unused slots between instructions.
+
+Finished HIR releases lowering-only source and inlining environments. Its
+parameter metadata contains names rather than executable default forms.
+Stored code has local/capture names and declared types, with no defining lambda
+source copy. =DISASSEMBLE= prints the selected function's labeled blocks,
+registers, bindings, captures, instructions and types without requiring a
+compiler in the receiving image. Closures share code and mutable lexical cells
+through ordinary runtime objects, also supported by application snapshots.
+
+The migration is still being integrated. Debug level 3 currently keeps the
+existing evaluator path while HIR stepping, lexical scopes and frame evaluation
+are implemented. This is a temporary rollout boundary, not a permanent choice
+of FASL formats. The default evaluator and file compiler will change after
+debugger parity and size/performance validation.
+
+=node scripts/benchmark-hir-bootstrap.mjs OUTPUT IMAGE= compares cold source
+bootstrap with prepared HIR bootstrap, reporting preparation and installation
+separately. Both resulting compilers then compile the original compiler sources
+again; the resulting module is instantiated but never installed as another
+compiler generation. The benchmark checks byte-identical output. A separate
+=hir-code-only.wasm= size measurement excludes the source corpus kept solely
+for that second benchmark.
+
+=node scripts/benchmark-hir-interpreter.mjs OUTPUT IMAGE PREPARED-HIR ORIGINALS=
+measures prepared-code loading, HIR compiler bootstrap, and compilation of a
+fixed original-source corpus in fresh runtimes. =MIRICL_BENCHMARK_ROUNDS= sets
+the sample count; =--profile= records the first bootstrap's CPU profile.
+An optional =--compare IMAGE PREPARED-HIR= alternates two runtimes in AB/BA
+order, checks matching instruction and output hashes, and delays compression
+measurements until all timed samples have finished.
+Prepare the payload for its image with =benchmark-hir-bootstrap.mjs=; names
+for bootstrap-local gensyms can differ between image builds. The execution
+benchmark records an instruction hash separately from those diagnostic names,
+so a comparison can establish that it executes the same instruction corpus.
+It also checks repeatable output and never installs another compiler generation.
+
 ** Indexed FASL format
 
 Each =miricl.fasl= custom section contains one independent unit, identified by

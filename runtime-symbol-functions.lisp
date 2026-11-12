@@ -299,6 +299,12 @@
     (then (return (call $three-values (ref.null eq) (call $symbol (i32.const 1))
       (struct.get $obj $c (ref.cast (ref $obj) (local.get $function)))))))
   #@(local.set $id (call $value-n (local.get $function)))
+  #@(if (i32.eq (local.get $id) (i32.const 2147483641))
+    (then (return (call $three-values
+      (ref.null eq)
+      (call $bool (i32.ne (array.len (call $vector-data
+        (struct.get $obj $b (ref.cast (ref $obj) (local.get $function))))) (i32.const 0)))
+      (struct.get $obj $c (ref.cast (ref $obj) (local.get $function)))))))
   #@(local.set $closure (call $symbol (i32.const 1)))
   #@(if (i32.eqz (local.get $id))
     (then

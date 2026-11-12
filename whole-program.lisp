@@ -852,7 +852,15 @@ With STRIP NIL, retain every definition and compact only the representation."
           (miricl::%fasl-finish-initializations)
           (incf count)
           (when progress (funcall progress (ir-unit-source unit) count))
-          (let ((hir (compile-to-hir (list 'lambda nil form))))
+          (let ((hir
+                  (if (and (consp form) (eq (first form) 'funcall) (null (cddr form))
+                           (consp (second form)) (eq (first (second form)) 'load-hir-code)
+                           (null (cddr (second form)))
+                           (consp (second (second form)))
+                           (eq (first (second (second form))) 'quote)
+                           (null (cddr (second (second form)))))
+                      (hir-code-to-unit (second (second (second form))))
+                      (compile-to-hir (list 'lambda nil form)))))
             (push (first (hir-unit-functions hir)) entries)
             (push (hir-unit-functions hir) functions)
             (when load

@@ -121,7 +121,9 @@ try {
     p.textContent.includes('First compilation (includes compiler bootstrap):'))`, 60000);
   assert.equal(await js("document.getElementById('stop').disabled"), false,
     'The compilation progress label must reach the page while compilation is still running.');
-  await waitFor(completed, 60000);
+  // Cold self-compilation runs in an inspected worker and can exceed a minute
+  // on CI. Match the dedicated browser compiler test's bootstrap budget.
+  await waitFor(completed, 180000);
   const compilation = await output();
   assert.equal((compilation.match(/Packed Lisp code: [1-9][0-9]* bytes/g) ?? []).length, 2);
   assert.equal((compilation.match(/Wasm module: [1-9][0-9]* bytes/g) ?? []).length, 2);

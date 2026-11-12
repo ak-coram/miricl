@@ -24,6 +24,12 @@ try {
     (defun values-and-capture (x)
       (let ((next (lambda () (incf x))))
         (values (funcall next) (funcall next))))
+    ;; Application dependencies can request DEBUG 3. Native bundle emission
+    ;; must continue to accept that policy during the HIR debugger migration.
+    (defun debug-values (x)
+      (declare (optimize (debug 3)))
+      (let ((next (lambda () (incf x))))
+        (values (funcall next) (funcall next))))
     (defun constant-factory-a () (lambda () 17))
     (defun constant-factory-b () (lambda () 29))
     (defun nested-static (x) (lambda (y) (+ x y (funcall (lambda () 17)))))
@@ -64,6 +70,7 @@ try {
           'native-bundle-test::first-constant))
     (plusp (miricl-compiler::compiler-primitive 26 #'native-bundle-test::values-and-capture))
     (equal (multiple-value-list (native-bundle-test::values-and-capture 40)) '(41 42))
+    (equal (multiple-value-list (native-bundle-test::debug-values 40)) '(41 42))
     (= (funcall (native-bundle-test::constant-factory-a)) 17)
     (= (funcall (native-bundle-test::constant-factory-b)) 29)
     (let ((f (native-bundle-test::nested-static 20))) (and (= (funcall f 2) 39) (= (funcall f 3) 40)))

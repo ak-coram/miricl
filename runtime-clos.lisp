@@ -25,12 +25,12 @@
 
 (setf *clos-primitives* (append *clos-primitives* '(%%open-file %%filesystem %%pathname-metadata %%pathname-match %%make-logical-path %%host-service %%calendar %%compile %%javascript %%thread)))
 
-;; The remaining high function IDs are reserved for formatters, complements, constant macro expanders,
+;; The remaining high function IDs are reserved for HIR code, formatters, complements, constant macro expanders,
 ;; generic functions, and condition readers in $APPLY1.
 (setf *clos-primitives* (append *clos-primitives* '(%pop-arg %list-eq %%find-method %%dispatch-eql-key %nth %%debugger
-                                                 %%class-subclass-p %%instance-type-p %%restore-saved-slots)))
+                                                 %%class-subclass-p %%instance-type-p %%restore-saved-slots %%hir-function)))
 
-(assert (<= (length *clos-primitives*) (- 2147483642 +clos-primitive-base+)))
+(assert (<= (length *clos-primitives*) (- 2147483641 +clos-primitive-base+)))
 
 (defun clos-primitive-op (name) (position name *clos-primitives*))
 
@@ -38,9 +38,9 @@
 (defvar *compile-evaluations-default* nil)
 (defun read-clos-library (&optional (compiler t))
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-types.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-types.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
     unless (if compiler (equal file "interpreter-library.lisp")
-               (member file '("whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-types.lisp" "wasm-compiler.lisp"
+               (member file '("whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-types.lisp" "wasm-compiler.lisp"
                               "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp") :test #'equal)) append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let* ((*package* (find-package :miricl))
@@ -48,6 +48,20 @@
                       if (and (consp form) (eq (car form) 'in-package))
                         do (setf *package* (find-package (second form)))
                       else collect (lower-runtime-library form))))
+        (when (equal file "hir-code.lisp")
+          ;; Host Common Lisp needs portable fallbacks. Both guest images
+          ;; always have the shared Wasm readers; do not ship duplicate parsers.
+          (setf forms
+            (loop for form in forms
+              unless (member (second form) '(miricl-compiler::read-hir-code-instruction-lisp
+                                            miricl-compiler::unpack-hir-blocks-lisp))
+              collect
+                (let ((mode (cond ((eq (second form) 'miricl-compiler::read-hir-code-instruction) 45)
+                                  ((eq (second form) 'miricl-compiler::unpack-hir-blocks) 46))))
+                  (if mode
+                      (lower-runtime-library
+                        `(defun ,(second form) ,(third form) (%%compile ,mode ,@(third form))))
+                      form)))))
         (unless compiler
           (cond ((equal file "compiler-library.lisp")
                  ;; Backquote expansion is also used by the evaluator.
@@ -58,7 +72,7 @@
                    (member (second form) '(%compile-top-body %compile-top-level compile-file))) forms)))))
         ;; Establish the native package and symbol identities before DEFSTRUCT
         ;; generates accessors. Public exports are declared in PACKAGE.LISP.
-        (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-types.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "fasl-utilities.lisp" "fasl-format.lisp") :test #'equal)
+        (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-types.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp") :test #'equal)
           (let* ((package (find-package (cond ((equal file "thread-library.lisp") :miricl-threads)
                                             ((equal file "debugger-library.lisp") :miricl-debugger)
                                             ((equal file "bundle-library.lisp") :miricl-bundle)
@@ -413,6 +427,8 @@
            ($start i32) ($column i32))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%compile)))
     (then (return (call $compile-primitive (local.get $args)))))
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%hir-function)))
+    (then (return_call $hir-load (local.get $args))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%debugger)))
     (then (return (call $debug-operation (local.get $args)))))
   #@(if (i32.or

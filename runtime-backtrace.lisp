@@ -14,6 +14,8 @@
           (then (call $symbol (i32.const ,(runtime-symbol-id 'lambda))))
           (else (struct.get $obj $c (ref.cast (ref $obj) (local.get $function))))))))
       (local.set $id (call $value-n (local.get $function)))
+      (if (i32.eq (local.get $id) (i32.const 2147483641))
+        (then (return (struct.get $obj $c (ref.cast (ref $obj) (local.get $function))))))
       (if (i32.lt_u (i32.sub (local.get $id) (i32.const 1)) (i32.const ,(length *runtime-symbols*)))
         (then (return (call $symbol (i32.sub (local.get $id) (i32.const 1))))))
       (if (i32.eq (local.get $id) (i32.const 2147483645))

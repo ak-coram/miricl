@@ -1095,6 +1095,10 @@
     (unless (eq function (%%generic-info function))
       (format t "~&; Generic function ~S~%" (generic-function-name function))
       (setq function (%get function :discriminating-function)))
+    (let ((code (%%compile 44 function)))
+      (when code
+        (miricl-compiler::disassemble-hir-code (car code) (cdr code))
+        (return-from disassemble nil)))
     (multiple-value-bind (source closure name) (function-lambda-expression function)
       (let ((*print-readably* nil) (*print-circle* t)
             (*print-level* nil) (*print-length* nil))

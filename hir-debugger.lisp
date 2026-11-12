@@ -1,0 +1,77 @@
+;;;; Debugger views reconstructed from executable HIR, without source trees.
+(in-package :miricl-compiler)
+
+(defun hir-debug-value-form (function literals value)
+  ;; FUNCTION is a privately validated executable descriptor. Reconstruct only
+  ;; the requested view; never retain another executable expression graph in
+  ;; the code object. Bound both work and depth for cycles and large regions.
+  (declare (optimize (safety 3)))
+  (unless (and (typep value '(unsigned-byte 31)) (< value (svref function 1)))
+    (hir-code-error value "debug value register out of range"))
+  (let* ((names (make-array (svref function 1) :initial-element nil))
+         (kinds (make-array (svref function 1) :initial-element 0))
+         (bindings (svref (svref function 6) 0)) (captures (svref (svref function 6) 1))
+         (scratch (make-array (+ 6 (svref function 7)) :initial-element 0))
+         (budget 64) (search-budget 4096))
+    (loop for i from 0 below (length bindings) by 3 do
+      (setf (svref names (svref bindings i)) (svref bindings (1+ i))
+            (svref kinds (svref bindings i)) (svref bindings (+ i 2))))
+    (labels ((placeholder (id) (list :value id))
+             (instruction (id)
+               (loop for block across (svref function 5) do
+                 (let ((pc 0) (code (svref block 2)))
+                   (loop while (< pc (length code)) do
+                     (when (minusp (decf search-budget)) (return-from instruction nil))
+                     (setq pc (read-hir-code-instruction code pc scratch))
+                     (when (= (svref scratch 2) (1+ id))
+                       ;; Recursive reconstruction must not reuse this scratch.
+                       (return-from instruction (subseq scratch 0 (+ 6 (svref scratch 3))))))))
+               nil)
+             (cell-name (id)
+               (or (svref names id)
+                   (let ((op (instruction id)))
+                     (when (and op (= (svref op 0) 19) (< (* 2 (svref op 4)) (length captures)))
+                       (svref captures (* 2 (svref op 4)))))))
+             (walk (id depth root path)
+               (when (or (minusp (decf budget)) (zerop depth) (member id path))
+                 (return-from walk (placeholder id)))
+               (when (and (not root) (svref names id) (>= (svref kinds id) 2))
+                 (return-from walk (svref names id)))
+               (let ((path (cons id path)))
+                 (let ((op (instruction id)))
+                   (unless op (return-from walk (placeholder id)))
+                   (let* ((opcode (first (svref *hir-code-operations* (svref op 0))))
+                          (inputs (loop for i below (svref op 3) collect (svref op (+ 6 i))))
+                          (a (svref op 4)))
+                     (flet ((read-value (register) (walk register (1- depth) nil path)))
+                       (case opcode
+                         (:constant
+                          (let ((object (svref literals a)))
+                            (if (or (null object) (eq object t) (keywordp object)
+                                    (numberp object) (characterp object) (stringp object))
+                                object (list 'quote object))))
+                         (:argument
+                          (or (nth a (remove-if (lambda (p) (member p lambda-list-keywords))
+                                     (svref function 10))) (placeholder id)))
+                         (:cell-read (or (cell-name (first inputs)) (placeholder id)))
+                         (:global-read (svref literals a))
+                         ((:function-reference :function-reference-inline :function-reference-notinline)
+                          (list 'function (svref literals a)))
+                         (:capture (if (< (* a 2) (length captures)) (svref captures (* a 2)) (placeholder id)))
+                         (:primary
+                          (let ((group (walk (first inputs) (1- depth) t path)))
+                            (if (and (consp group) (eq (car group) 'values)) (second group) group)))
+                         ((:values :list) (cons (if (eq opcode :values) 'values 'list) (mapcar #'read-value inputs)))
+                         ((:call :call-primary)
+                          (let ((callee (read-value (second inputs))) (arguments (mapcar #'read-value (cddr inputs))))
+                            (if (and (consp callee) (eq (car callee) 'function))
+                                (cons (second callee) arguments) (list* 'funcall callee arguments))))
+                         (:cell-write (list 'setq (or (cell-name (first inputs)) (placeholder (first inputs)))
+                                            (read-value (second inputs))))
+                         (:global-write (list 'setq (svref literals a) (read-value (second inputs))))
+                         (:closure (list :closure a))
+                         (:truth (list 'not (list 'null (read-value (first inputs)))))
+                         (:multiple-value-call
+                          (list* 'multiple-value-call (read-value (second inputs)) (mapcar #'read-value (cddr inputs))))
+                         (otherwise (list :hir opcode id)))))))))
+      (walk value 12 t nil))))

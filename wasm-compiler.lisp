@@ -1679,6 +1679,18 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                                      (+ (length *native-imports*) index))) 'simple-vector)
           (coerce (mapcar (lambda (entry) (position entry *native-functions* :test #'eq)) entries) 'simple-vector))))))))
 
+(defun compile-native-hir (payload &key name)
+  "Compile stored HIR directly, without reconstructing or retaining source."
+  (ensure-compiler)
+  (let* ((unit (hir-code-to-unit payload)) (root (first (hir-unit-functions unit))))
+    (when name (setf (hir-function-name root) name))
+    (multiple-value-bind (bytes literals debug) (emit-native-module unit)
+      (multiple-value-bind (function native) (compiler-primitive 17 bytes literals name)
+        (unless native (error "This host cannot instantiate compiled Wasm modules."))
+        (let ((arity (native-fixed-arity root)))
+          (when arity (setq function (compiler-primitive 30 function arity))))
+        (if debug (compiler-primitive 34 function debug 0) function)))))
+
 (defun compile-native (lambda-expression &key name)
   "Compile a lambda to native Wasm using the current host's module loader."
   ;; Restrict the caller's one-use promise to this entry. Macroexpansion and
@@ -1724,6 +1736,10 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    compiler-input-summary compiler-input-fail compiler-list-length compiler-type-specifier compiler-variable-name compiler-function-name
                    compiler-lambda-list compiler-body compiler-source-form validate-hir-shapes
                    hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant
+                   hir-clear-source
+                   hir-code-error pack-hir-blocks unpack-hir-blocks copy-hir-debug-info copy-hir-parameters
+                   read-hir-code-instruction validate-hir-code copy-hir-code verify-hir-code-operands
+                   verify-hir-code-dominance hir-code-to-unit
                    hir-special-p hir-declarations hir-intersect-types hir-type-environment hir-bound-type-environment
                    native-optimization-level native-debug-level native-safety-level
                    native-canonical-builtin-code native-builtin-code emit-native-object-types wasm-literal wasm-list
@@ -1776,7 +1792,9 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    miricl::%slot-cell miricl::%cpl make-load-form-saving-slots
                    compile-native record-edges pool-record-less-p layout-records compact-unit compile-linker ensure-compiler compile-compiler
                    ;; Traverse large initializer and literal graphs natively.
-                   prepare-native-unit native-unit-records compile-native-bundle))
+                   prepare-native-unit native-unit-records compile-native-bundle
+                   hir-code-parameters hir-code-debug-info hir-code-cell-aliases hir-code-register hir-code-single-calls
+                   emit-hir-code compile-native-hir))
 
 (defvar *native-compiler-functions* (make-hash-table :test 'eq))
 (defvar *compiler-state* :cold)
@@ -1823,10 +1841,12 @@ This does not change the policy for compiling application bodies."
     (dolist (name *native-compiler-seeds*)
       (unless (gethash name *native-compiler-functions*)
         (handler-case
-            (let* ((source (let ((original (function-lambda-expression (symbol-function name))))
-                             (and original (compiler-source-policy original))))
-                   (function (if source (compile-native source :name name)
-                                 (error "Missing compiler bootstrap source for ~S." name))))
+            (let* ((code (compiler-primitive 43 (symbol-function name)))
+                   (source (unless code (let ((original (function-lambda-expression (symbol-function name))))
+                             (and original (compiler-source-policy original)))))
+                   (function (cond (code (compile-native-hir code :name name))
+                                   (source (compile-native source :name name))
+                                   (t (error "Missing compiler bootstrap code for ~S." name)))))
               (setf (symbol-function name) function (gethash name *native-compiler-functions*) t))
           (error (condition) (push (list name (princ-to-string condition)) unsupported))))
       (when (gethash name *native-compiler-functions*) (push name installed)))
