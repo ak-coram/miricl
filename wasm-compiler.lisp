@@ -448,8 +448,24 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                                (max (1+ position) (or (native-value-slot last-use output) position)))))))
             (incf position)))))
     (dolist (value (hir-function-values function))
-      (let ((alias (native-value-slot aliases value)))
-        (when alias (setf (native-value-slot locals value) (native-value-slot locals alias)))))
+      (let* ((alias (native-value-slot aliases value))
+             (local (when alias (native-value-slot locals alias))))
+        (when alias
+          (if local
+            (setf (native-value-slot locals value) local)
+            (progn
+              ;; HIR IDs need not follow definition order. Resolve the complete
+              ;; environment-alias chain before assigning a local, then compress
+              ;; that path so later resolutions do not repeat the traversal.
+              (loop repeat (length aliases)
+                    for next = (native-value-slot aliases alias)
+                    while next do (setq alias next)
+                    finally (when next (error "Circular native local aliases.")))
+              (loop for current = value then next
+                    for next = (native-value-slot aliases current)
+                    while next do
+                      (setf (native-value-slot aliases current) alias
+                            (native-value-slot locals current) (native-value-slot locals alias))))))))
     (values locals count)))
 
 (defun native-inline-constants (function blocks)
@@ -1886,6 +1902,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    ;; Traverse large initializer and literal graphs natively.
                    prepare-native-unit native-unit-records compile-native-bundle
                    hir-code-parameters hir-code-debug-info hir-code-cell-aliases hir-code-register hir-code-single-calls
+                   hir-code-scope-aliases
                    emit-hir-code compile-native-hir))
 
 (defvar *native-compiler-functions* (make-hash-table :test 'eq))

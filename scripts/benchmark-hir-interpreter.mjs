@@ -24,6 +24,7 @@ await Promise.all(variants.map(async variant => {
 }));
 const sources = await fs.readFile(sourcesPath);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const sharedPayload = variants.every(variant => hash(variant.code) === hash(variants[0].code));
 const evaluate = (vm, source) => assert.equal(vm.evaluate(`(progn ${source} (values))`).output, '');
 const timed = action => {
   const cpu = process.cpuUsage(), before = performance.now();
@@ -33,7 +34,8 @@ const timed = action => {
 };
 await fs.mkdir(output, {recursive: true});
 const samples = [];
-let moduleSha256, instructionSha256;
+let moduleSha256;
+const instructionHashes = [];
 for (let round = 0; round < rounds; round++) {
   // Alternate AB/BA to reduce drift from runtime warmup and host load. Each
   // sample still uses a fresh heap; compression runs after all timed samples.
@@ -62,8 +64,9 @@ for (let round = 0; round < rounds; round++) {
               (dotimes (i 4) (write-byte (ldb (byte 8 (* 8 i)) (length bytes)) out))
               (loop for char across bytes do (write-byte (char-code char) out))))))`);
       const instructions = hash(await vm.readFile('/instructions.bin'));
-      if (instructionSha256) assert.equal(instructions, instructionSha256);
-      instructionSha256 = instructions;
+      if (instructionHashes[variant]) assert.equal(instructions, instructionHashes[variant]);
+      if (sharedPayload && instructionHashes[0]) assert.equal(instructions, instructionHashes[0]);
+      instructionHashes[variant] = instructions;
       const stopProfile = profile && round === 0
         && await startWasmProfile(vm, image, path.join(output, `bootstrap-${variant}`));
       const bootstrap = timed(() => evaluate(vm, '(ensure-compiler)'));
@@ -89,8 +92,11 @@ for (let round = 0; round < rounds; round++) {
     } finally {vm.close();}
   }
 }
+const sameInstructions = instructionHashes.every(digest => digest === instructionHashes[0]);
+if (!sameInstructions) console.log('HIR instruction streams differ; fixed original-source output remains byte-identical.');
 const images = variants.map(({imagePath, codePath, image, code}) => ({imagePath,
   imageSha256: hash(image), codePath, codeSha256: hash(code), sizes: measureWasm(imagePath)}));
 await fs.writeFile(path.join(output, 'results.json'), JSON.stringify({
-  images, sourcesPath, sourceSha256: hash(sources), instructionSha256, samples,
+  images, sourcesPath, sourceSha256: hash(sources), instructionSha256: instructionHashes[0],
+  instructionHashes, sameInstructions, samples,
 }, null, 2) + '\n');

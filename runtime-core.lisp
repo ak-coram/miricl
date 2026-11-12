@@ -128,7 +128,8 @@
                             ,(core-field-write (core-unmut field) `(local.get ,(core-field-variable index)))))))))
 
 (defun core-image-runtime-wat ()
-  (let ((types (remove-if (lambda (type) (string-equal (car type) '$bootstrap-bytes)) *core-types*))
+  (let ((types (remove-if (lambda (type)
+                 (member (car type) '($bootstrap-bytes $hir-decoded-instruction) :test #'string-equal)) *core-types*))
         (excluded '($green-thread $thread-context $thread-scratch-block $javascript-value)))
     (runtime-wat-forms
       (append

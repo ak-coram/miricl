@@ -165,6 +165,19 @@ check('(load "literal.lisp") *literal*', `T\n${JSON.stringify(literal)}`);
 check('(load #P"library/../missing.lisp" :if-does-not-exist nil)', 'NIL');
 // List operations: identity and sharing are observable even when contents match.
 check("(list (butlast '(1 2 3 . 4)) (butlast '(1 2 3 . 4) 0))", '((1 2) (1 2 3))');
+// Counts cross immediate, boxed i64 and bignum representations without
+// changing saturation or the oversized NBUTLAST no-mutation behavior.
+check(`(every (lambda (n)
+          (let ((x (list 1 2 3)))
+            (and (null (butlast x n)) (null (nbutlast x n))
+                 (equal x '(1 2 3)))))
+        '(3 1073741823 1073741824 2147483647 2147483648
+          9223372036854775807 9223372036854775808))`, 'T');
+for (const count of ['-1', '-1073741824', '-1073741825', '-9223372036854775809', '1.0', '1/2', 'nil'])
+  check(`(handler-case (butlast '(1 2 3) ${count})
+    (type-error (c) (and (eql (type-error-datum c) ${count})
+      (not (typep (type-error-datum c) (type-error-expected-type c))))))`, 'T');
+check("(butlast '(1 2 3) 1)", '(1 2)');
 check(`(let* ((x (list 1 2 3)) (last (cddr x)) (tail (list 4 5))
                (result (nreconc x tail)))
          (list (eq result last) (eq (cdddr result) tail) result))`, '(T T (3 2 1 4 5))');

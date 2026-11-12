@@ -52,15 +52,22 @@
              (when *binary-last-string*
                (loop while (and (< prefix (length value)) (< prefix (length *binary-last-string*))
                                 (char= (char value prefix) (char *binary-last-string* prefix))) do (incf prefix)))
-             (let ((prefix-bytes (length (utf8-bytes (subseq value 0 prefix)))))
-               (if (and (plusp prefix) (> prefix-bytes (+ (uleb-size (1- index)) (uleb-size prefix))))
+             (let* ((prefix-bytes (length (utf8-bytes (subseq value 0 prefix))))
+                    (prefix-header (+ (uleb-size (1- index)) (uleb-size prefix)))
+                    (suffix-bytes (- (length bytes) prefix-bytes))
+                    (latin1 (and (> (length bytes) (length value))
+                      (every (lambda (character) (< (char-code character) 256)) value)))
+                    (use-prefix (and (plusp prefix) (> prefix-bytes prefix-header)
+                      (or (not latin1)
+                          (< (+ prefix-header (uleb-size suffix-bytes) suffix-bytes)
+                             (+ (uleb-size (length value)) (length value)))))))
+               (if use-prefix
                    (progn (write-byte 9 stream) (write-uleb (1- index) stream) (write-uleb prefix stream)
                      (write-uleb (- (length bytes) prefix-bytes) stream) (write-sequence bytes stream :start prefix-bytes))
                    ;; Byte-valued strings include native modules. Preserve
                    ;; their characters directly instead of expanding every
                    ;; high byte into two UTF-8 bytes.
-                   (if (and (> (length bytes) (length value))
-                            (every (lambda (character) (< (char-code character) 256)) value))
+                   (if latin1
                        (progn (write-byte 11 stream) (write-uleb (length value) stream)
                          (loop for character across value do (write-byte (char-code character) stream)))
                        (progn (write-byte 3 stream) (write-uleb (length bytes) stream) (write-sequence bytes stream)))))

@@ -65,7 +65,7 @@
     (i32)
   #@(if (ref.is_null (local.get $x)) (then (return (i32.const 0))))
   #@(if (i32.ne (call $tag (local.get $x)) (i32.const 6)) (then (return (i32.const -1))))
-  #@(call $value-n (local.get $x)))
+  #@(struct.get $obj $n (ref.cast (ref $obj) (local.get $x))))
 
 (define-runtime-function $symbol
     (($id i32))

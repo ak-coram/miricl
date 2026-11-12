@@ -34,11 +34,41 @@ try {
            (= (miricl-compiler::read-hir-code-instruction-lisp code 0 host) ${bytes.length})
            (= (svref native 4) ${value}) (equalp native host)))`);
   }
-  for (const bytes of [[0, 128], [0, 0, 128], [0, 0, 256], [0, 0, 255, 255, 255, 255, 8]]) {
+  for (const bytes of [[0, 128], [0, 0, 128], [0, 0, 256], [0, 0, 255, 255, 255, 255, 8],
+    [16, 0, 128, 1], [16, 0, 0, 128], [16, 0, 0, 256]]) {
     check(`(handler-case
       (progn (miricl-compiler::read-hir-code-instruction
         (map 'string #'code-char '(${bytes.join(' ')})) 0 (make-array 8)) nil)
       (program-error () t))`);
+  }
+  // Variable-arity operations retain their minimum and maximum checks.
+  for (const bytes of [[18, 0, 1, 0], [30, 2, 0, 1, 0]]) {
+    for (const reader of ['read-hir-code-instruction', 'read-hir-code-instruction-lisp']) {
+      check(`(handler-case (progn (miricl-compiler::${reader}
+          (map 'string #'code-char '(${bytes.join(' ')})) 0 (make-array 16)) nil)
+        (program-error () t))`);
+    }
+  }
+  // Metadata handoff retains unsigned destination+1 and clears absent fields.
+  for (const destination of [127, 128, 0x7fffffff]) {
+    const bytes = [0, ...word(destination), 0];
+    check(`(let ((code (map 'string #'code-char '(${bytes.join(' ')})))
+                 (native (make-array 8 :initial-element 99)) (host (make-array 8 :initial-element 99)))
+      (and (= (miricl-compiler::read-hir-code-instruction code 0 native)
+              (miricl-compiler::read-hir-code-instruction-lisp code 0 host))
+           (= (svref native 2) ${destination + 1}) (equalp native host)))`);
+  }
+  // A previously enlarged internal buffer must not hide a small caller buffer.
+  for (const [bytes, size] of [...Array.from({length: 6}, (_, size) => [[0, 0, 0], size]),
+    [[10, 0, 2, 0, 1], 7]]) {
+    check(`(let ((scratch (make-array ${size} :initial-element 99)))
+      (miricl-compiler::read-hir-code-instruction (map 'string #'code-char '(0 0 7)) 0 (make-array 64))
+      (and (handler-case (progn (miricl-compiler::read-hir-code-instruction
+              (map 'string #'code-char '(${bytes.join(' ')})) 0 scratch) nil)
+             (program-error () t))
+           (every (lambda (value) (= value 99)) scratch)
+           (= (miricl-compiler::read-hir-code-instruction
+                (map 'string #'code-char '(0 0 7)) 0 (make-array 8)) 3)))`);
   }
   check(`(let ((scratch (make-array 8)))
     (= (miricl-compiler::read-hir-code-instruction (map 'string #'code-char '(0 0 7)) 0 scratch) 3))`);
@@ -63,14 +93,15 @@ try {
                       (expected (read-hir-code-instruction-lisp code pc host)))
                   (unless (and (= next expected) (equalp native host)) (return-from same-hir-readers-p nil))
                   (setq pc next))) t))))))
-    (defun hir-wire-operations (source)
+    (defun hir-wire-operations (source &optional raw)
       (let ((p (validate-hir-code (emit-hir-code (compile-to-hir source)))) (result nil))
         (loop for f across (svref p 1) do
           (loop for b across (svref f 5) do
             (let ((code (svref b 2)) (pc 0) (scratch (make-array (+ 6 (svref f 7)))))
               (loop while (< pc (length code)) do
                 (setq pc (read-hir-code-instruction code pc scratch))
-                (push (first (svref *hir-code-operations* (svref scratch 0))) result)))))
+                (let ((spec (svref *hir-code-operations* (svref scratch 0))))
+                  (push (if raw spec (first spec)) result))))))
         result)) (values)
     (in-package :cl-user) (values)`);
   const cases = [
@@ -103,6 +134,20 @@ try {
     ['(lambda (fn) (funcall fn :x 7))', "(miricl-compiler:compile-hir '(lambda (&key x) (values x :extra)))"],
     ['(lambda (fn) (funcall fn 4 5))', "(miricl-compiler:compile-hir '(lambda (&rest args) (values args)))"],
     ['(lambda (fn) (let ((x (funcall fn))) (values x x)))', "#'(lambda () (values))"],
+    ['(lambda (fn) (let ((x (funcall fn 4))) (values x :outer)))',
+      "(miricl-compiler:compile-hir '(lambda (&rest args) (values args :ignored)))"],
+    ['(lambda (fn) (let ((x (funcall fn 4))) (values x :outer)))',
+      "(miricl-compiler:compile-hir '(lambda (a &optional (b (+ a 2) supplied)) (values (list a b supplied) :ignored)))"],
+    ['(lambda (fn) (let ((x (funcall fn 4 5))) (values x :outer)))',
+      "(miricl-compiler:compile-hir '(lambda (a &optional (b 7)) (values (list a b) :ignored)))"],
+    ['(lambda (fn) (let ((x (funcall fn 4 5 6))) (values x :outer)))',
+      "(miricl-compiler:compile-hir '(lambda (a &rest args) (values (list a args) :ignored)))"],
+    ['(lambda (fn) (let ((x (funcall fn 4 5 :z 7))) (values x :outer)))',
+      "(miricl-compiler:compile-hir '(lambda (a b &key z) (values (list a b z) :ignored)))"],
+    ['(lambda (fn) (let ((x (funcall fn 4 5))) (values x :outer)))',
+      "(miricl-compiler:compile-hir '(lambda (a b) (declare (ignore a b)) (values)))"],
+    ['(lambda (fn) (funcall fn) (let ((x 5)) (if x (values x 6) (values))))', "#'(lambda () (values 1 2 3))"],
+    ['(lambda (fn) (funcall fn) (values))', "#'(lambda () (values 1 2 3))"],
     ['(lambda (fn) (multiple-value-call (function list) (funcall fn)))', "#'(lambda () (values 7 :extra))"],
     ['(lambda (x) (multiple-value-call (function list) (values x 2) (values) (values 3 4)))', '1'],
     ['(lambda (x) (let ((get (lambda () x)) (put (lambda (v) (setq x v)))) (funcall put 19) (values (funcall get) x)))', '7'],
@@ -140,6 +185,29 @@ try {
   check(`(let ((ops (miricl-compiler::hir-wire-operations
                     '(lambda (x) (let ((y x)) (values y y))))))
     (and (not (member :cell-new ops)) (not (member :cell-read ops))))`);
+  check(`(handler-case (progn
+    (funcall (miricl-compiler:compile-hir '(lambda (fn) (let ((x (funcall fn 1 2))) x)))
+             (miricl-compiler:compile-hir '(lambda (x) x))) nil)
+    (program-error () t))`);
+  check(`(= (funcall (miricl-compiler:compile-hir '(lambda (x) (1+ x))) 4) 5)`);
+  check(`(equal (multiple-value-list
+    (funcall (miricl-compiler:compile-hir '(lambda (fn)
+      (multiple-value-bind (a b) (funcall fn) (values (+ a 10) (+ b 20)))))
+      (lambda ()
+        (miricl-compiler::read-hir-code-instruction
+          (map 'string #'code-char '(10 0 2 127 128 1)) 0 (make-array 8))
+        (values 7 9)))) '(17 29))`);
+  vm.evaluate(`(defparameter *hir-thread-worker* (miricl-compiler:compile-hir
+    '(lambda (bias)
+       (let ((total 0) (step (lambda (a b) (values (+ a b) :extra))))
+         (dotimes (i 40 total)
+           (incf total (funcall step bias i))
+           (miricl-threads:thread-yield)))))) (values)`);
+  assert.equal((await vm.evaluateAsync(`(let
+    ((a (miricl-threads:make-thread (lambda () (funcall *hir-thread-worker* 10))))
+     (b (miricl-threads:make-thread (lambda () (funcall *hir-thread-worker* 100)))))
+    (and (= (miricl-threads:join-thread a) 1180) (= (miricl-threads:join-thread b) 4780)))`,
+    {eof: true})).output, 'T\n', 'Nested HIR calls retain operands across thread switches');
   check(`(not (null (member :call-primary (miricl-compiler::hir-wire-operations
       '(lambda (fn) (+ 1 (funcall fn)))))))`);
   check(`(not (member :call-primary (miricl-compiler::hir-wire-operations
@@ -147,6 +215,34 @@ try {
   check(`(let ((ops (miricl-compiler::hir-wire-operations
                     '(lambda (x) (let ((f (lambda () x))) (setq x 9) (funcall f))))))
     (and (not (null (member :cell-new ops))) (not (null (member :cell-write ops)))))`);
+  // Wide register tables retain operands, scoped types and debug bindings
+  // through compact-code execution and native reconstruction.
+  const wide = `(lambda (x) (declare (type (integer 0 1000) x))
+    (block wide-outer (block wide-inner
+    (let (${Array.from({length: 140}, (_, i) => `(v${i} (+ x ${i}))`).join(' ')})
+      (list ${Array.from({length: 140}, (_, i) => `v${i}`).join(' ')}
+        ${Array.from({length: 20}, () => 'v139').join(' ')})))))`;
+  const wideExpected = vm.evaluate(`(funcall (function ${wide}) 3)`).output;
+  vm.evaluate(`(defparameter *hir-wide-payload*
+    (miricl-compiler:emit-hir-code (miricl-compiler:compile-to-hir '${wide}))) (values)`);
+  check('(> (svref (svref (svref *hir-wide-payload* 1) 0) 1) 128)');
+  assert.equal(vm.evaluate('(funcall (miricl-compiler:load-hir-code *hir-wide-payload*) 3)').output, wideExpected);
+  assert.equal(vm.evaluate('(funcall (miricl-compiler::compile-native-hir *hir-wide-payload*) 3)').output, wideExpected);
+  check(`(let ((ops (miricl-compiler::hir-wire-operations
+      '(lambda () (block outer (block inner (values 7 9)))))))
+    (and (not (member :block-enter ops)) (not (member :block-environment ops))
+         (member :checked-jump ops) t))`);
+  check(`(let ((ops (miricl-compiler::hir-wire-operations
+      '(lambda () (declare (optimize (debug 2))) (block outer (values 7 9))))))
+    (and (member :block-enter ops) (not (member :checked-jump ops)) t))`);
+  check(`(let ((unit (miricl-compiler:compile-to-hir
+      '(lambda () (block done (funcall (lambda () (return-from done (values 7 9)))))))))
+    (dolist (function (miricl-compiler::hir-unit-functions unit))
+      (dolist (identity (miricl-compiler::hir-function-captures function))
+        (when (miricl-compiler::%hir-target-p identity)
+          (setf (miricl-compiler::hir-target-captured-p identity) nil))))
+    (equal (multiple-value-list (funcall (miricl-compiler:load-hir-code
+      (miricl-compiler:emit-hir-code unit)))) '(7 9)))`);
   check(`(let* ((unit (miricl-compiler:compile-to-hir '(lambda (x) (lambda () x))))
                 (function (first (miricl-compiler:hir-unit-functions unit))))
     (dolist (binding (miricl-compiler::hir-function-bindings function))
@@ -170,14 +266,62 @@ try {
                     '(lambda (x) (declare (optimize (debug 3))) (let ((y x)) (values y y))))))
     (and (not (null (member :cell-new ops))) (not (null (member :cell-read ops)))))`);
   vm.evaluate('(defparameter *hir-effects* nil) (values)');
+  vm.evaluate('(defun hir-many-arguments (&rest args) (values args :discard)) (values)');
+  check(`(loop for n from 0 to 8 always
+    (let* ((expected (loop for i below n collect i))
+           (arguments (loop for i below n collect
+             (list 'progn (list 'push i '*hir-effects*) i)))
+           (source (list 'lambda nil (list 'list (cons 'hir-many-arguments arguments))))
+           (f (miricl-compiler:compile-hir source)))
+      (setq *hir-effects* nil)
+      (and (equal (multiple-value-list (funcall f)) (list (list expected)))
+           (equal *hir-effects* (reverse expected))
+           (some (lambda (spec) (and (eq (first spec) :call-primary)
+             (if (< n 5) (and (eql (second spec) (+ n 2)) (eql (third spec) (+ n 2)))
+               (null (third spec))))) (miricl-compiler::hir-wire-operations source t)))))`);
+  vm.evaluate('(setq *hir-effects* nil) (values)');
+  check(`(let* ((wire (miricl-compiler:emit-hir-code
+                 (miricl-compiler:compile-to-hir '(lambda (x) (values (+ x 1) (list x))))))
+                (f (miricl-compiler:load-hir-code wire))
+                (code (svref (svref (svref wire 1) 0) 5)))
+    (and (loop repeat 3 always (equal (multiple-value-list (funcall f 40)) '(41 (40))))
+         (progn (setf (char code (1- (length code))) (code-char 255))
+           (handler-case (progn (miricl-compiler:load-hir-code wire) nil)
+             (program-error (c) (plusp (length (princ-to-string c))))))
+         (equal (multiple-value-list (funcall f 40)) '(41 (40)))))`);
   vm.evaluate('(defun hir-redefined-call (x) (values (+ x 1) :old)) (values)');
   check(`(let ((f (miricl-compiler:compile-hir '(lambda (x) (list (hir-redefined-call x)))))
                (original (symbol-function 'hir-redefined-call)))
     (unwind-protect
       (and (equal (funcall f 40) '(41))
         (progn (setf (symbol-function 'hir-redefined-call) (lambda (x) (values (+ x 2) :extra)))
-          (equal (funcall f 40) '(42))))
+          (equal (funcall f 40) '(42)))
+        (progn (fmakunbound 'hir-redefined-call)
+          (handler-case (progn (funcall f 40) nil)
+            (undefined-function (c) (eq (cell-error-name c) 'hir-redefined-call)))))
       (setf (symbol-function 'hir-redefined-call) original)))`);
+  for (const backend of ['compile-hir', 'compile-native']) {
+    check(`(let* ((name (gensym "FUNCTION-REFERENCE-"))
+                   (f (miricl-compiler:${backend} (list 'lambda nil
+                     (list 'funcall (list 'function name) 40)))))
+      (unwind-protect
+        (progn (setf (symbol-function name) (lambda (x) (+ x 2)))
+          (= (funcall f) 42))
+        (fmakunbound name)))`);
+    check(`(handler-case
+      (progn (funcall (miricl-compiler:${backend} '(lambda () #'nil))) nil)
+      (undefined-function (c) (null (cell-error-name c))))`);
+    check(`(let* ((name '(setf hir-function-reference-place))
+                   (f (miricl-compiler:${backend}
+                     '(lambda (x) (funcall #'(setf hir-function-reference-place) x)))))
+      (unwind-protect
+        (and (progn (setf (fdefinition name) (lambda (x) (+ x 1))) (= (funcall f 40) 41))
+             (progn (setf (fdefinition name) (lambda (x) (+ x 2))) (= (funcall f 40) 42))
+             (progn (fmakunbound name)
+               (handler-case (progn (funcall f 40) nil)
+                 (undefined-function (c) (equal (cell-error-name c) name)))))
+        (fmakunbound name)))`);
+  }
   check(`(let ((f (miricl-compiler:compile-hir
                   '(lambda ()
                      (let ((x (progn (push :init *hir-effects*) (values 7 :discard))))
@@ -234,6 +378,8 @@ try {
   check('(hir-runtime-rejects (vector nil) (quote (0 1 0 9 1 10 2 0 31 2)))');
   check(`(let ((cycle (list 1))) (setf (cdr cycle) cycle)
     (hir-runtime-rejects (vector cycle) '(0 1 0 31 1)))`);
+  check(`(let ((cycle (list 1))) (setf (cdr cycle) cycle)
+    (hir-runtime-rejects (vector cycle) '(0 1 0 38 1 1 0)))`);
   for (const mutation of [
     '(setf (svref f 1) 2147483647)',
     '(setf (svref f 2) 999)',

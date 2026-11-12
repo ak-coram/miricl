@@ -7,8 +7,8 @@ import {createHash} from 'node:crypto';
 import {Miricl} from './miricl.mjs';
 import {measureWasm} from './wasm-size.mjs';
 
-const [output, imagePath = 'miricl.wasm', sourcesPath] = process.argv.slice(2);
-if (!output) throw new Error('Expected OUTPUT [IMAGE] [SOURCES.lisp]');
+const [output, imagePath = 'miricl.wasm', sourcesPath, nativePath] = process.argv.slice(2);
+if (!output) throw new Error('Expected OUTPUT [IMAGE] [SOURCES.lisp] [PRECOMPILED-IMAGE]');
 await fs.mkdir(output, {recursive: true});
 const image = await fs.readFile(imagePath);
 const originals = sourcesPath && await fs.readFile(sourcesPath);
@@ -42,17 +42,43 @@ const compileOriginals = async vm => {
   assert.ok(WebAssembly.validate(bytes));
   return {...measurement, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex')};
 };
-const preparation = await Miricl.instantiate(image);
-let code, codeOnly, sourceBootstrap, sourceOriginals, hirOriginals, prepare;
+let preparation = await Miricl.instantiate(image);
+let code, codeOnly, sourceBootstrap, sourceOriginals, hirOriginals, prepare, sourceCapture, preparationImageSha256;
 try {
   preparation.evaluate('(in-package :miricl-compiler) (values)');
   evaluate(preparation, `(setq *compile-evaluations* nil)
     (defparameter *hir-bootstrap-sources*
       (mapcar (lambda (name) (list name (function-lambda-expression (symbol-function name)))) *native-compiler-seeds*))`);
+  if (nativePath) {
+    // Capture the current compiler's source with the ordinary object-graph
+    // codec, then prepare it with the already compiled compiler. This avoids
+    // repeating cold source bootstrap solely to construct a benchmark input.
+    sourceCapture = timed(() => evaluate(preparation, `(progv (mapcar (lambda (name) (compiler-primitive 10 1 name))
+        '("%FASL-RECORDS" "%FASL-SEEN" "%FILE-LOAD-VALUES"))
+        (list (make-array 32 :adjustable t :fill-pointer 0) (make-hash-table :test 'eq) nil)
+      (let ((root (funcall (symbol-function (compiler-primitive 10 1 "%FASL-DUMP"))
+                    (list 'defparameter '*hir-bootstrap-sources* (list 'quote *hir-bootstrap-sources*)))))
+        (funcall (symbol-function (compiler-primitive 10 1 "%FASL-WRITE"))
+          "/kernel-sources.wasm" (list root) (symbol-value (compiler-primitive 10 1 "%FASL-RECORDS")))))`));
+    delete sourceCapture.result;
+    const kernels = await preparation.readFile('/kernel-sources.wasm');
+    preparation.close();
+    const nativeImage = await fs.readFile(nativePath);
+    preparationImageSha256 = createHash('sha256').update(nativeImage).digest('hex');
+    preparation = await Miricl.instantiate(nativeImage);
+    preparation.evaluate('(in-package :miricl-compiler) (values)');
+    evaluate(preparation, '(setq *compile-evaluations* nil)');
+    preparation.mountFile('/kernel-sources.wasm', kernels);
+    evaluate(preparation, '(load "/kernel-sources.wasm" :verbose nil)');
+    assert.equal(preparation.evaluate('(eq *compiler-state* :ready)').output, 'T\n');
+    console.log(`HIR preparation uses ${nativePath}; cold source bootstrap skipped`);
+    sourceBootstrap = null;
+  } else {
+    sourceBootstrap = timed(() => evaluate(preparation, '(ensure-compiler)'));
+    delete sourceBootstrap.result;
+    console.log(`Source bootstrap: ${sourceBootstrap.wallMs.toFixed(0)} ms`);
+  }
   prepareOriginals(preparation);
-  sourceBootstrap = timed(() => evaluate(preparation, '(ensure-compiler)'));
-  delete sourceBootstrap.result;
-  console.log(`Source bootstrap: ${sourceBootstrap.wallMs.toFixed(0)} ms`);
   sourceOriginals = await compileOriginals(preparation);
   prepare = timed(() => evaluate(preparation, `
     (progv (mapcar (lambda (name) (compiler-primitive 10 1 name))
@@ -106,7 +132,8 @@ try {
   console.log(`HIR bootstrap: ${hirBootstrap.wallMs.toFixed(0)} ms; install ${install.wallMs.toFixed(0)} ms`);
 } finally {vm.close();}
 const result = {image: measureWasm(imagePath), imageSha256: createHash('sha256').update(image).digest('hex'),
-  sourcesPath, sourceSha256: originals && createHash('sha256').update(originals).digest('hex'),
+  sourcesPath, preparationImagePath: nativePath, preparationImageSha256, sourceCapture,
+  sourceSha256: originals && createHash('sha256').update(originals).digest('hex'),
   sourceBootstrap, sourceOriginals, prepare, install, hirBootstrap, hirOriginals, payloadBytes: code.length,
   payloadSizes: measureWasm(path.join(output, 'hir-bootstrap.wasm'))};
 result.codeOnlySizes = measureWasm(path.join(output, 'hir-code-only.wasm'));

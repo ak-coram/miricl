@@ -84,6 +84,53 @@ try {
       (setf (symbol-function 'miricl-compiler::compiler-primitive) native)))`);
   assert.deepEqual(await vm.readFile('/spines-portable.wasm'), spines);
   check(`(progn
+    (defparameter *latin-prefix-values* (vector
+      (concatenate 'string "HEAD" (make-string 512 :initial-element (code-char 200)))
+      (concatenate 'string "HEAD" (make-string 512 :initial-element (code-char 201)))
+      (concatenate 'string (make-string 500 :initial-element (code-char 200)) "A")
+      (concatenate 'string (make-string 500 :initial-element (code-char 200)) "B")
+      (concatenate 'string "abc" (string (code-char 200)))
+      (concatenate 'string "abc" (string (code-char 201)))))
+    (with-open-file (out "/latin-prefix.bin" :direction :output :element-type '(unsigned-byte 8))
+      (miricl-compiler::write-binary-chunk *latin-prefix-values* out))
+    (with-open-file (in "/latin-prefix.bin" :element-type '(unsigned-byte 8))
+      (equalp (miricl-compiler::read-binary-chunk in 0 (file-length in)) *latin-prefix-values*)))`);
+  const latinPrefix = await vm.readFile('/latin-prefix.bin');
+  assert.ok(latinPrefix.length < 1600,
+    `Short shared prefixes must not force large Latin-1 suffixes through UTF-8: ${latinPrefix.length}`);
+  check(`(let ((native (symbol-function 'miricl-compiler::compiler-primitive)))
+    (unwind-protect
+      (progn (setf (symbol-function 'miricl-compiler::compiler-primitive)
+               (lambda (&rest args) (declare (ignore args)) (values nil nil)))
+        (with-open-file (in "/latin-prefix.bin" :element-type '(unsigned-byte 8))
+          (unless (equalp (miricl-compiler::read-binary-chunk in 0 (file-length in)) *latin-prefix-values*)
+            (error "Portable Latin-1 prefix mismatch.")))
+        (with-open-file (out "/latin-prefix-portable.bin" :direction :output :element-type '(unsigned-byte 8))
+          (miricl-compiler::write-binary-chunk *latin-prefix-values* out)) t)
+      (setf (symbol-function 'miricl-compiler::compiler-primitive) native)))`);
+  assert.deepEqual(await vm.readFile('/latin-prefix-portable.bin'), latinPrefix);
+  check(`(progn
+    (defparameter *latin-boundary-values* (coerce (append
+      (loop for i below 140 collect (format nil "dictionary-~D" i))
+      (loop for n in '(63 64 65 127 128 129) append (list
+        (concatenate 'string "encoding-" (make-string n :initial-element (code-char 200)))
+        (concatenate 'string "encoding-" (make-string n :initial-element (code-char 201)))))
+      (list (concatenate 'string "ABCD" (string (code-char 200)))
+            (concatenate 'string "ABCD" (string (code-char 201))))) 'vector))
+    (with-open-file (out "/latin-boundaries.bin" :direction :output :element-type '(unsigned-byte 8))
+      (miricl-compiler::write-binary-chunk *latin-boundary-values* out))
+    (with-open-file (in "/latin-boundaries.bin" :element-type '(unsigned-byte 8))
+      (equalp (miricl-compiler::read-binary-chunk in 0 (file-length in)) *latin-boundary-values*)))`);
+  check(`(let ((native (symbol-function 'miricl-compiler::compiler-primitive)))
+    (unwind-protect
+      (progn (setf (symbol-function 'miricl-compiler::compiler-primitive)
+               (lambda (&rest args) (declare (ignore args)) (values nil nil)))
+        (with-open-file (out "/latin-boundaries-portable.bin" :direction :output :element-type '(unsigned-byte 8))
+          (miricl-compiler::write-binary-chunk *latin-boundary-values* out)) t)
+      (setf (symbol-function 'miricl-compiler::compiler-primitive) native)))`);
+  assert.deepEqual(await vm.readFile('/latin-boundaries-portable.bin'), await vm.readFile('/latin-boundaries.bin'),
+    'Encoding costs agree across dictionary, prefix and suffix ULEB boundaries.');
+  check(`(progn
     (defparameter *zero-tail* '#((5 0 1 1) (5 0 0 0)))
     (defparameter *prefix-values* (vector
       (concatenate 'string "prefixλ𝄞" (string (code-char 0)) "first")

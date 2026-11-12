@@ -455,6 +455,10 @@ identity and creation order still belong to the existing FASL object graph.
 Type annotations are Common Lisp type declarations; optimization facts are
 recomputed when =compile-native-hir= reconstructs semantic HIR for native output.
 
+Register IDs carry identity rather than definition order. Native local
+allocation resolves environment-alias dependencies explicitly and compresses
+their paths.
+
 The Wasm block and instruction readers are shared by validation, interpreter
 execution, native compilation, and HIR disassembly. The host Lisp fallbacks are
 excluded from both browser images. Readers reject truncated data, excessive
@@ -473,8 +477,52 @@ function redefinition. Multiple-value consumers retain the full call
 path, and debugger evaluation keeps the general application path and
 its frame handling.
 
-The shared decoder has a checked fast path for one-byte operands and writes
-each attribute slot once, including clearing unused slots between instructions.
+Primary calls with zero through four arguments have fixed-count wire opcodes.
+Their operand counts follow from the opcode, saving the stored count and
+runtime arity selection. All variants share the =:call-primary= operation for
+validation, debugging and native reconstruction. Larger calls retain the
+variable-count encoding and general application path.
+
+At debug levels below 2, compact-code lowering removes lexical target
+allocation when captures and actual uses prove that the target cannot escape.
+It aliases the scope's environment to its parent and lowers local exits to
+checked jumps. Those jumps still validate multiple-value packets and restore
+the destination block's environment. Captured exits retain their dynamic-extent
+checks; higher debug levels retain the original scope objects.
+
+The shared decoder has a checked fast path for one-byte operands. It returns
+instruction metadata as Wasm multiple results and stores only indexed operands
+in a reusable native scratch array. Metadata stays in Wasm locals; operand
+gathering finishes before callbacks or thread safepoints, so nested calls and
+threads can share the buffer without allocating one per HIR invocation.
+Public readers retain their Lisp
+scratch-vector API, including unsigned destination IDs and zeroed unused
+attributes. Their caller-buffer bounds are checked independently of the reused
+native buffer. Fixed input counts come from the opcode table; variable counts
+are checked against the operation's limits.
+
+Revisited small blocks can execute from a bounded transient decoded cache.
+It uses the same checked reader, then stores packed instruction metadata and
+operand IDs without caching Lisp values. Byte offsets remain available for
+debugging. The cache is excluded from snapshots; larger or cold blocks retain
+ordinary checked decoding.
+
+Fixed-arity native calls with up to four arguments use exact-length WasmGC
+reference arrays for their argument packets. These contain only argument
+references, avoiding Lisp object headers and unused slots. The existing
+native-call ABI and arity checks are retained; interpreter and general calls
+continue to use their normal argument lists.
+
+The shared runtime count conversion accepts nonnegative immediate integers
+directly. Other values retain the checked magnitude/saturation path, including
+boxed integers, bignums and negative/type-error cases. This avoids repeated
+limb extraction for HIR indices without weakening boundary validation.
+
+Global function lookup reads the current binding on each call. Once SYMBOLP
+has established a symbol representation, it reads that symbol's ID directly,
+avoiding a repeated tag test. SETF names and unbound functions retain the
+FDEFINITION path, so redefinition and undefined-function conditions remain
+observable.
 
 Finished HIR releases lowering-only source and inlining environments. Its
 parameter metadata contains names rather than executable default forms.
@@ -497,19 +545,27 @@ again; the resulting module is instantiated but never installed as another
 compiler generation. The benchmark checks byte-identical output. A separate
 =hir-code-only.wasm= size measurement excludes the source corpus kept solely
 for that second benchmark.
+An optional fourth positional argument, =PRECOMPILED-IMAGE=, prepares current
+kernel sources with an already compiled compiler instead of repeating cold
+source bootstrap. The report leaves that skipped timing empty; HIR bootstrap
+still runs in a fresh source image, and fixed original-source output must match.
 
 =node scripts/benchmark-hir-interpreter.mjs OUTPUT IMAGE PREPARED-HIR ORIGINALS=
 measures prepared-code loading, HIR compiler bootstrap, and compilation of a
 fixed original-source corpus in fresh runtimes. =MIRICL_BENCHMARK_ROUNDS= sets
 the sample count; =--profile= records the first bootstrap's CPU profile.
 An optional =--compare IMAGE PREPARED-HIR= alternates two runtimes in AB/BA
-order, checks matching instruction and output hashes, and delays compression
+order, records instruction and output hashes, and delays compression
 measurements until all timed samples have finished.
 Prepare the payload for its image with =benchmark-hir-bootstrap.mjs=; names
 for bootstrap-local gensyms can differ between image builds. The execution
 benchmark records an instruction hash separately from those diagnostic names,
 so a comparison can establish that it executes the same instruction corpus.
-It also checks repeatable output and never installs another compiler generation.
+Each variant must repeat its instruction stream. A shared payload also requires
+matching instructions across runtimes. When comparing an intentional HIR change,
+use distinct prepared payloads: the report records whether their instructions
+match, while still requiring byte-identical output for the fixed original-source
+corpus. It never installs another compiler generation.
 
 ** Indexed FASL format
 
@@ -535,8 +591,10 @@ use a dedicated record-block tag (10), a base record ID and a record count.
 Strings use minimal UTF-8 lengths, whole-string references, or a previously
 decoded string's prefix plus a UTF-8 suffix. Prefix lengths count characters,
 preserving Unicode boundaries; each chunk has its own dictionary.
-Byte-valued strings without a profitable prefix use tag 11 and one byte per
-character, avoiding UTF-8 expansion of native Wasm blobs. They join the same
+Byte-valued strings use tag 11 and one byte per character when that is smaller
+than the complete prefix-reference/UTF-8-suffix encoding, including its length
+and reference fields. This avoids expanding a large binary suffix merely to
+save a short prefix. They join the same
 dictionary, so later strings can reference them or reuse their prefixes.
 Header flag bit 2 advertises this encoding; older readers reject the unit
 before executing its initializers. Readers still accept earlier UTF-8 units.

@@ -36,6 +36,7 @@ const groups = {
     test('compiler-input', precompiled),
     test('evaluation-policy', wasm, precompiled, repl),
     test('core-image', precompiled),
+    test('native-arguments', precompiled),
     test('debugger', precompiled),
     ...['compilation', 'hir', 'whole-program', 'class-reachability', 'generic-dispatch',
       'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-input', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-modules', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',

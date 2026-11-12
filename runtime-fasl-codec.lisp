@@ -48,7 +48,8 @@
     (($value :nullable-object) ($strings :nullable-object) ($depth i32)) ()
   (:locals ($tag i32) ($n i32) ($i i32) ($index i32) ($prefix i32) ($prefix-bytes i32) ($c i32)
            ($table :nullable-object) ($last :nullable-object) ($chars :digits) ($previous :digits)
-           ($cell :nullable-object) ($data (ref $objects)) ($bytes i32) ($latin1 i32))
+           ($cell :nullable-object) ($data (ref $objects)) ($bytes i32) ($latin1 i32)
+           ($use-prefix i32) ($prefix-start i32))
   (wat-fail-when #@(i32.gt_u (local.get $depth) (i32.const 64)) :reader-syntax)
   #@(if (ref.is_null (local.get $value)) (then (call $fasl-byte (i32.const 0)) (return)))
   #@(if (ref.eq (local.get $value) (call $symbol (i32.const 1)))
@@ -72,9 +73,9 @@
       (local.set $index (call $value-n (local.get $table)))
       (drop (call $puthash-native (local.get $value) (local.get $table) (call $int (local.get $index))))
       (local.set $last (call $cdr (local.get $strings)))
+      (local.set $chars (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $value)))))
       (if (i32.eqz (ref.is_null (local.get $last)))
         (then
-          (local.set $chars (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $value)))))
           (local.set $previous (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $last)))))
           (block $prefix-done (loop $prefix-next
             (br_if $prefix-done (i32.or (i32.eq (local.get $prefix) (array.len (local.get $chars)))
@@ -86,13 +87,22 @@
                 (else (if (result i32) (i32.lt_u (local.get $c) (i32.const 2048)) (then (i32.const 2))
                   (else (select (i32.const 3) (i32.const 4) (i32.lt_u (local.get $c) (i32.const 65536)))))))))
             (local.set $prefix (i32.add (local.get $prefix) (i32.const 1))) (br $prefix-next)))))
-      (if (i32.gt_u (local.get $prefix-bytes)
-            (i32.add (call $fasl-uleb-size (i32.sub (local.get $index) (i32.const 1))) (call $fasl-uleb-size (local.get $prefix))))
-        (then (call $fasl-byte (i32.const 9))
-          (call $fasl-uleb (i32.sub (local.get $index) (i32.const 1))) (call $fasl-uleb (local.get $prefix)))
-        (else
-          (local.set $prefix (i32.const 0))
-          (local.set $chars (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $value)))))
+      (local.set $use-prefix (i32.gt_u (local.get $prefix-bytes)
+        (i32.add (call $fasl-uleb-size (i32.sub (local.get $index) (i32.const 1))) (call $fasl-uleb-size (local.get $prefix)))))
+      (block $string-done
+        (block $raw
+          (if (local.get $use-prefix)
+            (then
+              (local.set $prefix-start (global.get $cursor))
+              (call $fasl-byte (i32.const 9))
+              (call $fasl-uleb (i32.sub (local.get $index) (i32.const 1))) (call $fasl-uleb (local.get $prefix))
+              (call $fasl-text-bytes (local.get $value) (local.get $prefix))
+              ;; The character count is a lower bound on raw byte length.
+              ;; ASCII strings cannot pass this gate, avoiding a second scan.
+              (br_if $string-done (i32.gt_u
+                (i32.add (i32.const 1) (i32.add (call $fasl-uleb-size (array.len (local.get $chars))) (array.len (local.get $chars))))
+                (i32.sub (global.get $cursor) (local.get $prefix-start)))))
+            (else (local.set $prefix (i32.const 0))))
           (local.set $latin1 (i32.const 1))
           (block $scan-done (loop $scan
             (br_if $scan-done (i32.eq (local.get $i) (array.len (local.get $chars))))
@@ -103,19 +113,21 @@
             (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $scan)))
           (if (i32.and (local.get $latin1) (i32.ge_u (local.get $bytes) (i32.const 128)))
             (then
-              (call $fasl-byte (i32.const 11)) (call $fasl-uleb (array.len (local.get $chars)))
-              (call $reserve (array.len (local.get $chars)))
-              (local.set $i (i32.const 0))
-              (block $copy-done (loop $copy
-                (br_if $copy-done (i32.eq (local.get $i) (array.len (local.get $chars))))
-                (i32.store8 (i32.add (global.get $cursor) (local.get $i))
-                  (array.get $digits (local.get $chars) (local.get $i)))
-                (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $copy)))
-              (global.set $cursor (i32.add (global.get $cursor) (array.len (local.get $chars))))
-              (struct.set $obj $b (ref.cast (ref $obj) (local.get $strings)) (local.get $value))
-              (return)))
-          (call $fasl-byte (i32.const 3))))
-      (call $fasl-text-bytes (local.get $value) (local.get $prefix))
+              (if (local.get $use-prefix) (then (global.set $cursor (local.get $prefix-start))))
+              (br $raw)))
+          (br_if $string-done (local.get $use-prefix))
+          (call $fasl-byte (i32.const 3))
+          (call $fasl-text-bytes (local.get $value) (i32.const 0))
+          (br $string-done))
+        (call $fasl-byte (i32.const 11)) (call $fasl-uleb (array.len (local.get $chars)))
+        (call $reserve (array.len (local.get $chars)))
+        (local.set $i (i32.const 0))
+        (block $copy-done (loop $copy
+          (br_if $copy-done (i32.eq (local.get $i) (array.len (local.get $chars))))
+          (i32.store8 (i32.add (global.get $cursor) (local.get $i))
+            (array.get $digits (local.get $chars) (local.get $i)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $copy)))
+        (global.set $cursor (i32.add (global.get $cursor) (array.len (local.get $chars)))))
       (struct.set $obj $b (ref.cast (ref $obj) (local.get $strings)) (local.get $value))
       (return)))
   #@(if (call $keywordp (local.get $value))

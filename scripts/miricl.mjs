@@ -493,6 +493,18 @@ class CoreReader {
     this.position += 8;
     return value;
   }
+  array(type) {
+    const length = this.word();
+    const packed = type === 'i' ? this.word() : 0;
+    if (packed > 1) throw new Error('Invalid array encoding in Miricl image.');
+    if (length > this.bytes.length - this.position) throw new Error('Invalid array length in Miricl image.');
+    return {length, bytes: packed ? this.take(length) : null};
+  }
+  fieldMask(length) {
+    const mask = this.word();
+    if (mask >= 2 ** length) throw new Error('Invalid object field mask in Miricl image.');
+    return mask;
+  }
   field(type) {return type === 'l' || type === 'L' ? this.wide() : this.word();}
 }
 
@@ -528,6 +540,23 @@ function coreImageParts(bytes) {
 const coreSigned = value => ((value << 1) ^ (value >> 31)) >>> 0;
 const coreUnsigned = value => (value >>> 1) ^ -(value & 1);
 const coreReference = type => type === 'r' || type === 'R';
+// Reference IDs occupy 1..2^31-1; zero remains NIL. Rotate that domain around
+// the owner and encode a signed distance, so nearby objects take fewer bytes.
+// Wrapping keeps the complete original ID range representable in a u32 word.
+const coreRelativeId = (id, owner) => {
+  if (!owner) return id;
+  let distance = id - owner;
+  if (distance > 0x3fffffff) distance -= 0x7fffffff;
+  else if (distance < -0x3fffffff) distance += 0x7fffffff;
+  return coreSigned(distance) + 1;
+};
+const coreAbsoluteId = (id, owner) => {
+  if (!owner) return id;
+  let absolute = owner + coreUnsigned(id - 1);
+  if (absolute <= 0) absolute += 0x7fffffff;
+  else if (absolute > 0x7fffffff) absolute -= 0x7fffffff;
+  return absolute;
+};
 const coreEntryIndex = entry => {
   const name = entry?.name;
   if (!/^\d+$/.test(name) || Number(name) > 0xffffffff)
@@ -556,7 +585,20 @@ function captureCore(vm, base) {
   const writer = new CoreWriter();
   const objects = [];
   const ids = new Map();
-  function field(type, value) {
+  const headers = types.map(() => new Map());
+  let headerCount = 0;
+  function writeHeader(kind, mask, prefix = 0) {
+    const key = mask * 128 + prefix;
+    const known = headers[kind].get(key);
+    if (known !== undefined) {writer.word(known); return;}
+    headers[kind].set(key, ++headerCount);
+    writer.word(0);
+    writer.word(kind);
+    if (!types[kind].array) writer.word(mask);
+    if (!types[kind].array && (mask & 1) && types[kind].signature[0].toLowerCase() === 'i')
+      writer.word(prefix);
+  }
+  function field(type, value, owner = 0) {
     switch (type.toLowerCase()) {
       case 'r': {
         if (value === null) {writer.word(0); return;}
@@ -567,7 +609,7 @@ function captureCore(vm, base) {
           id = objects.length;
           ids.set(value, id);
         }
-        writer.word(id * 2);
+        writer.word(coreRelativeId(id, owner) * 2);
         return;
       }
       case 'i': writer.word(coreSigned(value)); return;
@@ -575,7 +617,7 @@ function captureCore(vm, base) {
       case 'e': writer.word(coreEntryIndex(value)); return;
     }
   }
-  writer.word(1);
+  writer.word(2);
   roots.read().forEach((value, i) => field(roots.signature[i], value));
   const countOffset = writer.position;
   writer.append(new Uint8Array(4));
@@ -584,14 +626,47 @@ function captureCore(vm, base) {
     const kind = vm['core-object-type'](object);
     const type = types[kind];
     if (!type) throw new Error('The image contains a thread or a host object that cannot be restored.');
-    writer.word(kind);
     if (type.array) {
+      writeHeader(kind, 0);
       const length = type.length(object);
       writer.word(length);
-      for (let index = 0; index < length; index++) field(type.signature, type.read(object, index));
+      if (type.signature === 'i') {
+        // Strings, HIR and native code share the runtime's i32 storage type.
+        // Pack octets without signed-integer expansion; preserve arbitrary
+        // i32 arrays with the ordinary encoding when any element is wider.
+        const start = writer.position;
+        writer.word(1);
+        writer.reserve(length);
+        let index = 0;
+        for (; index < length; index++) {
+          const value = type.read(object, index);
+          if ((value >>> 8) !== 0) break;
+          writer.bytes[writer.position++] = value;
+        }
+        if (index === length) continue;
+        writer.position = start;
+        writer.word(0);
+      }
+      for (let index = 0; index < length; index++) field(type.signature, type.read(object, index), i + 1);
     } else {
       const values = type.read(object);
-      for (let index = 0; index < type.signature.length; index++) field(type.signature[index], values[index]);
+      // Most object slots are NIL or zero. Preserve exact numeric bits (so
+      // negative zero is present), and always retain native entry identities.
+      let mask = 0;
+      for (let index = 0; index < type.signature.length; index++) {
+        const kind = type.signature[index], value = values[index];
+        if (coreReference(kind) ? value !== null : kind === 'e' || (value !== 0 && value !== 0n))
+          mask += 2 ** index;
+      }
+      if (type.signature.length > 32) throw new Error('Too many object fields in Miricl image layout.');
+      // A common first i32 field is the runtime tag/identity word. Factor
+      // its repeated low bits into the header while preserving every bit.
+      const scalar = (mask & 1) && type.signature[0].toLowerCase() === 'i';
+      const first = scalar ? coreSigned(values[0]) : 0;
+      writeHeader(kind, mask, first & 127);
+      if (scalar) writer.word(first >>> 7);
+      for (let index = scalar ? 1 : 0; index < type.signature.length; index++)
+        if (mask & (1 << index)) field(type.signature[index], values[index], i + 1);
     }
   }
   new DataView(writer.bytes.buffer).setUint32(countOffset, objects.length, true);
@@ -638,38 +713,68 @@ function coreNativeEntries(vm, bytes, indices) {
 function restoreCore(vm, payload) {
   const {roots, types} = coreLayout(vm);
   const reader = new CoreReader(payload);
-  const fields = signature => {
-    const values = [];
-    for (let i = 0; i < signature.length; i++) values.push(reader.field(signature[i]));
+  const descriptor = (type, mask, prefix) => {
+    const {signature, entry} = type;
+    if (entry >= 0 && !(mask & (1 << entry))) throw new Error('Missing native entry in Miricl image.');
+    return {...type, prefix,
+      defaults: Array.from(signature, kind => kind === 'l' || kind === 'L' ? 0n : 0),
+      slots: Array.from(signature, (_, i) => i).filter(i => mask & (1 << i))};
+  };
+  const scalar = (word, prefix) => {
+    if (word > 0x1ffffff) throw new Error('Invalid scalar field in Miricl image.');
+    return word * 128 + prefix;
+  };
+  const fields = ({signature, defaults, slots, prefix}, owner = 0) => {
+    const values = defaults.slice();
+    for (const i of slots) {
+      let value = reader.field(signature[i]);
+      if (coreReference(signature[i]) && value && !(value & 1))
+        value = coreAbsoluteId(value >>> 1, owner) * 2;
+      values[i] = value;
+    }
+    if (prefix !== undefined) values[0] = scalar(values[0], prefix);
     return values;
   };
-  if (reader.word() !== 1) throw new Error('Unsupported Miricl image format.');
-  const rootValues = fields(roots.signature);
+  if (reader.word() !== 2) throw new Error('Unsupported Miricl image format.');
+  const rootValues = fields(descriptor(roots, 0xffffffff));
   const size = reader.take(4);
   const count = new DataView(size.buffer, size.byteOffset, 4).getUint32(0, true);
   if (count > payload.length - reader.position) throw new Error('Invalid object count in Miricl image.');
   const offsets = new Uint32Array(count + 1);
-  const kinds = new Uint8Array(count + 1);
+  const kinds = new Uint32Array(count + 1);
+  const headers = [null];
   const objects = new Array(count + 1);
   const native = new Map();
   for (let id = 1; id <= count; id++) {
-    const kind = reader.word(), type = types[kind];
-    if (!type) throw new Error('Invalid object type in Miricl image.');
+    let kind = reader.word();
+    if (!kind) {
+      const type = types[reader.word()];
+      if (!type) throw new Error('Invalid object type in Miricl image.');
+      const mask = type.array ? 0 : reader.fieldMask(type.signature.length);
+      const prefix = !type.array && (mask & 1) && type.signature[0].toLowerCase() === 'i' ? reader.word() : undefined;
+      if (prefix > 127) throw new Error('Invalid scalar prefix in Miricl image.');
+      kind = headers.length;
+      headers.push(descriptor(type, mask, prefix));
+    }
+    const type = headers[kind];
+    if (!type) throw new Error('Invalid object header in Miricl image.');
     kinds[id] = kind;
     offsets[id] = reader.position;
     if (type.array) {
-      const length = reader.word();
-      if (length > payload.length - reader.position) throw new Error('Invalid array length in Miricl image.');
-      for (let i = 0; i < length; i++) reader.field(type.signature);
+      const {length, bytes} = reader.array(type.signature);
+      if (!bytes) for (let i = 0; i < length; i++) reader.field(type.signature);
       objects[id] = type.create(length);
     } else if (type.entry >= 0) {
-      const values = fields(type.signature);
+      const values = fields(type, id);
       // Native closures carry the code bytes in the common object's digits slot.
       const code = values[3];
       if (!native.has(code)) native.set(code, new Set());
       native.get(code).add(values[type.entry]);
     } else {
-      for (let i = 0; i < type.signature.length; i++) reader.field(type.signature[i]);
+      for (const i of type.slots) {
+        const value = reader.field(type.signature[i]);
+        if (i === 0 && type.prefix !== undefined) scalar(value, type.prefix);
+      }
     }
   }
   if (reader.position !== payload.length) throw new Error('Unexpected data after Miricl image.');
@@ -684,19 +789,24 @@ function restoreCore(vm, payload) {
       native.set(code, entries);
     } else {
       const id = code >>> 1;
-      if ((code & 1) || id > count || !types[kinds[id]].array || types[kinds[id]].signature !== 'i')
+      if ((code & 1) || id > count || !headers[kinds[id]].array || headers[kinds[id]].signature !== 'i')
         throw new Error('Invalid native code reference in Miricl image.');
       reader.position = offsets[id];
-      const bytes = new Uint8Array(reader.word());
-      for (let i = 0; i < bytes.length; i++) bytes[i] = coreUnsigned(reader.word());
+      const array = reader.array('i');
+      const bytes = array.bytes ?? new Uint8Array(array.length);
+      if (!array.bytes) for (let i = 0; i < bytes.length; i++) {
+        const value = coreUnsigned(reader.word());
+        if (value < 0 || value > 255) throw new Error('Invalid native code byte in Miricl image.');
+        bytes[i] = value;
+      }
       native.set(code, coreNativeEntries(vm, bytes, indices));
     }
   }
-  function field(type, value, values) {
+  function field(type, value, values, owner = 0) {
     if (coreReference(type)) {
       if (value === 0) return null;
       if (value & 1) return coreUnsigned(value >>> 1);
-      const object = objects[value >>> 1];
+      const object = objects[coreAbsoluteId(value >>> 1, owner)];
       if (object === undefined) throw new Error('Invalid object reference in Miricl image.');
       return object;
     }
@@ -714,10 +824,10 @@ function restoreCore(vm, payload) {
     if (objects[id] !== undefined) continue;
     pending.push(id);
     while (pending.length) {
-      const next = pending.at(-1), type = types[kinds[next]];
+      const next = pending.at(-1), type = headers[kinds[next]];
       constructing[next] = 1;
       reader.position = offsets[next];
-      const values = fields(type.signature);
+      const values = fields(type, next);
       let dependency = 0;
       for (let i = 0; i < values.length; i++) {
         const reference = values[i];
@@ -739,13 +849,15 @@ function restoreCore(vm, payload) {
     }
   }
   for (let id = 1; id <= count; id++) {
-    const type = types[kinds[id]], object = objects[id];
+    const type = headers[kinds[id]], object = objects[id];
     reader.position = offsets[id];
     if (type.array) {
-      const length = reader.word();
-      for (let i = 0; i < length; i++) type.set(object, i, field(type.signature, reader.field(type.signature)));
+      const {length, bytes} = reader.array(type.signature);
+      if (bytes) for (let i = 0; i < length; i++) type.set(object, i, bytes[i]);
+      else for (let i = 0; i < length; i++)
+        type.set(object, i, field(type.signature, reader.field(type.signature), undefined, id));
     } else {
-      const values = fields(type.signature), args = [];
+      const values = fields(type, id), args = [];
       for (let i = 0; i < values.length; i++) {
         const kind = type.signature[i];
         if (kind !== kind.toLowerCase()) args.push(field(kind, values[i]));

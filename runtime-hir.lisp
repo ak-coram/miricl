@@ -11,8 +11,7 @@
   ;; unnecessarily across calls. The shared decoder supplies checked IDs.
   (let ((form `(array.get $objects (local.get $registers)
                  (array.get $digits (local.get $decoded)
-                   ,(if (integerp index) `(i32.const ,(+ 6 index))
-                        `(i32.add ,index (i32.const 6)))))))
+                   ,(if (integerp index) `(i32.const ,index) index)))))
     (if raw form `(call $hir-lisp-value ,form))))
 (defun hir-literal () '(array.get $objects (local.get $literals) (local.get $a)))
 (defun hir-native (function &rest args)
@@ -21,20 +20,17 @@
 (defun hir-list-inputs (start &optional groups)
   `(call $hir-input-list (local.get $registers) (local.get $decoded) (i32.const ,start) (local.get $count)
      (i32.const ,(if groups 1 0))))
-(defun hir-primary-call-wat ()
+(defun hir-primary-call-wat (&optional arity)
   ;; Reuse the native backend's checked, redefinition-aware small-call entries.
   ;; Only CALL-PRIMARY may discard additional values. Debugger evaluation and
   ;; larger calls retain the general application path.
-  (let* ((fallback `(call $eval-apply ,(hir-input 1) ,(hir-list-inputs 2)))
-         (body fallback))
-    (loop for arity downfrom 4 to 0 do
-      (setq body `(if (result (ref null eq))
-        (i32.eq (local.get $count) (i32.const ,(+ 2 arity)))
-        (then ,(apply #'hir-native (intern (format nil "$NATIVE-CALL~D" arity) :miricl)
-                  (hir-input 1) (loop for i below arity collect (hir-input (+ 2 i)))))
-        (else ,body))))
-    `(if (result (ref null eq)) (global.get $debug-evaluating)
-       (then ,fallback) (else ,body))))
+  (let ((fallback `(call $eval-apply ,(hir-input 1) ,(hir-list-inputs 2))))
+    (if arity
+      `(if (result (ref null eq)) (global.get $debug-evaluating)
+         (then ,fallback)
+         (else ,(apply #'hir-native (intern (format nil "$NATIVE-CALL~D" arity) :miricl)
+           (hir-input 1) (loop for i below arity collect (hir-input (+ 2 i))))))
+      fallback)))
 (defun hir-wat-sequence (&rest forms)
   (apply #'runtime-wat-sequence
     (mapcar (lambda (form) (if (consp form) (wat-string form) form)) (remove nil forms))))
@@ -115,10 +111,10 @@
   #@(local.get $value) #@(local.get $pc))
 
 (define-runtime-function $hir-read-instruction
-    (($bytes (ref $digits)) ($pc i32) ($words (ref $digits))) (i32)
-  (:locals ($header i32) ($opcode i32) ($shape i32) ($output i32) ($count i32) ($i i32) ($word i32))
-  #@(if (i32.or (i32.ge_u (local.get $pc) (array.len (local.get $bytes)))
-                (i32.lt_u (array.len (local.get $words)) (i32.const 6)))
+    (($bytes (ref $digits)) ($pc i32) ($words (ref $digits))) (i32 i32 i32 i32 i32 i32)
+  (:locals ($header i32) ($opcode i32) ($shape i32) ($output i32) ($count i32) ($i i32) ($word i32)
+           ($a i32) ($b i32))
+  #@(if (i32.ge_u (local.get $pc) (array.len (local.get $bytes)))
     (then (call $hir-invalid (call $int (local.get $pc)) ,(wat-text-literal "invalid HIR decoder bounds"))))
   #@(local.set $header (array.get $digits (local.get $bytes) (local.get $pc)))
   #@(local.set $pc (i32.add (local.get $pc) (i32.const 1)))
@@ -131,38 +127,91 @@
     (then (call $hir-word (local.get $bytes) (local.get $pc)) (local.set $pc) (local.set $output)
       (local.set $output (i32.add (local.get $output) (i32.const 1)))))
   #@(local.set $count (i32.and (local.get $shape) (i32.const 255)))
+  ;; Fixed arities come from the operation table itself. Only encoded counts
+  ;; need checking against the operation's input-count limits.
   #@(if (i32.eq (local.get $count) (i32.const 255))
-    (then (call $hir-word (local.get $bytes) (local.get $pc)) (local.set $pc) (local.set $count)))
-  #@(if (i32.or (i32.gt_u (local.get $count) (i32.sub (array.len (local.get $words)) (i32.const 6)))
+    (then (call $hir-word (local.get $bytes) (local.get $pc)) (local.set $pc) (local.set $count)
+      (if (i32.or
+          (i32.lt_u (local.get $count) (i32.and (i32.shr_u (local.get $shape) (i32.const 11)) (i32.const 15)))
+          (i32.and (i32.ne (i32.shr_u (local.get $shape) (i32.const 15)) (i32.const 0))
+            (i32.ge_u (local.get $count) (i32.shr_u (local.get $shape) (i32.const 15)))))
+        (then (call $hir-invalid (call $int (local.get $count)) ,(wat-text-literal "invalid HIR operand count"))))))
+  #@(if (i32.or (i32.gt_u (local.get $count) (array.len (local.get $words)))
                 (i32.gt_u (local.get $count) (i32.sub (array.len (local.get $bytes)) (local.get $pc))))
     (then (call $hir-invalid (call $int (local.get $count)) ,(wat-text-literal "truncated HIR inputs or insufficient decoder storage"))))
-  #@(if (i32.or
-      (i32.lt_u (local.get $count) (i32.and (i32.shr_u (local.get $shape) (i32.const 11)) (i32.const 15)))
-      (i32.and (i32.ne (i32.shr_u (local.get $shape) (i32.const 15)) (i32.const 0))
-        (i32.ge_u (local.get $count) (i32.shr_u (local.get $shape) (i32.const 15)))))
-    (then (call $hir-invalid (call $int (local.get $count)) ,(wat-text-literal "invalid HIR operand count"))))
-  #@(array.set $digits (local.get $words) (i32.const 0) (local.get $opcode))
-  #@(array.set $digits (local.get $words) (i32.const 1) (i32.shr_u (local.get $header) (i32.const 6)))
-  #@(array.set $digits (local.get $words) (i32.const 2) (local.get $output))
-  #@(array.set $digits (local.get $words) (i32.const 3) (local.get $count))
   #@(block $done (loop $inputs
     (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
-    (call $hir-word (local.get $bytes) (local.get $pc)) (local.set $pc) (local.set $word)
-    (array.set $digits (local.get $words) (i32.add (local.get $i) (i32.const 6)) (local.get $word))
+    ;; The initial bounds check reserves one byte for every remaining input.
+    ;; One-byte words preserve that invariant; after a longer word, check the
+    ;; remaining reservation before the next direct byte read.
+    (local.set $word (array.get $digits (local.get $bytes) (local.get $pc)))
+    (if (i32.lt_u (local.get $word) (i32.const 128))
+      (then (local.set $pc (i32.add (local.get $pc) (i32.const 1))))
+      (else
+        (call $hir-word (local.get $bytes) (local.get $pc)) (local.set $pc) (local.set $word)
+        (if (i32.gt_u (i32.sub (local.get $count) (i32.add (local.get $i) (i32.const 1)))
+                     (i32.sub (array.len (local.get $bytes)) (local.get $pc)))
+          (then (call $hir-invalid (call $int (local.get $pc)) ,(wat-text-literal "truncated HIR operand"))))))
+    (array.set $digits (local.get $words) (local.get $i) (local.get $word))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $inputs)))
   #@(if (i32.ge_u (i32.and (local.get $shape) (i32.const 1536)) (i32.const 512))
-    (then (call $hir-word (local.get $bytes) (local.get $pc)) (local.set $pc) (local.set $word)
-      (array.set $digits (local.get $words) (i32.const 4) (local.get $word)))
-    (else (array.set $digits (local.get $words) (i32.const 4) (i32.const 0))))
+    (then (call $hir-word (local.get $bytes) (local.get $pc)) (local.set $pc) (local.set $a)))
   #@(if (i32.ge_u (i32.and (local.get $shape) (i32.const 1536)) (i32.const 1024))
-    (then (call $hir-word (local.get $bytes) (local.get $pc)) (local.set $pc) (local.set $word)
-      (array.set $digits (local.get $words) (i32.const 5) (local.get $word)))
-    (else (array.set $digits (local.get $words) (i32.const 5) (i32.const 0))))
-  #@(local.get $pc))
+    (then (call $hir-word (local.get $bytes) (local.get $pc)) (local.set $pc) (local.set $b)))
+  ;; The execution loop consumes metadata directly. Only indexed operands
+  ;; need scratch storage; the public reader still exposes its original API.
+  #@(local.get $pc) #@(local.get $header) #@(local.get $output)
+  #@(local.get $count) #@(local.get $a) #@(local.get $b))
+
+(define-runtime-function $hir-cached-block
+    (($code :nullable-object) ($words (ref $digits))) ((ref null $objects))
+  (:locals ($bytes (ref $digits)) ($map (ref $objects)) ($inputs (ref $digits))
+           ($cached :nullable-object) ($slot i32) ($hash i32) ($pc i32) ($start i32)
+           ($header i32) ($output i32) ($count i32) ($a i32) ($b i32))
+  #@(local.set $bytes (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $code)))))
+  ;; Only small, revisited blocks enter the cache. Cold or larger blocks use
+  ;; the ordinary checked reader; these are memory limits, not program limits.
+  #@(if (i32.gt_u (array.len (local.get $bytes)) (i32.const 1024))
+    (then (return (ref.null $objects))))
+  #@(local.set $hash (i32.shr_u (struct.get $obj $tag (ref.cast (ref $obj) (local.get $code))) (i32.const 6)))
+  #@(local.set $slot (i32.and (i32.xor (local.get $hash) (i32.shr_u (local.get $hash) (i32.const 6))) (i32.const 63)))
+  #@(if (i32.eqz (ref.eq (array.get $objects (global.get $hir-cache-keys) (local.get $slot)) (local.get $code)))
+    (then
+      (array.set $objects (global.get $hir-cache-keys) (local.get $slot) (local.get $code))
+      (array.set $objects (global.get $hir-cache-maps) (local.get $slot) (ref.null eq))
+      (return (ref.null $objects))))
+  #@(local.set $cached (array.get $objects (global.get $hir-cache-maps) (local.get $slot)))
+  #@(if (i32.eqz (ref.is_null (local.get $cached)))
+    (then (return (ref.cast (ref $objects) (local.get $cached)))))
+  #@(local.set $map (array.new_default $objects (array.len (local.get $bytes))))
+  #@(block $done (loop $decode (br_if $done (i32.ge_u (local.get $pc) (array.len (local.get $bytes))))
+    (local.set $start (local.get $pc))
+    (call $hir-read-instruction (local.get $bytes) (local.get $pc) (local.get $words))
+    (local.set $b) (local.set $a) (local.set $count)
+    (local.set $output) (local.set $header) (local.set $pc)
+    (local.set $inputs (if (result (ref $digits)) (local.get $count)
+      (then (array.new_default $digits (local.get $count))) (else (global.get $hir-empty-inputs))))
+    (array.copy $digits $digits (local.get $inputs) (i32.const 0) (local.get $words) (i32.const 0) (local.get $count))
+    ;; The size limit and checked decoder bound PC and COUNT to 1024. Pack
+    ;; their 11-bit fields with the 8-bit header and unsigned 32-bit output.
+    (array.set $objects (local.get $map) (local.get $start)
+      (struct.new $hir-decoded-instruction
+        (i64.or (i64.extend_i32_u (local.get $header))
+          (i64.or (i64.shl (i64.extend_i32_u (local.get $count)) (i64.const 8))
+            (i64.or (i64.shl (i64.extend_i32_u (local.get $pc)) (i64.const 19))
+              (i64.shl (i64.extend_i32_u (local.get $output)) (i64.const 30)))))
+        (i64.or (i64.extend_i32_u (local.get $a))
+          (i64.shl (i64.extend_i32_u (local.get $b)) (i64.const 32)))
+        (local.get $inputs)))
+    (br $decode)))
+  ;; Construction neither calls Lisp nor yields. Publish only complete maps.
+  #@(array.set $objects (global.get $hir-cache-maps) (local.get $slot) (local.get $map))
+  #@(local.get $map))
 
 (define-runtime-function $hir-read-instruction-primitive (($args :nullable-object)) (:nullable-object)
   (:locals ($code :nullable-object) ($scratch :nullable-object) ($data (ref $objects))
-           ($words (ref $digits)) ($pc i32) ($i i32) ($count i32))
+           ($words (ref $digits)) ($pc i32) ($i i32) ($count i32)
+           ($header i32) ($output i32) ($a i32) ($b i32))
   (wat-arity 3)
   #@(local.set $code (call $car (local.get $args)))
   #@(local.set $scratch (call $car (call $cdr (call $cdr (local.get $args)))))
@@ -171,17 +220,32 @@
     (then (call $hir-invalid (local.get $code) ,(wat-text-literal "HIR decoder requires a byte string and scratch vector"))))
   #@(local.set $pc (call $natural-count (call $car (call $cdr (local.get $args)))))
   #@(local.set $data (call $vector-data (local.get $scratch)))
+  #@(if (i32.lt_u (array.len (local.get $data)) (i32.const 6))
+    (then (call $hir-invalid (local.get $scratch) ,(wat-text-literal "invalid HIR decoder bounds"))))
   ;; Successful decoding cannot call Lisp or yield. A failed decode never
   ;; resumes, so nested debugger/compiler use cannot expose partial scratch.
   #@(local.set $words (ref.as_non_null (global.get $hir-decoder-words)))
-  #@(if (i32.lt_u (array.len (local.get $words)) (array.len (local.get $data)))
-    (then (local.set $words (array.new_default $digits (array.len (local.get $data))))
+  #@(if (i32.lt_u (array.len (local.get $words)) (i32.sub (array.len (local.get $data)) (i32.const 6)))
+    (then (local.set $words (array.new_default $digits (i32.sub (array.len (local.get $data)) (i32.const 6))))
       (global.set $hir-decoder-words (local.get $words))))
-  #@(local.set $pc (call $hir-read-instruction
-    (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $code)))) (local.get $pc) (local.get $words)))
-  #@(local.set $count (i32.add (array.get $digits (local.get $words) (i32.const 3)) (i32.const 6)))
+  #@(call $hir-read-instruction
+    (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $code)))) (local.get $pc) (local.get $words))
+  #@(local.set $b) #@(local.set $a) #@(local.set $count)
+  #@(local.set $output) #@(local.set $header) #@(local.set $pc)
+  ;; The reusable native buffer can be larger than this caller's vector.
+  ;; Check that vector before publishing any decoded fields into it.
+  #@(if (i32.gt_u (local.get $count) (i32.sub (array.len (local.get $data)) (i32.const 6)))
+    (then (call $hir-invalid (local.get $scratch)
+      ,(wat-text-literal "truncated HIR inputs or insufficient decoder storage"))))
+  (runtime-wat-forms
+    (loop for value in '((i32.and (local.get $header) (i32.const 63))
+                        (i32.shr_u (local.get $header) (i32.const 6))
+                        (local.get $output) (local.get $count) (local.get $a) (local.get $b))
+          for index from 0 collect
+      `(array.set $objects (local.get $data) (i32.const ,index)
+        (call $int64 (i64.extend_i32_u ,value)))))
   #@(block $done (loop $copy (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
-    (array.set $objects (local.get $data) (local.get $i)
+    (array.set $objects (local.get $data) (i32.add (local.get $i) (i32.const 6))
       (call $int64 (i64.extend_i32_u (array.get $digits (local.get $words) (local.get $i)))))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $copy)))
   #@(call $int (local.get $pc)))
@@ -253,7 +317,7 @@
     #@(call $hir-word (ref.as_non_null (local.get $bytes)) (local.get $pc))
     #@(local.set $pc) `(local.set ,local)))
 
-(defun hir-operation-wat (opcode)
+(defun hir-operation-wat (opcode &optional call-arity)
   (let ((result nil) (effects nil))
     (case opcode
       (:constant (setf result (hir-literal)))
@@ -282,7 +346,7 @@
        (push `(struct.set $obj $a (ref.cast (ref $obj) (local.get $value)) ,(hir-input 1)) effects)
        (setf result (hir-input 1)))
       (:call (setf result `(call $value-list (call $eval-apply ,(hir-input 1) ,(hir-list-inputs 2)))))
-      (:call-primary (setf result (hir-primary-call-wat)))
+      (:call-primary (setf result (hir-primary-call-wat call-arity)))
       (:capture (setf result '(array.get $objects (local.get $captures) (local.get $a))))
       (:closure (setf result `(call $hir-function (local.get $payload) (local.get $a)
         (call $hir-capture-vector (local.get $registers) (local.get $decoded) (local.get $count)))))
@@ -307,10 +371,11 @@
        (push `(local.set $block (select (local.get $a) (local.get $b)
          (i32.eqz (ref.is_null ,(hir-input 0))))) effects)
        (push '(local.set $enter (i32.const 1)) effects))
-      (:jump
+      ((:jump :checked-jump)
        (push '(local.set $block (local.get $a)) effects)
        (push `(local.set $incoming (if (result (ref null eq)) (local.get $count)
-         (then ,(hir-input 0)) (else (ref.null eq)))) effects)
+         (then ,(if (eq opcode :checked-jump) `(call $hir-values ,(hir-input 0)) (hir-input 0)))
+         (else (ref.null eq)))) effects)
        (push '(local.set $enter (i32.const 1)) effects))
       (:return (push `(return (call $return-values (call $hir-values ,(hir-input 0)))) effects))
       (:block-return
@@ -328,7 +393,14 @@
     (hir-wat-sequence (apply #'hir-wat-sequence (nreverse effects))
       (when result `(array.set $objects (local.get $registers)
         (local.get $output) ,result))
-      #@(call $clear-values)
+      ;; The dispatcher and nonlocal landing path establish one value. These
+      ;; operations only manipulate explicit registers and cannot change the
+      ;; ambient value packet. Calls still capture their results and clear it.
+      (unless (member opcode '(:constant :argument :rest-argument :check-arguments :truth
+                               :values :values-list :list :value-ref :checked-argument
+                               :cell-new :cell-read :cell-write :primary :capture :closure
+                               :check-apply-list :check-apply-arguments :branch :jump :checked-jump))
+        #@(call $clear-values))
       #@(br $next))))
 
 (defun hir-dispatch-wat ()
@@ -338,14 +410,18 @@
                      collect (intern (format nil "$HIR-OP-~D" i) :miricl)))
          (body `(br_table ,@names $invalid (local.get $opcode))))
     (loop for spec across miricl-compiler::*hir-code-operations* for name in names do
-      (setq body `(block (block ,name ,body) ,(hir-operation-wat (first spec)))))
+      (setq body `(block (block ,name ,body)
+        ,(hir-operation-wat (first spec)
+          (when (and (eq (first spec) :call-primary) (eql (second spec) (third spec)))
+            (- (second spec) 2))))))
     `(block $invalid ,body)))
 
 (define-runtime-function $hir-apply (($function :nullable-object) ($args :nullable-object)) (:nullable-object)
   (:locals ($payload :nullable-object) ($descriptor (ref $objects)) ($blocks (ref $objects))
            ($literals (ref $objects)) ($captures (ref $objects)) ($registers (ref $objects))
            ($decoded (ref $digits)) ($targets (ref $objects)) ($block-data (ref $objects))
-           ($bytes (ref null $digits)) ($pc i32) ($block i32) ($enter i32) ($opcode i32)
+           ($bytes (ref null $digits)) ($pc i32) ($block i32) ($enter i32) ($opcode i32) ($header i32)
+           ($cache (ref null $objects)) ($instruction (ref $hir-decoded-instruction)) ($info i64) ($attributes i64)
            ($output i32) ($count i32) ($a i32) ($b i32) ($i i32) ($word i32)
            ($value :nullable-object) ($incoming :nullable-object) ($ticks i32))
   #@(local.set $payload (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))))
@@ -357,8 +433,15 @@
   #@(local.set $captures (call $vector-data (struct.get $obj $b (ref.cast (ref $obj) (local.get $function)))))
   #@(local.set $registers (array.new_default $objects
     (call $natural-count (array.get $objects (local.get $descriptor) (i32.const 1)))))
-  #@(local.set $decoded (array.new_default $digits (i32.add
-    (call $natural-count (array.get $objects (local.get $descriptor) (i32.const 7))) (i32.const 6))))
+  ;; Gathering operands cannot yield or call Lisp. Every input is consumed
+  ;; before invoking a callee or safepoint, and decoded metadata lives in
+  ;; locals. Nested calls and other threads may therefore reuse this buffer;
+  ;; the next instruction decodes it again before reading any operands.
+  #@(local.set $decoded (ref.as_non_null (global.get $hir-decoder-words)))
+  #@(local.set $word (call $natural-count (array.get $objects (local.get $descriptor) (i32.const 7))))
+  #@(if (i32.lt_u (array.len (local.get $decoded)) (local.get $word))
+    (then (local.set $decoded (array.new_default $digits (local.get $word)))
+      (global.set $hir-decoder-words (local.get $decoded))))
   #@(local.set $targets (call $vector-data (array.get $objects (local.get $descriptor) (i32.const 8))))
   #@(array.set $objects (local.get $registers)
     (call $natural-count (array.get $objects (local.get $descriptor) (i32.const 2)))
@@ -383,13 +466,31 @@
                 (call $hir-context (array.get $objects (local.get $registers) (i32.sub (local.get $word) (i32.const 1))))))))
               (local.set $bytes (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj)
                 (array.get $objects (local.get $block-data) (i32.const 2))))))
+              (local.set $decoded (ref.as_non_null (global.get $hir-decoder-words)))
+              (local.set $cache (call $hir-cached-block
+                (array.get $objects (local.get $block-data) (i32.const 2)) (local.get $decoded)))
               (local.set $pc (i32.const 0)) (local.set $enter (i32.const 0))))
-          (local.set $pc (call $hir-read-instruction (ref.as_non_null (local.get $bytes)) (local.get $pc) (local.get $decoded)))
-          (local.set $opcode (array.get $digits (local.get $decoded) (i32.const 0)))
-          (local.set $output (i32.sub (array.get $digits (local.get $decoded) (i32.const 2)) (i32.const 1)))
-          (local.set $count (array.get $digits (local.get $decoded) (i32.const 3)))
-          (local.set $a (array.get $digits (local.get $decoded) (i32.const 4)))
-          (local.set $b (array.get $digits (local.get $decoded) (i32.const 5)))
+          (if (ref.is_null (local.get $cache))
+            (then
+              (call $hir-read-instruction (ref.as_non_null (local.get $bytes)) (local.get $pc) (local.get $decoded))
+              (local.set $b) (local.set $a) (local.set $count)
+              (local.set $output) (local.set $header) (local.set $pc))
+            (else
+              (if (i32.ge_u (local.get $pc) (array.len (local.get $cache)))
+                (then (call $hir-invalid (call $int (local.get $pc)) ,(wat-text-literal "invalid HIR decoder bounds"))))
+              (local.set $instruction (ref.cast (ref $hir-decoded-instruction)
+                (array.get $objects (local.get $cache) (local.get $pc))))
+              (local.set $info (struct.get $hir-decoded-instruction $info (local.get $instruction)))
+              (local.set $attributes (struct.get $hir-decoded-instruction $attributes (local.get $instruction)))
+              (local.set $decoded (struct.get $hir-decoded-instruction $inputs (local.get $instruction)))
+              (local.set $header (i32.and (i32.wrap_i64 (local.get $info)) (i32.const 255)))
+              (local.set $count (i32.and (i32.wrap_i64 (i64.shr_u (local.get $info) (i64.const 8))) (i32.const 2047)))
+              (local.set $pc (i32.and (i32.wrap_i64 (i64.shr_u (local.get $info) (i64.const 19))) (i32.const 2047)))
+              (local.set $output (i32.wrap_i64 (i64.shr_u (local.get $info) (i64.const 30))))
+              (local.set $a (i32.wrap_i64 (local.get $attributes)))
+              (local.set $b (i32.wrap_i64 (i64.shr_u (local.get $attributes) (i64.const 32))))))
+          (local.set $opcode (i32.and (local.get $header) (i32.const 63)))
+          (local.set $output (i32.sub (local.get $output) (i32.const 1)))
           ,(hir-dispatch-wat)
           ,(wat-fail :malformed-form))))
     ;; Resume a lexical RETURN-FROM or GO invoked by a captured closure.
@@ -407,6 +508,10 @@
   #@(unreachable))
 
 (define-runtime-section hir-runtime-wat ()
+  #@(type $hir-decoded-instruction (struct (field $info i64) (field $attributes i64) (field $inputs (ref $digits))))
+  #@(global $hir-empty-inputs (ref $digits) (array.new_default $digits (i32.const 0)))
+  #@(global $hir-cache-keys (ref $objects) (array.new_default $objects (i32.const 64)))
+  #@(global $hir-cache-maps (ref $objects) (array.new_default $objects (i32.const 64)))
   #@(global $hir-decoder-words (mut (ref null $digits)) (array.new_default $digits (i32.const 16)))
   #@(global $hir-operation-shapes (ref $digits)
     (array.new_fixed $digits ,(length miricl-compiler::*hir-code-operations*)
@@ -415,7 +520,7 @@
                        (if (fifth spec) 256 0) (* 512 (fourth spec))
                        (* 2048 (second spec)) (* 32768 (if (third spec) (1+ (third spec)) 0)))))))
   ($hir-invalid) ($hir-lisp-value) ($hir-context) ($hir-values) ($hir-input-list) ($hir-capture-vector) ($hir-word)
-  ($hir-read-instruction) ($hir-read-instruction-primitive)
+  ($hir-read-instruction) ($hir-cached-block) ($hir-read-instruction-primitive)
   ($hir-unpack-blocks)
   ($hir-control-data)
   ($hir-function) ($hir-load) ($hir-apply))

@@ -4,7 +4,8 @@
 
 (defvar *fasl-code-format* :source)
 
-;; Opcode, input count bounds, integer attribute count, result present.
+;; Opcode, input count bounds, integer attribute count, result present,
+;; optional terminator flag. Fixed-arity variants share their operation name.
 ;; All operands are register numbers; variable input counts occur only on
 ;; calls, value groups, lists and closures. Integers use unsigned LEB128.
 (defparameter *hir-code-operations*
@@ -21,10 +22,13 @@
     (:block-enter 1 1 1 t) (:block-environment 1 1 0 t)
     (:control-call 4 nil 1 t) (:restart-signal 2 nil 1 t)
     (:multiple-value-call 2 nil 0 t)
-    (:branch 1 1 2 nil) (:jump 0 1 1 nil) (:return 1 1 0 nil)
-    (:block-return 2 3 1 nil) (:throw 3 3 0 nil) (:unreachable 0 0 0 nil)
+    (:branch 1 1 2 nil t) (:jump 0 1 1 nil t) (:return 1 1 0 nil t)
+    (:block-return 2 3 1 nil t) (:throw 3 3 0 nil t) (:unreachable 0 0 0 nil t)
     (:function-reference-inline 0 0 1 t) (:function-reference-notinline 0 0 1 t)
-    (:call-primary 2 nil 0 t)) 'simple-vector))
+    (:call-primary 2 nil 0 t) (:checked-jump 0 1 1 nil t)
+    (:call-primary 2 2 0 t) (:call-primary 3 3 0 t)
+    (:call-primary 4 4 0 t) (:call-primary 5 5 0 t)
+    (:call-primary 6 6 0 t)) 'simple-vector))
 
 (defun hir-code-error (object reason)
   (error 'hir-code-input-error :datum object :reason reason))
@@ -217,7 +221,7 @@
                                  (<= output registers) (eq (not (zerop output)) (not (null (fifth spec)))))
                       (hir-code-error code "invalid operand count or destination"))
                     (setq max-inputs (max max-inputs count))
-                    (when (= opcode 37) (incf single-calls))
+                    (when (eq (first spec) :call-primary) (incf single-calls))
                     ;; A count is bounded by bytes remaining before looping.
                     (dotimes (i count) (bounded (svref scratch (+ i 6)) registers "register out of range"))
                     (let ((a (when (plusp (fourth spec)) (svref scratch 4)))
@@ -235,7 +239,7 @@
                            (unless (and (simple-vector-p child) (= (length child) 9)
                                         (eql count (svref child 4)))
                              (hir-code-error child "closure capture count mismatch"))))
-                        ((:branch :jump :block-enter)
+                        ((:branch :jump :checked-jump :block-enter)
                          (bounded a (length blocks) "block out of range")
                          (when b (bounded b (length blocks) "block out of range"))
                          (when (= opcode 24) (push (1- output) targets) (push a targets)))
@@ -253,7 +257,7 @@
                         (:restart-signal
                          (unless (and (<= 0 a 3) (>= count (if (= a 3) 4 3)))
                            (hir-code-error a "invalid restart operation or operands"))))
-                      (when (<= 29 opcode 34) (setq terminated t)))))
+                      (when (sixth spec) (setq terminated t)))))
                 (unless terminated (hir-code-error code "block has no terminator")))))
           (setf (svref copy fi) (vector (svref function 0) registers (svref function 2)
             (svref function 3) (svref function 4) block-copy
@@ -319,7 +323,7 @@
                 (when (plusp output) (format t "~A <- " (register (1- output))))
                 (case operation
                   (:branch (format t "if ~A then B~D else B~D" (register (first inputs)) a b))
-                  (:jump (format t "jump B~D~{ ~A~}" a (mapcar #'register inputs)))
+                  ((:jump :checked-jump) (format t "jump B~D~{ ~A~}" a (mapcar #'register inputs)))
                   (:constant (format t "constant ~S" (literal a)))
                   ((:function-reference :function-reference-inline :function-reference-notinline)
                    (format t "function ~S" (literal a)))

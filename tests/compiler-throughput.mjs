@@ -233,6 +233,29 @@ try {
         (assert (equal (funcall (compiler-primitive 17 bytes literals nil) 3) '(22 22))))) (values)`);
   }
   assert.deepEqual(await vm.readFile('/reused.wasm'), await vm.readFile('/fresh.wasm'));
+  // Dense HIR IDs and the value list need not follow definition order.
+  // Nested uncaptured scopes alias earlier environments through other aliases.
+  check(`(let* ((unit (compile-to-hir '(lambda (fn)
+                    (block outer (block inner (funcall fn))))))
+                (function (first (hir-unit-functions unit)))
+                (*wasm-live-values* (native-value-table function t))
+                (*wasm-inline-constants* (native-value-table function))
+                (*wasm-local-cells* (native-direct-cells function)))
+    (setf (hir-function-values function) (reverse (hir-function-values function)))
+    (multiple-value-bind (locals count)
+        (native-local-layout function (hir-function-blocks function) 3)
+      (declare (ignore count))
+      (every (lambda (value) (or (not (eq (hir-value-kind value) :dynamic))
+                                (native-value-slot locals value)))
+        (hir-function-values function))))`);
+  check(`(let* ((unit (compile-to-hir '(lambda (fn)
+                    (block outer (block inner (funcall fn))))))
+                (function (first (hir-unit-functions unit))))
+    (setf (hir-function-values function) (reverse (hir-function-values function)))
+    (and (verify-hir unit)
+      (multiple-value-bind (bytes literals) (emit-native-module unit)
+        (equal (multiple-value-list (funcall (compiler-primitive 17 bytes literals nil)
+                 (lambda () (values 7 9)))) '(7 9)))))`);
   const expressions = Array.from({length: 280}, (_, i) => `(+ n ${i})`).join(' ');
   vm.evaluate(`(defparameter *throughput-function* (compile-native '(lambda (n) (list ${expressions})))) (values)`);
   for (const n of [-5, 7]) check(`(equal (funcall *throughput-function* ${n})

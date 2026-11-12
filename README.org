@@ -359,6 +359,25 @@ includes the runtime, Lisp definitions, data, and virtual files. Host
 imports are supplied when opening the image. Save from a single Lisp
 thread with no live JavaScript values in the saved data.
 
+Snapshots preserve each function's current representation, including compact
+HIR, its debug metadata and shared closure cells. They do not convert source
+functions to HIR. The snapshot object graph preserves identity and cycles;
+octet-valued storage arrays are packed as bytes, and zero or NIL object fields
+are omitted using presence masks. Repeated type and field-mask headers share
+compact descriptors without merging the objects themselves. Object references
+use signed distances from their containing object's ID. Headers also share
+repeated low bits of leading integer fields, preserving complete tag words
+and identity hashes. Wider integers and exact floating-point bits, including
+negative zero, are retained.
+
+=node scripts/benchmark-snapshots.mjs OUTPUT IMAGE= measures snapshot size and
+save/restore time in fresh runtimes. =--hir PREPARED-HIR.wasm= also measures a
+compiler-HIR heap; =--compare ADAPTER.mjs= compares a saved copy of the previous
+JavaScript adapter in alternating order. =MIRICL_BENCHMARK_ROUNDS= sets the
+sample count. =--compare-image IMAGE= and =--compare-hir PAYLOAD.wasm= select
+matching baseline inputs when measuring runtime or HIR changes together with
+the adapter. Gzip and Brotli measurements follow all timed samples.
+
 **** Compiler
 
 The =miricl-interpreter.wasm= variant omits the compiler. =compile= returns
