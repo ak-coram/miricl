@@ -171,6 +171,40 @@ The analysis uses dependencies and a worklist. Lowering requests only facts
 needed by its current numeric and vector optimizations; clients may also
 request facts for an entire HIR unit. Inferred facts never overwrite source
 assertions, and emitting a rewritten HIR graph recomputes them.
+
+=hir-optimize.lisp= simplifies semantic HIR before compact-code or native
+lowering. Private lexical cell reads use reaching SSA definitions within a
+block and across visited predecessors. A bounded join query forwards an
+identical reaching value only when every predecessor supplies it. Immutable
+private bindings use their initializer directly, without per-edge state.
+An observed private-cell load supplies a reaching value until the next write,
+so repeated reads can share its SSA value even at an unresolved loop header.
+Ambiguous joins and loop-carried assignments retain their cells. Capture and
+alias exclusions come from actual graph uses, and
+debug levels 2 and 3 keep their bindings. Forwarded reads retain their own
+scoped type assertions on =:copy= values. Nullable-type narrowing follows
+these SSA copies without changing the type of their shared source.
+
+Conditional constant propagation jointly solves primary-value constants and
+executable edges. Only constants and structural value operations participate;
+it executes no application functions or host type expanders. Literal identity
+and the full value group selected by a branch remain intact. Its dense tables
+are indexed by validated HIR identities, and an exhausted work budget applies
+none of that query's provisional facts. Empty-block forwarding preserves
+dynamic environments and has a total traversal budget. Changed edges refresh
+predecessors before inference. Explicit =optimize-hir= calls validate structure,
+internal operand representations and dominance before entering the passes.
+Acyclic functions use one topological pass, with the same dense CFG ordering
+solver used by native lowering; cyclic functions retain the bounded fixed point.
+
+Native reachability omits unreachable blocks in cyclic functions as well as
+acyclic ones, retaining captured nonlocal landing targets. Dead canonical
+inlined predicates, identity operations and proven nontrapping scalar operations
+can disappear; their operand effects remain in order. Fresh cons allocation can
+be removed when unobserved, but is not treated as an interchangeable or movable
+value. General sequence checks, hash operations and potentially trapping vector
+accesses retain their ordinary effect requirements.
+
 The shared target type rules interpret =and= intersections, =or= unions,
 =member= and =eql= types, =mod=, and inclusive/exclusive integer intervals.
 Unbounded endpoints can become finite when intersected. Union intervals are
@@ -207,6 +241,65 @@ bignums. Inference retains that operand's type; safety-0 canonical =inline=
 calls can return its value directly. Both operands must be proven integers,
 and their expressions still run in order. Unknown, floating-point and complex
 operands retain ordinary arithmetic and its type conversions or errors.
+
+Canonical explicitly inlined =zerop=, =minusp=, =plusp=, =evenp= and =oddp=
+use direct Wasm tests at safety 0 when their operand fits signed =i64=.
+Integer intervals can prove a sign/zero result, and singleton integers can
+prove parity even outside the scalar range. Parity proofs query the target
+integer kernel without invoking a redefined application predicate. Unknown,
+floating-point and complex operands retain ordinary calls and their errors.
+The compiler kernels explicitly inline these predicates alongside arithmetic;
+application policy remains unchanged.
+
+Native branches can consume an adjacent canonical scalar predicate directly,
+without first boxing its boolean result. Only a single-use suffix of copies,
+truth normalization and scalar primary-value extraction participates. Operand
+evaluation remains in place; another instruction stops the scan. Shared or
+otherwise observed predicate results retain ordinary Lisp booleans, and
+debug-visible functions keep their original lowering.
+
+Reducible natural loops can use Wasm =loop= regions with direct branches instead
+of a program-counter dispatcher. Bounded dominance checks identify backedges;
+backward-numbered exits alone are not loop evidence. Reverse predecessor
+closure derives each body. Disjoint and nested loops must form a proper forest;
+crossing regions are rejected. Topological checks validate every collapsed body
+and the surrounding graph before selecting the layout. Region count, storage,
+nesting and proof work are bounded. Captured landing entries, debug-visible
+functions, irreducible cycles and exhausted budgets retain dispatch. Transfers preserve block
+arguments and dynamic scopes, and backedges retain scheduling polls. Bind
+Structured lowering is used whenever these proofs succeed.
+
+Within one basic block, canonical nontrapping predicates can reuse a previous
+result for identical SSA operands. Transparent scalar copies share the original
+value during liveness and local allocation, rather than requiring extra
+temporary stores. Literal keys compare identity and never traverse quoted data,
+including cycles. Mutable heap contents, general calls, full value groups,
+captured nonlocal entries and debug-visible functions retain ordinary handling.
+Cheap tag checks are rematerialized across effectful operations to limit live
+ranges. The query has a work budget and applies only complete equivalences.
+
+
+The first LICM pass hoists canonical, nonallocating predicates whose operands
+are established by definitions dominating the loop header or are literal values.
+It tries containing loops from inside outward, retaining a proven inner
+placement when an outer placement cannot be justified. A bounded, cached
+dominance query permits outer-iteration snapshots to move outside inner loops.
+It follows bounded
+scalar copy chains without borrowing type assertions scoped only to the loop
+body. Integer comparisons, sign/zero tests and parity require independently
+proven signed-64 widths at the new location; literal proofs use actual values.
+Integer addition, subtraction, multiplication, increment/decrement and bitwise
+operations can move when the shared interval rules also prove that the result
+fits the target's immediate signed-31 representation. This excludes numeric
+allocation as well as overflow; wider results retain ordinary placement.
+General calls, mutable heap reads, allocating operations and full value groups
+remain in place. Prefixes execute before the selected loop, while all operand
+effects keep their original positions. Cached results have dedicated locals.
+Single-use branch suffixes cache raw Wasm =i32= conditions; observed Lisp values
+retain their boxed representation. Work is bounded and entry
+blocks that are themselves loop headers cannot supply a prefix's operands.
+Bootstrap and subsequent native compilation use the same optimization pipeline.
+There are no pass-enable settings.
 
 At safety 0, these facts can select direct =1+=/=1-= operations, prove
 arithmetic fits =i64= even when operand widths alone are insufficient, and
@@ -293,6 +386,16 @@ rounds after warmup. The measured output is validated and
 instantiated without installing it as another compiler generation. Reports
 include corpus and image hashes, emitted module bytes, and raw/gzip/Brotli
 sizes. Module bytes exclude literals and differ from linked distribution size.
+When comparing compiler revisions, keep the first captured =SOURCES.lisp= and
+supply it to every run. Compare frozen compiler images between revisions;
+the compiler has one unconditional optimization pipeline.
+
+=node scripts/check-compiler-determinism.mjs OUTPUT COLD-IMAGE PRECOMPILED-IMAGE SOURCES.lisp=
+compares the cold self-compiled compiler with the sealed precompiled compiler.
+It fixes the macro-generation counter, compares exact Wasm bytes and serialized
+literal graphs, and validates and instantiates the output without installing a
+further compiler generation. The self-compilation timing benchmark uses the
+same fixed counter for each round.
 
 First-use bootstrap compiles the small HIR constructors and declaration readers
 immediately after the byte-emission primitives. They are used while compiling
@@ -731,10 +834,11 @@ literal vectors and captures. The browser instantiates each shared module once;
 loading an application does not bootstrap its Lisp compiler.
 
 The portable pass is implemented in =wasm-optimizer.lisp= and self-compiles with
-the other compiler kernels. The first bootstrap compiles kernels without size
-passes; the shipped compiler image is then recompiled with those compiled
-passes enabled. This avoids running the optimizer in the interpreter on its
-own initial bootstrap. No external Wasm optimizer is required.
+the other compiler kernels. Initial bootstrap and the shipped compiler image
+use the same HIR, loop-motion and size passes. The image builder recompiles the
+compiler as a sealed module for shared literals and lexical function bindings;
+that packaging step does not select a different optimization policy.
+No external Wasm optimizer is required.
 
 =wasm-module-optimizer.lisp= is a host-only adapter to these same passes. It
 decodes core-module types, function signatures and exact instruction stack

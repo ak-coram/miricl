@@ -150,6 +150,7 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
             case 0x4a: instructions.push('i32.gt_s'); break;
             case 0x4c: instructions.push('i32.le_s'); break;
             case 0x4e: instructions.push('i32.ge_s'); break;
+            case 0x50: instructions.push('i64.eqz'); break;
             case 0x51: instructions.push('i64.eq'); break;
             case 0x52: instructions.push('i64.ne'); break;
             case 0x53: instructions.push('i64.lt_s'); break;

@@ -13,6 +13,9 @@ const moduleMode = process.argv.includes('--module');
 const extractOnly = process.argv.includes('--extract');
 const profileEnabled = process.argv.includes('--profile');
 const synchronous = process.argv.includes('--sync');
+for (const option of process.argv.slice(2).filter(arg => arg.startsWith('--')))
+  if (!['--module', '--extract', '--profile', '--sync'].includes(option))
+    throw new Error(`Unknown benchmark option: ${option}`);
 const warmupRounds = Number(process.env.MIRICL_BENCHMARK_WARMUPS ?? 1);
 const rounds = Number(process.env.MIRICL_BENCHMARK_ROUNDS ?? 3);
 assert.ok(Number.isSafeInteger(warmupRounds) && warmupRounds > 0, 'Expected positive warmup count');
@@ -96,9 +99,10 @@ benchmark: try {
       (list* 'defun (first entry) (cdr (second entry)))) *self-benchmark-sources*)) (values)`);
   }
   const frontend = moduleMode
-    ? `(defparameter *self-benchmark-units* (list (compile-module-to-hir *self-definitions* :inline nil)))`
-    : `(defparameter *self-benchmark-units*
-        (mapcar (lambda (entry) (compile-to-hir (second entry) :name (first entry))) *self-benchmark-sources*))`;
+    ? `(let ((*gensym-counter* 0))
+         (defparameter *self-benchmark-units* (list (compile-module-to-hir *self-definitions* :inline nil))))`
+    : `(let ((*gensym-counter* 0)) (defparameter *self-benchmark-units*
+        (mapcar (lambda (entry) (compile-to-hir (second entry) :name (first entry))) *self-benchmark-sources*)))`;
   const emission = `(defparameter *self-benchmark-modules*
     (mapcar (lambda (unit) (multiple-value-list (emit-native-module unit))) *self-benchmark-units*))`;
   const installation = `(mapc (lambda (entry)
@@ -142,6 +146,7 @@ benchmark: try {
     [stage, Object.fromEntries(['wallMs', 'cpuMs'].map(metric => [metric, median(samples.map(sample => sample[stage][metric]))]))]));
   const report = {imagePath, imageSha256: createHash('sha256').update(image).digest('hex'),
     sourceSha256: createHash('sha256').update(corpus).digest('hex'), compilerSourcePolicy: true,
+    gensymCounter: 0, optimizationPipeline: 'standard',
     compilerPreparationMode, count, moduleBytes,
     node: process.version, execArgv: process.execArgv, synchronous,
     platform: process.platform, architecture: process.arch, warmupRounds, rounds,

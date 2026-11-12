@@ -235,6 +235,14 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
            (otherwise type)))
         (t type)))
 
+(defun hir-copy-source (value)
+  (declare (type simple-vector value))
+  (dotimes (depth 32 value)
+    (let ((producer (hir-value-producer value)))
+      (unless (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :copy))
+        (return value))
+      (setq value (first (hir-instruction-inputs producer))))))
+
 (defun hir-type-truth-premise (test cache &optional cells)
   "Recover a canonical NULL/NOT test through immutable predicate temporaries.
 CELLS records actual read-only cell uses, rather than client binding flags."
@@ -245,6 +253,9 @@ CELLS records actual read-only cell uses, rather than client binding flags."
         (unless (%hir-instruction-p producer) (return))
         (case (hir-instruction-opcode producer)
           (:primary (setq current (first (hir-instruction-inputs producer))))
+          (:copy
+           (when predicate (return-from hir-type-truth-premise (values current inverse)))
+           (setq current (first (hir-instruction-inputs producer))))
           (:call
            (unless (and (= (length (hir-instruction-inputs producer)) 3)
                         (member (hir-inline-primitive producer cache) '(null not)))
@@ -263,7 +274,7 @@ CELLS records actual read-only cell uses, rather than client binding flags."
     ;; If the expression is not a recognized predicate, a direct cell read
     ;; still establishes its own truth. Never transfer a partial inversion.
     (let ((producer (hir-value-producer test)))
-      (when (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :cell-read))
+      (when (and (%hir-instruction-p producer) (member (hir-instruction-opcode producer) '(:cell-read :copy)))
         (values test nil)))))
 
 (defun hir-type-branch-guards (unit)
@@ -316,10 +327,13 @@ A budget limits cost; stopping early only loses optimization opportunities."
                    (cell (and (%hir-instruction-p producer)
                               (eq (hir-instruction-opcode producer) :cell-read)
                               (first (hir-instruction-inputs producer))))
+                   (source (and (%hir-instruction-p producer)
+                                (eq (hir-instruction-opcode producer) :copy)
+                                (hir-copy-source observed)))
                    (arms (hir-instruction-attributes branch)))
               (when (and (plusp budget) (< (hir-function-debug-level function) 2)
                          (eq (hir-instruction-opcode branch) :branch)
-                         (gethash cell cells) (not (eq (first arms) (second arms))))
+                         (or source (gethash cell cells)) (not (eq (first arms) (second arms))))
                 (loop for arm in arms for positive in '(t nil) do
                   (incf serial)
                   ;; The initial edge must itself establish the premise.
@@ -336,8 +350,10 @@ A budget limits cost; stopping early only loses optimization opportunities."
                           (setf (aref epochs id) serial (aref remaining id) -1)
                           (dolist (instruction (hir-block-instructions current))
                             (when (minusp (decf budget)) (return))
-                            (when (and (eq (hir-instruction-opcode instruction) :cell-read)
-                                       (eq (first (hir-instruction-inputs instruction)) cell))
+                            (when (or (and cell (eq (hir-instruction-opcode instruction) :cell-read)
+                                           (eq (first (hir-instruction-inputs instruction)) cell))
+                                      (and source (eq (hir-instruction-opcode instruction) :copy)
+                                           (eq (hir-copy-source (hir-instruction-output instruction)) source)))
                               (push (cons observed (if (second premise) (not positive) positive))
                                     (gethash (hir-instruction-output instruction) guards))))
                           (let ((terminator (hir-block-terminator current)) (previous nil))
@@ -367,7 +383,7 @@ A budget limits cost; stopping early only loses optimization opportunities."
          (name (first attributes)))
     ;; INLINE is the contract that permits relying on the definition selected
     ;; at compilation. Ordinary calls retain their unrestricted result types.
-    (when (and (eq (second attributes) 'inline) (member name '(length cons consp simple-vector-p null not 1+ 1- + - * logand logior logxor ash)))
+    (when (and (eq (second attributes) 'inline) (member name '(length cons consp simple-vector-p null not zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor ash)))
       (multiple-value-bind (canonical found) (gethash name cache)
         (unless found
           (setq canonical
@@ -402,9 +418,30 @@ A budget limits cost; stopping early only loses optimization opportunities."
             (logior (cond (minus-a :left) (minus-b :right) (zero-b :left) (zero-a :right)))
             (ash (when (or zero-a zero-b) :left))))))))
 
+(defun hir-integer-predicate-type (name type)
+  (declare (type symbol name))
+  (multiple-value-bind (low high integer) (hir-integer-interval type)
+    (let ((answer
+            (when integer
+              (case name
+                (zerop (cond ((and (eql low 0) (eql high 0)) :true)
+                             ((or (and low (> low 0)) (and high (< high 0))) :false)))
+                (minusp (cond ((and high (< high 0)) :true) ((and low (>= low 0)) :false)))
+                (plusp (cond ((and low (> low 0)) :true) ((and high (<= high 0)) :false)))
+                ((evenp oddp)
+                 (when (and low high (= low high))
+                   ;; Query the target integer kernel, never an application's
+                   ;; possibly redefined ODDP/EVENP binding during a proof.
+                   (let ((odd (multiple-value-bind (value native) (compiler-primitive 47 low)
+                                (if native value (oddp low)))))
+                     (if (if (eq name 'evenp) (not odd) odd) :true :false))))))))
+      (case answer (:true '(eql t)) (:false 'null) (otherwise 'boolean)))))
+
 (defun hir-inline-result-type (name types)
   (declare (type symbol name) (type list types))
   (when (member nil types) (return-from hir-inline-result-type nil))
+  (when (and (= (length types) 1) (member name '(zerop minusp plusp evenp oddp)))
+    (return-from hir-inline-result-type (hir-integer-predicate-type name (first types))))
   (when (and (= (length types) 1) (member name '(consp simple-vector-p null not)))
     (let* ((type (first types))
            (positive (case name (consp 'cons) (simple-vector-p 'simple-vector) (otherwise 'null)))
@@ -546,6 +583,7 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                 (let ((target (gethash input references)))
                   (when (and target
                          (not (and (eq opcode :call) (= index 1)))
+                         (not (eq opcode :copy))
                          (not (and (eq opcode :cell-write) (= index 1)
                            (let* ((cell (hir-type-cell (first inputs)))
                                   (producer (and cell (hir-value-producer cell)))
@@ -578,7 +616,7 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                    (unless (gethash function escaped)
                      (dolist (inputs (gethash function sites))
                        (edge (nth (+ 2 (first (hir-instruction-attributes producer))) inputs) value))))
-                  ((:primary :values) (edge (first inputs) value))
+                  ((:primary :values :copy) (edge (first inputs) value))
                   (:value-ref
                    (let* ((group (first inputs)) (origin (hir-value-producer group))
                           (index (first (hir-instruction-attributes producer))))
@@ -639,7 +677,7 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                             (:constant (hir-constant-type (first (hir-instruction-attributes producer))))
                             (:argument (if (gethash (hir-value-owner value) escaped) t (joined value)))
                             (:values (if inputs (joined value) 'null))
-                            ((:primary :cell-new :cell-read :cell-write) (joined value))
+                            ((:primary :copy :cell-new :cell-read :cell-write) (joined value))
                             (:value-ref
                              (let* ((group (first inputs)) (origin (hir-value-producer group))
                                     (index (first (hir-instruction-attributes producer))))

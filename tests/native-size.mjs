@@ -30,7 +30,7 @@ try {
       assert.equal(vm.evaluate(`(funcall *size-function* ${args})`).output, output, `${name}: ${args}`);
     sizes.push(`${name} ${bytes.length} raw/${gzipSync(bytes, {level: 9}).length} gzip`);
   }
-  // Differential execution checks the observable state that stackification
+  // Execution checks the observable state that stackification
   // and CFG coloring must preserve, rather than particular instruction shapes.
   for (const [source, calls] of [
     [`(lambda (flag)
@@ -92,19 +92,19 @@ try {
          (values (progn (if flag (setf (car x) 2) (setf (car x) 3)) x)
                  (car x) (values))))`, [['t', '(2)\n2\nNIL\n'], ['nil', '(3)\n3\nNIL\n']]],
   ]) {
-    for (const optimize of ['nil', 't']) {
+    {
       vm.evaluate(`(defparameter *size-function*
-        (let ((miricl-compiler::*wasm-optimize* ${optimize}))
+        (progn
           (miricl-compiler:compile-native '${source})))`);
       for (const [args, output] of calls)
         assert.equal(vm.evaluate(`(funcall *size-function* ${args})`).output, output,
-          `${source}: ${args}, optimize ${optimize}`);
+          `${source}: ${args}, optimize standard`);
     }
   }
   // Public HIR need not place its entry block first. Rotating a cyclic CFG
   // keeps IDs dense while requiring a nonzero initial dispatcher index.
-  for (const optimize of ['nil', 't']) {
-    vm.evaluate(`(let* ((miricl-compiler::*wasm-optimize* ${optimize})
+  {
+    vm.evaluate(`(let* (
                        (unit (miricl-compiler:compile-to-hir
                          '(lambda (n) (let ((sum 0)) (dotimes (i n) (incf sum i)) sum))))
                        (function (first (miricl-compiler::hir-unit-functions unit)))
@@ -140,10 +140,11 @@ try {
     }
     return 0;
   };
-  for (const optimize of ['nil', 't']) {
-    vm.evaluate(`(let ((miricl-compiler::*wasm-optimize* ${optimize}))
+  {
+    // Inspect the lowering boundary to exercise Wasm cleanup and relocation.
+    vm.evaluate(`(progn
       (multiple-value-bind (bytes literals)
-          (miricl-compiler:emit-native-module (miricl-compiler:compile-to-hir '${constantArm}))
+          (miricl-compiler:emit-native-module (miricl-compiler::lower-source-to-hir '${constantArm}))
         (declare (ignore literals))
         (with-open-file (out "/constant-arm.wasm" :direction :output :if-exists :supersede
                             :element-type '(unsigned-byte 8)) (write-sequence bytes out)))
@@ -154,22 +155,23 @@ try {
     functionCounts.push(definedFunctions(code));
     assert.equal(vm.evaluate('(funcall (funcall *constant-arm*) 41)').output, '42\n');
   }
-  assert.ok(importCounts[1] < importCounts[0], `Unused imports must disappear: ${importCounts}`);
-  assert.ok(functionCounts[1] < functionCounts[0], `Unreachable functions must disappear: ${functionCounts}`);
-  assert.ok(functionCounts[0] > 128 && functionCounts[1] < 128,
+  assert.ok(importCounts[0] <= 20, `Pruned import budget: ${importCounts}`);
+  assert.equal(functionCounts[0], 2, `Only the factory and returned closure remain: ${functionCounts}`);
+  assert.ok(Number(vm.evaluate(`(length (miricl-compiler:hir-unit-functions
+    (miricl-compiler::lower-source-to-hir '${constantArm})))`).output.trim()) > 128 && functionCounts[0] < 128,
     'Function relocation must cross the one-byte LEB boundary.');
   const variables = Array.from({length: 140}, (_, i) => `v${i}`);
   const wide = `(lambda (n) (let (${bindings})
     (if (minusp n) (list ${variables.toReversed().join(' ')}) (list ${variables.join(' ')}))))`;
-  for (const optimize of ['nil', 't']) {
+  {
     vm.evaluate(`(defparameter *size-function*
-      (let ((miricl-compiler::*wasm-optimize* ${optimize}))
+      (progn
         (miricl-compiler:compile-native '${wide})))`);
     for (const n of [-5, 5]) {
       const expected = Array.from({length: 140}, (_, i) => n + i);
       if (n < 0) expected.reverse();
       assert.equal(vm.evaluate(`(equal (funcall *size-function* ${n}) '(${expected.join(' ')}))`).output,
-        'T\n', `wide live ranges: ${n}, optimize ${optimize}`);
+        'T\n', `wide live ranges: ${n}, optimize standard`);
     }
   }
   // Keep a wide set of bindings live at a call that can escape to a handler.
@@ -177,14 +179,14 @@ try {
   const wideHandler = `(lambda (n flag) (block done (let (${bindings})
     (funcall (lambda () (when flag (return-from done (values v0 v139)))))
     (list ${variables.join(' ')}))))`;
-  for (const optimize of ['nil', 't']) {
+  {
     vm.evaluate(`(defparameter *size-function*
-      (let ((miricl-compiler::*wasm-optimize* ${optimize}))
+      (progn
         (miricl-compiler:compile-native '${wideHandler})))`);
     assert.equal(vm.evaluate('(funcall *size-function* 5 t)').output, '5\n144\n');
     const expected = Array.from({length: 140}, (_, i) => i + 5);
     assert.equal(vm.evaluate(`(equal (funcall *size-function* 5 nil) '(${expected.join(' ')}))`).output,
-      'T\n', `wide exceptional live ranges, optimize ${optimize}`);
+      'T\n', `wide exceptional live ranges, optimize standard`);
   }
   console.log(`Native size budgets: ${sizes.join('; ')} bytes; branch and multiple-value paths pass.`);
 } finally {vm.close();}

@@ -97,7 +97,7 @@ try {
   vm.mountFile('/bad-source.lisp', '(defun bad-boundary-file () (let ((x 1 2)) x))');
   reject(`(compile-file "/bad-source.lisp")`, /binding/);
 
-  for (const source of ['(verify-hir 4)', '(emit-native-module #())', '(infer-hir-types nil)'])
+  for (const source of ['(verify-hir 4)', '(emit-native-module #())', '(infer-hir-types nil)', '(optimize-hir 4)'])
     reject(source, /HIR unit/);
   reject(`(let* ((unit (compile-to-hir '(lambda (x) (+ x 1))))
       (type (list 'and 'integer))

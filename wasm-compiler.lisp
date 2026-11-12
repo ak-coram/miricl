@@ -19,11 +19,11 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-current-function*)
 (defvar *wasm-static-closures*)
 (defvar *wasm-label-depths*)
+(defvar *wasm-next-blocks*)
 (defvar *wasm-body-keys*)
 (defvar *wasm-function-plans* nil)
 (defvar *wasm-inline-constants* nil)
 (defvar *wasm-last-local* nil)
-(defvar *wasm-optimize* t)
 (defvar *wasm-single-use-entry* nil)
 (defvar *compiler-bootstrapping* nil)
 (defvar *wasm-used-imports*)
@@ -48,6 +48,14 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-inline-vector-calls* nil)
 (defvar *wasm-inline-simple-calls* nil)
 (defvar *wasm-inline-references* nil)
+(defvar *wasm-branch-tests* nil)
+(defvar *wasm-reused-values* nil)
+(defvar *wasm-hoisted-values* nil)
+(defvar *wasm-loop-hoists* nil)
+(defvar *wasm-structured-labels*)
+(defvar *wasm-loop-regions*)
+(defvar *wasm-control-depth*)
+(defvar *wasm-optimization-barriers* nil)
 
 ;; IDs are dense within one function. Slot zero represents the NIL key used
 ;; by instructions without outputs; value zero starts at slot one. Keeping
@@ -167,8 +175,12 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (replace *wasm-bytes* bytes :start1 position :start2 start :end2 end)))
 (defun wasm-u32 (number)
   (declare (type (unsigned-byte 32) number))
-  (loop (wasm-byte (logior (logand number 127) (if (> number 127) 128 0)))
-    (setq number (ash number -7)) (when (zerop number) (return))))
+  ;; Five bytes cover every valid operand. An internal negative branch depth
+  ;; must signal a compiler condition instead of growing the byte buffer forever.
+  (loop repeat 5 do
+    (wasm-byte (logior (logand number 127) (if (> number 127) 128 0)))
+    (setq number (ash number -7)) (when (zerop number) (return-from wasm-u32 nil)))
+  (compiler-input-fail "Wasm unsigned operand" number "operand did not terminate within five bytes"))
 (defun wasm-s32 (number)
   (declare (type (signed-byte 32) number))
   (loop
@@ -220,6 +232,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun wasm-get (value)
   (declare (type simple-vector value *wasm-locals*) (type (or null simple-vector) *wasm-last-local*))
+  (when *wasm-reused-values*
+    (setq value (or (native-value-slot *wasm-reused-values* value) value)))
   (cond
     ((and *wasm-inline-constants* (native-value-slot *wasm-inline-constants* value))
      (wasm-literal (first (hir-instruction-attributes (hir-value-producer value)))))
@@ -291,7 +305,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defun wasm-literal (value)
   (cond ((null value) (wasm-null))
     ((and (integerp value) (<= -1073741824 value 1073741823))
-     (if (and *wasm-optimize* *wasm-import-counts* (gethash "native-int64" *wasm-import-counts*))
+     (if (and *wasm-import-counts* (gethash "native-int64" *wasm-import-counts*))
          ;; Reuse an existing boxing import: CONST + CALL is two bytes less
          ;; than repeating REF.I31 + EXTERN.CONVERT_ANY at every literal.
          ;; Small modules keep immediate boxing and acquire no new import.
@@ -315,12 +329,36 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   ;; Global lookups and calls stay live even when their result is discarded.
   (or (and *wasm-inline-references*
            (gethash (hir-instruction-output instruction) *wasm-inline-references*))
+      ;; These plans identify the canonical captured implementation, not a
+      ;; possibly redefined global call. Their valid operands cannot signal.
+      ;; Allocation is removable when its fresh result is unobserved, but is
+      ;; not interchangeable with an existing allocation or safe to hoist.
+      (and *wasm-inline-simple-calls* (eq (hir-instruction-opcode instruction) :call)
+           (let ((kind (gethash instruction *wasm-inline-simple-calls*)))
+             (or (integerp kind)
+                 (member kind '(:eq :eql :consp :simple-vector-p :null :true :false
+                                :left :right :cons :car :cdr :vector-length :evenp :oddp)))))
       (member (hir-instruction-opcode instruction)
-        '(:constant :primary :value-ref :values :list :capture :cell-new :cell-read :block-enter))))
+        '(:constant :copy :primary :truth :value-ref :values :list :capture :cell-new :cell-read :block-enter))))
 
 (defun native-live-inputs (instruction)
   (declare (type simple-vector instruction))
-  (let ((inputs (hir-instruction-inputs instruction)))
+  (let ((inputs (hir-instruction-inputs instruction))
+        (test (and *wasm-branch-tests* (gethash instruction *wasm-branch-tests*)))
+        (reused (and *wasm-reused-values*
+                     (native-value-slot *wasm-reused-values* (hir-instruction-output instruction))))
+        (hoisted (and *wasm-hoisted-values*
+                      (native-value-slot *wasm-hoisted-values* (hir-instruction-output instruction)))))
+    (when reused (return-from native-live-inputs (list reused)))
+    (when hoisted (return-from native-live-inputs (svref hoisted 5)))
+    (when test
+      (return-from native-live-inputs
+        (if (second test)
+            (let ((record (and *wasm-hoisted-values*
+                              (native-value-slot *wasm-hoisted-values* (hir-instruction-output (second test))))))
+              (if (and record (svref record 6)) (svref record 5)
+                  (cddr (hir-instruction-inputs (second test)))))
+            (list (first test)))))
     (if (or (and *wasm-inline-vector-calls* (gethash instruction *wasm-inline-vector-calls*))
             (and *wasm-inline-simple-calls* (gethash instruction *wasm-inline-simple-calls*)))
         ;; These primitives use neither the function lookup nor the hidden
@@ -350,27 +388,172 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun native-forward-blocks (function)
   (declare (type simple-vector function))
-  ;; Topologically order only reachable blocks. Acyclic functions need no
-  ;; program counter or dispatcher: Wasm's nested labels encode their edges.
-  ;; Count edges (including duplicate branch targets), so joins are emitted
-  ;; once, after all predecessors, without duplicating either arm's code.
-  (let ((seen (make-hash-table :test 'eq)) (incoming (make-hash-table :test 'eq))
-        (work (list (hir-function-entry function))) (count 0) (order nil))
-    (declare (type hash-table seen incoming) (type list work order) (type fixnum count))
+  ;; Share the HIR solver with constant propagation. Edge multiplicity and
+  ;; the reachable-only order are identical to the original backend pass.
+  (hir-forward-blocks function))
+
+(defun native-reachable-blocks (function targets)
+  (declare (type simple-vector function) (type list targets))
+  (let ((seen (make-array (hir-function-block-count function) :initial-element nil))
+        (work (cons (hir-function-entry function) (mapcar (lambda (target) (hir-target-block target)) targets))))
+    (declare (type simple-vector seen) (type list work))
     (loop while work do
-      (let ((block (pop work)))
-        (unless (gethash block seen)
-          (setf (gethash block seen) t) (incf count)
+      (let* ((block (pop work)) (id (hir-block-id block)))
+        (declare (type (unsigned-byte 32) id))
+        (unless (svref seen id)
+          (setf (svref seen id) t)
           (dolist (successor (hir-instruction-attributes (hir-block-terminator block)))
-            (incf (gethash successor incoming 0)) (push successor work)))))
-    (setq work (unless (gethash (hir-function-entry function) incoming)
-                 (list (hir-function-entry function))))
+            (push successor work)))))
+    (loop for block in (hir-function-blocks function)
+          when (svref seen (the (unsigned-byte 32) (hir-block-id block))) collect block)))
+
+(defun native-loop-region-order (function blocks region regions)
+  (declare (type simple-vector function) (type list blocks regions)
+           (type (or null simple-vector) region))
+  ;; Collapse immediate child loops. Ignore this region's return edges and
+  ;; exits; its parent's ordering accounts for those exits. Remaining cycles
+  ;; reject the whole structured layout.
+  (let* ((members (and region (svref region 1))) (header (and region (svref region 0)))
+         (nodes (make-array (hir-function-block-count function) :initial-element nil))
+         (edges (make-array (hir-function-block-count function) :initial-element nil))
+         (incoming (make-array (hir-function-block-count function) :initial-element 0))
+         (entry (or header (hir-function-entry function))) (count 0) (order nil) (work nil))
+    (declare (type simple-vector nodes edges incoming entry) (type list order work)
+             (type (unsigned-byte 32) count))
+    (dolist (child regions)
+      (when (eq (svref child 2) region)
+        (dolist (block blocks)
+          (let ((id (hir-block-id block)))
+            (declare (type (unsigned-byte 32) id))
+            (when (svref (the simple-vector (svref child 1)) id)
+              (setf (svref nodes id) (svref child 0)))))))
+    (dolist (block blocks)
+      (let ((id (hir-block-id block)))
+        (declare (type (unsigned-byte 32) id))
+        (when (or (null members) (svref (the simple-vector members) id))
+          (let ((from (or (svref nodes id) block)))
+            (when (eq from block) (incf count))
+            (dolist (target (hir-instruction-attributes (hir-block-terminator block)))
+              (let* ((next (hir-block-id target)) (to (or (svref nodes next) target)))
+                (declare (type (unsigned-byte 32) next))
+                (when (and (or (null members) (svref (the simple-vector members) next))
+                           (not (eq target header))
+                           (not (and (svref nodes id) (eq from to))))
+                  (push to (svref edges (the (unsigned-byte 32) (hir-block-id from))))
+                  (incf (svref incoming (the (unsigned-byte 32) (hir-block-id to)))))))))))
+    (when (and (or (null (svref nodes (the (unsigned-byte 32) (hir-block-id entry))))
+                   (eq entry (svref nodes (the (unsigned-byte 32) (hir-block-id entry)))))
+               (zerop (the (unsigned-byte 33) (svref incoming (the (unsigned-byte 32) (hir-block-id entry))))))
+      (push entry work))
     (loop while work do
       (let ((block (pop work)))
         (push block order)
-        (dolist (successor (reverse (hir-instruction-attributes (hir-block-terminator block))))
-          (when (zerop (decf (gethash successor incoming))) (push successor work)))))
-    (when (= (length order) count) (nreverse order))))
+        (dolist (target (svref edges (the (unsigned-byte 32) (hir-block-id block))))
+          (let* ((id (hir-block-id target)) (n (svref incoming id)))
+            (declare (type (unsigned-byte 32) id) (type (unsigned-byte 33) n))
+            (let ((next (1- n)))
+              (declare (type (unsigned-byte 33) next))
+              (setf (svref incoming id) next) (when (zerop next) (push target work)))))))
+    (when (= count (length order)) (nreverse order))))
+
+(defun native-loop-plan (function blocks)
+  (declare (type simple-vector function) (type list blocks))
+  ;; Natural loops must form a proper nesting forest. Numeric backward edges
+  ;; also include ordinary exits, so each latch needs a dominance proof.
+  (when (or (>= (hir-function-debug-level function) 2)
+            (and *wasm-optimization-barriers* (gethash function *wasm-optimization-barriers*))
+            (> (hir-function-block-count function) 16384))
+    (return-from native-loop-plan nil))
+  (let ((alive (make-array (hir-function-block-count function) :initial-element nil))
+        (seen (make-array (hir-function-block-count function) :initial-element 0))
+        (candidates (make-array (hir-function-block-count function) :initial-element nil))
+        (work nil) (backward nil) (targets nil) (groups nil) (regions nil) (epoch 0) (fuel 65536))
+    (declare (type simple-vector alive seen candidates) (type list work backward targets groups regions)
+             (type (unsigned-byte 32) epoch) (type (integer -1 65536) fuel))
+    (dolist (block blocks)
+      (setf (svref alive (the (unsigned-byte 32) (hir-block-id block))) t)
+      (dolist (target (hir-instruction-attributes (hir-block-terminator block)))
+        (when (<= (hir-block-id target) (hir-block-id block))
+          (push (cons block target) backward)
+          (unless (svref candidates (the (unsigned-byte 32) (hir-block-id target)))
+            (setf (svref candidates (the (unsigned-byte 32) (hir-block-id target))) t) (push target targets)))))
+    (dolist (candidate targets)
+      (incf epoch) (setq work (list (hir-function-entry function)))
+      (loop while work do
+        (when (minusp (decf fuel)) (return-from native-loop-plan nil))
+        (let* ((block (pop work)) (id (hir-block-id block)))
+          (declare (type simple-vector block) (type (unsigned-byte 32) id))
+          (unless (or (eq block candidate) (= (the (unsigned-byte 32) (svref seen id)) epoch))
+            (setf (svref seen id) epoch)
+            (dolist (target (hir-instruction-attributes (hir-block-terminator block))) (push target work)))))
+      (let ((latches nil))
+        (dolist (edge backward)
+          (when (minusp (decf fuel)) (return-from native-loop-plan nil))
+          (when (and (eq (cdr edge) candidate)
+                     (/= (the (unsigned-byte 32) (svref seen (the (unsigned-byte 32) (hir-block-id (car edge))))) epoch))
+            (push (car edge) latches)))
+        (when latches (push (cons candidate latches) groups))))
+    ;; Bound region storage, pair comparisons, ordering work and recursion.
+    (when (or (null groups) (> (length groups) 16)
+              (> (* (1+ (length groups)) (length blocks)) 32768))
+      (return-from native-loop-plan nil))
+    (dolist (group groups)
+      (let ((header (car group))
+            (members (make-array (hir-function-block-count function) :initial-element nil)))
+        (declare (type simple-vector members header))
+        (setq work (cdr group))
+        (loop while work do
+          (when (minusp (decf fuel)) (return-from native-loop-plan nil))
+          (let* ((block (pop work)) (id (hir-block-id block)))
+            (declare (type simple-vector block) (type (unsigned-byte 32) id))
+            (unless (svref members id)
+              (setf (svref members id) t)
+              (unless (eq block header)
+                (dolist (previous (hir-block-predecessors block))
+                  (when (svref alive (the (unsigned-byte 32) (hir-block-id previous))) (push previous work)))))))
+        ;; Header, membership, parent, ordered immediate body nodes.
+        (push (vector header members nil nil) regions)))
+    (dolist (region regions)
+      (dolist (other regions)
+        (unless (eq region other)
+          (let ((overlap nil) (only-region nil) (only-other nil))
+            (dolist (block blocks)
+              (when (minusp (decf fuel)) (return-from native-loop-plan nil))
+              (let* ((id (hir-block-id block))
+                     (left (svref (the simple-vector (svref region 1)) id))
+                     (right (svref (the simple-vector (svref other 1)) id)))
+                (declare (type (unsigned-byte 32) id))
+                (cond ((and left right) (setq overlap t))
+                      (left (setq only-region t)) (right (setq only-other t)))))
+            (when overlap
+              (when (or (and only-region only-other) (not (or only-region only-other)))
+                (return-from native-loop-plan nil))
+              (cond
+                ((not only-region)
+                 (when (svref (the simple-vector (svref region 1))
+                              (the (unsigned-byte 32) (hir-block-id (svref other 0))))
+                   (return-from native-loop-plan nil))
+                 (let ((parent (svref region 2)))
+                   (when (or (null parent)
+                             (svref (the simple-vector (svref parent 1))
+                                    (the (unsigned-byte 32) (hir-block-id (svref other 0)))))
+                     (setf (svref region 2) other))))
+                ((svref (the simple-vector (svref other 1))
+                        (the (unsigned-byte 32) (hir-block-id (svref region 0))))
+                 (return-from native-loop-plan nil))))))))
+    (let ((outer (native-loop-region-order function blocks nil regions))
+          (by-header (make-array (hir-function-block-count function) :initial-element nil)))
+      (declare (type simple-vector by-header))
+      (unless outer (return-from native-loop-plan nil))
+      (dolist (region regions)
+        (let ((order (native-loop-region-order function blocks region regions)))
+          (unless order (return-from native-loop-plan nil))
+          (setf (svref region 3) order
+                (svref by-header (the (unsigned-byte 32) (hir-block-id (svref region 0)))) region)))
+      ;; Emission needs only headers and ordered bodies. Do not retain proof
+      ;; bitsets or parent links in the module's cached function plans.
+      (dolist (region regions) (setf (svref region 1) nil (svref region 2) nil))
+      (cons outer by-header))))
 
 (defun native-live-values (function &optional dynamic-bindings blocks)
   (declare (type simple-vector function) (type list blocks))
@@ -401,14 +584,22 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (let ((position 0))
         (declare (type (unsigned-byte 32) position))
         (dolist (instruction (append (hir-block-instructions block) (list (hir-block-terminator block))))
-          (dolist (value (cons (hir-instruction-output instruction) (hir-instruction-inputs instruction)))
+          (let* ((reused (and *wasm-reused-values*
+                              (native-value-slot *wasm-reused-values* (hir-instruction-output instruction))))
+                 (inputs (unless reused (hir-instruction-inputs instruction))))
+          (dolist (original (cons (unless reused (hir-instruction-output instruction)) inputs))
+            (let ((value (if (and original *wasm-reused-values*)
+                             (or (native-value-slot *wasm-reused-values* original) original) original)))
             (when value
               (let ((owner (native-value-slot owners value)))
-                (setf (native-value-slot owners value) (if (or (null owner) (eq owner block)) block :shared)))))
-          (dolist (input (hir-instruction-inputs instruction)) (setf (native-value-slot last-use input) position))
+                (setf (native-value-slot owners value) (if (or (null owner) (eq owner block)) block :shared))))))
+          (dolist (input inputs)
+            (let ((value (if *wasm-reused-values* (or (native-value-slot *wasm-reused-values* input) input) input)))
+              (setf (native-value-slot last-use value) position))))
           (incf position))))
     (dolist (value (hir-function-values function))
-      (when (and (native-value-slot *wasm-live-values* value) (not (native-value-slot *wasm-inline-constants* value)))
+      (when (and (native-value-slot *wasm-live-values* value) (not (native-value-slot *wasm-inline-constants* value))
+                 (not (and *wasm-reused-values* (native-value-slot *wasm-reused-values* value))))
         (let* ((producer (hir-value-producer value))
                (alias (and (%hir-instruction-p producer)
                         (member (hir-instruction-opcode producer) '(:block-enter :block-environment))
@@ -416,6 +607,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                         (first (hir-instruction-inputs producer)))))
           (cond (alias (setf (native-value-slot aliases value) alias))
                 ((or (member (hir-value-kind value) '(:dynamic :cell)) (native-value-slot *wasm-local-cells* value) (%hir-block-p producer)
+                     (and *wasm-hoisted-values* (native-value-slot *wasm-hoisted-values* value))
                      (eq value (hir-function-environment function))
                      (eq (native-value-slot owners value) :shared))
                  (setf (native-value-slot locals value) (+ offset count)) (incf count))))))
@@ -439,6 +631,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
             (let ((output (hir-instruction-output instruction)))
               (when (and output (native-value-slot *wasm-live-values* output)
                          (not (native-value-slot *wasm-inline-constants* output))
+                         (not (and *wasm-reused-values* (native-value-slot *wasm-reused-values* output)))
                          (not (native-value-slot locals output)) (not (native-value-slot aliases output)))
                 (let ((index (if free (pop free) (prog1 (+ offset count) (incf count)))))
                   (setf (native-value-slot locals output) index)
@@ -498,6 +691,151 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                    (<= (length (hir-instruction-inputs producer)) 6) (native-value-slot scalar value))
           (setf (native-value-slot calls value) t))))
     calls))
+
+(defun native-plan-branch-tests (function blocks)
+  (declare (type simple-vector function) (type list blocks))
+  ;; Only consume a single-use suffix of the same block. No computation
+  ;; crosses an effect, and an observed Lisp boolean keeps its boxed value.
+  (when (or (>= (hir-function-debug-level function) 2)
+            (not (some (lambda (block) (eq (hir-instruction-opcode (hir-block-terminator block)) :branch)) blocks)))
+    (return-from native-plan-branch-tests nil))
+  (let ((uses (native-value-table function 0)) (tests (make-hash-table :test 'eq)))
+    (declare (type simple-vector uses) (type hash-table tests))
+    (dolist (block blocks)
+      (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+        (dolist (input (hir-instruction-inputs instruction)) (incf (native-value-slot uses input)))))
+    (dolist (block blocks)
+      (let ((end (hir-block-terminator block)))
+        (when (eq (hir-instruction-opcode end) :branch)
+          (let* ((original (first (hir-instruction-inputs end))) (value original) (call nil) (kind nil))
+            (dolist (instruction (reverse (hir-block-instructions block)))
+              (unless (and (eq (hir-instruction-output instruction) value)
+                           (= (native-value-slot uses value) 1)) (return))
+              (let ((opcode (hir-instruction-opcode instruction)) (inputs (hir-instruction-inputs instruction)))
+                (cond
+                  ((or (member opcode '(:copy :truth))
+                       (and (eq opcode :primary)
+                            (or (native-value-slot *wasm-scalar-groups* (first inputs))
+                                (native-value-slot *wasm-single-calls* (first inputs)))))
+                   (setq value (first inputs)))
+                  ((and (eq opcode :call)
+                        (let ((plan (gethash instruction *wasm-inline-simple-calls*)))
+                          (when (or (and (integerp plan) (< plan #x60))
+                                    (member plan '(:null :true :false :evenp :oddp)))
+                            (setq call instruction kind plan))))
+                   (return))
+                  (t (return)))))
+            (when (or call (not (eq value original)))
+              (setf (gethash end tests) (list value call kind)))))))
+    tests))
+
+(defun native-stable-predicate-p (kind)
+  ;; These canonical plans inspect immutable values or object identity/tags.
+  ;; Mutable contents, allocation, general calls and checked accesses are out.
+  (or (and (integerp kind) (<= #x50 kind #x59))
+      (member kind '(:eq :eql :null :consp :simple-vector-p :evenp :oddp))))
+
+(defun native-predicate-source (value reused)
+  (declare (type simple-vector value) (type (or null simple-vector) reused))
+  (loop repeat 32 do
+    (let* ((previous (and reused (native-value-slot reused value)))
+           (producer (hir-value-producer value)))
+      (cond (previous (setq value previous))
+            ((and (%hir-instruction-p producer)
+                  (or (eq (hir-instruction-opcode producer) :copy)
+                      (and (eq (hir-instruction-opcode producer) :primary)
+                           (native-value-slot *wasm-scalar-groups* (first (hir-instruction-inputs producer))))))
+             (setq value (first (hir-instruction-inputs producer))))
+            (t (return)))))
+  value)
+
+(defun native-predicate-key (scope instruction constants reused)
+  (declare (type simple-vector instruction) (type hash-table constants))
+  (let ((key (list scope (gethash instruction *wasm-inline-simple-calls*))))
+    (dolist (input (cddr (hir-instruction-inputs instruction)))
+      (let* ((source (native-predicate-source input reused)) (producer (hir-value-producer source))
+             (id (hir-value-id source)))
+        (when (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant))
+          ;; EQ keys preserve literal identity without traversing mutable or
+          ;; cyclic quoted objects. Their canonical value ID is function-local.
+          (let ((literal (first (hir-instruction-attributes producer))))
+            (setq id (or (gethash literal constants) (setf (gethash literal constants) id)))))
+        (push id key)))
+    key))
+
+(defun native-plan-predicate-reuse (function blocks)
+  (declare (type simple-vector function) (type list blocks))
+  (when (or (>= (hir-function-debug-level function) 2)
+            (and *wasm-optimization-barriers* (gethash function *wasm-optimization-barriers*)))
+    (return-from native-plan-predicate-reuse nil))
+  (let ((seen nil) (constants nil) (reused nil) (fuel 4096))
+    (declare (type (or null hash-table) seen constants) (type (or null simple-vector) reused)
+             (type (integer 0 4096) fuel))
+    (dolist (block blocks)
+      (let ((first nil) (first-epoch 0) (started nil) (epoch 0))
+        (declare (type (integer 0 4096) epoch first-epoch))
+        (dolist (instruction (hir-block-instructions block))
+          ;; Cheap tag tests are rematerialized across effectful operations:
+          ;; keeping their result alive can cost more code than recomputing it.
+          (unless (native-removable-p instruction)
+            (when (= epoch 4096) (return-from native-plan-predicate-reuse reused))
+            (incf epoch))
+          (let ((kind (and (eq (hir-instruction-opcode instruction) :call)
+                           (gethash instruction *wasm-inline-simple-calls*))))
+            (when (and kind (native-stable-predicate-p kind)
+                       (native-value-slot *wasm-live-values* (hir-instruction-output instruction))
+                       (native-value-slot *wasm-scalar-groups* (hir-instruction-output instruction)))
+              (when (zerop fuel) (return-from native-plan-predicate-reuse reused))
+              (decf fuel)
+              (if (null first)
+                  (setq first instruction first-epoch epoch)
+                  (progn
+                    ;; Most blocks have at most one live predicate. Allocate no
+                    ;; keys/table until a second candidate makes reuse possible.
+                    (unless started
+                      (unless seen (setq seen (make-hash-table :test 'equal)
+                                         constants (make-hash-table :test 'eq)))
+                      (let ((scope (if (member (gethash first *wasm-inline-simple-calls*)
+                                                '(:null :consp :simple-vector-p))
+                                       (cons (hir-block-id block) first-epoch) (hir-block-id block))))
+                        (setf (gethash (native-predicate-key scope first constants reused) seen)
+                              (hir-instruction-output first)))
+                      (setq started t))
+                    (let* ((scope (if (member kind '(:null :consp :simple-vector-p))
+                                      (cons (hir-block-id block) epoch) (hir-block-id block)))
+                           (key (native-predicate-key scope instruction constants reused))
+                           (previous (gethash key seen)))
+                      (if previous
+                          (progn
+                            (unless reused (setq reused (native-value-table function)))
+                            (setf (native-value-slot reused (hir-instruction-output instruction)) previous))
+                          (setf (gethash key seen) (hir-instruction-output instruction)))))))))))
+    reused))
+
+
+(defun native-predicate-aliases (function blocks reused)
+  (declare (type simple-vector function reused) (type list blocks))
+  ;; Flatten transparent copies of reused boolean results to the original
+  ;; scalar value. Keep aliases within its block: their execution counts and
+  ;; definition order then agree, including when the block is in a loop. All
+  ;; targets remain original scalar results, so alias lookups are one-hop.
+  (let ((roots (make-hash-table :test 'eq)))
+    (dolist (value (hir-function-values function))
+      (let ((previous (native-value-slot reused value)))
+        (when previous (setf (gethash previous roots) t))))
+    (dolist (block blocks)
+      (dolist (instruction (hir-block-instructions block))
+        (let ((output (hir-instruction-output instruction)) (inputs (hir-instruction-inputs instruction)))
+          (when (gethash output roots) (setf (gethash output roots) block))
+          (when (and (native-value-slot *wasm-live-values* output)
+                     (or (eq (hir-instruction-opcode instruction) :copy)
+                         (and (eq (hir-instruction-opcode instruction) :primary)
+                              (native-value-slot *wasm-scalar-groups* (first inputs)))))
+            (let ((source (native-predicate-source (first inputs) reused)))
+              (when (eq block (gethash source roots))
+                (setf (native-value-slot reused output) source)))))))
+    reused))
+
 
 (defun native-full-groups (function)
   (declare (type simple-vector function))
@@ -622,6 +960,14 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun native-inline-integer-opcode (name inputs)
   (declare (type symbol name) (type list inputs))
+  (when (and (= (length inputs) 3) (member name '(zerop minusp plusp evenp oddp)))
+    (let* ((value (third inputs))
+           (type (if *wasm-inferred-types* (gethash value *wasm-inferred-types* t) (hir-value-type value)))
+           (result (hir-integer-predicate-type name type)))
+      (return-from native-inline-integer-opcode
+        (cond ((equal result '(eql t)) :true) ((eq result 'null) :false)
+              ((native-integer-width value)
+               (case name (zerop #x50) (minusp #x53) (plusp #x55) (evenp :evenp) (oddp :oddp)))))))
   (when (and (= (length inputs) 3) (member name '(1+ 1-)))
     (let ((width (native-integer-width (third inputs))))
       (return-from native-inline-integer-opcode
@@ -648,16 +994,17 @@ Bind to NIL to interpret forms, including forms without native lowering.")
             (logand #x83) (logior #x84) (logxor #x85)
             (= #x51) (/= #x52) (< #x53) (> #x55) (<= #x57) (>= #x59)))))))
 
-(defun emit-native-inline-integer (inputs opcode)
+(defun emit-native-inline-integer (inputs opcode &optional raw)
   (declare (type list inputs) (type (unsigned-byte 8) opcode))
   ;; Planning proved scalar operands and, for arithmetic, absence of overflow.
   ;; INLINE selects the canonical definition at compilation. Values remain
   ;; boxed at generic HIR boundaries and retain the ordinary value count.
   (dolist (operand (cddr inputs))
     (emit-native-unboxed-integer operand (native-integer-width operand)))
-  (when (= (length inputs) 3) (wasm-byte #x42) (wasm-s32 1))
+  (when (and (= (length inputs) 3) (/= opcode #x50))
+    (wasm-byte #x42) (wasm-s32 (if (member opcode '(#x7c #x7d)) 1 0)))
   (wasm-byte opcode)
-  (wasm-call (if (< opcode #x60) "native-boolean" "native-int64")))
+  (unless raw (wasm-call (if (< opcode #x60) "native-boolean" "native-int64"))))
 
 (defun emit-native-integer-call (inputs &optional output (safety 1))
   (declare (type list inputs) (type (or null simple-vector) output)
@@ -765,7 +1112,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                      (hir-instruction-attributes producer)))
                    (name (and (eq (second attributes) 'inline) (first attributes)))
                    (kind (case name
-                     ((1+ 1- + - * logand logior logxor ash < > <= >= = /=)
+                     ((1+ 1- + - * logand logior logxor ash < > <= >= = /= zerop minusp plusp evenp oddp)
                       (and (zerop (hir-instruction-safety-level instruction))
                            (native-inline-integer-opcode name inputs)))
                      ((car first cdr rest)
@@ -929,6 +1276,10 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun native-known-callee (value)
   (declare (type simple-vector value))
+  (loop repeat (hir-function-value-count (hir-value-owner value))
+        for producer = (hir-value-producer value)
+        while (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :copy))
+        do (setq value (first (hir-instruction-inputs producer))))
   (let ((producer (hir-value-producer value)))
     (when (%hir-instruction-p producer)
       (case (hir-instruction-opcode producer)
@@ -1013,12 +1364,18 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (return-from emit-native-instruction nil))
     (when (and (native-removable-p instruction) (not (native-value-slot *wasm-live-values* output)))
       (return-from emit-native-instruction nil))
+    (let ((reused (and *wasm-reused-values* (native-value-slot *wasm-reused-values* output))))
+      (when reused
+        (return-from emit-native-instruction nil)))
+    (when (and *wasm-hoisted-values* (native-value-slot *wasm-hoisted-values* output))
+      (return-from emit-native-instruction nil))
     (when (and (member (hir-instruction-opcode instruction) '(:block-enter :block-environment))
                (not (hir-target-captured-p (first attributes))))
       ;; Uncaptured blocks introduce no runtime scope or value copy.
       (return-from emit-native-instruction nil))
     (case (hir-instruction-opcode instruction)
       (:constant (wasm-literal (first attributes)))
+      (:copy (wasm-get (first inputs)))
       ((:argument :rest-argument)
        (wasm-local 1) (wasm-integer (first attributes))
        (wasm-call (if (eq (hir-instruction-opcode instruction) :argument) "native-argument" "native-rest-argument")))
@@ -1087,6 +1444,11 @@ Bind to NIL to interpret forms, including forms without native lowering.")
              ((eq kind :false) (wasm-null))
              ((eq kind :left) (wasm-get (third inputs)))
              ((eq kind :right) (wasm-get (fourth inputs)))
+             ((member kind '(:evenp :oddp))
+              (emit-native-unboxed-integer (third inputs) (native-integer-width (third inputs)))
+              (wasm-byte #x42) (wasm-s32 1) (wasm-byte #x83)
+              (wasm-byte (if (eq kind :evenp) #x50 #xa7))
+              (wasm-call "native-boolean"))
              (t
               (wasm-get (third inputs))
               (case kind
@@ -1196,12 +1558,11 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (wasm-null) (wasm-call "native-cons"))
     (wasm-set (first (hir-block-parameters block)))))
 
-(defun native-dispatch-targets (function targets)
-  (declare (type simple-vector function) (type list targets))
+(defun native-dispatch-targets (function targets &optional (blocks (hir-function-blocks function)))
+  (declare (type simple-vector function) (type list targets blocks))
   ;; Most blocks are reached directly. Give only entry, backward and landing
   ;; targets dense dispatch indices, retaining their block IDs for layout.
-  (let* ((blocks (hir-function-blocks function))
-         (indices (make-array (length blocks) :initial-element nil))
+  (let* ((indices (make-array (hir-function-block-count function) :initial-element nil))
          (depths nil) (count 0))
     (declare (type simple-vector indices) (type (unsigned-byte 32) count))
     (setf (svref indices (hir-block-id (hir-function-entry function))) t)
@@ -1225,19 +1586,20 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (dolist (id dispatch) (setf (svref depths id) 1))
     (loop for tail on blocks for block = (car tail) for next = (cadr tail) do
       (dolist (successor (hir-instruction-attributes (hir-block-terminator block)))
-        (unless (eq successor next) (setf (svref depths (hir-block-id successor)) 1))))
+        (unless (eq successor next)
+          (setf (svref depths (hir-block-id successor)) 1))))
     (dolist (block blocks)
       (incf count (svref depths (hir-block-id block)))
       (setf (svref depths (hir-block-id block)) count))
     depths))
 
 (defun emit-native-dispatch-target (block from)
-  (declare (type simple-vector block from))
+  (declare (type simple-vector block from *wasm-next-blocks*))
   ;; The dispatcher's remaining nested labels already name every forward
   ;; block. Only backward edges need to reload the program counter.
   (let ((distance (- (hir-block-id block) (hir-block-id from))))
     (if (plusp distance)
-        (unless (= distance 1)
+        (unless (eq block (svref *wasm-next-blocks* (the (unsigned-byte 32) (hir-block-id from))))
           (wasm-byte #x0c)
           (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id block))
                        (svref *wasm-label-depths* (hir-block-id from)) 1)))
@@ -1257,6 +1619,72 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (wasm-get (hir-block-environment block)) (wasm-call "native-restore-environment"))
     (wasm-call "native-poll"))
   (emit-native-dispatch-target block from))
+
+(defun emit-native-condition (end truep)
+  (declare (type simple-vector end))
+  (let* ((test (and *wasm-branch-tests* (gethash end *wasm-branch-tests*)))
+         (call (second test)) (kind (third test)))
+    (if call
+        (let ((record (and *wasm-hoisted-values*
+                           (native-value-slot *wasm-hoisted-values* (hir-instruction-output call)))))
+          (if (and record (svref record 6))
+              (progn (wasm-local (svref record 6)) (unless truep (wasm-byte #x45)))
+        (let ((inputs (hir-instruction-inputs call)))
+          (cond
+            ((integerp kind) (emit-native-inline-integer inputs kind t))
+            ((member kind '(:true :false)) (wasm-integer (if (eq kind :true) 1 0)))
+            ((eq kind :null) (wasm-get (third inputs)) (wasm-byte #xd1))
+            ((member kind '(:evenp :oddp))
+             (emit-native-unboxed-integer (third inputs) (native-integer-width (third inputs)))
+             (wasm-byte #x42) (wasm-s32 1) (wasm-byte #x83)
+             (wasm-byte (if (eq kind :evenp) #x50 #xa7))))
+          (unless truep (wasm-byte #x45)))))
+        (progn
+          (wasm-get (if test (first test) (first (hir-instruction-inputs end))))
+          (wasm-byte #xd1)
+          (when truep (wasm-byte #x45))))))
+
+(defun emit-native-branch (end block next)
+  (declare (type simple-vector end block) (type (or null simple-vector) next))
+  (let* ((successors (hir-instruction-attributes end))
+         (yes (first successors)) (no (second successors))
+         (depth (svref *wasm-label-depths* (the (unsigned-byte 32) (hir-block-id block)))))
+    (when (eq yes no)
+      (emit-native-jump yes nil block) (return-from emit-native-branch nil))
+    (when (or (<= (hir-block-id yes) (hir-block-id block))
+              (<= (hir-block-id no) (hir-block-id block)))
+      (wasm-call "native-poll"))
+    (cond
+      ((or (eq yes next) (eq no next))
+       (let ((target (if (eq yes next) no yes)))
+         (emit-native-condition end (eq target yes))
+         (if (> (hir-block-id target) (hir-block-id block))
+             (progn
+               (wasm-byte #x0d)
+               (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1)))
+             (progn
+               ;; A backward target needs the dispatcher, while NEXT falls
+               ;; through. Account for this IF's extra control scope.
+               (wasm-byte #x04) (wasm-byte #x40)
+               (let ((*wasm-dispatch-depth* (1+ *wasm-dispatch-depth*)))
+                 (emit-native-dispatch-target target block))
+               (wasm-byte #x0b)))))
+      (t
+       (let ((target (cond ((> (hir-block-id no) (hir-block-id block)) no)
+                           ((> (hir-block-id yes) (hir-block-id block)) yes))))
+         (if target
+             (progn
+               (emit-native-condition end (eq target yes))
+               (wasm-byte #x0d)
+               (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1))
+               (emit-native-dispatch-target (if (eq target yes) no yes) block))
+             (progn
+               (emit-native-condition end nil)
+               (wasm-byte #x04) (wasm-byte #x7f)
+               (wasm-integer (svref *wasm-dispatch-indices* (hir-block-id no))) (wasm-byte #x05)
+               (wasm-integer (svref *wasm-dispatch-indices* (hir-block-id yes))) (wasm-byte #x0b)
+               (wasm-byte #x21) (wasm-u32 2)
+               (wasm-byte #x0c) (wasm-u32 *wasm-dispatch-depth*))))))))
 
 (defun emit-native-return (value)
   (when *wasm-dynamic-bindings*
@@ -1316,15 +1744,87 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                    (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1))))))
           (:branch
            (let ((no (second successors)))
-             (wasm-get (first inputs)) (wasm-byte #xd1)
-             (when (eq no next) (wasm-byte #x45))
-             (wasm-byte #x0d)
-             (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id (if (eq no next) target no))) depth 1))
-             (unless (or (eq target next) (eq no next))
-               (wasm-byte #x0c)
-               (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1)))))))
+             (if (eq target no)
+                 (unless (eq target next)
+                   (wasm-byte #x0c)
+                   (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1)))
+                 (progn
+                   (emit-native-condition terminator (eq no next))
+                   (wasm-byte #x0d)
+                   (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id (if (eq no next) target no))) depth 1))
+                   (unless (or (eq target next) (eq no next))
+                     (wasm-byte #x0c)
+                     (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1)))))))))
       (incf position))
     (wasm-byte #x0b)))
+
+(defun emit-native-structured-target (target)
+  (declare (type simple-vector target *wasm-structured-labels*)
+           (type (unsigned-byte 32) *wasm-control-depth*))
+  (wasm-u32 (- *wasm-control-depth*
+               (the (unsigned-byte 32) (svref *wasm-structured-labels*
+                                         (the (unsigned-byte 32) (hir-block-id target)))) 1)))
+
+(defun emit-native-structured-jump (target value from next)
+  (declare (type simple-vector target from))
+  (emit-native-jump-value target value)
+  (when (<= (hir-block-id target) (hir-block-id from))
+    (when *wasm-dynamic-bindings*
+      (wasm-get (hir-block-environment target)) (wasm-call "native-restore-environment"))
+    (wasm-call "native-poll"))
+  (unless (eq target next) (wasm-byte #x0c) (emit-native-structured-target target)))
+
+(defun emit-native-structured-region (blocks header)
+  (declare (type list blocks) (type (or null simple-vector) header)
+           (type simple-vector *wasm-structured-labels* *wasm-loop-regions*)
+           (type (unsigned-byte 32) *wasm-control-depth*))
+  ;; Outer labels stay open around the loop, so an exit branches directly to
+  ;; its ordinary successor. Inside, HEADER names LOOP rather than BLOCK.
+  (dolist (block (reverse blocks))
+    (unless (eq block header)
+      (setf (svref *wasm-structured-labels* (the (unsigned-byte 32) (hir-block-id block))) *wasm-control-depth*)
+      (wasm-byte #x02) (wasm-byte #x40) (incf *wasm-control-depth*)))
+  (loop for tail on blocks for block = (car tail) for next = (cadr tail) do
+    (unless (eq block header) (wasm-byte #x0b) (decf *wasm-control-depth*))
+    (let ((region (svref *wasm-loop-regions* (the (unsigned-byte 32) (hir-block-id block)))))
+     (if (and region (not (eq block header)))
+        (progn
+          (when *wasm-loop-hoists*
+            (dolist (record (svref *wasm-loop-hoists* (the (unsigned-byte 32) (hir-block-id block))))
+              (emit-native-hoisted-primitive record)))
+          (setf (svref *wasm-structured-labels* (the (unsigned-byte 32) (hir-block-id block))) *wasm-control-depth*)
+          (wasm-byte #x03) (wasm-byte #x40) (incf *wasm-control-depth*)
+          (emit-native-structured-region (svref region 3) block)
+          (wasm-byte #x0b) (decf *wasm-control-depth*)
+          ;; Every reachable path returned, exited, trapped or took a
+          ;; backedge; there is no ordinary fallthrough from this region.
+          (wasm-byte #x00))
+        (progn
+          (when *wasm-dynamic-bindings*
+            (wasm-get (hir-block-environment block)) (wasm-call "native-restore-environment"))
+          (dolist (instruction (hir-block-instructions block)) (emit-native-instruction instruction))
+          (let* ((end (hir-block-terminator block)) (inputs (hir-instruction-inputs end))
+                 (successors (hir-instruction-attributes end)) (target (first successors)))
+            (ecase (hir-instruction-opcode end)
+              (:unreachable (wasm-byte #x00))
+              (:return (emit-native-return (first inputs)) (when (or next header) (wasm-byte #x0f)))
+              (:throw (emit-native-throw inputs))
+              ((:jump :block-return)
+               (if (and (eq (hir-instruction-opcode end) :block-return) (null target))
+                   (emit-native-block-return inputs)
+                   (emit-native-structured-jump target
+                     (if (eq (hir-instruction-opcode end) :jump) (first inputs) (third inputs)) block next)))
+              (:branch
+               (let ((no (second successors)))
+                 (if (eq target no)
+                     (emit-native-structured-jump target nil block next)
+                     (progn
+                       (when (or (<= (hir-block-id target) (hir-block-id block))
+                                 (<= (hir-block-id no) (hir-block-id block))) (wasm-call "native-poll"))
+                       (emit-native-condition end (not (eq target next)))
+                       (wasm-byte #x0d) (emit-native-structured-target (if (eq target next) no target))
+                       (unless (or (eq target next) (eq no next))
+                         (wasm-byte #x0c) (emit-native-structured-target no)))))))))))))
 
 (defun emit-native-function (function)
   (let ((*wasm-current-function* function))
@@ -1333,16 +1833,15 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       ;; Acyclic evaluation entries execute their instructions at most once.
       ;; Their local/stack sizing work cannot pay back during execution. Keep
       ;; optimizing every persistent child and any entry containing a loop.
-      (if (and *wasm-optimize*
-               (not (and *wasm-single-use-entry* (eq function (first *native-functions*))
-                         plan (svref plan 1))))
+      (if (not (and *wasm-single-use-entry* (eq function (first *native-functions*))
+                         plan (svref plan 1)))
           (native-optimize-body body) body))))
 
-(defun native-loop-literals (function blocks)
+(defun native-loop-literals (blocks forward)
   ;; Literal identity is stable for the lifetime of this function object.
   ;; Load loop operands and global *names* once per invocation; the function
   ;; definitions themselves are still resolved at each original call site.
-  (when (null (native-forward-blocks function))
+  (when (null forward)
     (let ((seen (make-hash-table :test 'eq)) (literals nil))
       (dolist (block blocks)
         (dolist (instruction (hir-block-instructions block))
@@ -1361,42 +1860,294 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       ;; the cache as well as repeated execution benefiting from it.
       (remove-if (lambda (literal) (< (gethash literal seen) 2)) (nreverse literals)))))
 
+(defun native-loop-dominates-p (definition header query)
+  (declare (type simple-vector definition header query))
+  (when (eq definition header) (return-from native-loop-dominates-p nil))
+  (when (eq definition (svref query 0)) (return-from native-loop-dominates-p t))
+  (let* ((key (cons (hir-block-id definition) (hir-block-id header)))
+         (cache (svref query 2)) (seen (svref query 3)))
+    (declare (type hash-table cache) (type simple-vector seen))
+    (multiple-value-bind (proof found) (gethash key cache)
+      (when found (return-from native-loop-dominates-p proof)))
+    (let ((epoch (incf (svref query 4))) (work (list (svref query 0))) (proof t))
+      (declare (type (unsigned-byte 32) epoch) (type list work))
+      (loop while work do
+        (when (zerop (the (integer 0 65536) (svref query 5))) (setq proof nil) (return))
+        (decf (svref query 5))
+        (let* ((block (pop work)) (id (hir-block-id block)))
+          (declare (type simple-vector block) (type (unsigned-byte 32) id))
+          (unless (or (eq block definition) (= (the (unsigned-byte 32) (svref seen id)) epoch))
+            (when (eq block header) (setq proof nil) (return))
+            (setf (svref seen id) epoch)
+            (dolist (target (hir-instruction-attributes (hir-block-terminator block))) (push target work)))))
+      ;; Exhaustion supplies no proof; it does not establish non-dominance.
+      (setf (gethash key cache) proof))))
+
+(defun native-hoist-source (value header query)
+  (declare (type simple-vector value header query))
+  ;; A dominating definition has executed before this loop's prefix. Stop
+  ;; there, preserving its established assertion; a body-only assertion
+  ;; supplies no evidence for speculation before its own execution.
+  (loop repeat 32 do
+    (when (zerop (the (integer 0 65536) (svref query 5))) (return-from native-hoist-source nil))
+    (decf (svref query 5))
+    (let ((alias (and *wasm-reused-values* (native-value-slot *wasm-reused-values* value))))
+      (when alias (setq value alias)))
+    (let* ((producer (hir-value-producer value))
+           (definition (native-value-slot (the simple-vector (svref query 1)) value)))
+      (when (or (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant))
+                (and definition (native-loop-dominates-p definition header query)))
+        (return-from native-hoist-source value))
+      (unless (and (%hir-instruction-p producer)
+                   (or (eq (hir-instruction-opcode producer) :copy)
+                       (and (eq (hir-instruction-opcode producer) :primary)
+                            (native-value-slot *wasm-scalar-groups* (first (hir-instruction-inputs producer))))))
+        (return-from native-hoist-source nil))
+      (setq value (first (hir-instruction-inputs producer)))))
+  nil)
+
+(defun native-hoist-width (value)
+  (declare (type simple-vector value))
+  (let ((producer (hir-value-producer value)))
+    (if (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant))
+        (let ((literal (first (hir-instruction-attributes producer))))
+          ;; A literal's actual target value supplies the proof, rather than
+          ;; a potentially narrower assertion scoped to its original use.
+          (and (integerp literal) (<= -9223372036854775808 literal 9223372036854775807)
+               (1+ (integer-length literal))))
+        (let ((width (native-type-integer-width (gethash value *wasm-inferred-types* t))))
+          (and width (<= 1 width 64) width)))))
+
+(defun native-hoist-type (value)
+  (declare (type simple-vector value))
+  (let ((producer (hir-value-producer value)))
+    (if (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant))
+        (hir-constant-type (first (hir-instruction-attributes producer)))
+        (let ((type (gethash value *wasm-inferred-types* t)))
+          (if (and (consp type) (eq (car type) 'values))
+              (if (member (second type) lambda-list-keywords) t (second type)) type)))))
+
+(defun native-hoist-immediate-result-p (instruction arguments)
+  (declare (type simple-vector instruction) (type list arguments))
+  (let* ((reference (hir-value-producer (second (hir-instruction-inputs instruction))))
+         (name (and (%hir-instruction-p reference) (eq (hir-instruction-opcode reference) :function-reference)
+                    (first (hir-instruction-attributes reference))))
+         (type (and name (hir-inline-result-type name (mapcar #'native-hoist-type arguments))))
+         (width (and type (native-type-integer-width type))))
+    ;; This target representation is immediate and allocates no number object.
+    ;; The result proof also excludes intermediate i64 overflow for these ops.
+    (and width (<= 1 width 31))))
+
+(defun native-plan-loop-hoists (function blocks structured)
+  (declare (type simple-vector function) (type list blocks))
+  (unless structured (return-from native-plan-loop-hoists nil))
+  (let* ((regions (cdr structured)) (entry (hir-function-entry function))
+         (owners (make-array (hir-function-block-count function) :initial-element nil))
+         (parents (make-array (hir-function-block-count function) :initial-element nil))
+         (definitions (native-value-table function))
+         (query (vector entry definitions (make-hash-table :test 'equal)
+                        (make-array (hir-function-block-count function) :initial-element 0) 0 65536))
+         (fused (make-hash-table :test 'eq)) (hoists nil) (fuel 4096))
+    (declare (type simple-vector regions owners parents definitions entry)
+             (type (or null simple-vector) hoists) (type (integer 0 4096) fuel))
+    (dotimes (id (length regions))
+      (let ((region (svref regions id)))
+        (when region
+          (dolist (block (svref region 3))
+            (let* ((next (hir-block-id block)) (child (svref regions next)))
+              (declare (type (unsigned-byte 32) next))
+              (if (and child (not (eq child region)))
+                  (setf (svref parents next) (svref region 0))
+                  (setf (svref owners next) (svref region 0))))))))
+    (dolist (block blocks)
+      (dolist (value (hir-block-parameters block)) (setf (native-value-slot definitions value) block))
+      (dolist (instruction (hir-block-instructions block))
+        (when (hir-instruction-output instruction)
+          (setf (native-value-slot definitions (hir-instruction-output instruction)) block))))
+    (when *wasm-branch-tests*
+      (maphash (lambda (end test)
+        (when (and (second test)
+                   (not (eq (first (hir-instruction-attributes end)) (second (hir-instruction-attributes end)))))
+          (setf (gethash (second test) fused) t))) *wasm-branch-tests*))
+    (dolist (block blocks)
+      (let ((header (svref owners (the (unsigned-byte 32) (hir-block-id block)))))
+        (when header
+          (dolist (instruction (hir-block-instructions block))
+            (let* ((output (hir-instruction-output instruction))
+                   (kind (and (eq (hir-instruction-opcode instruction) :call)
+                              (gethash instruction *wasm-inline-simple-calls*))))
+              (when (and kind (or (and (integerp kind) (or (<= #x50 kind #x59) (member kind '(#x7c #x7d #x7e #x83 #x84 #x85))))
+                                  (member kind '(:eq :null :consp :simple-vector-p :evenp :oddp)))
+                         (native-value-slot *wasm-scalar-groups* output)
+                         (or (native-value-slot *wasm-live-values* output) (gethash instruction fused))
+                         (not (and *wasm-reused-values* (native-value-slot *wasm-reused-values* output))))
+                ;; Try each containing loop from inside outward. A failed outer
+                ;; proof keeps the already established inner placement.
+                (loop repeat 16 for target = header then (svref parents (the (unsigned-byte 32) (hir-block-id target)))
+                      while (and target (not (eq target entry))) do
+                  (when (zerop fuel) (return-from native-plan-loop-hoists hoists))
+                  (decf fuel)
+                  (let ((arguments nil) (widths nil) (valid t)
+                        (numeric (or (integerp kind) (member kind '(:evenp :oddp)))))
+                    (dolist (input (cddr (hir-instruction-inputs instruction)))
+                      (let ((operand (native-hoist-source input target query)))
+                        (unless operand (setq valid nil) (return))
+                        (push operand arguments)
+                        (when numeric
+                          (let ((width (native-hoist-width operand)))
+                            (unless width (setq valid nil) (return)) (push width widths)))))
+                    (when (and valid (integerp kind) (>= kind #x60))
+                      (unless (native-hoist-immediate-result-p instruction (reverse arguments)) (setq valid nil)))
+                    (unless valid (return))
+                    (unless hoists (setq hoists (native-value-table function)))
+                    ;; Original instruction, canonical plan, available operands,
+                    ;; independently proven widths, and destination loop header.
+                    (setf (native-value-slot hoists output)
+                      (let ((operands (nreverse arguments)))
+                        (vector instruction kind operands (nreverse widths) target
+                          (remove-if (lambda (value)
+                            (let ((producer (hir-value-producer value)))
+                              (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant)))) operands)
+                          ;; Fused tests have a proven single-use suffix. Keep
+                          ;; their cached condition raw when no Lisp value is live.
+                          (and (gethash instruction fused)
+                               (not (native-value-slot *wasm-live-values* output))))))))))))))
+    hoists))
+
+(defun native-finalize-loop-hoists (function blocks hoists)
+  (declare (type simple-vector function hoists) (type list blocks))
+  (let ((prefixes (make-array (hir-function-block-count function) :initial-element nil)))
+    (declare (type simple-vector prefixes))
+    ;; Preserve source instruction order within each prefix. All selected
+    ;; operations are independent, total and nonallocating; no body type
+    ;; assertion or runtime function lookup is evaluated speculatively.
+    (dolist (block blocks)
+      (dolist (instruction (hir-block-instructions block))
+        (let* ((output (hir-instruction-output instruction)) (record (native-value-slot hoists output)))
+          (when record
+            (if (or (svref record 6) (native-value-slot *wasm-live-values* output))
+                (push record (svref prefixes (the (unsigned-byte 32) (hir-block-id (svref record 4)))))
+                (setf (native-value-slot hoists output) nil))))))
+    (dotimes (id (length prefixes)) (setf (svref prefixes id) (nreverse (svref prefixes id))))
+    prefixes))
+
+(defun emit-native-invariant-value (value)
+  (declare (type simple-vector value))
+  (let ((producer (hir-value-producer value)))
+    (if (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant))
+        (wasm-literal (first (hir-instruction-attributes producer))) (wasm-get value))))
+
+(defun wasm-s64 (number)
+  (declare (type (signed-byte 64) number))
+  (loop
+    (let ((byte (logand number 127)))
+      (declare (type (unsigned-byte 7) byte))
+      (setq number (ash number -7))
+      (let ((done (or (and (= number 0) (< byte 64)) (and (= number -1) (>= byte 64)))))
+        (wasm-byte (logior byte (if done 0 128))) (when done (return))))))
+
+(defun emit-native-hoisted-primitive (record)
+  (declare (type simple-vector record))
+  (let ((kind (svref record 1)) (arguments (svref record 2)) (widths (svref record 3)))
+    (cond
+      ((or (integerp kind) (member kind '(:evenp :oddp)))
+       (loop for input in arguments for width in widths do
+         (let* ((producer (hir-value-producer input))
+                (literal (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant)
+                              (first (hir-instruction-attributes producer)))))
+           (if (integerp literal)
+               (progn (wasm-byte #x42) (wasm-s64 literal))
+               (progn (wasm-get input)
+                 (if (<= width 31)
+                     (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
+                     (wasm-call "native-unbox-int64"))))))
+       (cond ((member kind '(:evenp :oddp))
+              (wasm-byte #x42) (wasm-s32 1) (wasm-byte #x83)
+              (wasm-byte (if (eq kind :evenp) #x50 #xa7)))
+             (t (when (and (null (cdr arguments)) (/= kind #x50)) (wasm-byte #x42) (wasm-s32 (if (member kind '(#x7c #x7d)) 1 0)))
+                (wasm-byte kind)))
+       (unless (svref record 6)
+         (wasm-call (if (and (integerp kind) (>= kind #x60)) "native-int64" "native-boolean"))))
+      (t
+       (dolist (input arguments) (emit-native-invariant-value input))
+       (case kind (:eq (wasm-call "native-eq-inline"))
+                  (:consp (wasm-call "native-consp-inline"))
+                  (:simple-vector-p (wasm-call "native-simple-vector-p-inline"))
+                  (:null (wasm-byte #xd1) (unless (svref record 6) (wasm-call "native-boolean"))))))
+    (if (svref record 6)
+        (progn (wasm-byte #x21) (wasm-u32 (svref record 6)))
+        (wasm-set (hir-instruction-output (svref record 0))))))
+
 (defun native-function-plan (function)
   (declare (type simple-vector function))
   ;; Cache the lowering facts separately from the emitted literals, closure
   ;; objects and relocation offsets.
   (let* ((targets (native-block-targets function))
         (forward (unless targets (native-forward-blocks function)))
-        (blocks (or forward (hir-function-blocks function)))
+        (blocks (or forward (native-reachable-blocks function targets)))
+        (structured (unless (or forward targets) (native-loop-plan function blocks)))
+        (direct (or forward structured))
         (*wasm-inline-constants* (native-inline-constants function blocks))
         (*wasm-local-cells* (native-direct-cells function))
         (*wasm-dynamic-bindings* (or targets (some (lambda (block)
           (some (lambda (instruction) (eq (hir-instruction-opcode instruction) :dynamic-bind))
             (hir-block-instructions block))) blocks)))
         (*wasm-entry-environment* (hir-function-environment function))
-        (*wasm-live-values* (native-live-values function *wasm-dynamic-bindings* blocks))
         (*wasm-scalar-groups* (native-scalar-groups function))
         (*wasm-single-calls* (native-single-calls function *wasm-scalar-groups*))
-        (locals nil) (count 0)
-        (literals (native-loop-literals function blocks))
+        (*wasm-branch-tests* (native-plan-branch-tests function blocks))
+        (*wasm-reused-values* nil)
+        (*wasm-hoisted-values* nil)
+        (*wasm-live-values* (native-live-values function *wasm-dynamic-bindings* blocks))
+        (reused (native-plan-predicate-reuse function blocks))
+        (locals nil) (count 0) (literals nil) (prefixes nil) (raw-count 0)
         (literal-locals (make-hash-table :test 'eq))
-        (dispatch (unless forward (native-dispatch-targets function targets))))
-    (declare (type (unsigned-byte 32) count) (type list targets blocks literals)
+        (dispatch (unless direct (native-dispatch-targets function targets blocks)))
+        (next-blocks (make-array (hir-function-block-count function) :initial-element nil)))
+    (declare (type (unsigned-byte 32) count) (type simple-vector next-blocks) (type list targets blocks literals)
              (type hash-table literal-locals) (type (or null simple-vector) locals))
+    (when reused
+      (native-predicate-aliases function blocks reused)
+      (setq *wasm-reused-values* reused
+            *wasm-live-values* (native-live-values function *wasm-dynamic-bindings* blocks)))
+    (setq *wasm-hoisted-values* (native-plan-loop-hoists function blocks structured))
+    (when *wasm-hoisted-values*
+      ;; A formerly fused condition now reads its cached scalar result.
+      (when *wasm-branch-tests*
+        (maphash (lambda (end test)
+          (let ((call (second test)))
+            (when (and call (native-value-slot *wasm-hoisted-values* (hir-instruction-output call))
+                       (not (svref (native-value-slot *wasm-hoisted-values* (hir-instruction-output call)) 6)))
+              (setf (gethash end *wasm-branch-tests*) (list (first test) nil nil))))) *wasm-branch-tests*))
+      (setq *wasm-live-values* (native-live-values function *wasm-dynamic-bindings* blocks)
+            prefixes (native-finalize-loop-hoists function blocks *wasm-hoisted-values*)))
+    ;; Reuse the earlier CFG query; captured landing targets can force dispatch
+    ;; even when the entry's graph is acyclic. Use the final live-value set.
+    (setq literals (native-loop-literals blocks
+                     (or forward (and targets (native-forward-blocks function)))))
+    ;; Keep i32 condition locals before object locals, like the existing
+    ;; dispatcher local. Native bytecode decoding treats this prefix as pinned.
+    (when prefixes
+      (dotimes (id (length prefixes))
+        (dolist (record (svref prefixes id))
+          (when (svref record 6)
+            (setf (svref record 6) (+ (if direct 2 3) raw-count)) (incf raw-count)))))
     (multiple-value-setq (locals count)
-      (native-local-layout function blocks (if forward 2 3)))
+      (native-local-layout function blocks (+ (if direct 2 3) raw-count)))
+    (loop for tail on blocks do
+      (setf (svref next-blocks (the (unsigned-byte 32) (hir-block-id (car tail)))) (cadr tail)))
     (dolist (literal literals)
-      (setf (gethash literal literal-locals) (+ (if forward 2 3) count)) (incf count))
+      (setf (gethash literal literal-locals) (+ (if direct 2 3) raw-count count)) (incf count))
     (vector targets forward *wasm-inline-constants* *wasm-local-cells*
             *wasm-dynamic-bindings* *wasm-entry-environment* *wasm-live-values*
             *wasm-scalar-groups* *wasm-single-calls* locals count literal-locals literals
             (native-tail-calls function) (native-value-table function :unknown)
-            dispatch (native-block-label-depths function blocks (cdr dispatch)))))
+            dispatch (native-block-label-depths function blocks (cdr dispatch)) blocks next-blocks *wasm-branch-tests* structured reused *wasm-hoisted-values* prefixes raw-count)))
 
 (defun emit-native-function-body (function)
   (declare (type simple-vector function))
-  ;; Boxed SSA values are externref locals. A dispatcher is a first correct
-  ;; lowering of arbitrary CFG edges; structured regions replace it later.
+  ;; Boxed SSA values are externref locals. Acyclic and proven loop regions
+  ;; use direct branches; arbitrary control-flow graphs retain the dispatcher.
   (let* ((*wasm-current-function* function)
          (*wasm-last-local* nil)
          ;; Unit initializers run once. Other stable closures may share
@@ -1413,9 +2164,17 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                     (when *wasm-function-plans* (setf (gethash function *wasm-function-plans*) plan))
                     plan)))
         (targets (svref plan 0)) (forward (svref plan 1))
-        (blocks (or forward (hir-function-blocks function)))
+        (structured (svref plan 20)) (direct (or forward structured))
+        (blocks (svref plan 17))
+        (last-id (hir-block-id (car (last blocks))))
         (dispatch (svref plan 15))
         (*wasm-label-depths* (svref plan 16))
+        (*wasm-next-blocks* (svref plan 18))
+        (*wasm-branch-tests* (svref plan 19))
+        (*wasm-reused-values* (svref plan 21))
+        (*wasm-hoisted-values* (svref plan 22))
+        (*wasm-loop-hoists* (svref plan 23))
+        (raw-count (svref plan 24))
         (*wasm-dispatch-indices* (car dispatch))
         (*wasm-inline-constants* (svref plan 2)) (*wasm-local-cells* (svref plan 3))
         (*wasm-dynamic-bindings* (svref plan 4)) (*wasm-entry-environment* (svref plan 5))
@@ -1431,8 +2190,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
    (when *wasm-function-relocations*
      (setf (gethash function *wasm-function-relocations*) nil))
    (with-wasm-bytes
-    (wasm-u32 (if forward 1 2))
-    (unless forward (wasm-u32 1) (wasm-type :i32))
+    (wasm-u32 (if (or (not direct) (plusp raw-count)) 2 1))
+    (when (or (not direct) (plusp raw-count))
+      (wasm-u32 (+ (if direct 0 1) raw-count)) (wasm-type :i32))
     (wasm-u32 count) (wasm-type :object)
     (dolist (literal (svref plan 12))
       (let ((*wasm-literal-locals* nil)) (wasm-literal literal))
@@ -1441,6 +2201,13 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (wasm-call "native-environment") (wasm-set (hir-function-environment function)))
     (when forward
       (emit-native-forward blocks)
+      (return-from emit-native-function-body *wasm-bytes*))
+    (when structured
+      (let ((*wasm-structured-labels* (make-array (hir-function-block-count function) :initial-element nil))
+            (*wasm-loop-regions* (cdr structured))
+            (*wasm-control-depth* 0))
+        (emit-native-structured-region (car structured) nil))
+      (wasm-byte #x0b)
       (return-from emit-native-function-body *wasm-bytes*))
     ;; Fresh i32 locals already contain zero. No prologue work writes the
     ;; dispatcher local, so only a nonzero initial dispatch index needs a store.
@@ -1454,14 +2221,14 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (dolist (byte '(#x1f #x40 1 0 0 0)) (wasm-byte byte)))
     (wasm-byte #x03) (wasm-byte #x40) ; dispatch loop
     (wasm-byte #x02) (wasm-byte #x40) ; invalid program counter
-    (dotimes (i (svref *wasm-label-depths* (1- (length blocks)))) (wasm-byte #x02) (wasm-byte #x40))
+    (dotimes (i (svref *wasm-label-depths* last-id)) (wasm-byte #x02) (wasm-byte #x40))
     (wasm-local 2) (wasm-byte #x0e) (wasm-u32 (length (cdr dispatch)))
     (dolist (id (cdr dispatch)) (wasm-u32 (1- (svref *wasm-label-depths* id))))
-    (wasm-u32 (svref *wasm-label-depths* (1- (length blocks))))
+    (wasm-u32 (svref *wasm-label-depths* last-id))
     ;; BR_TABLE selects a block in constant time. The earlier chain of IFs
     ;; rescanned every preceding block on each edge of a compiler's inner loop.
-    (let ((*wasm-dispatch-depth* (1+ (svref *wasm-label-depths* (1- (length blocks))))) (depth 0))
-     (dolist (block (hir-function-blocks function))
+    (let ((*wasm-dispatch-depth* (1+ (svref *wasm-label-depths* last-id))) (depth 0))
+     (loop for tail on blocks for block = (car tail) for next = (cadr tail) do
       (let ((current (svref *wasm-label-depths* (hir-block-id block))))
         (unless (= current depth)
           (wasm-byte #x0b) (decf *wasm-dispatch-depth*) (setq depth current)))
@@ -1478,28 +2245,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
           (:block-return
            (if successors (emit-native-jump (first successors) (third inputs) block)
                (emit-native-block-return inputs)))
-          (:branch
-           (when (some (lambda (successor) (<= (hir-block-id successor) (hir-block-id block))) successors)
-             (wasm-call "native-poll"))
-           (let* ((yes (first successors)) (no (second successors))
-                  (target (cond ((and (= (hir-block-id no) (1+ (hir-block-id block)))
-                                      (> (hir-block-id yes) (hir-block-id no))) yes)
-                                ((> (hir-block-id no) (hir-block-id block)) no)
-                                ((> (hir-block-id yes) (hir-block-id block)) yes))))
-             (if target
-                 (progn
-                   (wasm-get (first inputs)) (wasm-byte #xd1)
-                   (when (eq target yes) (wasm-byte #x45))
-                   (wasm-byte #x0d)
-                   (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1))
-                   (emit-native-dispatch-target (if (eq target yes) no yes) block))
-                 (progn
-                   (wasm-get (first inputs)) (wasm-byte #xd1)
-                   (wasm-byte #x04) (wasm-byte #x7f)
-                   (wasm-integer (svref *wasm-dispatch-indices* (hir-block-id no))) (wasm-byte #x05)
-                   (wasm-integer (svref *wasm-dispatch-indices* (hir-block-id yes))) (wasm-byte #x0b)
-                   (wasm-byte #x21) (wasm-u32 2)
-                   (wasm-byte #x0c) (wasm-u32 *wasm-dispatch-depth*)))))))
+          (:branch (emit-native-branch terminator block next))))
       ))
     (wasm-byte #x0b) (wasm-byte #x00) ; invalid program counter traps
     (wasm-byte #x0b) (wasm-byte #x00)
@@ -1574,7 +2320,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (let ((original (mapcar #'emit-native-function *native-functions*))
         (original-indices *native-function-indices*)
         (*wasm-body-keys* (make-hash-table :test 'eq)))
-    (unless (or entries *wasm-optimize*) (return-from emit-native-bodies original))
     (loop
       (let ((bodies (mapcar (lambda (function body)
                              (native-relocate-body function body original-indices)) *native-functions* original)))
@@ -1684,7 +2429,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                          (eq (hir-instruction-opcode producer) :function-reference)
                          (not (eq (second (hir-instruction-attributes producer)) 'notinline))
                          (or (member (first (hir-instruction-attributes producer))
-                           '(1+ 1- + - * logand logior logxor ash < > <= >= = /= car first cdr rest length svref aref row-major-aref
+                           '(1+ 1- + - * logand logior logxor ash < > <= >= = /= zerop minusp plusp evenp oddp car first cdr rest length svref aref row-major-aref
                              (setf svref) (setf aref) (setf row-major-aref)) :test #'equal)
                              (and (zerop (hir-instruction-safety-level instruction))
                                   (eq (second (hir-instruction-attributes producer)) 'inline)
@@ -1713,12 +2458,13 @@ Bind to NIL to interpret forms, including forms without native lowering.")
          (*wasm-literal-index* (make-hash-table :test 'eq))
          (*wasm-literal-groups* (and entries (native-literal-groups entries)))
          (*native-functions* (hir-unit-functions unit))
+         (*wasm-optimization-barriers* (hir-optimization-barriers unit))
          ;; These roots come directly from validated instruction operands.
          (*wasm-inferred-types* (infer-hir-types-checked unit (native-type-roots unit) t entries))
          (*wasm-debug* (some (lambda (function) (>= (hir-function-debug-level function) 2)) *native-functions*))
          (*wasm-function-plans* (make-hash-table :test 'eq))
          (*native-function-indices* (native-function-indices *native-functions*))
-         (*wasm-function-relocations* (and (or entries *wasm-optimize*) (make-hash-table :test 'eq)))
+         (*wasm-function-relocations* (make-hash-table :test 'eq))
          (*wasm-used-imports* nil) (*wasm-import-counts* (make-hash-table :test 'equal))
          (*native-import-indices* nil)
          (*native-import-stack-effects* nil)
@@ -1735,7 +2481,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ;; emission of every instruction and literal in the application.
     (let* ((*native-imports* *native-imports*)
          (bodies (emit-native-bodies entries))
-         (bodies (native-prune-module bodies entries *wasm-optimize*))
+         (bodies (native-prune-module bodies entries))
          (type-prefix (if *wasm-object-types* 2 0))
          (signatures (remove-duplicates
                        (append (mapcar #'cdr *native-imports*) (list '((:object :object) :object))
@@ -1837,7 +2583,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
 
 (defparameter *native-compiler-seeds*
   '(compiler-primitive
-                   wasm-byte wasm-append wasm-u32 wasm-s32 wasm-name wasm-type wasm-section wasm-call
+                   wasm-byte wasm-append wasm-u32 wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call
                    wasm-remember-local wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
                    ;; These small constructors and declaration readers are
                    ;; exercised while compiling nearly every remaining kernel.
@@ -1851,30 +2597,33 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-special-p hir-declarations hir-intersect-types hir-type-environment hir-bound-type-environment
                    native-optimization-level native-debug-level native-safety-level
                    native-canonical-builtin-code native-builtin-code emit-native-object-types wasm-literal wasm-list
-                   native-removable-p native-live-inputs native-direct-cells native-forward-blocks native-live-values native-local-layout native-single-calls native-full-groups native-scalar-groups native-block-targets
+                   native-removable-p native-live-inputs native-direct-cells native-forward-blocks native-reachable-blocks native-loop-region-order native-loop-plan native-live-values native-local-layout native-single-calls native-full-groups native-scalar-groups native-plan-branch-tests native-stable-predicate-p native-predicate-source native-predicate-key native-plan-predicate-reuse native-predicate-aliases native-block-targets
                    emit-native-fixed-call native-type-integer-width native-compute-integer-width native-integer-width
                    emit-native-unboxed-integer native-integer-result-fits-p native-inline-integer-opcode emit-native-inline-integer emit-native-integer-call
                    native-simple-vector-value-p native-list-value-p emit-native-vector-call emit-native-list-call
                    native-plan-inline-simple native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-call
-                   emit-native-cons-access native-fixed-arity emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
+                   emit-native-cons-access native-fixed-arity emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward
+                   emit-native-structured-target emit-native-structured-jump emit-native-structured-region
                    hir-capture hir-cell-for-binding
                    hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
-                   hir-type-without-null hir-type-truth-premise hir-type-branch-guards
-                   hir-inline-primitive hir-integer-identity hir-inline-result-type infer-hir-types infer-hir-types-checked
+                   hir-type-without-null hir-copy-source hir-type-truth-premise hir-type-branch-guards
+                   hir-inline-primitive hir-integer-identity hir-integer-predicate-type hir-inline-result-type infer-hir-types infer-hir-types-checked
+                   hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells
+                   hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-refresh-predecessors optimize-hir-checked optimize-hir
                    hir-inline-environment hir-function-result-type hir-inline-size hir-inline-candidate hir-inline-body hir-shadow-specials
                    compiler-source-policy
                    hir-bind-value hir-read-variable hir-write-variable hir-function-reference
                    hir-small-membership hir-membership-branches hir-call-arguments hir-literal-apply-form hir-case-form hir-macro-environment hir-assert-form
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
                    hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir verify-hir-contents
-                   native-inline-constants native-loop-literals native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-checked emit-native-module
+                   native-inline-constants native-loop-literals native-loop-dominates-p native-hoist-source native-hoist-width native-hoist-type native-hoist-immediate-result-p native-plan-loop-hoists native-finalize-loop-hoists emit-native-invariant-value emit-native-hoisted-primitive native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-checked emit-native-module
                    hir-body hir-close hir-expand-local-macros hir-lambda
                    hir-tagbody-form hir-setq-form hir-local-functions-form
                    hir-multiple-value-bind-form hir-block-form hir-simple-restart-form
                    hir-restart-signal-form hir-symbol-iterate-form hir-while-form
                    hir-multiple-value-call-form hir-return-from-form
-                   hir-literal-membership hir-application-form hir-recursive-form hir-form compile-to-hir compile-module-to-hir compile-native-module
+                   hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-to-hir compile-module-to-hir compile-native-module
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
                    native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-prune-module
@@ -1918,7 +2667,8 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
       (append documentation (list '(declare (optimize (safety 0))
         (inline svref aref row-major-aref (setf svref) (setf aref) (setf row-major-aref)
                 length logand logior logxor ash car first cdr rest eq eql null not cons
-                gethash (setf gethash) consp simple-vector-p 1+ 1- + - * < > <= >= = /=))) body))))
+                gethash (setf gethash) consp simple-vector-p zerop minusp plusp evenp oddp
+                1+ 1- + - * < > <= >= = /=))) body))))
 
 (defun ensure-compiler ()
   "Compile the compiler once on first use; startup only loads its packed source."
@@ -1944,9 +2694,9 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
 (defun compile-compiler ()
   "Bootstrap supported compiler kernels; return installed names and unsupported sources.
 This does not change the policy for compiling application bodies."
-  ;; The first kernels make the optimizer itself fast. The image builder then
-  ;; recompiles them with optimization enabled, using these compiled kernels.
-  (let ((*compiler-bootstrapping* t) (*wasm-optimize* nil) (installed nil) (unsupported nil))
+  ;; Bootstrap uses the ordinary optimization policy. Only recursion into
+  ;; ENSURE-COMPILER is suppressed while its own kernels are being compiled.
+  (let ((*compiler-bootstrapping* t) (installed nil) (unsupported nil))
     (dolist (name *native-compiler-seeds*)
       (unless (gethash name *native-compiler-functions*)
         (handler-case

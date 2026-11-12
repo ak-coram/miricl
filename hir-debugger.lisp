@@ -54,6 +54,7 @@
                           (or (nth a (remove-if (lambda (p) (member p lambda-list-keywords))
                                      (svref function 10))) (placeholder id)))
                          (:cell-read (or (cell-name (first inputs)) (placeholder id)))
+                         (:copy (read-value (first inputs)))
                          (:global-read (svref literals a))
                          ((:function-reference :function-reference-inline :function-reference-notinline)
                           (list 'function (svref literals a)))

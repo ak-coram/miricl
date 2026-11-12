@@ -327,6 +327,7 @@
       (:check-arguments (push #@(call $native-check-arguments (extern.convert_any (local.get $args))
         (local.get $a) (i32.sub (local.get $b) (i32.const 1))) effects))
       (:truth (setf result `(call $bool (i32.eqz (ref.is_null ,(hir-input 0))))))
+      (:copy (setf result (hir-input 0)))
       ((:function-reference :function-reference-inline :function-reference-notinline)
        (setf result (hir-native '$native-function-reference (hir-literal))))
       (:global-read (setf result `(call $symbol-value ,(hir-literal))))
@@ -398,7 +399,7 @@
       ;; ambient value packet. Calls still capture their results and clear it.
       (unless (member opcode '(:constant :argument :rest-argument :check-arguments :truth
                                :values :values-list :list :value-ref :checked-argument
-                               :cell-new :cell-read :cell-write :primary :capture :closure
+                               :cell-new :cell-read :cell-write :primary :copy :capture :closure
                                :check-apply-list :check-apply-arguments :branch :jump :checked-jump))
         #@(call $clear-values))
       #@(br $next))))

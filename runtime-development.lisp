@@ -1386,6 +1386,8 @@
     (then (return_call $hir-read-instruction-primitive (local.get $args))))
   #@(if (i32.eq (local.get $mode) (i32.const 46))
     (then (return_call $hir-unpack-blocks (local.get $a))))
+  #@(if (i32.eq (local.get $mode) (i32.const 47))
+    (then (return_call $oddp-native (local.get $a))))
   #@(if (i32.or (i32.eq (local.get $mode) (i32.const 43)) (i32.eq (local.get $mode) (i32.const 44)))
     (then
       (if (i32.eq (call $tag (local.get $a)) (i32.const 8))

@@ -7,7 +7,8 @@ const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
 try {
   vm.evaluate(`(miricl-compiler::ensure-compiler) (in-package :miricl-compiler)
     (defun declared-read-widths (source)
-      (let ((unit (compile-to-hir source)))
+      ;; Inspect source assertions before cell forwarding and constant rewrites.
+      (let* ((unit (lower-source-to-hir source)))
         (loop for function in (hir-unit-functions unit) append
           (loop for value in (hir-function-values function)
             for producer = (hir-value-producer value)

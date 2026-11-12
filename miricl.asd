@@ -68,6 +68,7 @@
                (:file "hir")
                (:file "hir-interpreter")
                (:file "hir-types")
+               (:file "hir-optimize")
                (:file "wasm-compiler")
                (:file "wasm-optimizer")
                (:file "wasm-disassembly")

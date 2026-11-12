@@ -39,7 +39,10 @@ where size can be an issue (such as [[https://ak-coram.github.io/miricl/todo.htm
 *** How?
 
 I've set up a cage fighting match between an LLM and [[https://gitlab.common-lisp.net/ansi-test/ansi-test][ansi-test]] which
-lasted for days. You can view the results [[https://ak-coram.github.io/miricl/ansi-results.html][here]].
+lasted for days. You can view the results [[https://ak-coram.github.io/miricl/ansi-results.html][here]]. Now the cage fight
+endlessly continues with a few large applications (see the submodules
+in this repository) and image sizes, performance and snapshot sizes
+keep incrementally improving.
 
 *** Don't you care how the sausage is made?
 

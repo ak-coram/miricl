@@ -865,9 +865,9 @@ With STRIP NIL, retain every definition and compact only the representation."
             (push (hir-unit-functions hir) functions)
             (when load
               ;; Execute native initializers in order, retaining TCO for deep
-              ;; calls. Run the size passes on the shared output module only.
+              ;; calls, using the same optimization pipeline as the shared output.
               (multiple-value-bind (bytes literals debug)
-                  (let ((*wasm-optimize* nil)) (emit-native-module hir))
+                  (emit-native-module hir)
                 (declare (ignore debug))
                 (multiple-value-bind (function native) (compiler-primitive 17 bytes literals nil)
                   (unless native (error "This host cannot execute native bundle initializers."))

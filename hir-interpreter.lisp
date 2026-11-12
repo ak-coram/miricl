@@ -377,6 +377,7 @@
       (verify-hir unit)
       (verify-hir-code-operands unit)
       (verify-hir-code-dominance unit)
+      (optimize-hir-checked unit)
       unit)))
 
 (defun verify-hir-code-operands (unit)
@@ -420,6 +421,11 @@
                 (hir-code-error opcode "operand is not a lexical control target"))
               (when (third inputs) (group (third inputs))))
             (case opcode
+              (:copy
+               (unless (and (eq (hir-value-kind (first inputs)) :single)
+                            (hir-instruction-output instruction)
+                            (eq (hir-value-kind (hir-instruction-output instruction)) :single))
+                 (hir-code-error opcode "copy requires single-value operands")))
               ((:primary :value-ref :values-list :return) (group (first inputs)))
               (:jump (when inputs (group (first inputs))))
               (:throw (group (third inputs)))

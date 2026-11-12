@@ -220,13 +220,12 @@ try {
     (progn (emit-native-module *throughput-unit*)
       (throughput-rewrite *throughput-unit*) (values))`);
   // Reusing an HIR object after its uses change must give the same module as
-  // a fresh, identically rewritten graph. Disable final size passes here so
-  // they cannot mask stale lowering metadata by simplifying both results.
+  // a fresh, identically rewritten graph through the standard pipeline.
   for (const [name, unit] of [
     ['reused', '*throughput-unit*'],
     ['fresh', `(throughput-rewrite (compile-to-hir '(lambda (x) (list (+ x 19) (+ x 37)))))`],
   ]) {
-    vm.evaluate(`(let ((*wasm-optimize* nil))
+    vm.evaluate(`(progn
       (multiple-value-bind (bytes literals) (emit-native-module ${unit})
         (with-open-file (out "/${name}.wasm" :direction :output :if-exists :supersede
                             :element-type '(unsigned-byte 8)) (write-sequence bytes out))

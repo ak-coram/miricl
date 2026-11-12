@@ -16,7 +16,7 @@ const test = (name, ...args) => [`tests/${name}.mjs`, ...args];
 // native-bundle and the separate cold compiler-input run below.
 const readyCompilerTests = new Set([
   'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-inline-types',
-  'compiler-inline-writes', 'compiler-modules', 'compiler-throughput', 'native-size',
+  'compiler-inline-writes', 'compiler-modules', 'compiler-throughput', 'native-size', 'hir-optimization', 'compiler-integer-predicates', 'compiler-predicate-reuse', 'compiler-loops', 'compiler-licm',
 ]);
 const groups = {
   runtime: [
@@ -38,8 +38,8 @@ const groups = {
     test('core-image', precompiled),
     test('native-arguments', precompiled),
     test('debugger', precompiled),
-    ...['compilation', 'hir', 'whole-program', 'class-reachability', 'generic-dispatch',
-      'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-input', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-modules', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',
+    ...['compilation', 'hir', 'hir-optimization', 'compiler-loops', 'compiler-predicate-reuse', 'compiler-licm', 'whole-program', 'class-reachability', 'generic-dispatch',
+      'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-input', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-integer-predicates', 'compiler-modules', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',
       'fasl-format', 'fasl-hash-tables', 'fasl-shared-initialization', 'saved-slots', 'file-compilation', 'file-code-sharing', 'nested-backquote',
       'structure-printers', 'ansi-compiler-runner', 'ansi-runner', 'ansi-upstream-runner']
       .map(name => test(name, readyCompilerTests.has(name) ? precompiled : wasm)),

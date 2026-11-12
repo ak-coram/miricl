@@ -248,7 +248,8 @@ try {
     (dolist (binding (miricl-compiler::hir-function-bindings function))
       (setf (miricl-compiler::hir-binding-captured-p binding) nil))
     (= (funcall (funcall (miricl-compiler:load-hir-code (miricl-compiler:emit-hir-code unit)) 17)) 17))`);
-  check(`(let* ((unit (miricl-compiler:compile-to-hir '(lambda (x) x)))
+  // These fixtures inspect or corrupt cells before optimization removes them.
+  check(`(let* ((unit (miricl-compiler::lower-source-to-hir '(lambda (x) x)))
                 (function (first (miricl-compiler:hir-unit-functions unit)))
                 (instructions (loop for block in (miricl-compiler::hir-function-blocks function)
                                     append (miricl-compiler::hir-block-instructions block)))
@@ -258,10 +259,14 @@ try {
           (list (miricl-compiler::hir-instruction-output read)))
     (handler-case (progn (miricl-compiler:emit-hir-code unit) nil)
       (program-error (condition) (not (null (search "circular" (princ-to-string condition)))))))`);
-  check(`(let ((ops (miricl-compiler::hir-wire-operations
+  check(`(let* ((unit (miricl-compiler::lower-source-to-hir
                     '(lambda (x) (let ((y x))
-                       (list (locally (declare (type (unsigned-byte 8) y)) y) y))))))
-    (and (not (null (member :cell-new ops))) (not (null (member :cell-read ops)))))`);
+                       (list (locally (declare (type (unsigned-byte 8) y)) y) y)))))
+                (function (first (miricl-compiler:hir-unit-functions unit)))
+                (ops (loop for block in (miricl-compiler::hir-function-blocks function) append
+                       (mapcar (lambda (instruction) (miricl-compiler::hir-instruction-opcode instruction))
+                         (miricl-compiler::hir-block-instructions block)))))
+    (and (member :cell-new ops) (not (null (member :cell-read ops)))))`);
   check(`(let ((ops (miricl-compiler::hir-wire-operations
                     '(lambda (x) (declare (optimize (debug 3))) (let ((y x)) (values y y))))))
     (and (not (null (member :cell-new ops))) (not (null (member :cell-read ops)))))`);

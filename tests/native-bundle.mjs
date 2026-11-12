@@ -55,9 +55,10 @@ try {
   const bytes = await builder.readFile('/native.wasm');
   assert.ok(WebAssembly.validate(bytes));
   fresh = await Miricl.instantiate(image);
+  const initialState = fresh.evaluate('miricl-compiler::*compiler-state*').output.trim();
   fresh.mountFile('/native.wasm', bytes);
   fresh.evaluate('(load "/native.wasm")', {eof: true});
-  check(fresh, `(and (eq miricl-compiler::*compiler-state* :cold)
+  check(fresh, `(and (eq miricl-compiler::*compiler-state* ${initialState})
     (= native-bundle-test::*initializations* 2)
     (= (native-bundle-test::deep-from-file 42) 42)
     (= (native-bundle-test::bindings-from-file 42) 42)

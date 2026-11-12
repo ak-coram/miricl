@@ -1451,6 +1451,11 @@ Unsupported special operators and parameter syntax signal an error."
   (compiler-list-length global-specials "global special variables")
   (dolist (variable global-specials) (compiler-variable-name variable "global special variable"))
   (ensure-compiler)
+  (optimize-hir-checked (lower-source-to-hir lambda-expression name global-specials)))
+
+(defun lower-source-to-hir (lambda-expression &optional name global-specials)
+  ;; Internal lowering stage for validated source; public compilation always
+  ;; follows it with HIR optimization. IR tests can inspect this boundary.
   (let ((*hir-unit* (make-hir-unit)) (*hir-specials* global-specials)
         (*hir-debug-level* (or (compiler-primitive 33 nil) 1)) (*hir-types* nil)
         (*hir-safety-level* (or (compiler-primitive 36 nil) 1))
@@ -1460,7 +1465,8 @@ Unsupported special operators and parameter syntax signal an error."
     (hir-lambda lambda-expression nil nil nil nil name)
     (setf (hir-unit-functions *hir-unit*) (nreverse (hir-unit-functions *hir-unit*)))
     (hir-clear-source *hir-unit*)
-    (verify-hir *hir-unit*) *hir-unit*))
+    (verify-hir *hir-unit*)
+    *hir-unit*))
 
 (defun compile-module-to-hir (definitions &key (entry-points nil entriesp) (inline t))
   "Lower a sealed group of DEFUN forms. Only ENTRY-POINTS escape the module.
@@ -1498,7 +1504,7 @@ global definitions. Internal calls refer to this group's lexical definitions."
                       (:global-read 1 1 1 1) (:global-write 2 2 1 1) (:dynamic-bind 2 2 1 1)
                       (:environment-restore 1 1 0 0) (:values 0 nil 0 0) (:values-list 1 1 0 0)
                       (:list 0 nil 0 0) (:value-ref 1 1 1 1) (:cell-new 1 1 1 1)
-                      (:cell-read 1 1 0 0) (:cell-write 2 2 0 0) (:primary 1 1 0 0)
+                      (:cell-read 1 1 0 0) (:cell-write 2 2 0 0) (:primary 1 1 0 0) (:copy 1 1 0 0)
                       (:call 2 nil 0 0) (:control-call 4 nil 1 1) (:restart-signal 2 nil 1 1)
                       (:multiple-value-call 2 nil 0 0) (:capture 0 0 2 2) (:closure 0 nil 1 1)
                       (:branch 1 1 2 2) (:jump 0 1 1 1) (:return 1 1 0 0)
@@ -1616,6 +1622,11 @@ global definitions. Internal calls refer to this group's lexical definitions."
                  "unknown opcode or invalid operand/attribute count or safety level"))
              (dolist (input inputs) (value input))
              (when (hir-instruction-output object) (value (hir-instruction-output object)))
+             (when (eq opcode :copy)
+               (unless (and (hir-instruction-output object)
+                            (eq (hir-value-kind (first inputs)) :single)
+                            (eq (hir-value-kind (hir-instruction-output object)) :single))
+                 (compiler-input-fail "HIR copy" object "copy requires single-value operands")))
              (case opcode
                ((:argument :rest-argument :check-apply-arguments :checked-argument :value-ref :capture)
                 (unless (typep (first attributes) '(unsigned-byte 32))
@@ -1756,6 +1767,7 @@ global definitions. Internal calls refer to this group's lexical definitions."
                 (push successor seen) (push block (hir-block-predecessors successor)))))
           (case opcode
             (:branch (unless (and (= (length successors) 2)
+                                  (every (lambda (target) (null (hir-block-parameters target))) successors)
                                   (eq (hir-value-kind (first (hir-instruction-inputs terminator))) :single))
                        (error "Invalid HIR conditional.")))
             ((:jump :block-return)
