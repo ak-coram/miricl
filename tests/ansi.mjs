@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Run the unmodified upstream RT harness inside the standalone interpreter.
-// node tests/ansi.mjs [miricl.wasm] [--helpers=cons] [upstream-file.lsp ...]
+// node tests/ansi.mjs [image.wasm] [--compiler] [--helpers=cons] [upstream-file.lsp ...]
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -8,16 +8,18 @@ import {fileURLToPath} from 'node:url';
 import {Miricl} from '../scripts/miricl.mjs';
 import {installCompiler, compiledTest, compilerCounters, compilerPhase, summarizeCompilation} from './ansi-compiler.mjs';
 
-const binary = process.argv[2] ?? 'miricl.wasm';
-if (process.argv.slice(3).includes('--full')) {
+const args = process.argv.slice(2);
+const binary = args[0] && !args[0].startsWith('--') ? args.shift()
+  : args.includes('--compiler') ? 'miricl-precompiled.wasm' : 'miricl-interpreter.wasm';
+if (args.includes('--full')) {
   const {main} = await import('./ansi-full.mjs');
-  await main(binary, process.argv.slice(3).filter(arg => arg !== '--full'));
+  await main(binary, args.filter(arg => arg !== '--full'));
   process.exit(process.exitCode ?? 0);
 }
 const root = fileURLToPath(new URL('./ansi-test/', import.meta.url));
-const helpers = process.argv.slice(3).includes('--helpers=cons') ? 'cons' : null;
-const compiler = process.argv.slice(3).includes('--compiler');
-const files = process.argv.slice(3).filter(arg => !['--helpers=cons', '--compiler'].includes(arg));
+const helpers = args.includes('--helpers=cons') ? 'cons' : null;
+const compiler = args.includes('--compiler');
+const files = args.filter(arg => !['--helpers=cons', '--compiler'].includes(arg));
 if (!files.length) files.push(
   'eval-and-compile/declaim.lsp',
   'eval-and-compile/ignore.lsp',
@@ -36,6 +38,7 @@ try {
   const module = await WebAssembly.compile(fs.readFileSync(binary));
   assert.deepEqual(WebAssembly.Module.imports(module), []);
   vm = new Miricl(await WebAssembly.instantiate(module));
+  vm.evaluate('(setq miricl-compiler:*compile-evaluations* nil) (values)');
   const evaluate = source => {
     const result = vm.evaluate(source, {eof: true});
     assert.equal(result.quit, false, source);

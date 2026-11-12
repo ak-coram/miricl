@@ -124,7 +124,7 @@
 (defparameter *interpreter-only-wasm* nil)
 (defun interpreter-wasm (&key wasi native-compiler debug-names (compiler t))
   "Return the interpreter binary. NATIVE-COMPILER includes the bootstrapped
-compiler. COMPILER NIL omits the compiler and makes compilation a no-op.
+compiler. COMPILER NIL keeps minimal HIR compilation without the Wasm backend.
 DEBUG-NAMES retains native debugging names."
   (when (and (not compiler) (or wasi native-compiler))
     (error "COMPILER NIL requires an import-free image without NATIVE-COMPILER."))

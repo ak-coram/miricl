@@ -45,7 +45,7 @@
                    (miricl::lower-runtime-library
                `(defparameter *compile-file-truename* ',long-literal)))))
          (miricl::*clos-library-symbols*
-           (union miricl::*clos-primitives* (miricl::runtime-library-symbols miricl::*clos-library*)))
+           (miricl::clos-library-symbols miricl::*clos-library*))
          (miricl::*interpreter-wasm* nil))
     (m:with-interpreter (vm)
       ;; Private prefix operators are uninterned guest symbols. CLOS-VALUE
@@ -937,7 +937,7 @@
              (multiple-value-bind (expression closure name) (function-lambda-expression fn)
                (declare (ignore name))
                (and (consp expression) (eq (car expression) 'lambda) closure
-                    (not (compiled-function-p fn)) (compiled-function-p (compile nil fn)))))
+                    (compiled-function-p fn) (compiled-function-p (compile nil fn)))))
              (list reader writer constructor)))"
         "(setf (documentation #'inspected-structure-value t) \"Reader documentation\")
          (setf (documentation #'make-inspected-structure t) \"Constructor documentation\")
@@ -1451,7 +1451,7 @@
           (function (mop:method-function (car (compute-applicable-methods getter (list object))))))
           (and (equal (multiple-value-list (funcall getter object))
                       (multiple-value-list (funcall function (list object) nil)))
-               (function-lambda-expression function) (not (compiled-function-p function)))))
+               (function-lambda-expression function) (compiled-function-p function))))
         (append
           (mapcar (lambda (getter) (list getter class))
             (list #'class-name #'mop:class-direct-superclasses #'mop:class-direct-subclasses

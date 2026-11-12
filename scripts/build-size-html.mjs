@@ -7,7 +7,7 @@ import {measureFile, measureWasm} from './wasm-size.mjs';
 
 const artifacts = [
   {file: 'miricl.wasm', description: 'Import-free Common Lisp interpreter and compiler', kind: 'wasm'},
-  {file: 'miricl-interpreter.wasm', description: 'Import-free interpreter without the compiler; compilation is a no-op', kind: 'wasm'},
+  {file: 'miricl-interpreter.wasm', description: 'Import-free interpreter with the compact HIR compiler', kind: 'wasm'},
   {file: 'miricl-precompiled.wasm', description: 'Import-free interpreter with bootstrapped native compiler', kind: 'wasm'},
   {file: 'miricl-repl.wasm', description: 'Terminal REPL and precompiled compiler for Node and WASI', kind: 'wasm'},
   {file: 'miricl-asdf.wasm', description: 'Optional ASDF and UIOP library', kind: 'wasm'},
@@ -56,6 +56,14 @@ const coaltonImage = [
     kind: 'application', files: [...coaltonScripts, coaltonImageFile].map(file => `build/coalton/site/${file}`)},
   {file: `build/coalton/site/${coaltonImageFile}`, description: 'Coalton — compressed initialized compiler, standard library and runtime (included in total above)', kind: 'data'},
 ];
+const mcclimArtifacts = [
+  {file: 'mcclim/', description: 'McCLIM — demonstrations page, scripts and reusable native Lisp image',
+    kind: 'application', files: ['index.html', 'app.mjs', 'startup.lisp', 'miricl.js', 'miricl-mcclim.wasm']
+      .map(file => `build/mcclim/site/${file}`)},
+  {file: 'build/mcclim/site/miricl-mcclim.wasm', description: 'McCLIM — native compiled library, demonstrations, resources and ready compiler (included in total above)', kind: 'wasm'},
+];
+const artifactDefinitions = [...artifacts, ...acl2Preview, ...acl2Image, booksArtifact,
+  ...coaltonArtifacts, ...coaltonImage, ...mcclimArtifacts];
 const escape = value => String(value ?? '').replace(/[&<>"']/g,
   char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
 const number = value => value.toLocaleString('en-US');
@@ -69,8 +77,9 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
   fricasDirectory = path.join(directory, 'build/fricas/site'),
   acl2Directory = path.join(directory, 'build/acl2/site'),
   coaltonDirectory = path.join(directory, 'build/coalton/site'),
+  mcclimDirectory = path.join(directory, 'build/mcclim/site'),
   acl2BooksDirectory = path.join(directory, 'build/acl2/books')} = {}) {
-  const wasm = new Set([...artifacts, ...acl2Preview, ...coaltonArtifacts]
+  const wasm = new Set(artifactDefinitions
     .filter(artifact => artifact.kind === 'wasm').map(artifact => artifact.file));
   const measurements = new Map();
   const measure = (name, kind) => {
@@ -79,6 +88,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
       : name.startsWith('build/acl2/site/') ? path.join(acl2Directory, name.slice('build/acl2/site/'.length))
       : name.startsWith('build/acl2/books/') ? path.join(acl2BooksDirectory, name.slice('build/acl2/books/'.length))
       : name.startsWith('build/coalton/site/') ? path.join(coaltonDirectory, name.slice('build/coalton/site/'.length))
+      : name.startsWith('build/mcclim/site/') ? path.join(mcclimDirectory, name.slice('build/mcclim/site/'.length))
       : name.startsWith('build/fricas/site/') ? path.join(fricasDirectory, name.slice('build/fricas/site/'.length))
       : name.startsWith('build/maxima/site/') ? path.join(maximaDirectory, name.slice('build/maxima/site/'.length)) : path.join(directory, name);
     if (!measurements.has(name)) measurements.set(name, wasm.has(name) ? measureWasm(file) : measureFile(file));
@@ -115,6 +125,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
       ...acl2Artifacts,
       ...(fs.existsSync(path.join(acl2BooksDirectory, 'manifest.json')) ? [booksArtifact] : []),
       ...selectedCoalton,
+      ...(fs.existsSync(path.join(mcclimDirectory, 'miricl-mcclim.wasm')) ? mcclimArtifacts : []),
     ].map(({files: names, ...artifact}) => {
       if (!names) return {...measure(artifact.file, artifact.kind), ...artifact};
       const files = names.map(name => measure(name));
@@ -125,12 +136,9 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
 }
 
 export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = 'image-sizes.json'} = {}) {
-  const known = [...artifacts, ...acl2Preview, ...acl2Image, booksArtifact, ...coaltonArtifacts, ...coaltonImage].map(artifact => artifact.file);
   if (report.schemaVersion !== 1 || !Array.isArray(report.artifacts)
-    || artifacts.some(required => !report.artifacts.some(artifact => artifact.file === required.file))
-    || report.artifacts.some(artifact => !known.includes(artifact.file))
-    || new Set(report.artifacts.map(artifact => artifact.file)).size !== report.artifacts.length)
-    throw new Error('Expected measurements for the runtime, REPL, ASDF, standalone pages, Game of Life, Maxima and FriCAS.');
+    || artifacts.some(required => !report.artifacts.some(artifact => artifact.file === required.file)))
+    throw new Error('Expected measurements for the required build artifacts.');
   for (const artifact of report.artifacts) {
     for (const key of ['rawBytes', 'gzipBytes', 'brotliBytes']) {
       if (!Number.isSafeInteger(artifact[key]) || artifact[key] < 0) throw new Error(`Invalid ${key}.`);
@@ -151,13 +159,14 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
   </tr>`;
   const initializedAcl2 = report.artifacts.some(artifact => artifact.file.endsWith('/' + acl2ImageFile));
   const rows = [
-    ['Runtime files', artifact => artifact.kind === 'wasm' && !/^(game-of-life|build\/(?:maxima|fricas|acl2|coalton))\//.test(artifact.file)],
+    ['Runtime files', artifact => artifact.kind === 'wasm' && !/^(game-of-life|build\/(?:maxima|fricas|acl2|coalton|mcclim))\//.test(artifact.file)],
     ['Standalone applications', artifact => artifact.kind === 'html'],
     ['Game of Life', artifact => artifact.file.startsWith('game-of-life/')],
     ['FriCAS', artifact => artifact.file === 'fricas/' || artifact.file.startsWith('build/fricas/')],
     ['Maxima', artifact => artifact.file === 'maxima/' || artifact.file.startsWith('build/maxima/')],
     [initializedAcl2 ? 'ACL2' : 'ACL2 (development preview)', artifact => artifact.file === 'acl2/' || artifact.file.startsWith('build/acl2/')],
     ['Coalton', artifact => artifact.file === 'coalton/' || artifact.file.startsWith('build/coalton/')],
+    ['McCLIM', artifact => artifact.file === 'mcclim/' || artifact.file.startsWith('build/mcclim/')],
   ].filter(([, matches]) => report.artifacts.some(matches)).map(([title, matches]) => `<tbody><tr class="group"><th colspan="4" scope="rowgroup">${title}</th></tr>\n` +
     report.artifacts.filter(matches).map(row).join('\n') + '</tbody>').join('\n');
   const sections = report.artifacts.filter(artifact => artifact.kind === 'wasm').map(artifact => {
@@ -182,6 +191,7 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
     '@@ACL2@@': report.artifacts.some(artifact => artifact.file === 'acl2/')
       ? `<a href="acl2/">${initializedAcl2 ? 'ACL2' : 'ACL2 preview'}</a>` : '',
     '@@COALTON@@': report.artifacts.some(artifact => artifact.file === 'coalton/') ? '<a href="coalton/">Lisp + Coalton REPL</a>' : '',
+    '@@MCCLIM@@': report.artifacts.some(artifact => artifact.file === 'mcclim/') ? '<a href="mcclim/">McCLIM</a>' : '',
     '@@REPL@@': escape(replPage), '@@JSON@@': escape(jsonPage)};
   const template = fs.readFileSync(new URL('./image-sizes.html', import.meta.url), 'utf8');
   return template.replace(/@@[A-Z0-9]+@@/g, marker => {

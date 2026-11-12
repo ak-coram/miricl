@@ -4,6 +4,10 @@
 
 (define-runtime-function $compiled-function-p (($x :nullable-object)) (i32)
   #@(if (i32.ne (call $tag (local.get $x)) (i32.const 8)) (then (return (i32.const 0))))
+  ;; Direct runtime adapters execute Wasm too. Mode 7 alone deliberately
+  ;; exposes an evaluator-backed macroexpansion function.
+  #@(if (ref.test (ref $direct-function) (local.get $x))
+    (then (return (i32.ne (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $x))) (i32.const 7)))))
   ;; Native entry points have no run-time macro or load-time-value references.
   ;; Generic dispatch objects retain interpreted method machinery separately.
   #@(i32.or (f64.ne (struct.get $obj $f (ref.cast (ref $obj) (local.get $x))) (f64.const 0))

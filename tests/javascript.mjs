@@ -29,6 +29,10 @@ try {
   const check = source => assert.equal(vm.evaluate(source, {eof: true}).output, 'T\n', source);
   check(`(and (js:available-p) (eq (find-package "JS") (find-package "MIRICL-JS"))
     (not (nth-value 1 (find-symbol "INVOKE" "CL"))))`);
+  check(`(every (lambda (name) (compiled-function-p (fdefinition name)))
+    '(js:available-p js:valuep js:global js:property (setf js:property)
+      js:call js:call-with-this js:invoke js:new js:to-js js:from-js
+      js:typeof js:strict-equal js:callback js:array))`);
   check(`(progn (defparameter *js-fixture* (js:global "miriclJSFixture"))
     (and (js:valuep *js-fixture*) (typep *js-fixture* 'js:value)
       (eq (type-of *js-fixture*) 'js:value) (string= (js:typeof *js-fixture*) "object")

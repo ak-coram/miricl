@@ -6,9 +6,7 @@
   (let* ((*include-compiler* compiler)
          (*native-compiler-image* (and compiler *native-compiler-image*))
          (*clos-library* (if compiler *clos-library* *interpreter-library*))
-         (*clos-library-symbols* (if compiler *clos-library-symbols*
-            (stable-sort (copy-list (union *clos-primitives* (runtime-library-symbols *clos-library*)))
-                         #'string< :key #'symbol-name)))
+         (*clos-library-symbols* (if compiler *clos-library-symbols* (clos-library-symbols *clos-library*)))
          (*compile-evaluations-default* (and *native-compiler-image* (not wasi) t))
          (libraries (list (list *loop-library* *loop-library-symbols* 25 *loop-library-symbols*)
                           (list (compiler-image-library-forms) *clos-library-symbols* 24 *loop-library-symbols*)))
@@ -68,6 +66,7 @@
       ,(loop-runtime-wat)
       ,(clos-runtime-wat)
       ,(generic-functions-runtime-wat)
+      ,(clos-defaults-runtime-wat)
       ,(development-runtime-wat)
       ,(fasl-codec-runtime-wat)
       ,(native-code-runtime-wat)

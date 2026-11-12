@@ -30,6 +30,48 @@
 (setf *clos-primitives* (append *clos-primitives* '(%pop-arg %list-eq %%find-method %%dispatch-eql-key %nth %%debugger
                                                  %%class-subclass-p %%instance-type-p %%restore-saved-slots %%hir-function)))
 
+(defparameter *native-clos-defaults*
+  '((allocate-instance . %%standard-allocate-instance)
+    (make-instance . %%standard-make-instance)
+    (initialize-instance . %%standard-initialize-instance)
+    (shared-initialize . %%standard-shared-initialize)
+    (slot-value-using-class . %%standard-slot-value)
+    ((setf slot-value-using-class) . %%standard-set-slot-value)
+    (slot-boundp-using-class . %%standard-slot-boundp)
+    (slot-makunbound-using-class . %%standard-slot-makunbound)
+    (%default-initargs . %%standard-default-initargs)
+    (%check-initargs . %%standard-check-initargs)))
+
+;; Public library bindings are ordinary native primitive functions. CLOS
+;; promotion captures these bodies, then installs the public generic function.
+;; No hidden aliases or compiler are needed in the interpreter-only image.
+(defparameter *native-javascript-functions*
+  '((miricl-js:available-p %%js-available 0 0 0)
+    (miricl-js:valuep %%js-valuep 1 1 1)
+    (miricl-js:global %%js-global 2 0 1)
+    (miricl-js:property %%js-property 3 2 2)
+    ((setf miricl-js:property) %%js-set-property 4 3 3)
+    (miricl-js:call %%js-call 5 1 nil)
+    (miricl-js:call-with-this %%js-call-with-this 5 2 nil)
+    (miricl-js:invoke %%js-invoke 6 2 nil)
+    (miricl-js:new %%js-new 7 1 nil)
+    (miricl-js:to-js %%js-to-js 8 1 1)
+    (miricl-js:from-js %%js-from-js 9 1 1)
+    (miricl-js:typeof %%js-typeof 10 1 1)
+    (miricl-js:strict-equal %%js-strict-equal 11 2 2)
+    (miricl-js:callback %%js-callback 12 1 1)
+    (miricl-js:array %%js-array 13 0 nil)))
+(setf *clos-primitives* (append *clos-primitives*
+  (mapcar #'cdr *native-clos-defaults*) (mapcar #'second *native-javascript-functions*)))
+(setf *clos-primitives* (append *clos-primitives* '(%%invalidate-slot-access)))
+(defparameter *native-mop-slot-functions*
+  '((standard-instance-access . %%raw-instance-access)
+    (funcallable-standard-instance-access . %%raw-instance-access)
+    ((setf standard-instance-access) . %%set-raw-instance-access)
+    ((setf funcallable-standard-instance-access) . %%set-raw-instance-access)))
+(setf *clos-primitives* (append *clos-primitives* '(%%raw-instance-access %%set-raw-instance-access)))
+(defparameter *native-clos-symbols* '(:initarg-profile))
+
 (assert (<= (length *clos-primitives*) (- 2147483641 +clos-primitive-base+)))
 
 (defun clos-primitive-op (name) (position name *clos-primitives*))
@@ -42,16 +84,22 @@
   ;; GENSYM still creates distinct symbols throughout this library read.
   (let ((*gensym-counter* 0))
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
     unless (if compiler (equal file "interpreter-library.lisp")
-               (member file '("whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp"
+               (member file '("whole-program.lisp" "hir-reconstruction.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp"
                               "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp") :test #'equal)) append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let* ((*package* (find-package :miricl))
              (forms (loop for form = (read in nil :eof) until (eq form :eof)
                       if (and (consp form) (eq (car form) 'in-package))
                         do (setf *package* (find-package (second form)))
-                      else collect (lower-runtime-library form))))
+                      else collect
+                        (let ((native (and (consp form) (eq (car form) 'defun)
+                                       (or (cdr (assoc (second form) *native-mop-slot-functions* :test #'equal))
+                                           (cdr (assoc (second form) *native-clos-defaults* :test #'equal))
+                                           (second (assoc (second form) *native-javascript-functions* :test #'equal))))))
+                          (lower-runtime-library
+                            (if native `(setf (fdefinition ',(second form)) (function ,native)) form))))))
         (when (equal file "hir-code.lisp")
           ;; Host Common Lisp needs portable fallbacks. Both guest images
           ;; always have the shared Wasm readers; do not ship duplicate parsers.
@@ -66,17 +114,9 @@
                       (lower-runtime-library
                         `(defun ,(second form) ,(third form) (%%compile ,mode ,@(third form))))
                       form)))))
-        (unless compiler
-          (cond ((equal file "compiler-library.lisp")
-                 ;; Backquote expansion is also used by the evaluator.
-                 (setf forms (remove-if-not (lambda (form) (eq (second form) '%expand-backquote)) forms)))
-                ((equal file "file-compiler-library.lisp")
-                 ;; Keep the portable FASL loader and object serialization.
-                 (setf forms (remove-if (lambda (form)
-                   (member (second form) '(%compile-top-body %compile-top-level compile-file))) forms)))))
         ;; Establish the native package and symbol identities before DEFSTRUCT
         ;; generates accessors. Public exports are declared in PACKAGE.LISP.
-        (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp") :test #'equal)
+        (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp") :test #'equal)
           (let* ((package (find-package (cond ((equal file "thread-library.lisp") :miricl-threads)
                                             ((equal file "debugger-library.lisp") :miricl-debugger)
                                             ((equal file "bundle-library.lisp") :miricl-bundle)
@@ -97,10 +137,12 @@
         forms)))))
 (defparameter *clos-library* (read-clos-library))
 (defparameter *interpreter-library* (read-clos-library nil))
-(defparameter *clos-library-symbols*
+(defun clos-library-symbols (forms)
   ;; UNION may share its tail with the primitive list, whose order defines IDs.
-  (stable-sort (copy-list (union *clos-primitives* (runtime-library-symbols *clos-library*)))
+  (stable-sort (copy-list (union *native-clos-symbols*
+                          (union *clos-primitives* (runtime-library-symbols forms))))
                #'string< :key #'symbol-name))
+(defparameter *clos-library-symbols* (clos-library-symbols *clos-library*))
 
 (setf *runtime-library-symbol-codes*
   (runtime-library-symbol-codes
@@ -124,6 +166,7 @@
 
 (define-runtime-function $direct-function
     (($function :nullable-object) ($class :nullable-object) ($slot :nullable-object) ($mode i32)) (:object)
+  (wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 16)) :malformed-form)
   (wat-fail-when #@(i32.ne (call $tag (local.get $function)) (i32.const 8)) :malformed-form)
   (wat-fail-when #@(call $value-n (local.get $function)) :malformed-form)
   #@(struct.new $direct-function (call $allocate-object-tag (i32.const 8)) (i32.const 0)
@@ -136,6 +179,31 @@
   (:locals ($class :nullable-object) ($object :nullable-object) ($value :nullable-object) ($mode i32))
   #@(local.set $class (struct.get $direct-function $owner (local.get $function)))
   #@(local.set $mode (struct.get $direct-function $mode (local.get $function)))
+  #@(if (i32.ge_u (local.get $mode) (i32.const 15))
+    (then (return_call $specialized-slot-call (local.get $function) (local.get $args))))
+  ;; Standard DEFCLASS accessors use the same slot protocol as SLOT-VALUE.
+  ;; Modes 11/12 are method functions; 13/14 are cached effective functions
+  ;; for a lone primary and accept the generic's arguments directly.
+  #@(if (i32.ge_u (local.get $mode) (i32.const 11))
+    (then
+      (if (i32.le_u (local.get $mode) (i32.const 12))
+        (then ,(wat-arity 2) (local.set $args (call $car (local.get $args))))
+        (else ,(wat-arity 1) (local.set $args (call $car (local.get $args)))))
+      (local.set $mode (i32.and (i32.add (local.get $mode) (i32.const 1)) (i32.const 1)))
+      (call $arity (local.get $args) (i32.add (local.get $mode) (i32.const 1))
+        (i32.add (local.get $mode) (i32.const 1)))
+      (if (local.get $mode)
+        (then (local.set $value (call $car (local.get $args)))
+          (local.set $args (call $cdr (local.get $args)))))
+      (return_call $instance-slot-operation (local.get $mode) (call $car (local.get $args))
+        (struct.get $direct-function $slot (local.get $function)) (local.get $value))))
+  ;; A standard method receives (arguments next-methods), whereas its native
+  ;; implementation receives the original arguments. Keep this adapter in
+  ;; Wasm too, including for standard methods with optional/rest arguments.
+  #@(if (i32.eq (local.get $mode) (i32.const 10))
+    (then ,(wat-arity 2)
+      (return_call $apply (struct.get $direct-function $slot (local.get $function))
+        (call $car (local.get $args)))))
   #@(if (i32.eq (local.get $mode) (i32.const 9))
     (then ,(wat-arity 1)
       (local.set $object (struct.get $direct-function $slot (local.get $function)))
@@ -429,6 +497,18 @@
 (define-runtime-function $clos-primitive (($op i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($a :nullable-object) ($b :nullable-object) ($cell :nullable-object) ($value :nullable-object)
            ($start i32) ($column i32))
+  #@(if (i32.or (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%raw-instance-access)))
+                (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%set-raw-instance-access))))
+    (then (return_call $raw-instance-access (local.get $op) (local.get $args))))
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%invalidate-slot-access)))
+    (then ,(wat-arity 0 1)
+      (if (ref.is_null (local.get $args)) (then (return (global.get $slot-access-token))))
+      (call $invalidate-slot-access (call $car (local.get $args)))
+      (call $clear-values) (return (ref.null eq))))
+  #@(if (i32.ge_u (local.get $op) (i32.const ,(clos-primitive-op '%%js-available)))
+    (then (return_call $javascript-library-call (local.get $op) (local.get $args))))
+  #@(if (i32.ge_u (local.get $op) (i32.const ,(clos-primitive-op '%%standard-allocate-instance)))
+    (then (return_call $standard-clos-call (local.get $op) (local.get $args))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%compile)))
     (then (return (call $compile-primitive (local.get $args)))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%hir-function)))
@@ -525,7 +605,11 @@
   #@(if (i32.or (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%get))) (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%put))))
     (then
       (if (i32.eq (call $tag (local.get $a)) (i32.const 8))
-        (then (local.set $a (struct.get $obj $a (ref.cast (ref $obj) (local.get $a))))))
+        (then
+          (if (i32.and (i32.eq (call $value-n (local.get $a)) (i32.const 2147483645))
+                       (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%get))))
+            (then ,(wat-arity 2) (return (call $generic-property (local.get $a) (local.get $b)))))
+          (local.set $a (struct.get $obj $a (ref.cast (ref $obj) (local.get $a))))))
       ,(wat-fail-when #@(i32.ne (call $tag (local.get $a)) (i32.const 23)) :expected-designator)
       (local.set $cell (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $a))) (local.get $b)))
       (if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%get)))
@@ -533,8 +617,9 @@
       ,(wat-arity 3)
       (local.set $value (call $car (call $cdr (call $cdr (local.get $args)))))
       (if (ref.is_null (local.get $cell))
-        (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $a))
-          (call $cons (local.get $b) (call $cons (local.get $value) (struct.get $obj $b (ref.cast (ref $obj) (local.get $a)))))))
+        (then
+          (struct.set $obj $b (ref.cast (ref $obj) (local.get $a))
+            (call $cons (local.get $b) (call $cons (local.get $value) (struct.get $obj $b (ref.cast (ref $obj) (local.get $a)))))))
         (else (struct.set $obj $a (ref.cast (ref $obj) (local.get $cell)) (local.get $value))))
       (return (local.get $value))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%allocate)))
@@ -543,7 +628,9 @@
       ;; Ordinary instances and class metaobjects keep their existing N=0.
       (return (call $node (i32.const 23)
         (i32.eqz (ref.is_null (call $car (call $cdr (call $cdr (local.get $args))))))
-        (local.get $a) (local.get $b) (ref.null eq)))))
+        (local.get $a) (local.get $b)
+        (if (result (ref null eq)) (ref.is_null (local.get $b))
+          (then (call $symbol (i32.const 1))) (else (ref.null eq)))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%tag)))
     (then ,(wat-arity 1) (return (call $int (call $tag (local.get $a))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%condition-info)))
@@ -554,6 +641,7 @@
     (then ,(wat-arity 2) (return (call $apply (local.get $a) (local.get $b)))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%make-generic)))
     (then ,(wat-arity 1)
+      ,(wat-fail-when #@(i32.ne (call $tag (local.get $a)) (i32.const 23)) :expected-designator)
       (return (call $node (i32.const 8) (i32.const 2147483645) (local.get $a) (ref.null eq) (ref.null eq)))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%generic-info)))
     (then ,(wat-arity 1)
@@ -569,8 +657,15 @@
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%raw-class)))
     (then ,(wat-arity 1) (return (struct.get $obj $a (ref.cast (ref $obj) (local.get $a))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%raw-slots)))
-    (then ,(wat-arity 1) (return (struct.get $obj $b (ref.cast (ref $obj) (local.get $a))))))
+    (then ,(wat-arity 1)
+      ;; Borrowed storage can subsequently be modified through ordinary cons
+      ;; operations. Only exclusively owned storage admits fixed slot offsets.
+      (if (i32.eq (call $tag (local.get $a)) (i32.const 23))
+        (then (struct.set $obj $c (ref.cast (ref $obj) (local.get $a)) (ref.null eq))))
+      (return (struct.get $obj $b (ref.cast (ref $obj) (local.get $a))))))
   (wat-arity 2)
+  #@(if (i32.eq (call $tag (local.get $a)) (i32.const 23))
+    (then (struct.set $obj $c (ref.cast (ref $obj) (local.get $a)) (ref.null eq))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%set-raw-class)))
     (then (struct.set $obj $a (ref.cast (ref $obj) (local.get $a)) (local.get $b)))
     (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $a)) (local.get $b))))

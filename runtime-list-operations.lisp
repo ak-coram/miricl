@@ -886,7 +886,7 @@
         (%invoke-method-without-next 3 $invoke-method (0 1 (:null) 2 (:null) (:constant 1)))
         (%ensure-layout 1 $ensure-instance-layout (0))
         (%%property-method 2 $direct-function (0 (:null) 1 (:constant 3)))
-        (%%property-effective 3 $property-effective (0 1 2))
+        (%%property-effective 4 $property-effective (0 1 2 3))
         (%%values-expander 2 $values-expansion (0))
         (%%condition-method 4 $direct-function (0 1 2 (:index 3)))
         (%find-slot 2 $find-instance-slot (0 1))

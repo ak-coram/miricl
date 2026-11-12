@@ -35,6 +35,20 @@
   (miricl::%%javascript 12 function nil nil))
 (defun array (&rest elements) (miricl::%%javascript 13 elements nil nil))
 
+(defun make-weak-hash-table (&rest arguments &key weakness &allow-other-keys)
+  "Make a JavaScript-hosted weak hash table, using the ordinary CL hash API.
+WEAKNESS is :KEY or :VALUE. NIL makes an ordinary hash table."
+  (unless (member weakness '(nil :key :value))
+    (error "Unsupported weak hash table weakness: ~S." weakness))
+  (let ((options (copy-list arguments)))
+    (loop while (remf options :weakness))
+    (let ((table (apply #'make-hash-table options)))
+      (when weakness (miricl::%%javascript 15 table weakness nil))
+      table)))
+(defun hash-table-weakness (table)
+  (check-type table hash-table)
+  (case (miricl::%%javascript 16 table nil nil) (1 :key) (2 :value)))
+
 ;; These literal descriptors survive COMPILE/COMPILE-FILE. The adapter caches
 ;; a resolved function, receiver, and conversion plan by descriptor identity.
 (defun %import-type-p (type resultp)
@@ -58,7 +72,8 @@
 (let ((package (make-package "MIRICL-JS" :nicknames '("JS") :use '("CL")))
       (symbols '(available-p value valuep global property call call-with-this invoke new
                  to-js from-js typeof strict-equal callback array +null+ +undefined+
-                 javascript-error javascript-error-value javascript-unavailable define-import)))
+                 javascript-error javascript-error-value javascript-unavailable define-import
+                 make-weak-hash-table hash-table-weakness)))
   (shadowing-import symbols package)
   (export symbols package))
 (miricl::%boot-class 'value (list (find-class t)) (find-class 'built-in-class))

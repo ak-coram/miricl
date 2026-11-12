@@ -20,7 +20,7 @@
 Miricl is a Common Lisp implementation for browsers, Node.js and
 Wasmtime, with an interactive interpreter, a self-hosted native Wasm
 compiler, and a whole-program optimizer. Try the [[https://ak-coram.github.io/miricl/][browser REPL]], [[https://ak-coram.github.io/miricl/game-of-life/][Game of
-Life]], [[https://ak-coram.github.io/miricl/maxima/][Maxima]], [[https://ak-coram.github.io/miricl/fricas/][FriCAS]], [[https://ak-coram.github.io/miricl/acl2/][ACL2]] or [[https://ak-coram.github.io/miricl/coalton/][Coalton]].
+Life]], [[https://ak-coram.github.io/miricl/maxima/][Maxima]], [[https://ak-coram.github.io/miricl/fricas/][FriCAS]], [[https://ak-coram.github.io/miricl/acl2/][ACL2]], [[https://ak-coram.github.io/miricl/coalton/][Coalton]] or [[https://ak-coram.github.io/miricl/mcclim/][McCLIM demonstrations]].
 
 The runtime implements CLOS, conditions and restarts, packages,
 streams, ASDF/UIOP integration, JavaScript interop and cooperative
@@ -61,8 +61,8 @@ The =miricl-runtime= build artifact contains six files:
 
 - =miricl.js=: browser adapter and Node terminal command.
 - =miricl.wasm=: interpreter and compiler for browsers and Node.
-- =miricl-interpreter.wasm=: interpreter without the compiler. Compilation
-  is a no-op. Also published as the separate =miricl-interpreter= artifact.
+- =miricl-interpreter.wasm=: interpreter with minimal compilation, without
+  the optimizing Wasm compiler. Also published as =miricl-interpreter=.
 - =miricl-precompiled.wasm=: import-free interpreter with the size-optimized,
   bootstrapped native compiler ready at startup, for browsers and Node.
 - =miricl-repl.wasm=: Wasmtime terminal command and precompiled compiler for Node.
@@ -383,15 +383,24 @@ the adapter. Gzip and Brotli measurements follow all timed samples.
 
 **** Compiler
 
-The =miricl-interpreter.wasm= variant omits the compiler. =compile= returns
-the original interpreted function (or installs an interpreted lambda under
-the requested name), with =nil= warning and failure values. =compile-file=
-copies source bytes to its usual output pathname and returns that pathname
-and two =nil= values; it performs no reading or compile-time evaluation.
-=load= recognizes those source copies even with a =.wasm= suffix. Existing
-portable FASLs also load normally. Setting =miricl-compiler:*compile-evaluations*=
-has no effect in this image. This deliberately differs from the standard
-requirement that compilation produce compiled functions.
+The =miricl-interpreter.wasm= variant performs minimal compilation through
+the shared HIR frontend. =compile= expands macros and resolves
+load-time values; its results satisfy =compiled-function-p= and execute in
+the interpreter. =compile-file= preserves compile-time and load-time phases
+and writes portable FASLs, including literal identities and =make-load-form=
+recipes. File compilation emits executable HIR, with an internal source
+stepping fallback for DEBUG 3. Native FASLs also load normally. The image omits
+optimization, Wasm generation and compiler bootstrap. =disassemble= prints
+HIR instructions, capture names and packed instruction size, including for
+functions loaded from FASLs. Existing source closures keep their lexical
+cells through the compact source compiler; DEBUG 3 retains source stepping.
+Setting =miricl-compiler:*compile-evaluations*= has no effect in this image,
+and block-compilation directives are ignored.
+
+Interpreter-mode ANSI tests use this compiler-free image, including the
+=just ansi= and =just ansi-full= commands. Compiler-mode ANSI tests use
+=miricl-precompiled.wasm= and verify native compilation separately. Cold
+compiler bootstrap is covered by the dedicated compiler tests.
 
 The other runtime images include the compiler, which shares the
 interpreter's Lisp objects:
@@ -436,6 +445,25 @@ evaluator.  The native backend currently supports a subset of Common
 Lisp. Browser and Node adapters can instantiate generated Wasm; the
 WASI compiler can emit and optimize files.  ASDF remains a separate,
 explicitly loaded library.
+
+File compilation supports SBCL-style block compilation. Pass
+=:block-compile t= to compile a file as one block, or =:block-compile
+:specified= to delimit blocks with =(declaim
+(miricl-compiler:start-block entry ...))= and =(declaim
+(miricl-compiler:end-block))=. With no named entries, every function
+receives a global definition. =:entry-points= selects the global
+definitions for a whole-file block. Calls within a block use its lexical
+function bindings, so later global redefinitions do not change those
+calls. The interpreter ignores the boundary declarations. The default,
+=miricl-compiler:*block-compile-default*=, is =nil=.
+
+Cold compiler bootstrap uses small blocks while retaining the progressive
+installation order. Calls to kernels outside each block remain global.
+The precompiled compiler image already compiles its kernels together.
+=node scripts/benchmark-self-compiler.mjs OUTPUT miricl.wasm
+--individual-bootstrap= measures the comparison with separate bootstrap
+kernels; supply the same saved source corpus to compare subsequent
+compilation with either configuration.
 
 **** Whole-program optimization
 

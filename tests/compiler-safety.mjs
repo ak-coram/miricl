@@ -156,21 +156,19 @@ try {
     (defun safety-file-read (v i) (declare (optimize (safety 0) (debug 2))
       (type simple-vector v) (type (signed-byte 30) i)) (list (svref v i)))`);
   check(`(progn (compile-file "/safety-file.lisp") (load "/safety-file.wasm")
-    (setf (symbol-function 'cl-user::safety-file-read)
-      (compile-native (function-lambda-expression #'cl-user::safety-file-read)))
-    (and (equal (cl-user::safety-file-read #(42) 0) '(42))
-      (search "native-vector-ref-trusted"
-        (with-output-to-string (*standard-output*) (disassemble #'cl-user::safety-file-read))) t))`);
+    (miricl-compiler:compile-native-bundle "/safety-file.wasm" "/safety-native.wasm" :load t)
+    (equal (cl-user::safety-file-read #(42) 0) '(42)))`);
+  // Native bundles omit per-function disassembly metadata. The emitted module
+  // still records its runtime imports, including the proven unchecked access.
+  assert.ok(Buffer.from(await vm.readFile('/safety-native.wasm')).includes(Buffer.from('native-vector-ref-trusted')));
   const fresh = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
   try {
     fresh.mountFile('/safety-file.wasm', await vm.readFile('/safety-file.wasm'));
     assert.equal(fresh.evaluate(`(progn (setq miricl-compiler:*compile-evaluations* nil)
       (load "/safety-file.wasm")
-      (setf (symbol-function 'cl-user::safety-file-read)
-        (miricl-compiler:compile-native (function-lambda-expression #'cl-user::safety-file-read)))
-      (and (equal (cl-user::safety-file-read #(42) 0) '(42))
-        (search "native-vector-ref-trusted"
-          (with-output-to-string (*standard-output*) (disassemble #'cl-user::safety-file-read))) t))`).output, 'T\n');
+      (miricl-compiler:compile-native-bundle "/safety-file.wasm" "/safety-native.wasm" :load t)
+      (equal (cl-user::safety-file-read #(42) 0) '(42)))`).output, 'T\n');
+    assert.ok(Buffer.from(await fresh.readFile('/safety-native.wasm')).includes(Buffer.from('native-vector-ref-trusted')));
   } finally {fresh.close();}
   console.log('Compiler safety: default 1, lexical/global policy, initialization scope, inline definition scope, trusted list/vector access, result assertions, integer promotion, redefinition, and compiler policy isolation pass.');
 } finally {vm.close();}

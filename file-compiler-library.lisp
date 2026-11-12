@@ -17,6 +17,13 @@
 (defvar %file-object-barriers nil)
 (defvar %file-object-effects nil)
 (defvar %file-collect-object-references t)
+(defvar miricl-compiler:*block-compile-default* nil)
+(defvar %file-block-mode nil)
+(defvar %file-block-active nil)
+(defvar %file-block-entries nil)
+(defvar %file-block-definitions nil)
+(defvar %file-block-forms nil)
+(defvar %file-block-complete t)
 (define-condition %fasl-not-created (error) ())
 
 (defun %fasl-reference (object)
@@ -31,12 +38,15 @@
 (defun %fasl-hash-table-forms (object)
   ;; Hash tables are externalizable literals. Reserve their identity before
   ;; installing entries, so keys/values can share or refer back to the table.
-  (let ((entries nil) (entry (gensym "HASH-ENTRY-")))
+  (let ((entries nil) (entry (gensym "HASH-ENTRY-"))
+        (weakness (and (miricl-js:available-p) (miricl-js:hash-table-weakness object))))
     (maphash (lambda (key value) (push (cons key value) entries)) object)
     (values
-      (list 'make-hash-table :test (list 'quote (hash-table-test object))
+      (append (list (if weakness 'miricl-js:make-weak-hash-table 'make-hash-table)
+        :test (list 'quote (hash-table-test object))
         :size (hash-table-size object) :rehash-size (hash-table-rehash-size object)
         :rehash-threshold (hash-table-rehash-threshold object))
+        (when weakness (list :weakness weakness)))
       (list 'dolist (list entry (list 'quote entries))
         (list 'setf (list 'gethash (list 'car entry) (list 'quote object)) (list 'cdr entry))))))
 
@@ -220,12 +230,114 @@
         (when (= (aref %fasl-states index) 4) (setq progress t)))
       (when (and %fasl-pending (not progress)) (error "Circular compiled creation dependencies.")))))
 
+(defun %file-load-value-markers (body)
+  ;; Find recipes before HIR removes unreachable local functions. Their
+  ;; load-time evaluations remain observable even when their values are unused.
+  (when (plusp (hash-table-count %file-load-values))
+    (let ((work (list body)) (seen (make-hash-table :test 'eq)) (markers nil))
+      (loop while work do
+        (let ((object (pop work)))
+          (unless (gethash object seen)
+            (setf (gethash object seen) t)
+            (cond ((gethash object %file-load-values) (push object markers))
+                  ((consp object) (push (cdr object) work) (push (car object) work))))))
+      (nreverse markers))))
+
+(defun %file-emit-body (body complete)
+  (let* ((%file-object-references nil) (%file-object-barriers nil) (%file-object-effects nil)
+         (load-values (%file-load-value-markers body))
+         (body (if complete (%file-lexical-form body nil nil nil nil) body))
+         (hir (miricl-compiler:compile-to-hir (list 'lambda nil body)))
+         (root (%fasl-dump
+           (if (some (lambda (function) (= (miricl-compiler::hir-function-debug-level function) 3))
+                     (miricl-compiler:hir-unit-functions hir))
+               body
+               (list 'funcall (list 'miricl-compiler:load-hir-code
+                 (list 'quote (miricl-compiler:emit-hir-code hir))))))))
+    (dolist (marker load-values)
+      (unless (nth-value 1 (gethash marker %fasl-seen))
+        ;; A separate initializer returns the value so both portable and native
+        ;; output retain its creation recipe. Emit it before the owning form.
+        (let ((%file-definition nil)) (%file-emit-body (list 'quote marker) t))))
+    (push root %fasl-roots)
+    (when (fboundp 'miricl-compiler::form-references)
+      (multiple-value-bind (references barriers)
+          (miricl-compiler::form-references body %file-load-values)
+        (let ((descriptor (copy-list (or %file-definition
+                              (list (incf %file-definition-id) :effect nil t nil)))))
+          (when %file-object-effects (setf (fourth descriptor) t))
+          (push (list root descriptor
+                  (union references %file-object-references :test #'equal)
+                  (union barriers %file-object-barriers :test #'equal)) %file-ir))))))
+
+(defun %file-block-names (names)
+  (miricl-compiler::compiler-list-length names "block entry points")
+  (dolist (name names) (miricl-compiler::compiler-function-name name "block entry point"))
+  (copy-list names))
+
+(defun %file-block-flush ()
+  (let ((definitions (nreverse %file-block-definitions))
+        (forms (nreverse %file-block-forms))
+        (entries %file-block-entries) (complete %file-block-complete))
+    (setq %file-block-definitions nil %file-block-forms nil %file-block-complete t)
+    (dolist (entry entries)
+      (unless (assoc entry definitions :test #'equal)
+        (miricl-compiler::compiler-input-fail "block entry point" entry "no definition in this block")))
+    (when definitions
+      ;; The block is one indivisible initializer in the file IR. The existing
+      ;; LABELS lowering owns escape analysis, calls, argument checks and types.
+      (let ((%file-definition nil))
+        (%file-emit-body (list* 'labels definitions forms) complete)))))
+
+(defun %file-block-declaration (spec)
+  (when (and %file-compiling %file-block-mode)
+    (miricl-compiler::compiler-list-length spec "block declaration")
+    (case (car spec)
+      (miricl-compiler:start-block
+       (let ((entries (%file-block-names (cdr spec))))
+         (%file-block-flush)
+         (setq %file-block-active t %file-block-entries entries)))
+      (miricl-compiler:end-block
+       (%file-block-names (cdr spec))
+       (%file-block-flush)
+       (setq %file-block-active nil %file-block-entries nil)))))
+
+(defun %file-block-defun (form environment compile-time-too)
+  (when (and %file-block-active (null environment) (eq (car form) 'defun))
+    (let* ((name (second form)) (body (cdddr form))
+           (doc (when (and (stringp (car body)) (cdr body)) (pop body)))
+           (declarations nil))
+      (when (assoc name %file-block-definitions :test #'equal)
+        (miricl-compiler::compiler-input-fail "block definition" form "duplicate function name"))
+      (when (and (symbolp name) (macro-function name))
+        (miricl-compiler::compiler-input-fail "block definition" name "function name conflicts with a macro"))
+      (when compile-time-too (%%compile 7 environment form))
+      (loop while (and (consp (car body)) (eq (caar body) 'declare)) do
+        (push (pop body) declarations))
+      (let* ((%compilation-complete t)
+             (parts (%compile-lambda-parts (third form)
+                      (append (list (list 'declare (list 'optimize
+                                       (list 'debug %debug-default-level) (list 'safety %safety-default-level))))
+                        %file-top-declarations (nreverse declarations)
+                        (list (list* 'block (if (consp name) (second name) name) body))) environment)))
+        (push (if %compilation-complete (%%compile 2 name parts) (cons name parts)) %file-block-definitions)
+        (setq %file-block-complete (and %file-block-complete %compilation-complete)))
+      (when (or (null %file-block-entries) (member name %file-block-entries :test #'equal))
+        (push (%compile-form (list 'setf (list 'fdefinition (list 'quote name))
+                                   (list 'function name)) environment) %file-block-forms)
+        (when doc
+          (push (%compile-form (list 'setf (list 'documentation (list 'quote name) ''function) doc)
+                               environment) %file-block-forms)))
+      t)))
+
 (defun %compile-top-body (body environment compile-time-too)
   (let ((declarations nil))
     (loop while (and (consp (car body)) (eq (caar body) 'declare)) do
       (let ((declaration (pop body)))
         (push declaration declarations)
         (dolist (spec (cdr declaration))
+          (when (member (car spec) '(miricl-compiler:start-block miricl-compiler:end-block))
+            (miricl-compiler::compiler-input-fail "block declaration" spec "only valid as a global proclamation"))
           (when (eq (car spec) 'special)
             (dolist (name (cdr spec)) (setq environment (%%compile 11 environment name)))))))
     (let ((%file-top-declarations (append %file-top-declarations (nreverse declarations))))
@@ -240,12 +352,23 @@
            (or %file-definition
                (and (fboundp 'miricl-compiler::definition-info)
                     (miricl-compiler::definition-info form (incf %file-definition-id))))))
+    (when (and (eq operator 'defun) (%file-block-defun form environment compile-time-too))
+      (return-from %compile-top-level nil))
+    ;; A literal global PROCLAIM can delimit blocks without EVAL-WHEN. DECLAIM
+    ;; reaches the same path after its normal top-level macro expansion.
+    (when (and (eq operator 'proclaim) (consp (second form)) (eq (car (second form)) 'quote)
+               (consp (second (second form)))
+               (member (car (second (second form))) '(miricl-compiler:start-block miricl-compiler:end-block)))
+      (%file-block-declaration (second (second form)))
+      (setq compile-time-too nil))
     ;; Top-level DEFVAR/DEFPARAMETER proclaim their names at compile time,
     ;; without evaluating the initializer or assigning the variable (CLHS).
     ;; Lexical canonicalization must see that proclamation in subsequent code.
     (when (member operator '(defvar defparameter))
       (proclaim (list 'special (second form))))
-    (when (member operator '(in-package defpackage defmacro deftype defclass defstruct define-condition))
+    (when (member operator '(in-package defpackage defmacro define-symbol-macro
+                            defsetf define-setf-expander define-modify-macro
+                            deftype defclass defstruct define-condition))
       (unless compile-time-too
         ;; DEFINE-CONDITION must establish the type during compilation. Its
         ;; report function can be an ordinary DEFUN in this same file, which
@@ -281,32 +404,12 @@
         (when compile-time-too (%%compile 7 environment form))
         (let ((%compilation-complete t))
           (let ((compiled (%compile-form form environment)))
-            (let* ((%file-object-references nil) (%file-object-barriers nil) (%file-object-effects nil)
-                   (body (if %file-top-declarations
-                           (cons 'locally (append %file-top-declarations (list compiled))) compiled))
-                   (body (if %compilation-complete (%file-lexical-form body nil nil nil nil) body))
-                   (root (%fasl-dump
-                     (case miricl-compiler::*fasl-code-format*
-                       (:source body)
-                       (:hir
-                        (let ((hir (miricl-compiler:compile-to-hir (list 'lambda nil body))))
-                          (if (some (lambda (function)
-                                      (= (miricl-compiler::hir-function-debug-level function) 3))
-                                    (miricl-compiler:hir-unit-functions hir))
-                              body
-                              (list 'funcall (list 'miricl-compiler:load-hir-code
-                                (list 'quote (miricl-compiler:emit-hir-code hir)))))))
-                       (otherwise (error "Unknown FASL code format ~S." miricl-compiler::*fasl-code-format*))))))
-              (push root %fasl-roots)
-              (when (fboundp 'miricl-compiler::form-references)
-                (multiple-value-bind (references barriers)
-                  (miricl-compiler::form-references body %file-load-values)
-                (push (list root (let ((descriptor (copy-list (or %file-definition
-                                           (list (incf %file-definition-id) :effect nil t nil)))))
-                                   (when %file-object-effects (setf (fourth descriptor) t))
-                                   descriptor)
-                            (union references %file-object-references :test #'equal)
-                            (union barriers %file-object-barriers :test #'equal)) %file-ir))))))))))
+            (let ((body (if %file-top-declarations
+                         (cons 'locally (append %file-top-declarations (list compiled))) compiled)))
+              (if (and %file-block-active %file-block-definitions)
+                  (progn (push body %file-block-forms)
+                         (setq %file-block-complete (and %file-block-complete %compilation-complete)))
+                  (%file-emit-body body %compilation-complete)))))))))
 
 (defun %fasl-write (path roots records &optional metadata)
   (with-open-file (stream path :direction :output :element-type '(unsigned-byte 8) :if-exists :supersede)
@@ -358,25 +461,42 @@
           (file-position binary end))))
     t))
 
-(defun compile-file (input-file &key (output-file nil outputp) (verbose *compile-verbose*) (print *compile-print*) (external-format :default))
-  (miricl-compiler::ensure-compiler)
-  (let* ((*package* *package*) (*readtable* *readtable*)
-         (*compile-file-pathname* (merge-pathnames input-file)) (*compile-file-truename* (truename input-file))
-         (target (if outputp (compile-file-pathname input-file :output-file output-file) (compile-file-pathname input-file)))
+(defun compile-file (input-file &key (output-file nil outputp) (verbose *compile-verbose*) (print *compile-print*) (external-format :default)
+                                   (block-compile miricl-compiler:*block-compile-default*) entry-points)
+  (when (fboundp 'miricl-compiler::ensure-compiler) (miricl-compiler::ensure-compiler))
+  (unless (member block-compile '(nil :specified t))
+    (miricl-compiler::compiler-input-fail "block compilation mode" block-compile "expected NIL, :SPECIFIED or T"))
+  (%file-block-names entry-points)
+  ;; The interpreter-only image performs minimal compilation. Block directives
+  ;; retain their no-op meaning there, without hiding or sealing definitions.
+  (unless (fboundp 'miricl-compiler::ensure-compiler)
+    (setq block-compile nil entry-points nil))
+  (let* ((inputs (if (consp input-file) input-file (list input-file)))
+         (count (miricl-compiler::compiler-list-length inputs "compiler input files"))
+         (first (or (and (plusp count) (first inputs)) (error "Missing compiler input file.")))
+         (*package* *package*) (*readtable* *readtable*)
+         (*compile-file-pathname* (merge-pathnames first)) (*compile-file-truename* (truename first))
+         (target (if outputp (compile-file-pathname first :output-file output-file) (compile-file-pathname first)))
          (%file-compiling t) (%file-load-values (make-hash-table :test 'eq))
          (%file-lexical-names (make-array 16 :adjustable t :fill-pointer 0))
          (%fasl-records (make-array 32 :adjustable t :fill-pointer 0))
          (%fasl-seen (make-hash-table :test 'eq)) (%fasl-roots nil) (%file-top-declarations nil)
          (%file-definition nil) (%file-definition-id 0) (%file-ir nil)
          (%file-collect-object-references t)
+         (%file-block-mode block-compile) (%file-block-active (eq block-compile t))
+         (%file-block-entries (and (eq block-compile t) (copy-list entry-points))) (%file-block-definitions nil)
+         (%file-block-forms nil) (%file-block-complete t)
          (warnings nil) (failure nil))
     (when verbose (format t "~&; Compiling ~A~%" *compile-file-truename*))
     (handler-bind ((warning (lambda (condition) (setq warnings t) (unless (typep condition 'style-warning) (setq failure t)))))
-      (with-open-file (stream *compile-file-truename* :external-format external-format)
-        (let ((eof (list nil)))
-          (loop for form = (read stream nil eof) until (eq form eof) do
-            (when print (format t "~&; ~S~%" (if (consp form) (car form) form)))
-            (%compile-top-level form nil nil))))
+      (dolist (input inputs)
+        (let ((*compile-file-pathname* (merge-pathnames input)) (*compile-file-truename* (truename input)))
+          (with-open-file (stream *compile-file-truename* :external-format external-format)
+            (let ((eof (list nil)))
+              (loop for form = (read stream nil eof) until (eq form eof) do
+                (when print (format t "~&; ~S~%" (if (consp form) (car form) form)))
+                (%compile-top-level form nil nil))))))
+      (%file-block-flush)
       (%fasl-write target (nreverse %fasl-roots) %fasl-records
         (when (fboundp 'miricl-compiler::definition-info)
           (list :miricl-ir (namestring *compile-file-truename*) (nreverse %file-ir)))))

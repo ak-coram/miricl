@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 const binary = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
-const vm = await Miricl.instantiate(binary);
+const vm = await createCompilerTestVM(binary);
 vm.mountFile('portable.lisp', `
   (defpackage :compiled-package (:use :cl))
   (in-package :compiled-package)
@@ -71,6 +71,25 @@ vm.mountFile('portable.lisp', `
               (loop for x below (bump 2) sum (bump x))
               (let ((x (list 1 2)))
                 (psetf (car x) (bump (cadr x)) (cadr x) (bump (car x))) x))))
+  (defun file-first (cell) (car cell))
+  (defun set-file-first (cell value) (setf (car cell) value))
+  (defun file-pair (cell) (values (car cell) (cdr cell)))
+  (defmacro define-file-places ()
+    '(progn
+       (defsetf file-first set-file-first)
+       (defsetf file-pair (cell) (left right)
+         (list 'progn (list 'setf (list 'car cell) left (list 'cdr cell) right)
+               (list 'values left right)))
+       (define-setf-expander file-head (cell &environment environment)
+         (get-setf-expansion (list 'car cell) environment))
+       (define-modify-macro add-file-head (&optional (amount 1)) +)))
+  (define-file-places)
+  (defun compiled-file-places ()
+    (let ((cell (cons 0 nil)) (calls 0))
+      (setf (file-pair (progn (incf calls) cell)) (values 17 42))
+      (setf (file-first cell) 7)
+      (add-file-head (file-head cell) 5)
+      (values cell calls)))
 `);
 const check = (machine, source) => assert.equal(machine.evaluate(source, {eof: true}).output, 'T\n', source);
 check(vm, `(let ((result (multiple-value-list (compile-file "portable.lisp" :verbose nil :print nil))))
@@ -84,14 +103,14 @@ assert.ok(exported.startsWith('#('));
 const bytes = Uint8Array.from(exported.match(/\d+/g).map(Number));
 assert.equal(WebAssembly.validate(bytes), true);
 const module = await WebAssembly.compile(bytes);
-assert.equal(WebAssembly.Module.customSections(module, 'miricl.fasl').length, 1);
 assert.deepEqual(WebAssembly.Module.imports(module), []);
-const fresh = await Miricl.instantiate(binary);
+const fresh = await createCompilerTestVM(binary);
 fresh.mountFile('portable.wasm', bytes);
 check(fresh, `(let ((*read-eval* nil) (*read-base* 16) (*readtable* (copy-readtable nil)))
   (set-macro-character (code-char 40) (lambda (stream character) (declare (ignore stream character)) (error "User reader called.")))
   (load "portable.wasm" :verbose nil :print nil))`);
 check(fresh, `(equal (compiled-package::aux-captures 40) '(40 41 42))`);
+check(fresh, `(equal (multiple-value-list (compiled-package::compiled-file-places)) '((12 . 42) 1))`);
 check(fresh, `(and (eq (compiled-package::persisted-character) (code-char 41))
   (eq (compiled-package::persisted-character) (peek-char t (make-string-input-stream " )"))))`);
 check(fresh, `(string= (format nil "~A"

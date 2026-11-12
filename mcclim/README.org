@@ -1,0 +1,46 @@
+* McCLIM browser port
+
+The port lives here, with upstream McCLIM and its dependencies pinned as
+submodules. The browser backend uses Common Lisp and MIRICL-JS interop.
+It draws through Canvas and measures the fonts supplied by the browser.
+
+The reusable image contains McCLIM, its browser backend, the complete
+=clim-examples= system and the ready miricl compiler. ASDF is used to build the library and is absent from the
+resulting image. No browser port or DOM objects are created while saving it.
+
+Build the runtime and ASDF library first, then assemble the McCLIM image:
+
+#+begin_src sh
+just build build-asdf
+node mcclim/build.mjs demo
+node mcclim/native.mjs
+node mcclim/image.mjs
+node mcclim/page.mjs
+#+end_src
+
+The output is =mcclim/build/miricl-mcclim.wasm=. Load it with the existing
+=Miricl.instantiate= adapter and use =evaluateAsync= to start applications,
+so CLIM's event and application processes can run cooperatively. The backend
+uses a =mcclim-desktop= element, creating one if needed. Windows share that
+desktop, with their own title bars and move, resize and close controls.
+Window drawing uses a backing canvas. CLIM's =with-output-buffered= groups
+are presented together, including nested groups on panes sharing a window.
+=force-output= and =finish-output= explicitly present pending drawing.
+
+=node mcclim/tests/browser.mjs= uses the development core checkpoint and
+loads backend source for iteration. The first frame fixture checks Canvas
+drawing and delivery of pointer events to a real CLIM gadget.
+
+The page is written to =build/mcclim/site/= and launches
+=(clim-demo:demodemo)= on one desktop. CI includes it in the existing
+GitHub Pages site under =mcclim/=. The reusable image is included in the
+=application-mcclim= CI artifact for building other applications.
+Use an HTTP server to view the page locally.
+
+Bitmap decoding and PNG/JPEG export use browser image codecs. SVG preview
+opens inside the page. Example sources and image resources are included
+in the Lisp filesystem; the build does not bundle font files.
+
+PDF export is not supported yet. Its browser handler is a stub that logs
+an error to the browser console and creates no file. The PDF generation
+dependencies are omitted from the image.

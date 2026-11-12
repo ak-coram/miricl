@@ -1,0 +1,17 @@
+;;;; McCLIM's portability API delegates to miricl's JavaScript-hosted tables.
+(defpackage #:trivial-garbage
+  (:use #:cl)
+  (:nicknames #:tg)
+  (:export #:make-weak-hash-table #:hash-table-weakness #:gc #:finalize #:cancel-finalization))
+(in-package #:trivial-garbage)
+(defun make-weak-hash-table (&rest arguments &key weakness (weakness-matters t) &allow-other-keys)
+  (declare (ignore weakness-matters))
+  (let ((options (copy-list arguments)))
+    (loop while (remf options :weakness-matters))
+    (apply #'js:make-weak-hash-table options)))
+(defun hash-table-weakness (table) (js:hash-table-weakness table))
+(defun gc (&key full verbose) (declare (ignore full verbose)) nil)
+(defun finalize (object function)
+  (declare (ignore object function)) (error "WasmGC finalizers are unavailable."))
+(defun cancel-finalization (object) (declare (ignore object)) nil)
+(in-package #:cl-user)

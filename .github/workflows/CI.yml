@@ -160,7 +160,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [game-of-life, maxima, fricas]
+        app: [game-of-life, maxima, fricas, mcclim]
     env:
       LISP: sbcl-bin
       CHROMIUM: google-chrome
@@ -171,7 +171,7 @@ jobs:
       - uses: ./.github/actions/setup-miricl
         with:
           lisp: ${{ matrix.app == 'game-of-life' && 'true' || 'false' }}
-          native-tools: ${{ matrix.app != 'game-of-life' && 'true' || 'false' }}
+          native-tools: ${{ (matrix.app == 'maxima' || matrix.app == 'fricas') && 'true' || 'false' }}
           just: 'true'
       - uses: actions/download-artifact@v4
         with:
@@ -187,7 +187,7 @@ jobs:
           node tests/browser-game-of-life.mjs game-of-life/build/index.html
           node tests/browser-game-of-life.mjs game-of-life/dev.html --dev
       - name: Cache native application image and compiled algebra
-        if: matrix.app != 'game-of-life'
+        if: matrix.app == 'maxima' || matrix.app == 'fricas'
         uses: actions/cache@v4
         id: native
         with:
@@ -197,6 +197,25 @@ jobs:
             build/${{ matrix.app }}/retention.txt
             build/${{ matrix.app }}/algebra
           key: ${{ matrix.app }}-native-v2-${{ runner.os }}-${{ hashFiles('miricl-precompiled.wasm', '*.lisp', '*.asd', 'scripts/*.lisp', 'scripts/*.mjs', 'scripts/ports/*.lisp') }}-${{ hashFiles(format('vendor/{0}/**', matrix.app)) }}
+      - name: Cache native McCLIM image
+        if: matrix.app == 'mcclim'
+        uses: actions/cache@v4
+        id: mcclim-image
+        with:
+          path: build/mcclim/miricl-mcclim.wasm
+          key: mcclim-image-v1-${{ runner.os }}-${{ hashFiles('miricl-precompiled.wasm', 'miricl-asdf.wasm', 'mcclim/**/*.lisp', 'mcclim/**/*.asd', 'mcclim/**/*.mjs', 'mcclim/upstream/**', 'mcclim/deps/**') }}
+      - name: Build McCLIM demonstrations and check the browser backend
+        if: matrix.app == 'mcclim'
+        env:
+          MCCLIM_IMAGE_CACHE_HIT: ${{ steps.mcclim-image.outputs.cache-hit }}
+        run: |
+          if [ "$MCCLIM_IMAGE_CACHE_HIT" != 'true' ]; then
+            node mcclim/build.mjs demo
+            node mcclim/native.mjs mcclim/build/mcclim-demo-library.wasm mcclim/build/mcclim-demo-native.wasm
+            node mcclim/image.mjs mcclim/build/mcclim-demo-native.wasm build/mcclim/miricl-mcclim.wasm
+          fi
+          node mcclim/page.mjs build/mcclim/miricl-mcclim.wasm build/mcclim/site
+          node mcclim/tests/browser.mjs build/mcclim/miricl-mcclim.wasm
       - name: Cache upstream FriCAS bootstrap
         if: matrix.app == 'fricas'
         uses: actions/cache@v4
@@ -466,7 +485,7 @@ jobs:
           name: miricl-runtime
       - name: Selected ANSI tests (blocking)
         if: matrix.mode == 'interpreter'
-        run: node tests/ansi.mjs miricl.wasm
+        run: node tests/ansi.mjs miricl-interpreter.wasm
       - name: Full ANSI suite
         timeout-minutes: 20
         # Both execution modes must pass every upstream test.
@@ -476,9 +495,9 @@ jobs:
           ANSI_MODE: ${{ matrix.mode }}
         run: |
           if [ "$ANSI_MODE" = compiler ]; then
-            node tests/ansi.mjs miricl.wasm --full --compiler
+            node tests/ansi.mjs miricl-precompiled.wasm --full --compiler
           else
-            node tests/ansi.mjs miricl.wasm --full
+            node tests/ansi.mjs miricl-interpreter.wasm --full
           fi
       - name: Render report and require a complete passing suite
         if: always()
@@ -555,6 +574,10 @@ jobs:
           path: build/coalton/site
       - uses: actions/download-artifact@v4
         with:
+          name: application-mcclim
+          path: build/mcclim/site
+      - uses: actions/download-artifact@v4
+        with:
           name: acl2-math-books
           path: build/acl2/books
       - name: Assemble static site and measure the actual payloads
@@ -567,6 +590,7 @@ jobs:
           cp -R build/fricas/site public/fricas
           cp -R build/acl2/site public/acl2
           cp -R build/coalton/site public/coalton
+          cp -R build/mcclim/site public/mcclim
           node scripts/build-size-html.mjs . public/image-sizes.html index.html
       - uses: actions/upload-artifact@v4
         with:

@@ -425,7 +425,7 @@
         #@(call $arity (local.get $spec) (i32.const 2) (i32.const 2))
         #@(local.set $report (call $car (call $cdr (local.get $spec))))
         #@(if (i32.and (i32.ne (call $tag (local.get $report)) (i32.const 10))
-                      (i32.eqz (ref.test (ref $native-function) (local.get $report))))
+                      (i32.ne (call $tag (local.get $report)) (i32.const 8)))
             (then (local.set $report (call $eval
               (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'function)))
                 (call $cons (local.get $report) (ref.null eq))) (local.get $env))))))

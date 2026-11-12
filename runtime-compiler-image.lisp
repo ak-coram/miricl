@@ -25,6 +25,7 @@
                       (dolist (entry (funcall (%%compile 20 ,index (cadr %fasl-work) nil)))
                         (setf (symbol-function (car entry)) (cdr entry)
                               (gethash (car entry) miricl-compiler::*native-compiler-functions*) t))))
+                 (%invalidate-all-dispatch)
                  (setq miricl-compiler::*compiler-state* :ready
                        miricl-compiler::*compiler-origin* :image
                        miricl-compiler:*compile-evaluations* ,*compile-evaluations-default*)))))))))

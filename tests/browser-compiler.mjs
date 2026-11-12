@@ -38,7 +38,8 @@ const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--disable-background-networking', `--user-data-dir=${profile}`, '--no-startup-window', '--remote-debugging-pipe',
 ], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
 const stopped = new Promise(resolve => browser.once('exit', resolve));
-let diagnostics = '', received = '', nextId = 0;
+let diagnostics = '', received = '', nextId = 0, phase = 'browser startup';
+const trace = process.env.MIRICL_BROWSER_COMPILER_TRACE === '1';
 const pending = new Map();
 function fail(error) {
   for (const {reject, timer} of pending.values()) {clearTimeout(timer); reject(error);}
@@ -54,6 +55,8 @@ browser.stdio[4].on('data', chunk => {
     const message = JSON.parse(received.slice(0, end)); received = received.slice(end + 1);
     if (message.method === 'Network.requestWillBeSent') requests.push(message.params.request.url);
     if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
+    if (message.method === 'Runtime.consoleAPICalled' && trace)
+      console.log('Browser:', ...message.params.args.map(arg => arg.value ?? arg.description));
     const request = pending.get(message.id);
     if (!request) continue;
     pending.delete(message.id); clearTimeout(request.timer);
@@ -66,7 +69,11 @@ function send(method, params = {}, sessionId, timeoutMs = 60000) {
     const id = ++nextId;
     // Keep ordinary CDP calls bounded. Cold self-compilation gets a separate
     // budget below because it compiles every kernel under Chromium's inspector.
-    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`Timed out: ${method}. ${diagnostics}`));}, timeoutMs);
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      const expression = params.expression ? `\nExpression: ${params.expression.slice(0, 500)}` : '';
+      reject(new Error(`Timed out after ${timeoutMs} ms: ${method}, ${phase}.${expression}\n${diagnostics}`));
+    }, timeoutMs);
     pending.set(id, {resolve, reject, timer});
     browser.stdio[3].write(JSON.stringify({id, method, params, sessionId}) + '\0');
   });
@@ -116,20 +123,41 @@ try {
   // All subsequent compilation happens offline in this browser instance.
   await command('Network.emulateNetworkConditions', {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
   if (!precompiled) {
+    phase = 'cold compiler bootstrap';
+    console.log('Browser compiler: starting cold bootstrap.');
+    // This compiles the complete optimizer and emitter, not one application
+    // function. The measured cold run takes several minutes under Chromium.
+    // The integration runner's ten-minute test limit remains the outer bound.
     const bootstrapStarted = performance.now();
-    assert.equal(await evaluate(`(progn (miricl-compiler::ensure-compiler)
+    const heartbeat = setInterval(() => console.log(
+      `Browser compiler: cold bootstrap still running (${Math.round((performance.now() - bootstrapStarted) / 1000)} s).`), 30000);
+    try {
+      assert.equal(await evaluate(`(progn (miricl-compiler::ensure-compiler)
     (multiple-value-bind (installed unsupported)
       (miricl-compiler::compile-compiler)
     (and (>= (length installed) 93) (null unsupported)
       (every (lambda (name) (null (function-lambda-expression (symbol-function name))))
         '(miricl-compiler::hir-form miricl-compiler:compile-to-hir
-          miricl-compiler::emit-native-module miricl-compiler:compile-native)))))`, 180000), 'T\n');
+          miricl-compiler::emit-native-module miricl-compiler:compile-native)))))`, 480000), 'T\n');
+    } finally {clearInterval(heartbeat);}
     console.log(`Browser compiler self-bootstrap: ${Math.round(performance.now() - bootstrapStarted)} ms`);
   }
-  for (const [name, source] of compilerSmokeCases) assert.equal(await evaluate(source), 'T\n', name);
+  for (const [name, source] of compilerSmokeCases) {
+    phase = name;
+    if (trace) console.log(`Browser compiler: ${name}`);
+    assert.equal(await evaluate(source), 'T\n', name);
+  }
+  phase = 'JavaScript interop and native DOM callbacks';
   assert.equal(await evaluate(`(let ((function (miricl-compiler:compile-native
       '(lambda (x) (js:from-js (js:invoke (js:global "Math") "sqrt" x))))))
     (= (funcall function 81) 9))`), 'T\n');
+  phase = 'weak hash tables';
+  assert.equal(await evaluate(`(progn
+    (defparameter *browser-weak-table* (js:make-weak-hash-table :weakness :key))
+    (setf (gethash :retained *browser-weak-table*) (vector 42))
+    (and (eq (js:hash-table-weakness *browser-weak-table*) :key)
+         (equalp (gethash :retained *browser-weak-table*) #(42))))`), 'T\n');
+  phase = 'native DOM callbacks';
   assert.equal(await evaluate(`(progn (defparameter *compiler-clicks* 0)
     (setf (js:property (js:invoke (js:global "document") "getElementById" "compiled") "onclick")
       (js:callback (miricl-compiler:compile-native
@@ -139,16 +167,25 @@ try {
   assert.equal(await evaluate('*compiler-clicks*'), '1\n');
   assert.equal(await js('app.evaluateAsync("(funcall *compiler-test-function* 40)").then(r => r.output)'), '42\n');
   if (precompiled) {
+    phase = 'saved image restoration';
     assert.equal(await js(`(async () => {
       const restored = await Miricl.instantiate(app.saveImage());
-      try {return restored.evaluate("(list *compiler-clicks* (funcall *compiler-test-function* 40))").output;}
+      try {return restored.evaluate("(list *compiler-clicks* (funcall *compiler-test-function* 40) (aref (gethash :retained *browser-weak-table*) 0))").output;}
       finally {restored.close();}
-    })()`), '(1 42)\n');
+    })()`), '(1 42 42)\n');
   }
   await command('Network.emulateNetworkConditions', {offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
+  phase = 'fresh interpreter isolation';
   assert.equal(await js(`(async () => {
     const second = await Miricl.instantiate(image);
-    try {return second.evaluate("(funcall (miricl-compiler:compile-native '(lambda () 42)))").output;}
+    try {
+      const state = second.evaluate('miricl-compiler::*compiler-state*').output;
+      if (state !== ${JSON.stringify(precompiled ? ':READY\n' : ':COLD\n')}) throw new Error('Unexpected fresh compiler state: ' + state);
+      // Cold first-use compilation was exercised above. Avoid repeating the
+      // entire bootstrap merely to check that a second browser VM is isolated.
+      return second.evaluate(${JSON.stringify(precompiled
+        ? "(funcall (miricl-compiler:compile-native '(lambda () 42)))" : '(+ 20 22)')}).output;
+    }
     finally {second.close();}
   })()`), '42\n');
   assert.equal(requests.some(url => /miricl-repl|asdf|dev-repl|dev-filesystem|^wss?:/.test(url)), false);

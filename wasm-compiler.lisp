@@ -2644,6 +2644,13 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    ;; CALL-NEXT-METHOD continuations on every invocation.
                    ;; Keep those shared paths native alongside the compiler.
                    miricl::%effective-call miricl::%around-plan miricl::%call-next miricl::%invoke-effective
+                   ;; Allocation and protocol introspection select methods too,
+                   ;; independently of the executable generic-call cache.
+                   miricl::%compute-applicable miricl::%applicable miricl::%specializer-matches
+                   miricl::%more-specific miricl::%insert-method
+                   miricl::%lambda-profile miricl::%dispatch-key miricl::%key-equal
+                   miricl::%required miricl::%instancep miricl::%subclassp
+                   find-class
                    ;; Externalizing large constant graphs repeatedly uses
                    ;; these shared slot and load-form operations.
                    miricl::%slot-cell miricl::%cpl make-load-form-saving-slots
@@ -2655,6 +2662,17 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    emit-hir-code compile-native-hir))
 
 (defvar *native-compiler-functions* (make-hash-table :test 'eq))
+(defparameter *native-compiler-blocks*
+  ;; Each block starts at its first seed. Only its own definitions are sealed;
+  ;; calls into later bootstrap stages retain their global bindings. The
+  ;; interpreter still installs and executes ordinary global definitions.
+  '((wasm-byte wasm-append wasm-u32 wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call)
+    (hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant hir-clear-source)
+    (hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell)
+    (hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells)
+    (miricl::%file-lexical-name miricl::%file-lexical-specials miricl::%file-lexical-bind
+     miricl::%file-lexical-reference miricl::%file-code-cons miricl::%file-lexical-forms
+     miricl::%file-lexical-function miricl::%file-lexical-call miricl::%file-lexical-form)))
 (defvar *compiler-state* :cold)
 (defvar *compiler-origin* :source)
 
@@ -2700,16 +2718,38 @@ This does not change the policy for compiling application bodies."
     (dolist (name *native-compiler-seeds*)
       (unless (gethash name *native-compiler-functions*)
         (handler-case
-            (let* ((code (compiler-primitive 43 (symbol-function name)))
-                   (source (unless code (let ((original (function-lambda-expression (symbol-function name))))
+            (let* ((block (assoc name *native-compiler-blocks*))
+                   ;; Packed HIR kernels need no retained source. Keep their
+                   ;; existing individual bootstrap path when a source block
+                   ;; cannot be reconstructed in its entirety.
+                   (definitions (and block
+                     (loop for member in block
+                       for source = (and (not (gethash member *native-compiler-functions*))
+                                     (function-lambda-expression (symbol-function member)))
+                       unless source do (return nil)
+                       collect (list* 'defun member (cdr (compiler-source-policy source)))))))
+              (if definitions
+                  (let ((functions (compile-native-module definitions :inline nil)))
+                    ;; Publish the complete block only after compilation and
+                    ;; factory invocation succeed.
+                    (dolist (entry functions)
+                      (setf (symbol-function (car entry)) (cdr entry)
+                            (gethash (car entry) *native-compiler-functions*) t)))
+                  (let* ((code (compiler-primitive 43 (symbol-function name)))
+                         (source (unless code
+                           (let ((original (function-lambda-expression (symbol-function name))))
                              (and original (compiler-source-policy original)))))
-                   (function (cond (code (compile-native-hir code :name name))
-                                   (source (compile-native source :name name))
-                                   (t (error "Missing compiler bootstrap code for ~S." name)))))
-              (setf (symbol-function name) function (gethash name *native-compiler-functions*) t))
+                         (function (cond (code (compile-native-hir code :name name))
+                                         (source (compile-native source :name name))
+                                         (t (error "Missing compiler bootstrap code for ~S." name)))))
+                    (setf (symbol-function name) function (gethash name *native-compiler-functions*) t))))
           (error (condition) (push (list name (princ-to-string condition)) unsupported))))
       (when (gethash name *native-compiler-functions*) (push name installed)))
     (unless unsupported
+      (unless (eq *compiler-state* :ready)
+        ;; Boot-time effective methods were built before native compilation
+        ;; became available. Rebuild those plans through the ready compiler.
+        (miricl::%invalidate-all-dispatch))
       (setq *compiler-state* :ready)
       (unless (eq *compiler-origin* :image) (setq *compiler-origin* :first-use)))
     (values (nreverse installed) (nreverse unsupported))))

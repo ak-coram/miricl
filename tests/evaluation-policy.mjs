@@ -18,6 +18,26 @@ for (const [file, compiled] of [[process.argv[2] ?? 'miricl.wasm', false],
       (eq (null (function-lambda-expression #'policy-default)) ${compiled ? 't' : 'nil'}))`);
 
     mode(true);
+    // Defining macros compile executable bodies too, without replacing the
+    // generic function or losing initform closures and next-method contexts.
+    output(`(defclass policy-instance () ((value :initform (list 40) :reader policy-value)))
+      (defgeneric policy-method (object))
+      (defmethod policy-method ((object t)) (values :base object))
+      (defmethod policy-method ((object policy-instance))
+        (multiple-value-bind (tag value) (call-next-method)
+          (values tag (+ 2 (car (policy-value value))))))
+      (defstruct (policy-positional (:constructor make-policy-positional (value))) value)
+      (defmacro policy-native-macro (x) (list '+ x 2))
+      (deftype policy-native-type (limit) (list 'integer 0 limit))`);
+    check(`(and (equal (multiple-value-list (policy-method (make-instance 'policy-instance))) '(:base 42))
+      (typep #'policy-method 'standard-generic-function)
+      (plusp (miricl-compiler::compiler-primitive 26
+        (mop:method-function (find-method #'policy-method nil (list (find-class 'policy-instance))))))
+      (plusp (miricl-compiler::compiler-primitive 26 (macro-function 'policy-native-macro)))
+      (plusp (miricl-compiler::compiler-primitive 26 #'make-policy-positional))
+      (= (policy-positional-value (make-policy-positional 42)) 42)
+      (= (policy-native-macro 40) 42) (typep 42 '(policy-native-type 42))
+      (not (typep 43 '(policy-native-type 42))))`);
     // Policy scanning must accept dotted destructuring lists in source,
     // including macro calls, while preserving native compilation at debug 1.
     output(`(defmacro policy-dotted-macro ((head . tail)) (list 'quote (cons head tail)))
@@ -149,7 +169,9 @@ for (const [file, compiled] of [[process.argv[2] ?? 'miricl.wasm', false],
       (compile-file "/policy-fasl.lisp" :output-file "/policy-fasl.wasm") (values)`);
     assert.equal(output('(load "/policy-fasl.wasm")'), 'T\n');
     check(`(and miricl-compiler:*compile-evaluations* (= (policy-fasl) 42)
-      (not (null (function-lambda-expression #'policy-fasl))))`);
+      (compiled-function-p #'policy-fasl)
+      (null (function-lambda-expression #'policy-fasl))
+      (not (null (miricl-compiler::compiler-primitive 44 #'policy-fasl))))`);
     assert.equal((await vm.evaluateAsync(`(defun policy-async (x) (+ x 2))
       (and (= (policy-async 40) 42) (null (function-lambda-expression #'policy-async)))`)).output,
       'POLICY-ASYNC\nT\n');

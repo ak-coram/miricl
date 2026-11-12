@@ -389,6 +389,9 @@ try {
     '(setf (svref f 1) 2147483647)',
     '(setf (svref f 2) 999)',
     '(setf (svref f 3) 999)',
+    '(setf (svref f 9) -1)',
+    '(setf (svref f 9) 4)',
+    '(setf (svref f 9) "invalid")',
     '(setf (svref f 4) 1)',
     '(setf (svref b 0) 999)',
     '(setf (svref b 2) (string (code-char 255)))',
@@ -415,10 +418,19 @@ try {
     (defun hir-fasl-literal () *hir-literal*)
     (defun hir-fasl-counter (n) (lambda () (incf n)))
     (defparameter *hir-counter* (hir-fasl-counter 40))
+    (define-condition hir-file-condition (type-error)
+      ((detail :initform 17 :reader hir-file-detail))
+      (:default-initargs :expected-type 'symbol)
+      (:report (lambda (condition stream)
+                 (format stream "Detail ~D, expected ~A"
+                   (hir-file-detail condition) (type-error-expected-type condition)))))
+    (let ((prefix "Captured reporter"))
+      (define-condition hir-captured-report (condition) ()
+        (:report (lambda (condition stream) (declare (ignore condition))
+                   (write-string prefix stream)))))
     (push :second *hir-order*)`;
   vm.mountFile('/hir-source.lisp', source);
-  vm.evaluate(`(let ((miricl-compiler::*fasl-code-format* :hir))
-    (compile-file "/hir-source.lisp" :output-file "/hir-test.wasm" :verbose nil)) (values)`);
+  vm.evaluate(`(compile-file "/hir-source.lisp" :output-file "/hir-test.wasm" :verbose nil) (values)`);
   const fasl = await vm.readFile('/hir-test.wasm');
   const fresh = await Miricl.instantiate(await fs.readFile(process.argv[3] ?? image));
   let snapshot;
@@ -431,6 +443,10 @@ try {
     assert.equal(fresh.evaluate(`(not (null (search "HIR function"
       (with-output-to-string (*standard-output*) (disassemble 'hir-fasl-values)))))`).output, 'T\n');
     assert.equal(fresh.evaluate('(funcall *hir-counter*)').output, '41\n');
+    assert.equal(fresh.evaluate('(princ-to-string (make-condition \'hir-file-condition))').output,
+      '"Detail 17, expected SYMBOL"\n');
+    assert.equal(fresh.evaluate('(princ-to-string (make-condition \'hir-captured-report))').output,
+      '"Captured reporter"\n');
     fresh.evaluate('(miricl-core:save-image "/hir-snapshot.wasm") (values)');
     snapshot = await fresh.readFile('/hir-snapshot.wasm');
   } finally {fresh.close();}

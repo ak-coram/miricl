@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 
 const image = await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm');
 const definitions = `(defpackage :saved-slot-test (:use :cl)) (in-package :saved-slot-test)
@@ -52,7 +52,7 @@ const valid = `(and (= *initforms* 0) (= *creations* 1) (= *restorations* 1)
       (slot-boundp (aref *graph* 5) 'slot-39) (null (slot-value (aref *graph* 5) 'slot-39))
       (not (slot-boundp (aref *graph* 5) 'slot-0))
       (eq (structure-value structure) array) (eq (structure-next structure) structure))))`;
-const builder = await Miricl.instantiate(image);
+const builder = await createCompilerTestVM(image);
 try {
   await builder.evaluateAsync(definitions, {eof: true});
   // Calling the standard helper directly must also return executable forms,
@@ -78,7 +78,7 @@ try {
     const module = new WebAssembly.Module(bytes);
     const units = WebAssembly.Module.customSections(module, 'miricl.fasl');
     assert.ok(units.some(unit => new DataView(unit).getUint32(4, true) & 2), 'Dense record feature bit');
-    const fresh = await Miricl.instantiate(image);
+    const fresh = await createCompilerTestVM(image);
     try {
       await fresh.evaluateAsync(definitions, {eof: true}); fresh.mountFile('/graph.wasm', bytes);
       await fresh.evaluateAsync('(load "/graph.wasm") (values)', {eof: true});

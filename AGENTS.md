@@ -97,6 +97,15 @@ for direct Wasm implementations.
 
 # Style
 
+Test intended behavior and success criteria, not incidental details of the
+current implementation or environment. Avoid fixed counts, exact inventories,
+ordering, sizes or cosmetic values unless they are part of the contract being
+tested. Check that required results are present and correct, allow unrelated
+additions, and derive expectations from the actual inputs or configuration
+where possible. For example, a test suite should verify that all discovered
+tests succeed rather than require a hardcoded number of tests. Keep relevant
+checks consistent with changes so stale assumptions do not waste CI runs.
+
 Wasm supports a Lisp-style syntax, the intention is to integrate Wasm
 modules into the Common Lisp source code using reader macros, regular
 macros and hand over compilation and some optimizations to the

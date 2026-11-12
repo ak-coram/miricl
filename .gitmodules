@@ -16,3 +16,27 @@
 [submodule "vendor/coalton"]
 	path = vendor/coalton
 	url = https://github.com/coalton-lang/coalton
+[submodule "mcclim/upstream"]
+	path = mcclim/upstream
+	url = https://codeberg.org/McCLIM/McCLIM
+[submodule "mcclim/deps/alexandria"]
+	path = mcclim/deps/alexandria
+	url = https://gitlab.common-lisp.net/alexandria/alexandria.git
+[submodule "mcclim/deps/acclimation"]
+	path = mcclim/deps/acclimation
+	url = https://github.com/robert-strandh/Acclimation
+[submodule "mcclim/deps/cluffer"]
+	path = mcclim/deps/cluffer
+	url = https://github.com/robert-strandh/Cluffer
+[submodule "mcclim/deps/spatial-trees"]
+	path = mcclim/deps/spatial-trees
+	url = https://github.com/rpav/spatial-trees
+[submodule "mcclim/deps/clump"]
+	path = mcclim/deps/clump
+	url = https://github.com/robert-strandh/Clump
+[submodule "mcclim/deps/lorem-ipsum"]
+	path = mcclim/deps/lorem-ipsum
+	url = https://github.com/phoe/lorem-ipsum.git
+[submodule "mcclim/deps/cl-who"]
+	path = mcclim/deps/cl-who
+	url = https://github.com/edicl/cl-who.git

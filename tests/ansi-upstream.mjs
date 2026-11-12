@@ -2,10 +2,14 @@ import {Worker} from 'node:worker_threads';
 import {measureWasmImages} from '../scripts/wasm-size.mjs';
 import {validateExecution, summarizeCompilation} from './ansi-compiler.mjs';
 
-export async function runUpstream({binary, sources, timeout = 10000, loadTimeout = 120000,
+export async function runUpstream({binary, sources, timeout = 10000, loadTimeout,
   heapLimitMb = 512, expectedTests = null,
   execution = 'interpreter',
   seed = Array.from(crypto.getRandomValues(new Uint32Array(4))), onProgress = () => {}}) {
+  // Upstream INIT compiles its helpers and test files to HIR. The small
+  // image's interpreted frontend takes about four minutes for this corpus.
+  // Keep setup's budget separate from each test body's timeout.
+  if (loadTimeout === undefined) loadTimeout = 300000;
   for (const [name, value] of Object.entries({timeout, loadTimeout}))
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer.`);
   validateExecution(execution);

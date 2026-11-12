@@ -131,6 +131,21 @@
     (f64.add (call $host-service (i32.const 1) (f64.const 0)) (f64.const 8)))
   #@(global.set $thread-pending (struct.get $green-thread $interrupts (local.get $thread))))
 
+(define-runtime-function $thread-callback-enter () (i32)
+  (:export-raw "thread-callback-enter")
+  (:locals ($id i32))
+  ;; The asynchronous driver has saved the parked thread already. An external
+  ;; synchronous callback must not inherit its in-flight transfers, handlers,
+  ;; reader state or scratch buffers. THREAD-ENTER restores that saved state
+  ;; after the host has converted the callback's result and output.
+  #@(local.set $id (call $thread-id))
+  (runtime-wat-forms
+    (loop for (name type initial) in *thread-state* collect
+      `(global.set ,name ,initial)))
+  ;; Synchronous JS callbacks cannot suspend through the host's JS frames.
+  #@(global.set $javascript-depth (i32.const 1))
+  #@(local.get $id))
+
 (define-runtime-function $thread-switch () ()
   (wat-fail-when #@(i32.or (i32.eqz (global.get $thread-active))
     (ref.is_null (table.get $thread-services (i32.const 0)))) :unsupported)
@@ -260,8 +275,12 @@
           (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $previous)) (call $cdr (local.get $scan)))))
         (if (ref.eq (global.get $thread-scan) (local.get $scan))
           (then (global.set $thread-scan (call $cdr (local.get $scan)))))
-        (return)))
-    (local.set $previous (local.get $scan)) (local.set $scan (call $cdr (local.get $scan))) (br $next))))
+        (br $done)))
+    (local.set $previous (local.get $scan)) (local.set $scan (call $cdr (local.get $scan))) (br $next)))
+  ;; A later external callback saves/restores the current thread. Do not leave
+  ;; it pointing at a retired record whose context and scratch were released.
+  #@(if (ref.eq (global.get $current-thread) (local.get $thread))
+    (then (call $thread-enter (i32.const 0)))))
 
 (define-runtime-function $thread-interrupt-scope (($function :nullable-object) ($enable i32)) (:nullable-object)
   (:locals ($mask i32) ($result :nullable-object) ($thrown i32)
@@ -379,7 +398,7 @@
   ;; saved context: another thread can enqueue an interrupt while it sleeps.
   #@(global $thread-pending (mut (ref null eq)) (ref.null eq))
   #@(global $thread-slice-deadline (mut f64) (f64.const 0))
-  ($thread-find) ($thread-create) ($thread-current) ($thread-free-scratch) ($thread-allocate-scratch) ($thread-save) ($thread-enter)
+  ($thread-find) ($thread-create) ($thread-current) ($thread-free-scratch) ($thread-allocate-scratch) ($thread-save) ($thread-enter) ($thread-callback-enter)
   ($thread-switch) ($thread-checkpoint) ($thread-park) ($thread-next) ($thread-delay)
   ($thread-run) ($thread-failed) ($thread-id) ($thread-main-state) ($thread-retire)
   ($thread-interrupt-scope) ($thread-operation))

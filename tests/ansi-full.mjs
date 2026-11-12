@@ -309,7 +309,7 @@ export async function main(binary, args = []) {
       execution: compiler ? 'compiler' : 'interpreter',
       // The upstream driver discovers its inventory after a successful load.
       // A submodule update may add or remove tests without changing this runner.
-      ...(!diagnostic ? {loadTimeout: option('load-timeout', 120000)} : {}),
+      ...(!diagnostic ? {loadTimeout: option('load-timeout', 300000)} : {}),
       ...(options.some(arg => arg.startsWith('--seed='))
         ? {seed: options.findLast(arg => arg.startsWith('--seed=')).slice(7).split(',').map(Number)} : {}),
       timeout: option('timeout', 10000), heapLimitMb: option('heap', 512),

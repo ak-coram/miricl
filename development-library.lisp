@@ -945,6 +945,9 @@
       (unless (and (consp spec) (symbolp (car spec)) (list-length spec))
         (error 'program-error))
       (case (car spec)
+        ((miricl-compiler:start-block miricl-compiler:end-block)
+          (when (and (boundp '%file-compiling) %file-compiling (fboundp '%file-block-declaration))
+            (%file-block-declaration spec)))
         (optimize
           (let ((debug (%optimize-debug-level (cdr spec) %debug-default-level))
                 (safety (%optimize-safety-level (cdr spec) %safety-default-level)))
@@ -1059,7 +1062,8 @@
 ;; Resolve macro and LOAD-TIME-VALUE references into compact executable forms.
 ;; Preserve lexical cells and literal identity when compiling existing closures.
 (defun compile (name &optional (definition nil suppliedp))
-  (when (fboundp 'miricl-compiler::ensure-compiler) (miricl-compiler::ensure-compiler))
+  (when (and suppliedp (consp definition) (fboundp 'miricl-compiler::compiler-source-form))
+    (miricl-compiler::compiler-source-form definition))
   (%%function-name-symbol name)
   (let* ((macro (and (symbolp name) (macro-function name)))
          (function
@@ -1070,7 +1074,9 @@
                    (error 'type-error :datum definition :expected-type '(or function cons)))
                  (coerce definition 'function))
                (or macro (fdefinition name)))))
-    (setq function (%%compile 0 function))
+    (setq function (if (fboundp 'miricl-compiler::compile-minimal-function)
+                       (miricl-compiler::compile-minimal-function function name)
+                       (%%compile 0 function)))
     (when name
       (if macro (setf (macro-function name) function)
           (setf (fdefinition name) function)))
@@ -1095,6 +1101,8 @@
     (unless (eq function (%%generic-info function))
       (format t "~&; Generic function ~S~%" (generic-function-name function))
       (setq function (%get function :discriminating-function)))
+    ;; Compile a temporary copy, leaving the named definition untouched.
+    (unless (compiled-function-p function) (setq function (compile nil function)))
     (let ((code (%%compile 44 function)))
       (when code
         (miricl-compiler::disassemble-hir-code (car code) (cdr code))

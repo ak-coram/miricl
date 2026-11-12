@@ -1450,12 +1450,14 @@ Unsupported special operators and parameter syntax signal an error."
   (compiler-function-name name "function name")
   (compiler-list-length global-specials "global special variables")
   (dolist (variable global-specials) (compiler-variable-name variable "global special variable"))
-  (ensure-compiler)
-  (optimize-hir-checked (lower-source-to-hir lambda-expression name global-specials)))
+  (if (fboundp 'ensure-compiler)
+      (progn (ensure-compiler)
+        (optimize-hir-checked (lower-source-to-hir lambda-expression name global-specials)))
+      (lower-source-to-hir lambda-expression name global-specials)))
 
 (defun lower-source-to-hir (lambda-expression &optional name global-specials)
-  ;; Internal lowering stage for validated source; public compilation always
-  ;; follows it with HIR optimization. IR tests can inspect this boundary.
+  ;; Internal lowering stage for validated source. The full compiler follows
+  ;; it with optimization; the small image emits executable HIR directly.
   (let ((*hir-unit* (make-hir-unit)) (*hir-specials* global-specials)
         (*hir-debug-level* (or (compiler-primitive 33 nil) 1)) (*hir-types* nil)
         (*hir-safety-level* (or (compiler-primitive 36 nil) 1))

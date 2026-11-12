@@ -11,12 +11,17 @@ const repl = image('miricl-repl.wasm');
 const precompiled = image('miricl-precompiled.wasm');
 const asdf = image('build/asdf/asdf.lisp');
 const test = (name, ...args) => [`tests/${name}.mjs`, ...args];
-// These suites exercise backend behavior and already support the ready image.
-// Keep first-use/bootstrap coverage in compiler-runtime, native-compilation,
-// native-bundle and the separate cold compiler-input run below.
+// Compile the backend test bodies with the ready image. Cold bootstrap remains
+// covered by compiler-runtime, evaluation-policy, native-compilation, the
+// separate cold compiler-input run.
 const readyCompilerTests = new Set([
   'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-inline-types',
   'compiler-inline-writes', 'compiler-modules', 'compiler-throughput', 'native-size', 'hir-optimization', 'compiler-integer-predicates', 'compiler-predicate-reuse', 'compiler-loops', 'compiler-licm',
+  'compilation', 'hir', 'whole-program', 'class-reachability', 'generic-dispatch',
+  'native-bundle', 'native-ltv', 'tail-calls', 'native-disassembly',
+  'fasl-format', 'fasl-hash-tables', 'fasl-shared-initialization', 'saved-slots',
+  'file-compilation', 'file-code-sharing', 'nested-backquote', 'structure-printers',
+  'ansi-compiler-runner',
 ]);
 const groups = {
   runtime: [
@@ -28,6 +33,8 @@ const groups = {
     test('terminal-debugger', wasm, image('miricl.js')),
     ...['backtrace', 'debugger', 'javascript', 'development', 'integer-tiers', 'printer-integers', 'float-bits', 'derived-types', 'readtable-iteration', 'reader-suppression', 'package-local-nicknames', 'hash-structural']
       .map(name => test(name, wasm)),
+    ['--expose-gc', ...test('weak-hash-tables', precompiled)],
+    test('mop', wasm),
     test('ansi-report-check'),
   ],
   compiler: [
@@ -37,12 +44,15 @@ const groups = {
     test('evaluation-policy', wasm, precompiled, repl),
     test('core-image', precompiled),
     test('native-arguments', precompiled),
+    test('block-compilation', precompiled),
     test('debugger', precompiled),
     ...['compilation', 'hir', 'hir-optimization', 'compiler-loops', 'compiler-predicate-reuse', 'compiler-licm', 'whole-program', 'class-reachability', 'generic-dispatch',
       'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-input', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-integer-predicates', 'compiler-modules', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',
       'fasl-format', 'fasl-hash-tables', 'fasl-shared-initialization', 'saved-slots', 'file-compilation', 'file-code-sharing', 'nested-backquote',
-      'structure-printers', 'ansi-compiler-runner', 'ansi-runner', 'ansi-upstream-runner']
+      'structure-printers', 'ansi-compiler-runner']
       .map(name => test(name, readyCompilerTests.has(name) ? precompiled : wasm)),
+    test('ansi-runner', image('miricl-interpreter.wasm')),
+    test('ansi-upstream-runner', image('miricl-interpreter.wasm')),
   ],
   asdf: [test('asdf-build'), test('asdf', wasm, asdf), test('asdf-bundle', wasm, asdf),
     test('bundle-command', wasm, repl, image('miricl-asdf.wasm')), test('application-setup')],

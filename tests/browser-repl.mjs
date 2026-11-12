@@ -123,7 +123,11 @@ try {
     'The compilation progress label must reach the page while compilation is still running.');
   // Cold self-compilation runs in an inspected worker and can exceed a minute
   // on CI. Match the dedicated browser compiler test's bootstrap budget.
-  await waitFor(completed, 180000);
+  const bootstrapStarted = performance.now();
+  const heartbeat = setInterval(() => console.log(
+    `Browser REPL compiler bootstrap: ${Math.round((performance.now() - bootstrapStarted) / 1000)}s`), 30000);
+  try { await waitFor(completed, 480000); }
+  finally { clearInterval(heartbeat); }
   const compilation = await output();
   assert.equal((compilation.match(/Packed Lisp code: [1-9][0-9]* bytes/g) ?? []).length, 2);
   assert.equal((compilation.match(/Wasm module: [1-9][0-9]* bytes/g) ?? []).length, 2);

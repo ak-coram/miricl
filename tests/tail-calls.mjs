@@ -2,9 +2,9 @@
 // Common Lisp value/extent semantics as well as successful deep recursion.
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await createCompilerTestVM(fs.readFileSync(process.argv[2] ?? 'miricl-precompiled.wasm'));
 const evaluate = source => vm.evaluate(source, {eof: true}).output;
 const check = source => assert.equal(evaluate(source), 'T\n', source);
 const define = (name, source) => evaluate(`(setf (symbol-function '${name})

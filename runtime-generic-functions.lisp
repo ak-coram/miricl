@@ -10,9 +10,37 @@
     (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))) (struct.get $obj $b (ref.cast (ref $obj) (local.get $function)))
     (struct.get $obj $c (ref.cast (ref $obj) (local.get $function))) (local.get $gf)))
 
+(defparameter *generic-property-cache-keys*
+  '(:discriminating-function :cache :lambda-list :methods :cache-protocol :name :eql-dispatch-profile))
+
 (define-runtime-function $generic-property (($gf :nullable-object) ($key :nullable-object)) (:nullable-object)
-  #@(call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $gf)))))
-    (local.get $key))))
+  (:locals ($info (ref $obj)) ($owned :nullable-object) ($cache (ref null $objects))
+           ($cell :nullable-object) ($index i32))
+  #@(local.set $info (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $gf)))))
+  #@(block $ordinary
+    (local.set $owned (struct.get $obj $c (local.get $info)))
+    (if (ref.eq (local.get $owned) (call $symbol (i32.const 1)))
+      (then
+        (local.set $cache (array.new_default $objects (i32.const ,(1+ (length *generic-property-cache-keys*)))))
+        (array.set $objects (local.get $cache) (i32.const 0) (local.get $owned))
+        (struct.set $obj $c (local.get $info) (local.get $cache)))
+      (else
+        (br_if $ordinary (i32.eqz (ref.test (ref $objects) (local.get $owned))))
+        (local.set $cache (ref.cast (ref $objects) (local.get $owned)))
+        (br_if $ordinary (i32.ne (array.len (local.get $cache)) (i32.const ,(1+ (length *generic-property-cache-keys*)))))
+        (br_if $ordinary (i32.eqz (ref.eq (array.get $objects (local.get $cache) (i32.const 0)) (call $symbol (i32.const 1)))))))
+    (block $selected
+      ,@(loop for key in *generic-property-cache-keys* for index from 1 collect
+          `(if (ref.eq (local.get $key) ,(clos-library-reference key))
+              (then (local.set $index (i32.const ,index)) (br $selected))))
+      (br $ordinary))
+    (local.set $cell (array.get $objects (local.get $cache) (local.get $index)))
+    (if (ref.is_null (local.get $cell))
+      (then
+        (local.set $cell (call $property-cell (struct.get $obj $b (local.get $info)) (local.get $key)))
+        (array.set $objects (local.get $cache) (local.get $index) (local.get $cell))))
+    (return (call $car (local.get $cell))))
+  #@(call $car (call $property-cell (struct.get $obj $b (local.get $info)) (local.get $key))))
 
 ;; The next-method context has lexical extent through the method's closures.
 ;; Pack the private context into one object while retaining the same dynamic
@@ -164,6 +192,19 @@
     (local.set $position (i32.sub (local.get $position) (i32.const 1))) (br $next))
   #@(i32.const 0))
 
+(define-runtime-function $generic-cache-permitted-p (($gf :nullable-object)) (i32)
+  (:locals ($proof :nullable-object))
+  #@(if (i32.eqz (ref.is_null (call $symbol-value ,(clos-library-reference '%cache-permitted))))
+    (then (return (i32.const 1))))
+  #@(local.set $proof (call $generic-property (local.get $gf) ,(clos-library-reference :cache-protocol)))
+  #@(if (i32.eqz (ref.is_null (local.get $proof)))
+    (then
+      (if (call $eql (call $car (local.get $proof))
+            (call $symbol-value ,(clos-library-reference '%dispatch-version)))
+        (then (return (i32.eqz (ref.is_null (call $cdr (local.get $proof)))))))))
+  #@(i32.eqz (ref.is_null (call $apply ,(clos-library-reference '%dispatch-cache-permitted-p)
+    (call $cons (local.get $gf) (ref.null eq))))))
+
 (define-runtime-function $generic-apply (($gf :nullable-object) ($args :nullable-object)) (:nullable-object)
   (:locals ($function :nullable-object) ($cache :nullable-object) ($entry :nullable-object)
            ($version :nullable-object) ($key :nullable-object) ($mode-object :nullable-object)
@@ -178,7 +219,7 @@
         (ref.cast (ref $generic-discriminator) (local.get $function))) (local.get $gf)))
       (else (i32.const 0)))))
     (then
-      (if (i32.eqz (ref.is_null (call $symbol-value ,(clos-library-reference '%cache-permitted))))
+      (if (call $generic-cache-permitted-p (local.get $gf))
         (then
           (local.set $cache (call $generic-property (local.get $gf) ,(clos-library-reference :cache)))
           (local.set $version (call $symbol-value ,(clos-library-reference '%dispatch-version)))
@@ -190,6 +231,9 @@
                 (local.set $mode-object (call $car (call $cdr (call $cdr (call $cdr (local.get $entry))))))
                 (local.set $mode (call $natural-count (local.get $mode-object)))
                 (br_if $miss (i32.eqz (local.get $mode)))
+                (if (i32.and (local.get $mode) (i32.const 4096))
+                  (then (br_if $miss (i32.eqz (ref.eq (global.get $slot-access-token)
+                    (call $car (call $cdr (call $cdr (call $cdr (call $cdr (call $cdr (local.get $entry))))))))))))
                 (if (i32.eqz (local.get $computed))
                   (then
                     (if (i32.and (local.get $mode) (i32.const 16))
@@ -218,10 +262,10 @@
 (define-runtime-function $standard-property-generic-p
     (($function :nullable-object) ($method :nullable-object)) (i32)
   (:locals ($methods :nullable-object) ($discriminator :nullable-object))
-  #@(if (ref.is_null (call $symbol-value ,(clos-library-reference '%cache-permitted)))
-    (then (return (i32.const 0))))
   #@(if (i32.ne (call $tag (local.get $function)) (i32.const 8)) (then (return (i32.const 0))))
   #@(if (i32.ne (call $value-n (local.get $function)) (i32.const 2147483645)) (then (return (i32.const 0))))
+  #@(if (i32.eqz (call $generic-cache-permitted-p (local.get $function)))
+    (then (return (i32.const 0))))
   #@(local.set $methods (call $generic-property (local.get $function) ,(clos-library-reference :methods)))
   #@(if (i32.eqz (ref.eq (call $car (local.get $methods)) (local.get $method))) (then (return (i32.const 0))))
   #@(if (i32.eqz (ref.is_null (call $cdr (local.get $methods)))) (then (return (i32.const 0))))
@@ -306,8 +350,12 @@
   #@(local.get $result))
 
 (define-runtime-function $property-effective
-    (($function :nullable-object) ($form :nullable-object) ($gf :nullable-object)) (:nullable-object)
-  (:locals ($method :nullable-object) ($body :nullable-object) ($scan :nullable-object) ($next :nullable-object))
+    (($function :nullable-object) ($form :nullable-object) ($gf :nullable-object) ($args :nullable-object)) (:nullable-object)
+  (:locals ($method :nullable-object) ($body :nullable-object) ($scan :nullable-object) ($next :nullable-object)
+           ($specialized :nullable-object) ($probe i32))
+  #@(local.set $probe (ref.is_null (local.get $function)))
+  #@(if (local.get $probe)
+    (then (local.set $function (call $closure (ref.null eq) (ref.null eq) (ref.null eq)))))
   #@(block $ordinary
     (br_if $ordinary (i32.ne (call $operator (local.get $form)) (i32.const ,(runtime-symbol-id 'call-method))))
     (br_if $ordinary (i32.eqz (ref.is_null (call $cdr (call $cdr (call $cdr (local.get $form)))))))
@@ -317,7 +365,20 @@
     (br_if $ordinary (i32.ne (call $tag (local.get $method)) (i32.const 23)))
     (local.set $body (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $method))) ,(clos-library-reference :function))))
     (if (i32.and (ref.is_null (local.get $next)) (ref.test (ref $direct-function) (local.get $body)))
-      (then (if (i32.eq (struct.get $direct-function $mode
+      (then
+        (if (i32.or
+              (i32.eq (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $body))) (i32.const 11))
+              (i32.eq (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $body))) (i32.const 12)))
+          (then
+            (if (call $generic-cache-permitted-p (local.get $gf))
+              (then (local.set $specialized (call $specialize-accessor (local.get $function) (local.get $gf)
+                (ref.cast (ref $direct-function) (local.get $body)) (local.get $args)))
+                (if (i32.eqz (ref.is_null (local.get $specialized))) (then (return (local.get $specialized))))))
+            (return (call $direct-function (local.get $function)
+            (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $body)))
+            (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $body)))
+            (i32.add (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $body))) (i32.const 2))))))
+        (if (i32.eq (struct.get $direct-function $mode
                        (ref.cast (ref $direct-function) (local.get $body))) (i32.const 3))
         (then (return (call $direct-function (local.get $function) (ref.null eq)
           (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $body))) (i32.const 4)))))))
@@ -341,7 +402,7 @@
           (call $cons (local.get $function) (call $cons (local.get $gf)
             (call $cons (local.get $method) (call $cons (local.get $next) (ref.null eq)))))))))
     (return (call $direct-function (local.get $function) (local.get $gf) (local.get $method) (i32.const 8))))
-  #@(local.get $function))
+  #@(if (result (ref null eq)) (local.get $probe) (then (ref.null eq)) (else (local.get $function))))
 
 (define-runtime-function $ensure-instance-layout (($object :nullable-object)) (:nullable-object)
   (:locals ($class :nullable-object) ($function :nullable-object) ($methods :nullable-object)
@@ -352,13 +413,13 @@
   ;; access. Custom methods and discriminators keep their ordinary path.
   #@(block $general
     (br_if $general (i32.eqz (call $boundp ,(clos-library-reference '%standard-class-slots-method))))
-    (br_if $general (ref.is_null (call $symbol-value ,(clos-library-reference '%cache-permitted))))
     (local.set $class (struct.get $obj $a (ref.cast (ref $obj) (local.get $object))))
     (br_if $general (ref.is_null (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $class)))
       ,(clos-library-reference :finalized)))))
     (local.set $function (call $fdefinition (call $symbol (i32.const ,(runtime-symbol-id 'class-slots)))))
     (br_if $general (i32.ne (call $tag (local.get $function)) (i32.const 8)))
     (br_if $general (i32.ne (call $value-n (local.get $function)) (i32.const 2147483645)))
+    (br_if $general (i32.eqz (call $generic-cache-permitted-p (local.get $function))))
     (local.set $methods (call $generic-property (local.get $function) ,(clos-library-reference :methods)))
     (br_if $general (i32.eqz (ref.eq (call $car (local.get $methods))
       (call $symbol-value ,(clos-library-reference '%standard-class-slots-method)))))
@@ -404,5 +465,5 @@
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
     (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
     (field $args (ref null eq)) (field $next (ref null eq)))))
-  ($dispatch-eql-key) ($generic-discriminator) ($generic-property) ($invoke-method) ($method-context-element) ($dispatch-class) ($generic-key-match) ($generic-apply)
+  ($dispatch-eql-key) ($generic-discriminator) ($generic-property) ($invoke-method) ($method-context-element) ($dispatch-class) ($generic-key-match) ($generic-cache-permitted-p) ($generic-apply)
   ($standard-property-generic-p) ($find-instance-slot) ($instance-slot-operation) ($restore-saved-slots) ($property-effective) ($ensure-instance-layout))

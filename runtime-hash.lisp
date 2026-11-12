@@ -2,6 +2,47 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+;; Weak tables have a negative count header (-1 for weak keys, -2 for weak
+;; values). Their storage and iteration live entirely in the JS adapter.
+(define-runtime-function $weak-hash-p (($table :nullable-object)) (i32)
+  #@(i32.lt_s (call $value-n (local.get $table)) (i32.const 0)))
+
+(define-runtime-function $weak-hash-bridge
+    (($operation i32) ($table externref) ($left externref) ($right externref)) (i32)
+  (:export-raw "weak-hash-bridge")
+  (:locals ($object (ref $obj)))
+  #@(local.set $object (ref.cast (ref $obj)
+    (call $require-hash-table (ref.cast (ref null eq) (any.convert_extern (local.get $table))))))
+  #@(if (i32.eqz (local.get $operation))
+    (then (return (if (result i32) (call $weak-hash-p (local.get $object))
+      (then (i32.sub (i32.const 0) (call $value-n (local.get $object)))) (else (i32.const 0))))))
+  #@(if (i32.eq (local.get $operation) (i32.const 1))
+    (then (return (call $hash-code (call $id (struct.get $obj $a (local.get $object)))
+      (ref.cast (ref null eq) (any.convert_extern (local.get $left))) (i32.const 4)))))
+  #@(if (i32.eq (local.get $operation) (i32.const 2))
+    (then (return (call $hash-key-match (call $id (struct.get $obj $a (local.get $object)))
+      (ref.cast (ref null eq) (any.convert_extern (local.get $left)))
+      (ref.cast (ref null eq) (any.convert_extern (local.get $right)))))))
+  #@(if (i32.eq (local.get $operation) (i32.const 5))
+    (then (struct.set $obj $b (local.get $object) (ref.null eq))
+      (struct.set $obj $c (local.get $object) (ref.null eq)) (return (i32.const 0))))
+  (wat-fail-when #@(i32.or (i32.lt_u (local.get $operation) (i32.const 3))
+                         (i32.gt_u (local.get $operation) (i32.const 4))) :unsupported)
+  (wat-fail-when #@(call $value-n (local.get $object)) :unsupported)
+  #@(struct.set $obj $n (local.get $object) (i32.sub (i32.const 2) (local.get $operation)))
+  #@(i32.const 0))
+
+(define-runtime-function $hash-count (($table :nullable-object)) (:nullable-object)
+  #@(drop (call $require-hash-table (local.get $table)))
+  #@(if (call $weak-hash-p (local.get $table))
+    (then (return (call $javascript (i32.const 20) (local.get $table) (ref.null eq) (ref.null eq)))))
+  #@(call $int (call $value-n (local.get $table))))
+
+(define-runtime-function $hash-entries (($table :nullable-object)) (:nullable-object)
+  #@(if (call $weak-hash-p (local.get $table))
+    (then (return (call $javascript (i32.const 22) (local.get $table) (ref.null eq) (ref.null eq)))))
+  #@(struct.get $obj $b (ref.cast (ref $obj) (local.get $table))))
+
 (define-runtime-function $make-hash-table-object
     (($test :nullable-object) ($size :nullable-object) ($rehash :nullable-object) ($threshold :nullable-object)) (:nullable-object)
   #@(struct.new $hash-table (call $allocate-object-tag (i32.const 29)) (i32.const 0) (f64.const 0)
@@ -77,15 +118,23 @@
       (if (i32.eq (local.get $mode) (i32.const 2)) (then (return (call $int (i32.const 2)))))
       (if (i32.eq (local.get $mode) (i32.const 3)) (then (return (call $int (i32.const 1)))))
       (local.set $size (call $int (i32.const 16)))))
-  #@(local.set $count (call $int (call $value-n (local.get $table))))
+  #@(local.set $count (call $hash-count (local.get $table)))
   #@(if (result (ref null eq)) (i32.ge_s (call $cmpabs (ref.as_non_null (local.get $size)) (ref.as_non_null (local.get $count))) (i32.const 0))
     (then (local.get $size)) (else (local.get $count))))
 
 (define-runtime-function $hash-iterator-state (($table :nullable-object)) (:nullable-object)
+  #@(drop (call $require-hash-table (local.get $table)))
+  #@(if (call $weak-hash-p (local.get $table))
+    (then (return (call $javascript (i32.const 23) (local.get $table) (ref.null eq) (ref.null eq)))))
   #@(call $cons (struct.get $obj $b (ref.cast (ref $obj) (call $require-hash-table (local.get $table)))) (ref.null eq)))
 
 (define-runtime-function $hash-iterator-next (($state :nullable-object)) (:nullable-object)
   (:locals ($scan :nullable-object) ($entry :nullable-object))
+  #@(if (i32.eq (call $tag (local.get $state)) (i32.const 47))
+    (then
+      (local.set $entry (call $javascript (i32.const 24) (local.get $state) (ref.null eq) (ref.null eq)))
+      (if (ref.is_null (local.get $entry)) (then (call $clear-values) (return (ref.null eq))))
+      (return (call $three-values (call $symbol (i32.const 1)) (call $car (local.get $entry)) (call $cdr (local.get $entry))))))
   #@(local.set $scan (call $car (local.get $state)))
   #@(if (ref.is_null (local.get $scan)) (then (call $clear-values) (return (ref.null eq))))
   #@(local.set $entry (call $car (local.get $scan)))
@@ -270,6 +319,8 @@
 
 (define-runtime-function $hash-cell-native (($key :nullable-object) ($table :nullable-object)) (:nullable-object)
   #@(drop (call $require-hash-table (local.get $table)))
+  #@(if (call $weak-hash-p (local.get $table))
+    (then (return (call $javascript (i32.const 17) (local.get $table) (local.get $key) (ref.null eq)))))
   #@(call $hash-index-find (local.get $key) (local.get $table)
     (call $hash-code (call $id (struct.get $obj $a (ref.cast (ref $obj) (local.get $table)))) (local.get $key) (i32.const 4))))
 
@@ -277,6 +328,8 @@
     (($key :nullable-object) ($table :nullable-object) ($value :nullable-object)) (:nullable-object)
   (:locals ($hash i32) ($entry :nullable-object))
   #@(drop (call $require-hash-table (local.get $table)))
+  #@(if (call $weak-hash-p (local.get $table))
+    (then (return (call $javascript (i32.const 18) (local.get $table) (local.get $key) (local.get $value)))))
   #@(local.set $hash (call $hash-code (call $id (struct.get $obj $a (ref.cast (ref $obj) (local.get $table)))) (local.get $key) (i32.const 4)))
   #@(local.set $entry (call $hash-index-find (local.get $key) (local.get $table) (local.get $hash)))
   #@(if (ref.is_null (local.get $entry))
@@ -320,6 +373,8 @@
 (define-runtime-function $remhash-native (($key :nullable-object) ($table :nullable-object)) (:nullable-object)
   (:locals ($entry :nullable-object) ($scan :nullable-object) ($previous :nullable-object))
   #@(drop (call $require-hash-table (local.get $table)))
+  #@(if (call $weak-hash-p (local.get $table))
+    (then (return (call $javascript (i32.const 19) (local.get $table) (local.get $key) (ref.null eq)))))
   #@(local.set $entry (call $hash-index-delete (local.get $key) (local.get $table)))
   #@(if (ref.is_null (local.get $entry)) (then (return (ref.null eq))))
   #@(local.set $scan (struct.get $obj $b (ref.cast (ref $obj) (local.get $table))))
@@ -335,6 +390,7 @@
   #@(ref.null eq))
 
 (define-runtime-section hash-runtime-wat ()
+  ($weak-hash-p) ($weak-hash-bridge) ($hash-count) ($hash-entries)
   ($make-hash-table-object) ($hash-test-designator) ($hash-test-designator-p) ($make-hash-table-native) ($hash-table-property)
   ($hash-iterator-state) ($hash-iterator-next)
   ($hash-mix) ($hash-test-function-id) ($hash-string-code) ($hash-code) ($require-hash-table)

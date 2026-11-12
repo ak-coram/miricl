@@ -6,6 +6,8 @@ import {Miricl} from '../scripts/miricl.mjs';
 import {installCompiler, compiledTest, compilerCounters, compilerPhase} from './ansi-compiler.mjs';
 
 const vm = await Miricl.instantiate(fs.readFileSync(workerData.binary));
+// Keep setup interpreted; compiler mode compiles each RT body explicitly.
+vm.evaluate('(setq miricl-compiler:*compile-evaluations* nil) (values)');
 vm.vm['seed-random'](...workerData.seed);
 const context = createContext({source: '', evaluate: source => {
   const result = vm.evaluate(source, {eof: true});

@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
-const builder = await Miricl.instantiate(image);
+const builder = await createCompilerTestVM(image);
 let fresh;
 try {
   assert.equal((await builder.evaluateAsync(`
@@ -45,7 +45,7 @@ try {
   await builder.evaluateAsync('(compile-file "/recipes.lisp") (values)', {eof: true});
   const portable = await builder.readFile('/recipes.wasm');
   // The builder has never loaded the application's package or structures.
-  const nativeBuilder = await Miricl.instantiate(image);
+  const nativeBuilder = await createCompilerTestVM(image);
   let native;
   try {
     nativeBuilder.mountFile('/recipes.wasm', portable);
@@ -54,7 +54,7 @@ try {
       (values)`, {eof: true});
     native = await nativeBuilder.readFile('/native.wasm');
   } finally {nativeBuilder.close();}
-  fresh = await Miricl.instantiate(image);
+  fresh = await createCompilerTestVM(image);
   const initialState = (await fresh.evaluateAsync('miricl-compiler::*compiler-state*', {eof: true})).output.trim();
   fresh.mountFile('/native.wasm', native);
   await fresh.evaluateAsync('(load "/native.wasm") (values)', {eof: true});

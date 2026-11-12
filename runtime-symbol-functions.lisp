@@ -374,6 +374,7 @@
 
 (define-runtime-function $store-function (($name :nullable-object) ($value :nullable-object)) (:nullable-object)
   (:locals ($binding :nullable-object) ($setf i32) ($table (ref $symbol-index)) ($id i32))
+  #@(call $invalidate-slot-access (local.get $name))
   ;; Initializer closures acquire their global name when installed. Preserve
   ;; that name when the same function is subsequently installed as an alias.
   #@(if (ref.test (ref $native-function) (local.get $value))

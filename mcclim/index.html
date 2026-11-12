@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#9999cc">
+<title>McCLIM / miricl</title>
+<style>
+  :root {color-scheme:light;font:13px/1.55 "Lucida Console","Courier New",monospace;color:#222;background:#9999cc}
+  * {box-sizing:border-box} body {margin:0;padding:24px} a {color:#005580;text-underline-offset:3px}
+  button {font:inherit;color:inherit;border:1px solid #222;background:#ffffea;padding:5px 10px;cursor:pointer;touch-action:manipulation}
+  button:hover:not(:disabled) {background:#cccc88} button:disabled {opacity:.5;cursor:wait}
+  :focus-visible {outline:2px solid #0055aa;outline-offset:3px}
+  .desktop {max-width:1440px;min-width:720px;margin:auto}
+  header {border:1px solid #222;background:#ffffea;box-shadow:4px 4px #555588;padding:16px 20px}
+  .heading {display:flex;align-items:baseline;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  h1 {font-size:26px;line-height:1.2;font-weight:normal;margin:0 0 8px} p {margin:0;color:#555}
+  nav {display:flex;gap:16px;flex-wrap:wrap;font-size:12px}
+  .toolbar {display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
+  #status {margin-left:auto;font-size:12px;color:#555} #status.error {color:#a02020}
+  #mcclim-desktop {position:relative;height:max(760px,calc(100vh - 206px));margin-top:18px;overflow:hidden}
+  .mcclim-window {background:#ffffea;border:1px solid #333;box-shadow:4px 4px #3335}
+  .mcclim-window canvas {display:block}
+  .mcclim-titlebar button {color:#222;padding:0 6px}
+  footer {font-size:11px;margin-top:8px;color:#333}
+  @media(max-width:760px) {body {padding:12px}.desktop {min-width:720px}}
+</style>
+</head>
+<body>
+<main class="desktop">
+  <header>
+    <div class="heading">
+      <h1>McCLIM demonstrations</h1>
+      <nav aria-label="Navigation">
+        <a href="../">miricl</a>
+        <a href="../image-sizes.html">Image sizes</a>
+        <a href="https://codeberg.org/McCLIM/McCLIM">McCLIM source ↗</a>
+      </nav>
+    </div>
+    <p>Choose an example in the launcher. Move and resize its windows on this desktop.</p>
+    <div class="toolbar">
+      <button id="examples" disabled>Show examples</button>
+      <button id="restart">Restart</button>
+      <span id="status" role="status" aria-live="polite">Loading McCLIM…</span>
+    </div>
+  </header>
+  <div id="mcclim-desktop" aria-label="McCLIM application desktop"></div>
+  <footer>Common Lisp running in your browser. Application windows share this page.</footer>
+</main>
+<script type="module" src="./app.mjs"></script>
+</body>
+</html>

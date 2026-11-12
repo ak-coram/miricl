@@ -1017,7 +1017,7 @@
     (then (call $type-fail (local.get $table) (call $symbol (i32.const ,(runtime-symbol-id 'hash-table)))
       (i32.const ,(runtime-error-code :expected-designator)))))
   #@(local.set $function (call $callable (local.get $function)))
-  #@(local.set $scan (struct.get $obj $b (ref.cast (ref $obj) (local.get $table))))
+  #@(local.set $scan (call $hash-entries (local.get $table)))
   #@(block $done (loop $each (br_if $done (ref.is_null (local.get $scan)))
     (local.set $entry (call $car (local.get $scan)))
     ;; Retain the successor before the callback can unlink the current cell.
@@ -1044,9 +1044,11 @@
           (then (call $car (call $cdr (call $cdr (local.get $args))))) (else (call $cdr (local.get $value))))
         (call $bool (i32.eqz (ref.is_null (local.get $value)))))))
     (hash-table-count (wat-arity 1)
-      #@(return (call $int (call $value-n (call $require-hash-table (local.get $a))))))
+      #@(return (call $hash-count (local.get $a))))
     (clrhash (wat-arity 1)
       #@(drop (call $require-hash-table (local.get $a)))
+      #@(if (call $weak-hash-p (local.get $a))
+        (then (return (call $javascript (i32.const 21) (local.get $a) (ref.null eq) (ref.null eq)))))
       #@(struct.set $obj $b (ref.cast (ref $obj) (local.get $a)) (ref.null eq))
       #@(struct.set $obj $c (ref.cast (ref $obj) (local.get $a)) (ref.null eq))
       #@(struct.set $obj $n (ref.cast (ref $obj) (local.get $a)) (i32.const 0))
@@ -1444,8 +1446,7 @@
   ;; Retired compiler-transport modes 22--24 stay reserved for FASL ABI stability.
   #@(if (i32.eq (local.get $mode) (i32.const 17))
     (then (return (call $native-install (local.get $a) (local.get $b) (local.get $c)))))
-  (if *include-compiler*
-      #@(if (i32.eqz (local.get $mode))
+  #@(if (i32.eqz (local.get $mode))
         (then
           (call $check-type (local.get $a) (call $symbol (i32.const ,(runtime-symbol-id 'function))))
           (if (i32.or (call $value-n (local.get $a))
@@ -1466,10 +1467,6 @@
               (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $a)))
               (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $a)))))))
           (return (local.get $b))))
-      #@(if (i32.eqz (local.get $mode))
-        (then
-          (call $check-type (local.get $a) (call $symbol (i32.const ,(runtime-symbol-id 'function))))
-          (return (local.get $a)))))
   #@(if (i32.le_u (local.get $mode) (i32.const 2))
     (then (return ,(wat-new-object #@(i32.const 7) :f #@(f64.convert_i32_u (local.get $mode))
       :a #@(local.get $a) :b #@(local.get $b)))))

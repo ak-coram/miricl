@@ -264,9 +264,9 @@ test-backtrace: build
 
 # Check ANSI accounting and recovery from load errors and hanging tests.
 test-ansi-runner: build
-    {{ quote(node) }} tests/ansi-runner.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/ansi-upstream-runner.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/ansi-compiler-runner.mjs {{ quote(interpreter) }}
+    {{ quote(node) }} tests/ansi-runner.mjs {{ quote(interpreter_only) }}
+    {{ quote(node) }} tests/ansi-upstream-runner.mjs {{ quote(interpreter_only) }}
+    {{ quote(node) }} tests/ansi-compiler-runner.mjs {{ quote(precompiled) }}
 
 # Initialize the pinned upstream ANSI test submodule.
 ansi-init:
@@ -375,22 +375,22 @@ test-asdf: build build-asdf
 # Run the default ANSI profile, or pass upstream paths and runner options.
 [positional-arguments]
 ansi *files: build
-    {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter) }} "$@"
+    {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter_only) }} "$@"
 
 # Run ANSI bodies through the native compiler; unsupported forms fail.
 [positional-arguments]
 ansi-compiler *files: build
-    MIRICL_ANSI_REPORT={{ quote(env('MIRICL_ANSI_REPORT', build_dir / 'ansi-compiler-results.json')) }} {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter) }} --compiler "$@"
+    MIRICL_ANSI_REPORT={{ quote(env('MIRICL_ANSI_REPORT', build_dir / 'ansi-compiler-results.json')) }} {{ quote(node) }} tests/ansi.mjs {{ quote(precompiled) }} --compiler "$@"
 
 # Run the full upstream ANSI suite through the native compiler.
 [positional-arguments]
 full-ansi-compiler *options: build
-    SBCL={{ quote(sbcl) }} MIRICL_ANSI_REPORT={{ quote(env('MIRICL_ANSI_REPORT', build_dir / 'ansi-compiler-results.json')) }} {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter) }} --full --compiler "$@"
+    SBCL={{ quote(sbcl) }} MIRICL_ANSI_REPORT={{ quote(env('MIRICL_ANSI_REPORT', build_dir / 'ansi-compiler-results.json')) }} {{ quote(node) }} tests/ansi.mjs {{ quote(precompiled) }} --full --compiler "$@"
 
 # Load the upstream ANSI driver and run every test in one WASM interpreter.
 [positional-arguments]
 ansi-full *options: build
-    SBCL={{ quote(sbcl) }} {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter) }} --full "$@"
+    SBCL={{ quote(sbcl) }} {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter_only) }} --full "$@"
 
 alias full-ansi := ansi-full
 
@@ -405,7 +405,7 @@ test-ansi-html:
 # Run selected ANSI files with the incremental upstream cons helpers.
 [positional-arguments]
 ansi-cons +files: build
-    {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter) }} --helpers=cons "$@"
+    {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter_only) }} --helpers=cons "$@"
 
 # Run project tests, Node integration tests, and the default ANSI profile.
 check: test test-js ansi

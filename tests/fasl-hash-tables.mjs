@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
-const vm = await Miricl.instantiate(image);
+const vm = await createCompilerTestVM(image);
 try {
   vm.mountFile('/hash-literals.lisp', `
     (defmacro hash-literals ()
@@ -29,7 +29,7 @@ try {
     (miricl-compiler:shake-file "/hash-literals.wasm" "/hash-compacted.wasm" :strip nil)
     (miricl-compiler:compile-native-bundle "/hash-compacted.wasm" "/hash-native.wasm") (values)`, {eof: true});
   for (const file of ['/hash-literals.wasm', '/hash-compacted.wasm', '/hash-native.wasm']) {
-    const fresh = await Miricl.instantiate(image);
+    const fresh = await createCompilerTestVM(image);
     try {
       fresh.mountFile('/hash.wasm', await vm.readFile(file));
       await fresh.evaluateAsync(`(let ((miricl-compiler:*compile-evaluations* t)

@@ -1,10 +1,10 @@
 import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 
 const binary = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
-const builder = await Miricl.instantiate(binary);
-const fresh = await Miricl.instantiate(binary);
+const builder = await createCompilerTestVM(binary);
+const fresh = await createCompilerTestVM(binary);
 assert.equal(builder.evaluate("(fboundp 'miricl-compiler:optimize-system)").output, 'T\n');
 assert.equal(builder.evaluate(`(and (miricl-compiler::compile-linker) (miricl-compiler::compile-linker)
   (null (function-lambda-expression #'miricl-compiler::compact-unit)))`).output, 'T\n');
@@ -122,7 +122,8 @@ try {
   builder.mountFile('/all.wasm', bundle);
   check(builder, `(pathnamep (nth-value 0 (miricl-compiler:shake-file "/all.wasm" "/small.wasm"
     :entry-points '("WHOLE-PROGRAM-TEST:START")
-    :keep '("WHOLE-PROGRAM-TEST:EXPLICITLY-KEPT" "WHOLE-PROGRAM-TEST:ESCAPING-LOCAL")
+    :keep '("WHOLE-PROGRAM-TEST:EXPLICITLY-KEPT" "WHOLE-PROGRAM-TEST:ESCAPING-LOCAL"
+            "WHOLE-PROGRAM-TEST:LOCAL-TREE")
     :report "/retention.txt")))`);
   check(builder, '(not (boundp (quote whole-program-test::*events*)))');
   const small = await builder.readFile('/small.wasm');
@@ -136,7 +137,7 @@ try {
     :entry-points '("WHOLE-PROGRAM-TEST:START") :index-definitions t))`);
   const indexed = await builder.readFile('/indexed.wasm');
   assert.ok(await definitionChunks(indexed) > 0);
-  const indexedVM = await Miricl.instantiate(binary);
+  const indexedVM = await createCompilerTestVM(binary);
   try {
     indexedVM.mountFile('/indexed.wasm', indexed);
     check(indexedVM, '(load "/indexed.wasm")');

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 
 const image = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
-const builder = await Miricl.instantiate(image);
+const builder = await createCompilerTestVM(image);
 const check = (vm, source) => assert.equal(vm.evaluate(source, {eof: true}).output, 'T\n', source);
 let fresh;
 try {
@@ -54,7 +54,7 @@ try {
   check(builder, '(= native-bundle-test::*initializations* 2)');
   const bytes = await builder.readFile('/native.wasm');
   assert.ok(WebAssembly.validate(bytes));
-  fresh = await Miricl.instantiate(image);
+  fresh = await createCompilerTestVM(image);
   const initialState = fresh.evaluate('miricl-compiler::*compiler-state*').output.trim();
   fresh.mountFile('/native.wasm', bytes);
   fresh.evaluate('(load "/native.wasm")', {eof: true});
@@ -101,7 +101,7 @@ try {
     (incf *initializations*)
     (defun state () (values (token-value *token*) *initializations*))`);
   builder.evaluate('(compile-file "/ordered.lisp") (values)', {eof: true});
-  const ordered = await Miricl.instantiate(image);
+  const ordered = await createCompilerTestVM(image);
   try {
     ordered.mountFile('/ordered.wasm', await builder.readFile('/ordered.wasm'));
     // No application packages or definitions exist before this call. Decoding

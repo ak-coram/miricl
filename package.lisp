@@ -11,7 +11,8 @@
   (:export #:available-p #:value #:valuep #:global #:property #:call #:call-with-this
            #:invoke #:new #:to-js #:from-js #:typeof #:strict-equal #:callback #:array
            #:+null+ #:+undefined+ #:javascript-error #:javascript-error-value
-           #:javascript-unavailable #:define-import))
+           #:javascript-unavailable #:define-import
+           #:make-weak-hash-table #:hash-table-weakness))
 
 (defpackage #:miricl-threads
   (:use #:cl)
@@ -43,6 +44,7 @@
 (defpackage #:miricl-compiler
   (:use #:cl)
   (:export #:analyze-file #:shake-file #:optimize-system
+           #:*block-compile-default* #:start-block #:end-block
            #:*compile-evaluations*
            #:compile-to-hir #:verify-hir #:infer-hir-types #:hir-unit #:hir-unit-functions
            #:emit-native-module #:compile-native #:compile-native-bundle

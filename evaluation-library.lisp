@@ -50,10 +50,10 @@
            (when (and (symbolp name) (macro-function name)) (setf (macro-function name) nil))
            (setf (documentation name 'function) documentation
                  (documentation function 'function) documentation) name)))
-      ;; These establish the target's compilation environment and retain the
-      ;; evaluator's existing semantics. Their generated methods/macros can be
-      ;; compiled explicitly; ordinary expressions and DEFUN bodies use the
-      ;; selected compiler.
+      ;; Variable binding and package/declaration operations keep their native
+      ;; evaluator entry points. Defining macros with executable bodies use
+      ;; their ordinary expansions below, compiling methods, macro expanders
+      ;; and class initfunctions in the same lexical context as the definition.
       ((defvar defparameter)
        (if (and (<= (if (eq operator 'defvar) 2 3) (length form) 4) (symbolp (second form)))
            (progn
@@ -63,8 +63,7 @@
                          (list 'quote (%compiler-evaluate (third form))) (cdddr form)))
                  (%%eval form)))
            (%%eval form)))
-      ((defpackage in-package defmacro deftype defclass defstruct define-condition
-        defmethod defgeneric defconstant declaim proclaim)
+      ((defpackage in-package defconstant declaim proclaim)
        (%%eval form))
       (otherwise
        (multiple-value-bind (expansion expanded)

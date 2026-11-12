@@ -11,30 +11,58 @@ const check = (source, instance = vm) =>
   assert.equal(instance.evaluate(source, {eof: true}).output, 'T\n', source);
 const noCompiler = `(and (not (fboundp 'miricl-compiler::ensure-compiler))
   (not (fboundp 'miricl-compiler:compile-native))
-  (not (fboundp 'miricl-compiler:compile-to-hir))
+  (fboundp 'miricl-compiler:compile-to-hir)
+  (not (fboundp 'miricl-compiler::optimize-hir-checked))
+  (not (fboundp 'miricl-compiler::hir-code-to-unit))
   (not (fboundp 'miricl-compiler:emit-native-module))
-  (not (fboundp 'miricl::%compile-closure))
+  (fboundp (miricl-compiler::compiler-primitive 10 1 "%COMPILE-CLOSURE"))
   (not (find-class 'miricl-compiler::hir-constant nil)))`;
 try {
   check(noCompiler);
   check(`(let* ((x 40) (fn (lambda () (incf x))) (values (multiple-value-list (compile nil fn))))
-    (and (equal values (list fn nil nil)) (not (compiled-function-p fn))
+    (and (= (length values) 3) (not (second values)) (not (third values))
+      (compiled-function-p (first values)) (not (compiled-function-p fn))
       (= (funcall (first values)) 41) (= (funcall fn) 42)))`);
   check(`(progn (defun nop-named (x &optional (y (+ x 2)) &key (z 3)) (+ x y z))
     (let ((fn #'nop-named))
       (and (equal (multiple-value-list (compile 'nop-named)) '(nop-named nil nil))
-        (eq fn #'nop-named) (= (nop-named 1 2 :z 39) 42))))`);
+        (compiled-function-p #'nop-named) (= (nop-named 1 2 :z 39) 42))))`);
+  check(`(let ((text (with-output-to-string (*standard-output*) (disassemble 'nop-named))))
+    (and (search "HIR function NOP-NAMED" text) (search "Packed HIR code:" text)
+         (search "entry B0" text) (search "return" text) t))`);
+  check(`(progn
+    (defparameter *minimal-capture* (funcall (compile nil '(lambda (x) (lambda () (incf x)))) 40))
+    (let ((text (with-output-to-string (*standard-output*) (disassemble *minimal-capture*))))
+      (and (compiled-function-p *minimal-capture*) (search "Capture 0: X" text)
+           (search "capture 0 [X]" text) (search "cell-write" text)
+           (= (funcall *minimal-capture*) 41))))`);
+  check(`(progn (defun nop-uncompiled (x) (+ x 2))
+    (let* ((original #'nop-uncompiled)
+           (text (with-output-to-string (*standard-output*) (disassemble 'nop-uncompiled))))
+      (and (search "HIR function" text) (eq original #'nop-uncompiled)
+           (not (compiled-function-p #'nop-uncompiled)) (= (nop-uncompiled 40) 42))))`);
+  check(`(let ((text nil) (result nil))
+    (setq text (with-output-to-string (*standard-output*)
+                 (setq result (disassemble '(lambda (x) (+ x 2))))))
+    (and (null result) (search "HIR function" text) t))`);
   check(`(let ((fn (lambda (value object) (setf (car object) value))))
     (and (equal (multiple-value-list (compile '(setf nop-place) fn)) '((setf nop-place) nil nil))
-      (eq fn (fdefinition '(setf nop-place)))
+      (compiled-function-p (fdefinition '(setf nop-place)))
       (let ((object (list 1))) (setf (nop-place object) 42) (= (car object) 42))))`);
   check(`(progn (defmacro nop-macro (x) (list '+ x 1))
     (let ((fn (macro-function 'nop-macro)))
-      (and (eq (compile 'nop-macro) 'nop-macro) (eq fn (macro-function 'nop-macro))
+      (and (eq (compile 'nop-macro) 'nop-macro) (compiled-function-p (macro-function 'nop-macro))
         (= (nop-macro 41) 42))))`);
   check(`(let ((fn (compile nil '(lambda (x) (nop-macro x)))))
     (defmacro nop-macro (x) (list '+ x 2))
-    (= (funcall fn 40) 42))`);
+    (= (funcall fn 41) 42))`);
+  check(`(let* ((literal (list 42))
+                (fn (compile nil (list 'lambda nil (list 'quote literal)))))
+    (and (compiled-function-p fn) (eq literal (funcall fn)) (eq fn (compile nil fn))))`);
+  check(`(progn (defparameter *minimal-ltv-count* 0)
+    (let ((fn (compile nil '(lambda () (load-time-value (incf *minimal-ltv-count*))))))
+      (and (= *minimal-ltv-count* 1) (= (funcall fn) 1) (= (funcall fn) 1)
+           (= *minimal-ltv-count* 1))))`);
   check(`(handler-case (progn (compile nil 42) nil) (type-error () t))`);
   check(`(progn (setq miricl-compiler:*compile-evaluations* t)
     (eval '(defun nop-eval () (values 41 42)))
@@ -54,21 +82,46 @@ try {
     (defparameter *nop-load-effects* 0)
     (equal (multiple-value-list (compile-file "/nop.lisp" :verbose nil))
       (list (truename "/nop.wasm") nil nil)))`);
-  assert.deepEqual(await vm.readFile('/nop.wasm'), new TextEncoder().encode(source));
-  check(`(and (= *nop-reads* 0) (= *nop-compile-effects* 0) (= *nop-load-effects* 0)
+  assert.deepEqual([...(await vm.readFile('/nop.wasm')).subarray(0, 8)], [0,97,115,109,1,0,0,0]);
+  check(`(and (= *nop-reads* 1) (= *nop-compile-effects* 1) (= *nop-load-effects* 0)
     (not (fboundp 'nop-file-value)) (not (boundp '*nop-loaded*)))`);
   check(`(and (load "/nop.wasm" :verbose nil) (= *nop-reads* 1)
-    (= *nop-load-effects* 1) (= *nop-compile-effects* 0) (string= *nop-loaded* "é𝄞")
-    (= (nop-file-value) 42) (not (compiled-function-p #'nop-file-value)))`);
+    (= *nop-load-effects* 1) (= *nop-compile-effects* 1) (string= *nop-loaded* "é𝄞")
+    (= (nop-file-value) 42) (compiled-function-p #'nop-file-value))`);
+  check(`(not (null (search "HIR function" (with-output-to-string (*standard-output*)
+    (disassemble #'nop-file-value)))))`);
   check(`(and (equal (multiple-value-list
       (compile-file "/nop.lisp" :output-file "/copied.lisp" :verbose nil))
       (list (truename "/copied.lisp") nil nil))
-    (equal (multiple-value-list (compile-file "/nop.lisp" :output-file "/nop.lisp" :verbose nil))
-      (list (truename "/nop.lisp") nil nil)))`);
-  assert.deepEqual(await vm.readFile('/copied.lisp'), new TextEncoder().encode(source));
+    (load "/copied.lisp" :verbose nil) (compiled-function-p #'nop-file-value)
+    (not (null (miricl-compiler::compiler-primitive 44 #'nop-file-value))))`);
   assert.deepEqual(await vm.readFile('/nop.lisp'), new TextEncoder().encode(source));
-  check(`(progn (compile-file "/nop.lisp" :output-file "/sub/../nop.lisp" :verbose nil) t)`);
-  assert.deepEqual(await vm.readFile('/nop.lisp'), new TextEncoder().encode(source));
+  vm.mountFile('/condition-file.lisp', `(define-condition minimal-file-condition (type-error) ()
+    (:default-initargs :expected-type 'symbol)
+    (:report (lambda (condition stream)
+               (format stream "Expected ~A" (type-error-expected-type condition)))))
+    (let ((text "Captured reporter"))
+      (define-condition minimal-captured-condition (condition) ()
+        (:report (lambda (condition stream) (declare (ignore condition))
+                   (write-string text stream)))))`);
+  check(`(progn (compile-file "/condition-file.lisp" :verbose nil)
+    (load "/condition-file.wasm" :verbose nil)
+    (and (string= (princ-to-string (make-condition 'minimal-file-condition)) "Expected SYMBOL")
+         (string= (princ-to-string (make-condition 'minimal-captured-condition)) "Captured reporter")))`);
+  vm.mountFile('/debug-file.lisp', `(defun minimal-debug-file (x)
+    (declare (optimize (debug 3))) (+ x 2))`);
+  check(`(progn (compile-file "/debug-file.lisp" :verbose nil)
+    (load "/debug-file.wasm" :verbose nil)
+    (and (= (minimal-debug-file 40) 42) (compiled-function-p #'minimal-debug-file)
+      (function-lambda-expression #'minimal-debug-file)
+      (search "INTERPRET" (with-output-to-string (*standard-output*)
+        (disassemble #'minimal-debug-file))) t))`);
+  // Minimal compilation uses the same checked syntax boundary as the full frontend.
+  for (const malformed of [
+    "'(lambda #1=(x . #1#) x)", "'(lambda (x x) x)",
+    "'(lambda () #1=(progn . #1#))", "'(lambda () (if t))",
+  ]) check(`(handler-case (progn (compile nil ${malformed}) nil) (program-error () t))`);
+  check(`(= (funcall (compile nil '(lambda () (+ 20 22)))) 42)`);
 
   const full = await Miricl.instantiate(fullBinary);
   try {
@@ -87,7 +140,7 @@ try {
       (eq (compile nil #'from-full-compiler) #'from-full-compiler))`);
     check(`(and (search "NATIVE-CALL" (with-output-to-string (*standard-output*)
         (disassemble #'from-full-compiler)))
-      (search "INTERPRET" (with-output-to-string (*standard-output*)
+      (search "HIR function" (with-output-to-string (*standard-output*)
         (disassemble #'nop-eval))) t)`);
     // Building the compiler-free variant must not alter the ordinary image.
     check(`(and (fboundp 'miricl-compiler:compile-native)
@@ -97,8 +150,10 @@ try {
   const restored = await Miricl.instantiate(vm.saveImage());
   try {
     check(noCompiler, restored);
+    check(`(let ((text (with-output-to-string (*standard-output*) (disassemble *minimal-capture*))))
+      (and (search "Capture 0: X" text) (= (funcall *minimal-capture*) 42)))`, restored);
     check(`(let ((fn #'nop-eval))
-      (and (eq fn (compile nil fn)) (not (compiled-function-p fn))
+      (and (compiled-function-p (compile nil fn))
         (= (nop-value (make-instance 'nop-object :value 40)) 42)
         (= (from-full-compiler 40) 42) (= (nop-file-value) 42)))`, restored);
   } finally { restored.close(); }
@@ -112,8 +167,8 @@ try {
       (asdf:initialize-source-registry '(:source-registry (:tree "/app/") :ignore-inherited-configuration))
       (asdf:initialize-output-translations '(:output-translations (t "/compiled/") :ignore-inherited-configuration))
       (asdf:load-system "app"))`);
-    check(`(and (= (app:answer) 42) (not (compiled-function-p #'app:answer)))`);
+    check(`(and (= (app:answer) 42) (compiled-function-p #'app:answer))`);
     check(noCompiler);
   }
 } finally { vm.close(); }
-console.log(`Interpreter-only: no-op compilation, source copies, CLOS, portable FASLs and saved images pass (${binary.length} bytes).`);
+console.log(`Interpreter-only: minimal compilation, macro snapshots, load-time values, checked input, CLOS, portable FASLs and saved images pass (${binary.length} bytes).`);

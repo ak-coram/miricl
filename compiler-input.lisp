@@ -202,6 +202,8 @@ Objects inside MEMBER and EQL remain literal data, including cyclic objects."
         (compiler-input-fail "declaration" declaration "expected (declaration-name ...)"))
       (compiler-list-length declaration "declaration")
       (case (first declaration)
+        ((start-block end-block)
+         (compiler-input-fail "block declaration" declaration "only valid as a global proclamation"))
         (special
          (dolist (name (cdr declaration)) (compiler-variable-name name "SPECIAL declaration")))
         (type

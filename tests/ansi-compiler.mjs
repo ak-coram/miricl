@@ -3,9 +3,7 @@ import fs from 'node:fs';
 export function installCompiler(vm) {
   const started = performance.now();
   const output = vm.evaluate(`(cl:progn (miricl-compiler::ensure-compiler)
-    (cl:multiple-value-bind (installed unsupported)
-      (miricl-compiler::compile-compiler)
-    (cl:when unsupported (cl:error "Compiler bootstrap failed: ~S" unsupported))
+    (cl:let ((installed miricl-compiler::*native-compiler-seeds*))
     (cl:unless (cl:every (cl:lambda (name) (cl:member name installed))
       '(miricl-compiler::hir-form miricl-compiler:compile-to-hir
         miricl-compiler::emit-native-function miricl-compiler::emit-native-module

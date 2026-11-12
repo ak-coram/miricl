@@ -720,8 +720,7 @@
            (append m::*clos-library*
              (list (m::lower-runtime-library `(defparameter *compile-file-pathname* ',symbols)))))
          (m::*clos-library-symbols*
-           (stable-sort (copy-list (union m::*clos-primitives* (m::runtime-library-symbols m::*clos-library*)))
-                        #'string< :key #'symbol-name))
+           (m::clos-library-symbols m::*clos-library*))
          (m::*interpreter-wasm* nil))
     (m:with-interpreter (vm)
       (is (equal '(255 255 129) (m:evaluate-string vm

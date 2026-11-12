@@ -167,6 +167,167 @@ class GreenThreads {
   }
 }
 
+// Weak entries retain their payload through an ephemeron keyed by the weak
+// target. In particular, a value-to-key cycle must not keep a weak key alive.
+class WeakHashTables {
+  constructor(host) {
+    this.host = host;
+    this.vm = host.vm;
+    this.tables = new WeakMap();
+    this.iterators = new WeakSet();
+  }
+  bridge(op, table, left = null, right = null) {
+    return this.vm['weak-hash-bridge'](op, table, left, right);
+  }
+  mode(table) { return this.bridge(0, table); }
+  create(table, weakness) {
+    if (typeof WeakRef !== 'function' || typeof FinalizationRegistry !== 'function')
+      throw new Error('This JavaScript host does not support weak references.');
+    const name = this.host.text(this.host.link(7, weakness));
+    if (!['KEY', 'VALUE'].includes(name)) throw new Error('Unsupported weak hash table weakness.');
+    this.bridge(name === 'KEY' ? 3 : 4, table);
+    this.state(table);
+    return table;
+  }
+  state(table) {
+    let state = this.tables.get(table);
+    if (state) return state;
+    const mode = this.mode(table);
+    if (mode !== 1 && mode !== 2) throw new TypeError('Expected a weak hash table.');
+    this.hasTables = true;
+    state = {mode, buckets: new Map(), ephemerons: new WeakMap()};
+    state.registry = new FinalizationRegistry(record => {
+      record.active = false;
+      const bucket = state.buckets.get(record.hash);
+      if (!bucket) return;
+      const remaining = bucket.filter(item => item.active);
+      if (remaining.length) state.buckets.set(record.hash, remaining);
+      else state.buckets.delete(record.hash);
+    });
+    this.tables.set(table, state);
+    return state;
+  }
+  target(record) { return record.weak ? record.weak.deref() : record.target; }
+  pair(state, record) {
+    if (!record.active) return;
+    if (!record.weak) return record.pair;
+    const target = record.weak.deref();
+    if (target === undefined) return;
+    return state.ephemerons.get(target)?.get(record);
+  }
+  remove(state, record) {
+    const target = this.target(record);
+    if (record.weak && target !== undefined) {
+      const entries = state.ephemerons.get(target);
+      entries?.delete(record);
+      if (!entries?.size) state.ephemerons.delete(target);
+      state.registry.unregister(record);
+    }
+    record.active = false;
+    record.pair = undefined;
+    record.target = undefined;
+  }
+  find(table, key) {
+    const state = this.state(table), hash = this.bridge(1, table, key);
+    const bucket = state.buckets.get(hash);
+    if (bucket) for (const record of bucket) {
+      const pair = this.pair(state, record);
+      if (!pair) {this.remove(state, record); continue;}
+      if (pair[0] === key || this.bridge(2, table, key, pair[0]))
+        return {state, hash, record, pair};
+    }
+    return {state, hash};
+  }
+  set(table, key, value) {
+    const found = this.find(table, key), {state, hash} = found;
+    let record = found.record;
+    if (record) {key = found.pair[0]; this.remove(state, record);}
+    else {
+      record = {hash};
+      const bucket = state.buckets.get(hash) ?? [];
+      bucket.push(record); state.buckets.set(hash, bucket);
+    }
+    const target = state.mode === 1 ? key : value;
+    const pair = [key, value];
+    record.active = true;
+    if (target !== null && (typeof target === 'object' || typeof target === 'function')) {
+      record.weak = new WeakRef(target);
+      let entries = state.ephemerons.get(target);
+      if (!entries) state.ephemerons.set(target, entries = new Map());
+      entries.set(record, pair);
+      state.registry.register(target, record, record);
+    } else {
+      // NIL and immediate Wasm integers cannot be weakly collected.
+      record.weak = undefined; record.target = target; record.pair = pair;
+    }
+    return value;
+  }
+  delete(table, key) {
+    const {state, record, hash} = this.find(table, key);
+    if (!record) return false;
+    this.remove(state, record);
+    const remaining = state.buckets.get(hash).filter(item => item.active);
+    if (remaining.length) state.buckets.set(hash, remaining); else state.buckets.delete(hash);
+    return true;
+  }
+  clear(table) {
+    const state = this.state(table);
+    for (const bucket of state.buckets.values()) for (const record of bucket) this.remove(state, record);
+    state.buckets.clear();
+    return table;
+  }
+  *entries(table) {
+    const state = this.state(table);
+    for (const bucket of state.buckets.values()) for (const record of bucket) {
+      const pair = this.pair(state, record);
+      if (pair) yield pair;
+    }
+  }
+  count(table) {
+    const state = this.state(table);
+    let count = 0;
+    for (const [hash, bucket] of state.buckets) {
+      const live = [];
+      for (const record of bucket) {
+        if (this.pair(state, record)) {live.push(record); count++;}
+        else this.remove(state, record);
+      }
+      if (live.length) state.buckets.set(hash, live); else state.buckets.delete(hash);
+    }
+    return count;
+  }
+  list(table) {
+    let list = null;
+    for (const [key, value] of this.entries(table))
+      list = this.host.link(2, this.host.link(2, key, value), list);
+    return list;
+  }
+  iterator(table) {
+    const state = this.state(table);
+    // Snapshot metadata, rather than keys or values, so an iterator doesn't
+    // turn all its unvisited entries into strong references.
+    const iterator = {state, records: [...state.buckets.values()].flat(), index: 0};
+    this.iterators.add(iterator);
+    return this.host.wrap(iterator);
+  }
+  next(value) {
+    const iterator = this.host.unwrap(value);
+    if (!this.iterators.has(iterator)) throw new TypeError('Expected a weak hash table iterator.');
+    while (iterator.index < iterator.records.length) {
+      const pair = this.pair(iterator.state, iterator.records[iterator.index++]);
+      if (pair) return this.host.link(2, pair[0], pair[1]);
+    }
+    return null;
+  }
+  restore(table, entries) {
+    for (let scan = entries; scan !== null; scan = this.host.link(1, scan)) {
+      const entry = this.host.link(0, scan);
+      this.set(table, this.host.link(0, entry), this.host.link(1, entry));
+    }
+    this.bridge(5, table);
+  }
+}
+
 // The bridge retains GC references directly. No integer object registry or
 // finalization protocol is needed, including for retained Lisp callbacks.
 class JavaScriptHost {
@@ -179,6 +340,7 @@ class JavaScriptHost {
     this.imports = imports;
     this.callbacks = new WeakMap();
     this.bindings = new WeakMap();
+    this.weakHashTables = new WeakHashTables(this);
     this.depth = 0;
     this.void = Symbol('void');
     this.null = this.link(4);
@@ -282,23 +444,26 @@ class JavaScriptHost {
     callback = (...args) => {
       const depth = this.depth;
       const nested = depth > 0;
+      const parked = !nested && this.owner.threads?.initialized && this.vm['thread-callback-enter']
+        ? this.vm['thread-callback-enter']() : null;
       this.depth = depth + 1;
-      let result;
+      let result, outputText;
       try {
         let arguments_ = null;
         for (let i = args.length - 1; i >= 0; i--) arguments_ = this.link(2, this.wrap(args[i]), arguments_);
         result = this.toJS(this.link(3, function_, arguments_));
+        if (!nested && this.owner.onOutput) {
+          const output = this.link(8);
+          if (output !== null) outputText = this.text(output);
+        }
       } catch (cause) {
         if (nested) throw cause;
         throw this.owner.failure(cause);
-      } finally { this.depth = depth; }
-      if (!nested && this.owner.onOutput) {
-        const output = this.link(8);
-        if (output !== null) {
-          const text = this.text(output);
-          if (text) this.owner.onOutput(text);
-        }
+      } finally {
+        this.depth = depth;
+        if (parked !== null) this.vm['thread-enter'](parked);
       }
+      if (outputText) this.owner.onOutput(outputText);
       return result;
     };
     this.callbacks.set(function_, callback);
@@ -386,6 +551,22 @@ class JavaScriptHost {
       case 12: return this.wrap(this.callback(a));
       case 13: return this.wrap(this.list(a));
       case 14: return this.importCall(a, b);
+      case 15: return this.weakHashTables.create(a, b);
+      case 16: {
+        const mode = this.weakHashTables.mode(a);
+        return this.makeInteger(BigInt(mode));
+      }
+      case 17: {
+        const pair = this.weakHashTables.find(a, b).pair;
+        return pair ? this.link(2, pair[0], pair[1]) : null;
+      }
+      case 18: return this.weakHashTables.set(a, b, c);
+      case 19: return this.bool(this.weakHashTables.delete(a, b));
+      case 20: return this.makeInteger(BigInt(this.weakHashTables.count(a)));
+      case 21: return this.weakHashTables.clear(a);
+      case 22: return this.weakHashTables.list(a);
+      case 23: return this.weakHashTables.iterator(a);
+      case 24: return this.weakHashTables.next(a);
       default: throw new RangeError('Unknown JavaScript bridge operation.');
     }
   }
@@ -580,8 +761,57 @@ function coreLayout(vm) {
   return {roots, types};
 }
 
-function captureCore(vm, base) {
+function weakImageEntries(vm, {roots, types}, weakTables) {
+  const snapshots = new Map();
+  if (!weakTables?.hasTables) return snapshots;
+  const reachable = new Set(), queue = [], tables = [];
+  function enqueue(value) {
+    if (value === null || typeof value === 'number' || reachable.has(value)) return;
+    reachable.add(value); queue.push(value);
+  }
+  roots.read().forEach((value, i) => {if (coreReference(roots.signature[i])) enqueue(value);});
+  let cursor = 0;
+  function trace() {
+    while (cursor < queue.length) {
+      const object = queue[cursor++], type = types[vm['core-object-type'](object)];
+      if (!type) throw new Error('The image contains a thread or a host object that cannot be restored.');
+      if (type.array) {
+        if (coreReference(type.signature)) for (let i = 0; i < type.length(object); i++) enqueue(type.read(object, i));
+      } else {
+        const values = type.read(object);
+        const weak = typeof values[0] === 'number' && (values[0] & 63) === 29 && values[1] < 0;
+        if (weak) tables.push({object, mode: -values[1], pairs: [...weakTables.entries(object)], kept: new Set()});
+        for (let i = 0; i < type.signature.length; i++)
+          if (coreReference(type.signature[i]) && !(weak && (i === 5 || i === 6))) enqueue(values[i]);
+      }
+    }
+  }
+  trace();
+  // Ephemeron values can make further keys reachable. Iterate to a fixed
+  // point, preserving strong application roots and discarding weak-only cycles.
+  let progress;
+  do {
+    progress = false;
+    for (const table of tables) for (const pair of table.pairs) {
+      if (table.kept.has(pair)) continue;
+      const target = pair[table.mode === 1 ? 0 : 1];
+      if (target !== null && typeof target !== 'number' && !reachable.has(target)) continue;
+      table.kept.add(pair); enqueue(pair[0]); enqueue(pair[1]); progress = true;
+    }
+    trace();
+  } while (progress);
+  for (const table of tables) {
+    let entries = null;
+    for (const [key, value] of table.kept)
+      entries = weakTables.host.link(2, weakTables.host.link(2, key, value), entries);
+    snapshots.set(table.object, entries);
+  }
+  return snapshots;
+}
+
+function captureCore(vm, base, weakTables) {
   const {roots, types} = coreLayout(vm);
+  const weakEntries = weakImageEntries(vm, {roots, types}, weakTables);
   const writer = new CoreWriter();
   const objects = [];
   const ids = new Map();
@@ -650,6 +880,7 @@ function captureCore(vm, base) {
       for (let index = 0; index < length; index++) field(type.signature, type.read(object, index), i + 1);
     } else {
       const values = type.read(object);
+      if (weakEntries.has(object)) {values[5] = weakEntries.get(object); values[6] = null;}
       // Most object slots are NIL or zero. Preserve exact numeric bits (so
       // negative zero is present), and always retain native entry identities.
       let mask = 0;
@@ -866,6 +1097,15 @@ function restoreCore(vm, payload) {
     }
   }
   vm['core-set-roots'](...rootValues.map((value, i) => field(roots.signature[i], value)));
+  const weak = [];
+  for (let id = 1; id <= count; id++) {
+    const type = headers[kinds[id]];
+    if (type.array) continue;
+    const object = objects[id], values = type.read(object);
+    if (typeof values[0] === 'number' && (values[0] & 63) === 29 && values[1] < 0)
+      weak.push({table: object, entries: values[5]});
+  }
+  return weak;
 }
 
 export class Miricl {
@@ -889,7 +1129,7 @@ export class Miricl {
       this.vm['host-services'].set(0, bridge.exports.service);
     }
     this.vm.initialize();
-    if (payload) restoreCore(this.vm, new Uint8Array(payload));
+    const restoredWeak = payload ? restoreCore(this.vm, new Uint8Array(payload)) : [];
     if (this.vm['native-services']) {
       this.nativeModules = new WeakMap();
       const bridge = new WebAssembly.Instance(nativeCompilerBridge, {host: {service: (code, literals, name) => {
@@ -922,6 +1162,7 @@ export class Miricl {
           catch (error) {return error.message;}
         },
       }});
+    for (const {table, entries} of restoredWeak) this.javascript.weakHashTables.restore(table, entries);
     if (this.vm['thread-services'] && typeof WebAssembly.Suspending === 'function')
       this.threads = new GreenThreads(this);
     if (onDebugger && this.threads && this.vm['debugger-connected'])
@@ -971,7 +1212,7 @@ export class Miricl {
   saveImage() {
     if (!this.imageBase) throw new Error('Saving a Miricl image requires the original Wasm bytes.');
     if (!this.vm['core-checkpoint-safe']()) throw new Error('Saving a Miricl image requires a single Lisp thread.');
-    return captureCore(this.vm, this.imageBase);
+    return captureCore(this.vm, this.imageBase, this.javascript?.weakHashTables);
   }
 
   failure(cause) {

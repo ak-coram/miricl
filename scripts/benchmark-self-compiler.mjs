@@ -13,14 +13,15 @@ const moduleMode = process.argv.includes('--module');
 const extractOnly = process.argv.includes('--extract');
 const profileEnabled = process.argv.includes('--profile');
 const synchronous = process.argv.includes('--sync');
+const individualBootstrap = process.argv.includes('--individual-bootstrap');
 for (const option of process.argv.slice(2).filter(arg => arg.startsWith('--')))
-  if (!['--module', '--extract', '--profile', '--sync'].includes(option))
+  if (!['--module', '--extract', '--profile', '--sync', '--individual-bootstrap'].includes(option))
     throw new Error(`Unknown benchmark option: ${option}`);
 const warmupRounds = Number(process.env.MIRICL_BENCHMARK_WARMUPS ?? 1);
 const rounds = Number(process.env.MIRICL_BENCHMARK_ROUNDS ?? 3);
 assert.ok(Number.isSafeInteger(warmupRounds) && warmupRounds > 0, 'Expected positive warmup count');
 assert.ok(Number.isSafeInteger(rounds) && rounds > 0, 'Expected positive sample count');
-const [output, imagePath, sourcesPath] = process.argv.slice(2).filter(arg => !['--module', '--extract', '--profile', '--sync'].includes(arg));
+const [output, imagePath, sourcesPath] = process.argv.slice(2).filter(arg => !arg.startsWith('--'));
 if (!output || !imagePath) throw new Error('Expected OUTPUT IMAGE [SOURCES.lisp]');
 await fs.mkdir(output, {recursive: true});
 const image = await fs.readFile(imagePath);
@@ -41,6 +42,11 @@ const timed = source => {
 };
 benchmark: try {
   vm.evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (values)');
+  if (individualBootstrap) {
+    assert.equal(vm.evaluate('(eq *compiler-state* :cold)').output, 'T\n',
+      'Individual bootstrap comparison requires a cold compiler image');
+    vm.evaluate('(setq *native-compiler-blocks* nil) (values)');
+  }
   if (sources) {
     vm.mountFile('/self-sources.lisp', sources.toString('utf8'));
     vm.evaluate('(let ((*compile-evaluations* nil)) (load "/self-sources.lisp")) (values)');
@@ -147,7 +153,7 @@ benchmark: try {
   const report = {imagePath, imageSha256: createHash('sha256').update(image).digest('hex'),
     sourceSha256: createHash('sha256').update(corpus).digest('hex'), compilerSourcePolicy: true,
     gensymCounter: 0, optimizationPipeline: 'standard',
-    compilerPreparationMode, count, moduleBytes,
+    compilerPreparationMode, bootstrapBlocks: !individualBootstrap, count, moduleBytes,
     node: process.version, execArgv: process.execArgv, synchronous,
     platform: process.platform, architecture: process.arch, warmupRounds, rounds,
     image: measureWasm(imagePath), bootstrap, compilerModule, samples, medians, hotFrames, emittedModuleVerified: true};

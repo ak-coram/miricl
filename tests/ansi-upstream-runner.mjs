@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {runUpstream} from './ansi-upstream.mjs';
 
-const binary = process.argv[2] ?? 'miricl.wasm';
+const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
 const sources = ['rt-package.lsp', 'rt.lsp'].map(file => [file,
   fs.readFileSync(new URL(`./ansi-test/${file}`, import.meta.url), 'utf8')]);
 sources.push(['sandbox/fixture.txt', 'fixture\n'], ['init.lsp', `

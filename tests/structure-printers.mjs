@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 const bytes = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
-const vm = await Miricl.instantiate(bytes);
-const fresh = await Miricl.instantiate(bytes);
+const vm = await createCompilerTestVM(bytes);
+const fresh = await createCompilerTestVM(bytes);
 const check = (machine, source, expected = 'T') =>
   assert.equal(machine.evaluate(source, {eof: true}).output, expected + '\n', source);
 try {

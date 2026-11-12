@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 
 const binary = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
-const builder = await Miricl.instantiate(binary);
-const fresh = await Miricl.instantiate(binary);
+const builder = await createCompilerTestVM(binary);
+const fresh = await createCompilerTestVM(binary);
 const check = (vm, form) => assert.equal(vm.evaluate(form, {eof: true}).output, 'T\n', form);
 try {
   builder.mountFile('/types.lisp', `
@@ -104,7 +104,7 @@ try {
     assert.match(report, /KEEP :CLASS \("DISCARDED-CLASS"/, entry);
     assert.match(report, /KEEP :STRUCTURE \("DISCARDED"/, entry);
     if (entry === 'READER-OBJECT') {
-      const reader = await Miricl.instantiate(binary);
+      const reader = await createCompilerTestVM(binary);
       try {
         reader.mountFile('/reader.wasm', await builder.readFile('/open-types.wasm'));
         check(reader, '(load "/reader.wasm")');

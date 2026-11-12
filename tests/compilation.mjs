@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-import {Miricl} from '../scripts/miricl.mjs';
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
+const vm = await createCompilerTestVM(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source, {eof: true}).output, 'T\n', source);
 check(`(progn
   (defmacro compile-regression (x) (list '+ x 1))

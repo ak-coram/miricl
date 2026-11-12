@@ -1,10 +1,10 @@
 // Nested comma splicing must expand the inner template before its enclosure.
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 const bytes = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
-const vm = await Miricl.instantiate(bytes);
-const fresh = await Miricl.instantiate(bytes);
+const vm = await createCompilerTestVM(bytes);
+const fresh = await createCompilerTestVM(bytes);
 const source = `
 (defmacro once-simple (specs &body forms)
   (let ((gs (mapcar (lambda (x) (declare (ignore x)) (gensym)) specs)))

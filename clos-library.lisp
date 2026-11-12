@@ -6,7 +6,12 @@
 (defparameter %classes nil)
 (defparameter %eql-specializers nil)
 (defparameter %dispatch-version 0)
+(defun %invalidate-all-dispatch ()
+  (%%invalidate-slot-access t)
+  (incf %dispatch-version))
 (defparameter %cache-permitted t)
+(defparameter %standard-dispatch-protocols nil)
+(defparameter %compiling-effective-function nil)
 
 (defun %remove (item items)
   ;; A generic function can have thousands of methods. Keep removal on the
@@ -14,6 +19,12 @@
   (%%remove-sequence 0 item items nil #'eq nil nil 0 nil nil nil nil))
 (defun (setf %get) (value object key) (%%put object key value))
 (defun %quote (x) (list 'quote x))
+(defun %proper-list-length (object context)
+  (let ((length (%%list-length object)))
+    (unless length
+      (error 'simple-type-error :datum object :expected-type 'list
+        :format-control "Expected a finite proper ~A." :format-arguments (list context)))
+    length))
 (defun %map (fn items)
   (if items (cons (funcall fn (car items)) (%map fn (cdr items))) nil))
 (defun %flatmap (fn items)
@@ -41,7 +52,7 @@
           ((eq spec '&rest)
            (when (or restp (eq mode '&key) (eq mode '&aux)) (error 'program-error))
            (let ((name (pop params)))
-             (unless (and name (symbolp name)) (error 'program-error))
+             (unless (and name (symbolp name) (not (%member name names))) (error 'program-error))
              (push name names) (push (list name (list 'car box)) bindings))
            (setq restp t mode '&rest))
           ((eq spec '&key)
@@ -129,6 +140,26 @@
 (defun class-direct-superclasses (class) (%get class :direct-superclasses))
 (defun class-direct-subclasses (class) (%get class :direct-subclasses))
 (defun class-direct-slots (class) (%get class :direct-slots))
+(defun class-direct-default-initargs (class) (%get class :direct-default-initargs))
+(defun %check-default-initargs (defaults)
+  (%proper-list-length defaults "default initialization arguments")
+  (let ((scan defaults) (names nil))
+    (%%while scan
+      (let ((entry (pop scan)))
+        (unless (and (= (%proper-list-length entry "default initialization argument") 3)
+                     (symbolp (car entry)) (functionp (caddr entry))
+                     (not (%member (car entry) names)))
+          (error 'program-error))
+        (push (car entry) names)))) defaults)
+(defun class-default-initargs (class)
+  (unless (and (not (eq (class-of class) (find-class 'forward-referenced-class)))
+               (class-finalized-p class))
+    (error "Class ~S has not been finalized." (class-name class)))
+  (%get class :default-initargs))
+(defun class-prototype (class)
+  (unless (class-finalized-p class)
+    (error "Class ~S has not been finalized." (class-name class)))
+  (or (%get class :prototype) (setf (%get class :prototype) (allocate-instance class))))
 (defun class-slots (class)
   (unless (class-finalized-p class) (finalize-inheritance class)) (%get class :slots))
 (defun class-precedence-list (class)
@@ -370,7 +401,16 @@
     (unless (%member allocation '(:instance :class)) (error 'program-error))
     (%%set-raw-slots slot (append plist (list :allocation allocation :type t)))
     (setf (%get slot :owner) class)
-    (unless %booting (apply 'initialize-instance slot plist))
+    (unless %booting
+      (let ((scan plist) (extensions nil))
+        (%%while scan
+          (let ((key (pop scan)) (value (pop scan)))
+            (unless (%member key '(:name :allocation :type :initform :initfunction :initargs :readers :writers :documentation))
+              (setq extensions (append extensions (list key value))))))
+        ;; Standard slot definitions reject unknown options. Custom slot
+        ;; classes and initialization methods may accept additional initargs.
+        (when extensions (%check-initargs slot extensions '(initialize-instance shared-initialize) t nil)))
+      (apply 'initialize-instance slot plist))
     slot))
 (defun compute-effective-slot-definition (class name direct-slots)
   (let* ((first (car direct-slots))
@@ -403,6 +443,17 @@
         (when (eq (slot-definition-allocation slot) :instance)
           (setf (%get slot :location) index) (incf index))
         (push slot result))) (reverse result)))
+(defun compute-default-initargs (class)
+  ;; Finalization has already installed the precedence list. Do not request
+  ;; CLASS-PRECEDENCE-LIST here: its lazy finalization would recurse.
+  (let ((cpl (%get class :cpl)) (names nil) (result nil))
+    (%%while cpl
+      (let ((defaults (class-direct-default-initargs (pop cpl))))
+        (%%while defaults
+          (let ((entry (pop defaults)))
+            (unless (%member (car entry) names)
+              (push (car entry) names) (push entry result))))))
+    (reverse result)))
 (defun finalize-inheritance (class)
   (when (%get class :finalizing) (error 'error))
   (when (eq (class-name (class-of class)) 'forward-referenced-class) (error 'error))
@@ -415,6 +466,7 @@
           (setq supers (cdr supers))))
       (setf (%get class :cpl) (compute-class-precedence-list class))
       (setf (%get class :slots) (compute-slots class)
+            (%get class :default-initargs) (%check-default-initargs (compute-default-initargs class))
             (%get class :empty-layout) (make-symbol "EMPTY-LAYOUT")
             (%get class :finalized) t)
       (let ((slots (%get class :slots)))
@@ -428,11 +480,11 @@
                     (funcall (slot-definition-initfunction slot)) %unbound)))))))))
     (setf (%get class :finalizing) nil)) class)
 (defun %invalidate-class (class)
-  (setf (%get class :finalized) nil)
+  (setf (%get class :finalized) nil (%get class :prototype) nil)
   (let ((subs (class-direct-subclasses class)))
     (%%while subs (%invalidate-class (pop subs)))) class)
 (defun make-instances-obsolete (class)
-  (incf %dispatch-version)
+  (%invalidate-all-dispatch)
   (%invalidate-class (if (symbolp class) (find-class class) class)))
 
 (defun %ensure-layout-general (object)
@@ -493,15 +545,29 @@
 (defun slot-unbound (class object name) (error 'unbound-slot :instance object :name name))
 (defun slot-missing (class object name operation &optional new-value) (error 'error))
 (defun %slot-at (object location)
+  (unless (typep object 'standard-object)
+    (error 'type-error :datum object :expected-type 'standard-object))
+  (unless (and (integerp location) (>= location 0))
+    (error 'type-error :datum location :expected-type '(integer 0 *)))
   (let ((scan (class-slots (class-of object))) (found nil))
     (%%while scan
-      (when (eql location (slot-definition-location (car scan))) (setq found (car scan)))
+      (when (and (eq (slot-definition-allocation (car scan)) :instance)
+                 (eql location (slot-definition-location (car scan)))) (setq found (car scan)))
       (setq scan (cdr scan)))
-    (unless found (error 'error)) found))
-(defun standard-instance-access (object location)
-  (slot-value-using-class (class-of object) object (%slot-at object location)))
+    (unless found (error "No instance slot at location ~S in ~S." location (class-name (class-of object)))) found))
+(defun %raw-instance-access-general (object location)
+  (let* ((slot (%slot-at object location)) (class (class-of object))
+         (cell (%slot-cell class object slot)))
+    (if (or (not cell) (eq (car cell) %unbound))
+        (slot-unbound class object (slot-definition-name slot)) (car cell))))
+(defun standard-instance-access (object location) (%raw-instance-access-general object location))
+(defun %set-raw-instance-access-general (value object location)
+  ;; Raw storage bypasses both customized slot access and declared slot types.
+  ;; Metaclasses may store a box here and expose its contents through the MOP.
+  (let* ((slot (%slot-at object location)) (cell (%slot-cell (class-of object) object slot)))
+    (if cell (rplaca cell value) (setf (%get object (slot-definition-name slot)) value))) value)
 (defun (setf standard-instance-access) (value object location)
-  (setf (slot-value-using-class (class-of object) object (%slot-at object location)) value))
+  (%set-raw-instance-access-general value object location))
 (defun funcallable-standard-instance-access (object location) (standard-instance-access object location))
 (defun (setf funcallable-standard-instance-access) (value object location)
   (setf (standard-instance-access object location) value))
@@ -522,13 +588,12 @@
               (%subclassp (class-of class) (find-class 'funcallable-standard-class)))
           (%%make-generic object) object))))
 (defun %default-initargs (class args)
-  (let ((cpl (class-precedence-list class)))
-    (%%while cpl
-      (let ((defaults (%get (pop cpl) :direct-default-initargs)))
-        (%%while defaults
-          (let ((entry (pop defaults)))
-            (unless (%cell args (car entry))
-              (setq args (append args (list (car entry) (funcall (caddr entry))))))))))) args)
+  (unless (class-finalized-p class) (finalize-inheritance class))
+  (let ((defaults (class-default-initargs class)))
+    (%%while defaults
+      (let ((entry (pop defaults)))
+        (unless (%cell args (car entry))
+          (setq args (append args (list (car entry) (funcall (caddr entry))))))))) args)
 (defun %check-initargs (object args names slot-names previous)
   (let ((allowed nil) (allow nil) (slots (class-slots (class-of object))))
     (%%while slots (setq allowed (append allowed (slot-definition-initargs (pop slots)))))
@@ -541,9 +606,15 @@
                        ((eq name 'shared-initialize) (cons object (cons slot-names args)))
                        (t (cons object args))))))
           (%%while methods
-            (let ((ll (method-lambda-list (pop methods))))
-              (when (%member '&allow-other-keys ll) (setq allow t))
-              (setq allowed (append (%nth 4 (%lambda-profile ll)) allowed))))))
+            (let* ((method (pop methods)) (ll (method-lambda-list method))
+                   (info (%get method :initarg-profile)))
+              ;; Method lambda lists are immutable metadata. Still invoke the
+              ;; MOP reader each time; a changed reader result gets a new plan.
+              (unless (and info (eq (car info) ll))
+                (setq info (list ll (%member '&allow-other-keys ll) (%nth 4 (%lambda-profile ll))))
+                (setf (%get method :initarg-profile) info))
+              (when (cadr info) (setq allow t))
+              (setq allowed (append (caddr info) allowed))))))
     (%check-keys args allowed allow)))
 (defun make-instance (class &rest initargs)
   (when (symbolp class) (setq class (find-class class)))
@@ -608,9 +679,13 @@
   (if (%classp name) name
       (or (find-class name nil) (%boot-class name nil (find-class 'forward-referenced-class)))))
 (defun ensure-class-using-class (class name &rest initargs)
+  (unless (evenp (%proper-list-length initargs "class initialization arguments")) (error 'program-error))
+  (%proper-list-length (car (%cell initargs :direct-superclasses)) "direct superclasses")
+  (%proper-list-length (car (%cell initargs :direct-slots)) "direct slots")
+  (%check-default-initargs (car (%cell initargs :direct-default-initargs)))
   ;; A fresh class cannot change dispatch on any existing argument class.
   ;; Defining a forward reference is a redefinition and still changes the epoch.
-  (when class (incf %dispatch-version))
+  (when class (%invalidate-all-dispatch))
   (let* ((meta (or (car (%cell initargs :metaclass)) (and class (class-of class)) (find-class 'standard-class)))
          (supers (car (%cell initargs :direct-superclasses)))
          (slot-specs (car (%cell initargs :direct-slots))) (new (not class)))
@@ -627,7 +702,8 @@
         (progn
           (%%set-raw-class class meta)
           (%%set-raw-slots class (append (list :name name :class-metaobject t :direct-superclasses supers
-              :direct-slots nil :finalized nil :direct-default-initargs (car (%cell initargs :direct-default-initargs))) old))
+              :direct-slots nil :finalized nil :prototype nil
+              :direct-default-initargs (car (%cell initargs :direct-default-initargs))) old))
           (apply (if new 'initialize-instance 'reinitialize-instance) class initargs)
           (let ((scan supers))
             (%%while scan
@@ -651,12 +727,19 @@
         (unless committed (%%set-raw-slots class old) (%%set-raw-class class old-meta))))))
 
 (defun %expand-slot (spec)
+  (unless (symbolp spec) (%proper-list-length spec "slot specification"))
   (let* ((name (if (symbolp spec) spec (car spec))) (options (if (symbolp spec) nil (cdr spec)))
-         (initargs nil) (readers nil) (writers nil) (result (list :name (%quote name))))
+         (initargs nil) (readers nil) (writers nil) (seen nil) (result (list :name (%quote name))))
+    (unless (and (symbolp name) name (not (keywordp name)) (not (eq name t))
+                 (evenp (%proper-list-length options "slot options")))
+      (error 'program-error))
     (%%while options
       (let ((key (pop options)))
+        (unless (symbolp key) (error 'program-error))
         (unless options (error 'program-error))
-        (when (%cell result key) (error 'program-error))
+        (when (and (%member key seen) (not (%member key '(:initarg :reader :writer :accessor))))
+          (error 'program-error))
+        (push key seen)
         (let ((value (pop options)))
           (cond
             ((eq key :initarg) (push value initargs))
@@ -665,12 +748,11 @@
             ((eq key :accessor) (push value readers) (push (list 'setf value) writers))
             ((eq key :initform)
              (setq result (append result (list :initform (%quote value) :initfunction (list 'lambda nil value)))))
-            ((%member key '(:allocation :type :documentation))
-             (setq result (append result (list key (%quote value)))))
-            (t (error 'program-error))))))
+            (t (setq result (append result (list (if (keywordp key) key (%quote key)) (%quote value)))))))))
     (cons 'list (append result (list :initargs (%quote (reverse initargs))
       :readers (%quote (reverse readers)) :writers (%quote (reverse writers)))))))
 (defun %expand-defaults (options)
+  (unless (evenp (%proper-list-length options "default initialization arguments")) (error 'program-error))
   (let ((forms nil) (seen nil))
     (%%while options
       (let ((key (pop options)))
@@ -681,11 +763,16 @@
           (push (list 'list (%quote key) (%quote value) (list 'lambda nil value)) forms))))
     (cons 'list (reverse forms))))
 (defun %expand-class (args)
+  (%proper-list-length args "class definition")
   (unless (and (car args) (symbolp (car args)) (cdr args) (cddr args)) (error 'program-error))
   (let ((name (car args)) (supers (cadr args)) (slots (caddr args)) (options (cdr (cddr args)))
         (result nil) (seen nil))
+    (%proper-list-length supers "superclasses")
+    (%proper-list-length slots "slot specifications")
     (%%while options
       (let ((option (pop options)))
+        (unless (consp option) (error 'program-error))
+        (%proper-list-length option "class option")
         (when (%member (car option) seen) (error 'program-error))
         (push (car option) seen)
         (cond ((eq (car option) :metaclass) (setq result (append result (list :metaclass (%quote (cadr option))))))
@@ -728,6 +815,7 @@
 (defun remove-direct-method (specializer method)
   (setf (%get specializer :direct-methods) (%remove method (%get specializer :direct-methods))) nil)
 (defun %set-generic-discriminator (gf function)
+  (%%invalidate-slot-access (%get gf :name))
   ;; Method changes rebuild the discriminator without dropping an active trace.
   ;; Ordinary generic calls have no trace test or additional dispatch overhead.
   (setf (%get gf :discriminating-function)
@@ -853,10 +941,31 @@
       (cons method sorted) (cons (car sorted) (%insert-method gf method (cdr sorted) args))))
 (defun %compute-applicable (gf args)
   (%%check-generic-arity (%get gf :lambda-list) args)
-  (let ((methods (%get gf :methods)) (result nil))
+  (let* ((version %dispatch-version) (token (%get gf :cache-token))
+         (key (unless %booting (nth-value 0 (%dispatch-key gf args))))
+         (cache (unless %booting (%get gf :applicable-cache)))
+         (methods (%get gf :methods)) (result nil))
+    ;; This caches only the intrinsic selection, inside the default protocol
+    ;; method. User COMPUTE-APPLICABLE-METHODS methods still run on every call.
+    ;; The existing dispatch key includes classes and relevant EQL identities.
+    (when cache
+      (if (not (= (caar cache) version)) (setq cache nil)
+          (let ((entries cache))
+            (%%while entries
+              (let ((entry (pop entries)))
+                (when (and (eq token (cadr entry)) (%key-equal key (caddr entry)))
+                  (return-from %compute-applicable (copy-list (%nth 3 entry)))))))))
     (%%while methods
       (let ((method (pop methods)))
-        (when (%applicable method args) (setq result (%insert-method gf method result args))))) result))
+        (when (%applicable method args) (setq result (%insert-method gf method result args)))))
+    (when (and (not %booting) (= version %dispatch-version)
+               (eq token (%get gf :cache-token)))
+      ;; Bound polymorphic histories, and keep caller-owned result lists apart
+      ;; from the cache so destructive inspection cannot corrupt future calls.
+      (setf (%get gf :applicable-cache)
+        (cons (list version token key (copy-list result))
+          (subseq cache 0 (min 15 (length cache))))))
+    result))
 (defun compute-applicable-methods (gf args) (%compute-applicable gf args))
 (defun compute-applicable-methods-using-classes (gf classes)
   (let ((scan (%get gf :methods)) (eqlp nil) (objects nil))
@@ -979,7 +1088,8 @@
               (%map (lambda (method) (list 'call-method method nil)) before) (list body)))))
           (if around
               (list '%around-plan (%quote gf) (%quote around)
-                (%quote (%%eval (list 'lambda '(%effective-args) (%expand-effective-form gf body))))
+                (%quote (%compile-effective-function gf
+                          (list 'lambda '(%effective-args) (%expand-effective-form gf body))))
                 '%effective-args)
               body))
         (list '%around (%quote gf) (%quote (%qualified methods :around)) (%quote methods) '%effective-args))))
@@ -989,14 +1099,15 @@
         (lambda (newargs) (%around-plan gf (cdr methods) primary newargs)))
       (funcall primary args)))
 (defun %invalidate-dispatch (gf)
+  (%%invalidate-slot-access (%get gf :name))
   ;; Method edits invalidate this generic's call history. Class changes and
   ;; dispatch-protocol changes still invalidate all histories through the epoch.
   ;; The token prevents an in-flight miss from publishing an obsolete plan.
-  (setf (%get gf :cache) nil (%get gf :cache-token) (list nil)
+  (setf (%get gf :cache) nil (%get gf :applicable-cache) nil (%get gf :cache-token) (list nil)
         (%get gf :dispatch-profile) nil (%get gf :eql-dispatch-profile) nil)
   (when (and (not %booting) (%member (%get gf :name)
           '(compute-applicable-methods compute-effective-method compute-discriminating-function)))
-    (incf %dispatch-version)
+    (%invalidate-all-dispatch)
     (setq %cache-permitted nil)) nil)
 (defun %compute-dispatch-profile (gf)
   ;; Like SICL's specializer profile, omit arguments specialized only on T.
@@ -1015,6 +1126,45 @@
       (incf position))
     (setf (%get gf :eql-dispatch-profile) (reverse eql-profile)
           (%get gf :dispatch-profile) (reverse result))))
+(defun %dispatch-cache-permitted-p (gf)
+  ;; A protocol extension on one generic-function subclass must not disable
+  ;; caching for unrelated generic functions. Prove that every applicable
+  ;; protocol method is still the original method. Only inspect the first
+  ;; specializer; any uncertainty keeps the uncached protocol path.
+  (if %cache-permitted t
+      (let ((proof (%get gf :cache-protocol)))
+        (if (and proof (= (car proof) %dispatch-version)) (cdr proof)
+            (let ((safe t) (protocols %standard-dispatch-protocols) (version %dispatch-version))
+              (unless protocols (setq safe nil))
+              (%%while (and safe protocols)
+                (let* ((entry (pop protocols)) (protocol (cadr entry))
+                       (standard (caddr entry)) (methods (%get protocol :methods)))
+                  (unless (and (eq (fdefinition (car entry)) protocol)
+                               (%member standard methods))
+                    (setq safe nil))
+                  (%%while (and safe methods)
+                    (let* ((method (pop methods))
+                           (specializer (car (%get method :specializers))))
+                      (unless (eq method standard)
+                        ;; Proving cache eligibility must not dispatch another
+                        ;; generic function: EQL-SPECIALIZER-OBJECT itself
+                        ;; would ask for the same proof and recurse. Inspect
+                        ;; finalized class metadata directly. Unknown kinds
+                        ;; of specializer keep the ordinary protocol path.
+                        (if (%classp specializer)
+                            (let ((class (class-of gf)))
+                              (when (or (not (%get class :finalized))
+                                        (%member specializer (%get class :cpl)))
+                                (setq safe nil)))
+                            (when (or (not (eq (%%raw-class specializer) (find-class 'eql-specializer)))
+                                      (eql gf (%get specializer :object)))
+                              (setq safe nil))))))))
+              ;; A protocol edit or class change can run at a cooperative
+              ;; checkpoint during this scan. Never publish its partial proof
+              ;; under the new epoch.
+              (when (= version %dispatch-version)
+                (setf (%get gf :cache-protocol) (cons version safe))
+                safe))))))
 (defun %dispatch-key (gf args)
   (let* ((profile (or (%get gf :dispatch-profile) (%compute-dispatch-profile gf)))
          (count (length profile)) (key nil) (position 0)
@@ -1045,13 +1195,30 @@
             (list '%%nthcdr (+ (car profile) (cadr profile)) '%effective-args)
             (%quote allowed) (not (not allow))) form)
           form))))
+(defun %compile-generated-function (form)
+  ;; Constructors and effective methods can generate executable functions
+  ;; after startup. Use the ready compiler without bootstrapping or recursively
+  ;; entering compilation while the compiler itself uses the object system.
+  (if (and (not %booting) (not %compiling-effective-function)
+           (boundp 'miricl-compiler::*compiler-state*)
+           (eq miricl-compiler::*compiler-state* :ready)
+           (miricl-compiler::compiler-primitive 21 nil))
+      (let ((%compiling-effective-function t))
+        (miricl-compiler:compile-native form))
+      (%%eval form)))
+(defun %compile-effective-function (gf form)
+  (if (%dispatch-cache-permitted-p gf) (%compile-generated-function form) (%%eval form)))
 (defun %invoke-effective (gf args)
   (if (%member (%get gf :name) '(compute-applicable-methods compute-effective-method compute-discriminating-function))
       (let ((methods (%compute-applicable gf args)))
         (%around gf (%qualified methods :around) methods args))
       (let ((key nil) (mode 0) (cache nil) (function nil) (version %dispatch-version)
-            (token (%get gf :cache-token)))
-        (when %cache-permitted
+            (slot-token (%%invalidate-slot-access))
+            (token (%get gf :cache-token)) (cache-permitted (%dispatch-cache-permitted-p gf)))
+        (when (and (%get gf :slot-cache-dependent)
+                   (not (eq (%get gf :slot-cache-token) slot-token)))
+          (setf (%get gf :cache) nil (%get gf :slot-cache-token) slot-token))
+        (when cache-permitted
           (multiple-value-bind (computed flags) (%dispatch-key gf args)
             (setq key computed mode flags))
           (setq cache (%get gf :cache))
@@ -1064,22 +1231,31 @@
             (unless methods (return-from %invoke-effective (apply 'no-applicable-method gf args)))
             ;; Distinct class keys can select the same ordered method list.
             ;; Reuse its executable plan instead of expanding it again.
-            (when %cache-permitted
+            (when cache-permitted
               (let ((entries (%get gf :cache)))
                 (%%while (and entries (not function))
                   (let ((entry (pop entries)))
-                    (when (and (= (car entry) version) (%list-eq methods (%nth 4 entry)))
+                    (when (and (not (%get (car methods) :accessor-slot))
+                               (= (car entry) version) (%list-eq methods (%nth 4 entry)))
                       (setq function (caddr entry)))))))
             (unless function
               (let ((form (compute-effective-method gf (%get gf :method-combination) methods)))
-                (setq function (%%property-effective
-                  (%%eval (list 'lambda '(%effective-args)
-                    (%effective-keyword-form gf methods (%expand-effective-form gf form)))) form gf))))
-            (when (and %cache-permitted (= version %dispatch-version)
+                ;; Select an existing Wasm plan before invoking the compiler.
+                ;; Otherwise simple accessors and primary calls would compile
+                ;; a lambda only to discard it for a direct runtime adapter.
+                (setq function (%%property-effective nil form gf args))
+                (unless function
+                  (setq function (%compile-effective-function gf (list 'lambda '(%effective-args)
+                    (%effective-keyword-form gf methods (%expand-effective-form gf form))))))))
+            (when (and cache-permitted (= version %dispatch-version)
+                       (eq slot-token (%%invalidate-slot-access))
                        (eq token (%get gf :cache-token)))
+              (when (%get (car methods) :accessor-slot)
+                (setq mode (logior mode 4096))
+                (setf (%get gf :slot-cache-dependent) t (%get gf :slot-cache-token) slot-token))
               (let ((old (%get gf :cache)))
                 (when (and old (not (= (car (car old)) %dispatch-version))) (setq old nil))
-                (setf (%get gf :cache) (cons (list version key function mode methods) old))))))
+                (setf (%get gf :cache) (cons (list version key function mode methods slot-token) old))))))
         (funcall function args))))
 (defun %expand-effective-form (gf form)
   (cond ((not (= (%%tag form) 7)) form)
@@ -1095,7 +1271,7 @@
 (defun %effective-method-object (gf method)
   (if (and (consp method) (eq (car method) 'make-method))
       (let* ((context (let ((*gensym-counter* 0)) (gensym "METHOD-CONTEXT")))
-             (function (%%eval (list 'lambda (list '%effective-args context)
+             (function (%compile-effective-function gf (list 'lambda (list '%effective-args context)
                (%rewrite-next (%expand-effective-form gf (cadr method)) context)))))
         (%%allocate (find-class 'standard-method)
           (list :qualifiers nil :lambda-list (%get gf :lambda-list) :specializers nil :generic-function gf
@@ -1107,7 +1283,7 @@
 (defun %primary-effective (function gf method next)
   ;; The next-method chain belongs to the cached effective method, not to an
   ;; invocation. Only the context's original arguments vary between calls.
-  (let ((continuation (%%eval (list 'lambda '(%effective-args)
+  (let ((continuation (%compile-effective-function gf (list 'lambda '(%effective-args)
             (list '%effective-call (%quote gf) (%quote (car next))
               (%quote (cdr next)) '%effective-args)))))
     (%%structure-function function gf (list method next continuation) 9)))
@@ -1120,27 +1296,70 @@
   (unless (and (= (%%tag object) 8) (not (eq object (%%generic-info object)))) (error 'type-error))
   (%set-generic-discriminator object (lambda (args) (apply function args))) object)
 
+(defun %method-lambda-parts (parameters)
+  (%proper-list-length parameters "specialized lambda list")
+  (let ((scan parameters) (required t) (mode nil) (ll nil) (specializers nil) (markers nil))
+    (labels ((variable (name)
+               (unless (and (symbolp name) name (not (eq name t)) (not (keywordp name))
+                            (not (%member name lambda-list-keywords)))
+                 (error 'program-error))))
+      (%%while scan
+        (let ((parameter (pop scan)))
+          (cond
+            ((%member parameter lambda-list-keywords)
+             (when (eq mode '&rest) (error 'program-error))
+             (unless (and (%member parameter '(&optional &rest &key &allow-other-keys &aux))
+                          (not (%member parameter markers))) (error 'program-error))
+             (push parameter markers)
+             (setq required nil mode parameter)
+             (push parameter ll))
+            (required
+             (if (consp parameter)
+                 (progn
+                   (unless (= (%proper-list-length parameter "specialized parameter") 2) (error 'program-error))
+                   (variable (car parameter))
+                   (push (car parameter) ll) (push (cadr parameter) specializers))
+                 (progn (variable parameter) (push parameter ll) (push t specializers))))
+            (t
+             (when (%member mode '(:after-rest &allow-other-keys)) (error 'program-error))
+             (if (consp parameter)
+                 (let ((size (%proper-list-length parameter "method parameter")))
+                   (unless (and (%member mode '(&optional &key &aux))
+                                (<= 1 size (if (eq mode '&aux) 2 3))) (error 'program-error))
+                   (if (and (eq mode '&key) (consp (car parameter)))
+                       (progn
+                         (unless (= (%proper-list-length (car parameter) "keyword parameter") 2) (error 'program-error))
+                         (unless (symbolp (caar parameter)) (error 'program-error))
+                         (variable (cadar parameter)))
+                       (variable (car parameter)))
+                   (when (= size 3) (variable (caddr parameter))))
+                 (variable parameter))
+             (push parameter ll)
+             (when (eq mode '&rest) (setq mode :after-rest))))))
+      (when (eq mode '&rest) (error 'program-error))
+      (setq ll (reverse ll))
+      ;; Reuse the ordinary argument parser for marker ordering, duplicate
+      ;; variables and the remaining ordinary lambda-list syntax. It builds
+      ;; code without evaluating default forms or specializer names.
+      (%normalize-lambda ll nil)
+      (values ll (reverse specializers)))))
+(defun extract-lambda-list (specialized-lambda-list)
+  (values (%method-lambda-parts specialized-lambda-list)))
+(defun extract-specializer-names (specialized-lambda-list)
+  (nth-value 1 (%method-lambda-parts specialized-lambda-list)))
+
 (defun %expand-method (args)
   (let ((name (pop args)) (qualifiers nil) (params nil) (ll nil) (specializers nil) (body nil)
-        (required t) (context (gensym)) (declarations nil) (doc nil) (scanning t) (expansion nil) (call-ll nil))
+        (context (gensym)) (declarations nil) (doc nil) (scanning t) (expansion nil) (call-ll nil))
     (%%while (and args (car args) (atom (car args))) (push (pop args) qualifiers))
     (unless args (error 'program-error))
     (setq params (pop args) body args)
-    (let ((scan params))
-      (%%while scan
-        (let ((param (pop scan)))
-          (when (%member param '(&optional &rest &key &allow-other-keys &aux)) (setq required nil))
-          (if required
-              (if (symbolp param)
-                  (progn (push param ll) (push (list 'find-class (%quote t)) specializers))
-                  (let ((specializer (cadr param)))
-                    (unless (= (length param) 2) (error 'program-error))
-                    (push (car param) ll)
-                    (push (if (and (not (symbolp specializer)) (eq (car specializer) 'eql))
-                              (list 'intern-eql-specializer (cadr specializer))
-                              (list 'find-class (%quote specializer))) specializers)))
-              (push param ll)))))
-    (setq ll (reverse ll))
+    (multiple-value-bind (lambda-list names) (%method-lambda-parts params)
+      (setq ll lambda-list)
+      (dolist (specializer names)
+        (push (if (and (consp specializer) (eq (car specializer) 'eql))
+                  (list 'intern-eql-specializer (cadr specializer))
+                  (list 'find-class (%quote specializer))) specializers)))
     (setq call-ll ll)
     ;; The generic validates the union of applicable keyword names. Relax the
     ;; executable lambda without changing method metadata or actual arguments.
@@ -1209,8 +1428,12 @@
           (slot-value (car args) slot)))))
     (when (%get class :condition)
       (setq function (%%condition-method function (class-name class) slot (if writer 6 5))))
-    (%ensure-method name nil (if writer '(new-value object) '(object))
-      (if writer (list (find-class t) class) (list class)) function)))
+    (unless (%get class :condition)
+      (setq function (%%structure-function function class slot (if writer 12 11))))
+    (let ((method (%ensure-method name nil (if writer '(new-value object) '(object))
+                    (if writer (list (find-class t) class) (list class)) function)))
+      (setf (%get method :accessor-slot) slot)
+      method)))
 (defun %install-accessors (class)
   (let ((slots (class-direct-slots class)))
     (%%while slots
@@ -1309,7 +1532,7 @@
           (push (if (%member name variables) name
                     (if (slot-definition-initfunction slot)
                         (list 'funcall (%quote (slot-definition-initfunction slot))) nil)) arguments))))
-    (%%eval (list 'lambda (%boa-params class params)
+    (%compile-generated-function (list 'lambda (%boa-params class params)
       (list '%%structure-make (%quote class) (%quote (reverse slots))
         (cons 'list (reverse arguments)))))))
 (defun %typed-structure-descriptor (name representation direct-slots include offset named)
@@ -1477,7 +1700,7 @@
   (setf (get name '%combination)
     (list (or (car (%cell options :operator)) name)
           (car (%cell options :identity-with-one-argument)) (car (%cell options :documentation))))
-  (incf %dispatch-version) name)
+  (%invalidate-all-dispatch) name)
 (defun %expand-object-form (operator args)
   (let ((*gensym-counter* 0)) (%expand-object-form-1 operator args)))
 (defun %expand-object-form-1 (operator args)
@@ -1622,7 +1845,8 @@
                    (append ll '(&key &allow-other-keys)) ll)))
          (method (%%allocate (find-class 'standard-method)
            (list :qualifiers nil :lambda-list ll :specializers (%map 'find-class specializers)
-             :function (lambda (args next) (%%apply original args))))))
+             :function (%%structure-function (lambda (args next) (%%apply original args))
+                         nil original 10)))))
     (when property (setf (%get method :function) (%%property-method (%get method :function) property)))
     (funcall %raw-add-method gf method)))
 
@@ -1655,11 +1879,15 @@
     (class-direct-subclasses (class) (class) :direct-subclasses)
     (class-precedence-list (class) (class))
     (class-direct-slots (class) (class) :direct-slots)
+    (class-direct-default-initargs (class) (class) :direct-default-initargs)
+    (class-default-initargs (class) (class))
+    (class-prototype (class) (standard-class))
     (class-slots (class) (class))
     (class-finalized-p (class) (class) :finalized)
     (finalize-inheritance (class) (class))
     (compute-class-precedence-list (class) (class))
     (compute-slots (class) (class))
+    (compute-default-initargs (class) (class))
     (compute-effective-slot-definition (class name slots) (class t t))
     (direct-slot-definition-class (class &rest initargs) (class))
     (effective-slot-definition-class (class &rest initargs) (class))
@@ -1703,7 +1931,13 @@
     (let ((entry (pop protocols))) (%promote (car entry) (cadr entry) (caddr entry) (cadddr entry)))))
 
 (defparameter %standard-class-slots-method (car (generic-function-methods #'class-slots)))
+(defparameter %standard-slot-location-protocol
+  (let ((function #'slot-definition-location)) (cons function (car (%get function :methods)))))
 (defparameter %standard-slot-definition-name-method (car (generic-function-methods #'slot-definition-name)))
+(setq %standard-dispatch-protocols
+  (%map (lambda (name)
+          (let ((gf (fdefinition name))) (list name gf (car (%get gf :methods)))))
+    '(compute-applicable-methods compute-effective-method compute-discriminating-function)))
 
 (funcall %raw-add-method (fdefinition 'make-instances-obsolete)
   (%%allocate (find-class 'standard-method)
@@ -1741,7 +1975,7 @@
                     (setf (%get specializer :direct-methods)
                       (cons method (%get specializer :direct-methods)))))))))
         (setf (%get gf :methods) methods))))
-  (incf %dispatch-version))
+  (%invalidate-all-dispatch))
 (defun %initialize-method-meta (object &rest args)
   (let ((keys '(:qualifiers :lambda-list :specializers :function)))
     (%%while keys
@@ -1774,4 +2008,30 @@
     (let* ((entry (pop definitions)) (function (cadr entry)))
       (%ensure-method 'initialize-instance '(:after) (caddr entry) (list (find-class (car entry)))
         (lambda (args next) (apply function args))))))
+(defun %standard-slot-protocol-for-args-p (entry class object slot)
+  (let* ((name (car entry)) (gf (cadr entry)) (standard (caddr entry))
+         (reader (eq name 'slot-value-using-class))
+         (writer (equal name '(setf slot-value-using-class)))
+         (methods (%get gf :methods)) (safe t)
+         (args (cond (reader (list class object slot))
+                     (writer (list nil class object slot))
+                     ((%member name '(class-slots class-finalized-p)) (list class))
+                     (t (list slot)))))
+    (unless (equal (%get gf :method-combination-name) '(standard)) (setq safe nil))
+    ;; Cached accessors cover all instances of this actual class and all
+    ;; writer values. EQL object tests or value-specific writer methods need
+    ;; the ordinary protocol, even when they miss for the current arguments.
+    (%%while (and safe methods)
+      (let ((specializers (%get (pop methods) :specializers)))
+        (when (and writer (not (eq (car specializers) (find-class t)))) (setq safe nil))
+        (when (and (or reader writer)
+                   (not (%classp (%nth (if writer 2 1) specializers)))) (setq safe nil))))
+    (when safe
+      (let ((applicable (%compute-applicable gf args)))
+        (and (eq (car applicable) standard) (not (cdr applicable)))))))
+(defparameter %standard-slot-protocols
+  (%map (lambda (name)
+          (let ((gf (fdefinition name))) (list name gf (car (%get gf :methods)))))
+    '(class-slots class-finalized-p slot-definition-name slot-definition-allocation
+      slot-definition-type slot-value-using-class (setf slot-value-using-class))))
 (setq %booting nil)

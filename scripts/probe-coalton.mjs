@@ -135,7 +135,14 @@ try {
     ;; replace it with fresh portable definitions while compiling libraries.
     (dolist (name (asdf:already-loaded-systems)) (asdf:register-immutable-system name))
     (values)`);
-  await evaluate('load Coalton', `(asdf:load-system "${mode === 'compiler' ? 'coalton-compiler' : 'coalton'}") (values)`);
+  await evaluate('load Coalton', `
+    (handler-bind ((type-error (lambda (condition)
+                    (let ((*print-length* 20) (*print-level* 6))
+                      (format t "Coalton type error: datum ~S, expected ~S~%"
+                        (type-error-datum condition) (type-error-expected-type condition))
+                      (finish-output)))))
+      (asdf:load-system "${mode === 'compiler' ? 'coalton-compiler' : 'coalton'}"))
+    (values)`);
   if (mode === 'full') await evaluate('smoke test', '(in-package :coalton-user) (coalton (+ 20 22))');
   await evaluate('preloaded system registry', `
     (cl:in-package :cl-user)

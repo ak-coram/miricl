@@ -7,6 +7,8 @@ import {Miricl} from '../scripts/miricl.mjs';
 import {installCompiler, compiledTest, compilerCounters} from './ansi-compiler.mjs';
 
 const vm = await Miricl.instantiate(fs.readFileSync(workerData.binary));
+// The harness compiles test bodies explicitly, independently of image policy.
+vm.evaluate('(setq miricl-compiler:*compile-evaluations* nil) (values)');
 if (workerData.seed) vm.vm['seed-random'](...workerData.seed);
 const evaluate = source => {
   const result = vm.evaluate(source, {eof: true});

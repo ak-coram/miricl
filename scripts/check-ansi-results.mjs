@@ -25,8 +25,7 @@ for (const file of process.argv.slice(2)) {
     'Summary hides non-passing test entries.');
   if (report.execution === 'compiler') {
     assert.equal(report.compilerBootstrap?.mode, 'self-compiled', 'The ANSI compiler was not bootstrapped with itself');
-    assert.equal(report.compilerBootstrap.origin, 'first-use');
-    assert.ok(report.compilerBootstrap.functions >= 93);
+    assert.equal(report.compilerBootstrap.origin, 'image', 'ANSI compiler tests must use the precompiled image');
     assert.ok(report.tests.filter(test => test.passed).every(test => test.compilation?.compiled > 0),
       'A compiler test passed without native compilation');
   }

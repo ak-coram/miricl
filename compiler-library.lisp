@@ -216,6 +216,33 @@
          (%file-code-cons form operator
            (cons kind
              (case kind
+               (define-condition
+                ;; Names, superclasses and slot options are literal syntax.
+                ;; In particular, a slot called FUNCTION or LAMBDA must not
+                ;; acquire executable-code flags during file canonicalization.
+                (list* (first forms) (second forms)
+                  (mapcar (lambda (slot)
+                    (if (symbolp slot) slot
+                        (let ((tail (cdr slot)) (parts nil))
+                          (loop while tail do
+                            (let ((key (pop tail)) (value (pop tail)))
+                              (push key parts)
+                              (push (if (eq key :initform)
+                                      (%file-lexical-form value variables functions blocks tags) value) parts)))
+                          (cons (car slot) (nreverse parts))))) (third forms))
+                  (mapcar (lambda (option)
+                    (case (car option)
+                      (:report
+                       (list :report (if (symbolp (second option))
+                         (%file-lexical-reference (second option) functions)
+                         (%file-lexical-form (second option) variables functions blocks tags))))
+                      (:default-initargs
+                       (let ((tail (cdr option)) (parts nil))
+                         (loop while tail do
+                           (push (pop tail) parts)
+                           (push (%file-lexical-form (pop tail) variables functions blocks tags) parts))
+                         (cons :default-initargs (nreverse parts))))
+                      (otherwise option))) (cdddr forms))))
                (check-type
                 ;; The place and optional description contain executable code;
                 ;; the type is literal syntax, even when it names a binding.

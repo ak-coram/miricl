@@ -2,6 +2,35 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(define-runtime-function $javascript-library-call (($op i32) ($args :nullable-object)) (:nullable-object)
+  (:locals ($a :nullable-object) ($b :nullable-object) ($c :nullable-object))
+  #@(call $check-apply-list (local.get $args))
+  #@(local.set $a (call $car (local.get $args)))
+  #@(local.set $b (call $car (call $cdr (local.get $args))))
+  (apply #'runtime-wat-sequence
+    (loop for (name primitive operation minimum maximum) in *native-javascript-functions* collect
+      #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op primitive)))
+        (then ,(wat-arity minimum (or maximum 2147483647))
+          ,@(when (eq name 'miricl-js:callback)
+              (list (wat-fragment #@(call $check-type (local.get $a) (call $symbol (i32.const ,(runtime-symbol-id 'function)))))))
+          (call $clear-values)
+          (return_call $javascript (i32.const ,operation)
+            ,(let ((expression (cond ((equal name '(setf miricl-js:property)) #@(local.get $b))
+                   ((eq name 'miricl-js:array) #@(local.get $args))
+                   (t #@(local.get $a)))))
+               (if (stringp expression) (wat-fragment expression) expression))
+            ,(let ((expression (cond ((eq name 'miricl-js:call) (clos-library-reference 'miricl-js::%undefined))
+                   ((equal name '(setf miricl-js:property)) #@(call $car (call $cdr (call $cdr (local.get $args)))))
+                   ((member name '(miricl-js:property miricl-js:call-with-this miricl-js:invoke miricl-js:strict-equal)) #@(local.get $b))
+                   (t #@(ref.null eq)))))
+               (if (stringp expression) (wat-fragment expression) expression))
+            ,(wat-fragment (cond ((member name '(miricl-js:call miricl-js:new)) #@(call $cdr (local.get $args)))
+                   ((member name '(miricl-js:call-with-this miricl-js:invoke)) #@(call $cdr (call $cdr (local.get $args))))
+                   ((equal name '(setf miricl-js:property)) #@(local.get $a))
+                   (t #@(ref.null eq)))))))))
+  (wat-fail :undefined-function)
+  #@(ref.null eq))
+
 (define-runtime-function $javascript-wrap (($value externref)) (:object)
   (:export-raw "javascript-wrap")
   #@(struct.new $javascript-value (call $allocate-object-tag (i32.const 47))
@@ -124,5 +153,5 @@
   ;; Host VM termination can skip JavaScript finally blocks. UNWIND resets
   ;; this counter along with guest dynamic state, allowing safe reuse.
   #@(global $javascript-depth (export "javascript-depth") (mut i32) (i32.const 0))
-  ($javascript-wrap) ($javascript-unwrap) ($javascript)
+  ($javascript-wrap) ($javascript-unwrap) ($javascript) ($javascript-library-call)
   ($javascript-buffer) ($javascript-info) ($javascript-data) ($javascript-make) ($javascript-link))

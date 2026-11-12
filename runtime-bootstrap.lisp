@@ -58,7 +58,9 @@
 (defparameter *mop-symbols*
   '(ensure-class ensure-class-using-class class-direct-superclasses class-direct-subclasses
     class-precedence-list class-direct-slots class-slots class-finalized-p finalize-inheritance
-    compute-class-precedence-list compute-slots compute-effective-slot-definition
+    class-direct-default-initargs class-default-initargs class-prototype
+    compute-class-precedence-list compute-slots compute-default-initargs compute-effective-slot-definition
+    extract-lambda-list extract-specializer-names
     direct-slot-definition-class effective-slot-definition-class validate-superclass
     slot-definition slot-definition-name slot-definition-allocation slot-definition-initargs
     slot-definition-initform slot-definition-initfunction slot-definition-type

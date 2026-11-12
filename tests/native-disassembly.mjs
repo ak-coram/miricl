@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import {Miricl} from '../scripts/miricl.mjs';
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
 
 const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
-const vm = await Miricl.instantiate(image);
+const vm = await createCompilerTestVM(image);
 const evaluate = source => vm.evaluate(source, {eof: true}).output;
 const check = source => assert.equal(evaluate(`(not (null ${source}))`), 'T\n', source);
 try {
@@ -83,7 +83,7 @@ try {
     (defun debug-bundle-plain (x) (+ x 1))`);
   evaluate(`(compile-file "/debug-source.lisp") (load "/debug-source.wasm")
     (miricl-compiler:compile-native-bundle "/debug-source.wasm" "/debug-bundle.wasm")`);
-  const fresh = await Miricl.instantiate(image);
+  const fresh = await createCompilerTestVM(image);
   try {
     fresh.mountFile('/debug-bundle.wasm', await vm.readFile('/debug-bundle.wasm'));
     const output = fresh.evaluate(`(progn (load "/debug-bundle.wasm")

@@ -6,7 +6,13 @@ import {threadCases} from './thread-cases.mjs';
 
 const binary = process.argv[2] ?? 'miricl.wasm';
 const errors = [];
-const vm = await Miricl.instantiate(await fs.readFile(binary), {onThreadError: error => errors.push(error)});
+const callbackFixture = {
+  save(good, bad) {this.good = good; this.bad = bad;},
+  parked() {this.cleanupEntered = true;},
+};
+const vm = await Miricl.instantiate(await fs.readFile(binary), {
+  imports: {threadCallbacks: callbackFixture}, onThreadError: error => errors.push(error),
+});
 assert.ok(vm.threads, 'The runtime must expose JavaScript Promise Integration.');
 for (const [name, source] of threadCases) {
   let timer;
@@ -22,6 +28,37 @@ await vm.evaluateAsync('(defparameter *background-worker* (miricl-threads:make-t
 assert.equal(vm.evaluate('(+ 20 22)').output, '42\n');
 assert.equal((await vm.evaluateAsync('(miricl-threads:join-thread *background-worker*)')).output, '17\n');
 console.log('PASS synchronous evaluation alongside a background thread');
+
+// A DOM-style callback can arrive while the last active Lisp thread is
+// sleeping in UNWIND-PROTECT cleanup, with a pending nonlocal transfer.
+await vm.evaluateAsync(`
+  (js:define-import save-thread-callbacks ("threadCallbacks" "save") (:value :value) :void)
+  (js:define-import mark-thread-cleanup ("threadCallbacks" "parked") () :void)
+  (defparameter *external-callback-count* 0)
+  (save-thread-callbacks
+    (js:callback (lambda (value)
+      (incf *external-callback-count*)
+      (unless (= *print-base* 10) (error "Callback inherited a parked thread's bindings."))
+      (+ (js:from-js value) 2)))
+    (js:callback (lambda () (error "External callback failure."))))
+  (defparameter *callback-cleanup-worker*
+    (miricl-threads:make-thread (lambda ()
+      (let ((*print-base* 16))
+        (catch 'callback-cleanup-exit
+          (unwind-protect (throw 'callback-cleanup-exit 42)
+            (mark-thread-cleanup) (sleep 0.15)))))))
+  (values)`);
+const callbackDeadline = performance.now() + 5000;
+while (!callbackFixture.cleanupEntered) {
+  assert.ok(performance.now() < callbackDeadline, 'Worker did not enter cleanup.');
+  await new Promise(resolve => setTimeout(resolve, 1));
+}
+assert.equal(callbackFixture.good(40), 42);
+assert.throws(() => callbackFixture.bad(), /External callback failure/);
+assert.equal(callbackFixture.good(41), 43);
+assert.equal((await vm.evaluateAsync('(miricl-threads:join-thread *callback-cleanup-worker*)')).output, '42\n');
+assert.equal(vm.evaluate('*external-callback-count*').output, '2\n');
+console.log('PASS external callbacks isolate bindings and errors while preserving a parked nonlocal transfer');
 
 const churn = '(dotimes (i 100) (miricl-threads:join-thread (miricl-threads:make-thread (lambda () (miricl-threads:thread-yield)))))';
 await vm.evaluateAsync(churn);

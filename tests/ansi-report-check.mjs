@@ -22,7 +22,7 @@ try {
   };
   for (const execution of ['interpreter', 'compiler']) {
     const report = {...base, execution, ...(execution === 'compiler' ? {
-      compilerBootstrap: {mode: 'self-compiled', origin: 'first-use', functions: 152},
+      compilerBootstrap: {mode: 'self-compiled', origin: 'image', functions: 152},
     } : {})};
     check(report, true, `${execution}: a complete passing run must succeed`);
     check({...report, error: 'load failed'}, false, `${execution}: runner errors must fail CI`);
@@ -44,9 +44,9 @@ try {
       `${execution}: passing counts must match the total`);
   }
   const compiler = {...base, execution: 'compiler',
-    compilerBootstrap: {mode: 'self-compiled', origin: 'first-use', functions: 152}};
-  check({...compiler, compilerBootstrap: {...compiler.compilerBootstrap, origin: 'image'}}, false,
-    'Compiler conformance must exercise self-bootstrapping');
+    compilerBootstrap: {mode: 'self-compiled', origin: 'image', functions: 152}};
+  check({...compiler, compilerBootstrap: {...compiler.compilerBootstrap, origin: 'first-use'}}, false,
+    'Compiler conformance must use the precompiled image');
   check({...compiler, tests: base.tests.map(test => ({...test, compilation: {compiled: 0}}))}, false,
     'Passing without native compilation must fail CI');
   check({...base, execution: undefined}, false, 'Missing execution mode must fail CI');

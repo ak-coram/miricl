@@ -5,7 +5,7 @@ import {runUpstream} from './ansi-upstream.mjs';
 import {Miricl} from '../scripts/miricl.mjs';
 import {installCompiler} from './ansi-compiler.mjs';
 
-const binary = process.argv[2] ?? 'miricl.wasm';
+const binary = process.argv[2] ?? 'miricl-precompiled.wasm';
 const forms = [
   '(defpackage :cl-test (:use :cl :rt))',
   '(defparameter cl-test::*compiler-fallback-probe* 0)',
@@ -28,8 +28,7 @@ for (const [name, run, options] of [['diagnostic', runFull, {records, sources}],
   assert.equal(report.error, null, report.error);
   assert.equal(report.execution, 'compiler');
   assert.equal(report.compilerBootstrap.mode, 'self-compiled');
-  assert.equal(report.compilerBootstrap.origin, 'first-use');
-  assert.ok(report.compilerBootstrap.functions >= 93);
+  assert.equal(report.compilerBootstrap.origin, 'image');
   assert.ok(report.compilerBootstrap.elapsedMs >= 0);
   assert.equal(report.summary.complete, true);
   assert.deepEqual(report.tests.map(test => test.status), ['pass', 'fail', 'fail', 'pass', 'pass'],
@@ -41,14 +40,14 @@ for (const [name, run, options] of [['diagnostic', runFull, {records, sources}],
   assert.equal(report.summary.failed, 2, 'Rejected compilation must count as a failure.');
   console.log(`ANSI compiler ${name}: self-compiled frontend/backend, native bodies, result failures, rejected compilation and no interpreter fallback pass.`);
 }
-// An invalid bootstrap replacement must fail before RT hooks are installed.
+// Reject invalid compiler state before RT hooks are installed, without a cold bootstrap.
 const vm = await Miricl.instantiate(fs.readFileSync(binary));
 try {
-  vm.evaluate(`(setf (symbol-function 'miricl-compiler::compile-linker)
-    (lambda (&rest arguments) (declare (ignore arguments)) (go missing-bootstrap-tag)))`);
-  assert.throws(() => installCompiler(vm), /Compiler bootstrap failed/);
-  assert.equal(vm.evaluate('miricl-compiler::*compiler-state*').output, ':FAILED\n');
+  vm.evaluate(`(setq miricl-compiler:*compile-evaluations* nil)
+    (setf (symbol-function 'miricl-compiler::hir-form) (lambda (form) form))`);
+  assert.throws(() => installCompiler(vm), /left an interpreted compiler function/);
+  vm.evaluate('(setq miricl-compiler::*compiler-state* :failed)');
   assert.throws(() => installCompiler(vm), /Compiler bootstrap previously failed/);
   assert.equal(vm.evaluate('(find-package :miricl-ansi-compiler)').output, 'NIL\n');
-  console.log('ANSI compiler rejects failed self-compilation before installing the RT hook.');
+  console.log('ANSI compiler rejects interpreted kernels and failed compiler state before installing the RT hook.');
 } finally {vm.close();}

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {Miricl} from '../scripts/miricl.mjs';
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
+import {createCompilerTestVM} from './compiler-test-vm.mjs';
+const vm = await createCompilerTestVM(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source, {eof: true}).output, 'T\n', source);
 try {
   vm.evaluate(`(miricl-compiler::ensure-compiler)
@@ -9,6 +9,34 @@ try {
   check(`(every (lambda (name) (compiled-function-p (symbol-function
     (miricl-compiler::compiler-primitive 10 1 name))))
     '("%EFFECTIVE-CALL" "%AROUND-PLAN" "%CALL-NEXT" "%INVOKE-EFFECTIVE"))`);
+  check("(typep #'make-instance 'standard-generic-function)");
+  // A linked compiler can be ready in WASI even though the host cannot
+  // instantiate new modules. Generated dispatch plans must still work there.
+  const nativeServices = vm.vm['native-services'];
+  const nativeService = nativeServices.get(0);
+  nativeServices.set(0, null);
+  try {
+    check(`(progn
+      (defgeneric loader-free-dispatch (object &key))
+      (defmethod loader-free-dispatch ((object t) &key (value 17)) (+ object value))
+      (defmethod loader-free-dispatch :around ((object integer) &key value)
+        (declare (ignore value)) (call-next-method))
+      (= (loader-free-dispatch 25 :value 17) 42))`);
+  } finally { nativeServices.set(0, nativeService); }
+  vm.evaluate(`(defclass native-accessor-object () ((value :initarg :value :accessor native-accessor-value)))
+    (defparameter *native-accessor-object* (make-instance 'native-accessor-object :value 42)) (values)`);
+  check(`(let ((compiler (fdefinition 'miricl-compiler:compile-native))
+              (put (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%PUT"))))
+    (unwind-protect
+        (progn
+          (funcall put #'native-accessor-value :cache nil)
+          (funcall put (fdefinition '(setf native-accessor-value)) :cache nil)
+          (setf (fdefinition 'miricl-compiler:compile-native)
+            (lambda (&rest arguments) (declare (ignore arguments)) (error "Accessor plan invoked the compiler.")))
+          (and (= (native-accessor-value *native-accessor-object*) 42)
+               (= (setf (native-accessor-value *native-accessor-object*) 43) 43)
+               (= (native-accessor-value *native-accessor-object*) 43)))
+      (setf (fdefinition 'miricl-compiler:compile-native) compiler)))`);
   vm.evaluate(`
     (defgeneric eql-dispatch (x))
     (defmethod eql-dispatch ((x t)) (values :other x))
@@ -22,6 +50,25 @@ try {
         (equal (multiple-value-list (eql-dispatch 7d0)) '(:other 7d0))
         (equal (multiple-value-list (eql-dispatch nil)) '(:nil nil))))`);
   check('(check-eql-dispatch)');
+  check(`(let ((methods (compute-applicable-methods #'eql-dispatch '(7))))
+    (and (= (length methods) 2)
+      (progn (setf (car methods) nil (cdr methods) nil)
+        (loop repeat 3 always
+          (and (= (length (compute-applicable-methods #'eql-dispatch '(7))) 2)
+               (= (length (compute-applicable-methods #'eql-dispatch '(7f0))) 2)
+               (= (length (compute-applicable-methods #'eql-dispatch '(7d0))) 1))))))`);
+  vm.evaluate(`
+    (defclass applicability-left () ())
+    (defclass applicability-right () ())
+    (defclass applicability-child (applicability-left) ())
+    (defgeneric applicability-choice (object))
+    (defmethod applicability-choice ((object applicability-left)) :left)
+    (defmethod applicability-choice ((object applicability-right)) :right)
+    (defparameter *applicability-object* (make-instance 'applicability-child))`);
+  check(`(and (eq (applicability-choice *applicability-object*) :left)
+    (progn (compute-applicable-methods #'applicability-choice (list *applicability-object*))
+      (defclass applicability-child (applicability-right) ())
+      (eq (applicability-choice *applicability-object*) :right)))`);
   vm.evaluate(`
     (defgeneric context-dispatch (x))
     (defmethod context-dispatch ((x t)) (values :base x))
@@ -36,6 +83,42 @@ try {
             (equal (multiple-value-list (funcall second)) '(:base 19))
             (equal (multiple-value-list (funcall first 11)) '(:base 11))))))`);
   check('(check-method-context)');
+  // Presentation systems customize dispatch on a generic-function subclass.
+  // Its dynamic protocol must run on every call while unrelated generics
+  // retain cached plans, including the native slot metadata readers.
+  vm.evaluate(`
+    (defclass selective-dispatch-gf (standard-generic-function) ()
+      (:metaclass miricl-mop:funcallable-standard-class))
+    (defgeneric selective-dispatch (value) (:generic-function-class selective-dispatch-gf))
+    (defmethod selective-dispatch ((value t)) :base)
+    (defmethod selective-dispatch ((value integer)) :integer)
+    (defparameter *selective-base-only* nil)
+    (defparameter *selective-protocol-calls* 0)
+    (defparameter *selective-cam-method*
+      (defmethod compute-applicable-methods :around ((gf selective-dispatch-gf) arguments)
+        (incf *selective-protocol-calls*)
+        (let ((methods (call-next-method)))
+          (if *selective-base-only* (last methods) methods))))`);
+  check(`(and (eq (selective-dispatch 1) :integer)
+    (progn (setq *selective-base-only* t) (eq (selective-dispatch 1) :base))
+    (progn (setq *selective-base-only* nil) (eq (selective-dispatch 1) :integer))
+    (>= *selective-protocol-calls* 3))`);
+  check(`(progn (check-eql-dispatch)
+    (let* ((get (symbol-function (miricl-compiler::compiler-primitive 10 1 "%GET")))
+           (cache (funcall get #'eql-dispatch :cache)))
+      (and cache (check-eql-dispatch) (eq cache (funcall get #'eql-dispatch :cache)))))`);
+  vm.evaluate(`(remove-method #'compute-applicable-methods *selective-cam-method*)
+    (defparameter *selective-cem-method*
+      (defmethod miricl-mop:compute-effective-method :around
+          ((gf selective-dispatch-gf) combination methods)
+        (incf *selective-protocol-calls*)
+        (call-next-method gf combination (if *selective-base-only* (last methods) methods))))`);
+  check(`(and (eq (selective-dispatch 1) :integer)
+    (progn (setq *selective-base-only* t) (eq (selective-dispatch 1) :base))
+    (progn (setq *selective-base-only* nil) (eq (selective-dispatch 1) :integer))
+    (check-eql-dispatch))`);
+  vm.evaluate('(remove-method #\'miricl-mop:compute-effective-method *selective-cem-method*) (values)');
+  check('(eq (selective-dispatch 1) :integer)');
   vm.evaluate(`
     (defstruct dispatch-parent (value 1 :type integer))
     (defstruct (dispatch-child (:include dispatch-parent (value 1 :type (unsigned-byte 8)))) extra)
@@ -74,6 +157,10 @@ try {
          (equal (reverse *around-events*)
            '((:before 17) (:after 17) (:before 29) (:after 29) (:before 19) (:after 19)))
          (handler-case (progn (funcall first :different-methods) nil) (error () t))))`);
+  check(`(let ((get (symbol-function (miricl-compiler::compiler-primitive 10 1 "%GET"))))
+    (and (not miricl-compiler:*compile-evaluations*)
+      (some (lambda (entry) (plusp (miricl-compiler::compiler-primitive 26 (third entry))))
+        (funcall get #'deferred-around :cache))))`);
   vm.evaluate(`(setf (symbol-function 'check-method-context)
     (miricl-compiler:compile-native (function-lambda-expression #'check-method-context)))`);
   check('(check-method-context)');
@@ -91,7 +178,7 @@ try {
   // separate argument contexts, including native callers after restoration.
   vm.evaluate(`(defparameter *saved-next-first* (context-dispatch 31))
     (defparameter *saved-next-second* (context-dispatch 47)) (values)`);
-  const restored = await Miricl.instantiate(vm.saveImage());
+  const restored = await createCompilerTestVM(vm.saveImage());
   try {
     assert.equal(restored.evaluate(`(and (check-eql-dispatch) (check-method-context)
       (equal (multiple-value-list (funcall *saved-next-first*)) '(:base 31))

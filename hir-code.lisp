@@ -2,8 +2,6 @@
 ;;;; This is an internal representation, rebuilt with the runtime.
 (in-package :miricl-compiler)
 
-(defvar *fasl-code-format* :source)
-
 ;; Opcode, input count bounds, integer attribute count, result present,
 ;; optional terminator flag. Fixed-arity variants share their operation name.
 ;; All operands are register numbers; variable input counts occur only on
@@ -174,7 +172,7 @@
     (hir-code-error payload "expected literal and function vectors"))
   (let* ((literals (copy-seq (svref payload 0))) (functions (svref payload 1))
          (copy (make-array (length functions))))
-    (unless (and (simple-vector-p (svref functions 0)) (= (length (svref functions 0)) 9)
+    (unless (and (simple-vector-p (svref functions 0)) (= (length (svref functions 0)) 10)
                  (eql (svref (svref functions 0) 4) 0))
       (hir-code-error payload "root function must have no captures"))
     (dotimes (fi (length functions))
@@ -182,12 +180,13 @@
         ;; name, register count, entry environment, entry block, capture count,
         ;; blocks, source lambda, declared types. Blocks contain a parameter+1,
         ;; environment+1 and byte string. Types never authorize unchecked VM use.
-        (unless (and (simple-vector-p function) (= (length function) 9)
+        (unless (and (simple-vector-p function) (= (length function) 10)
                      (every (lambda (n) (typep n '(unsigned-byte 31))) (subseq function 1 5))
                      (plusp (svref function 1))
                      (< (svref function 2) (svref function 1))
                      (typep (svref function 5) 'simple-string)
-                     (simple-vector-p (svref function 7)) (evenp (length (svref function 7))))
+                     (simple-vector-p (svref function 7)) (evenp (length (svref function 7)))
+                     (typep (svref function 9) '(integer 0 3)))
           (hir-code-error function "invalid function descriptor"))
         (let* ((registers (svref function 1)) (blocks (unpack-hir-blocks (svref function 5)))
                (block-copy blocks) (bytes 0) (max-inputs 0) (targets nil) (single-calls 0))
@@ -236,7 +235,7 @@
                         (:closure
                          (bounded a (length functions) "function out of range")
                          (let ((child (svref functions a)))
-                           (unless (and (simple-vector-p child) (= (length child) 9)
+                           (unless (and (simple-vector-p child) (= (length child) 10)
                                         (eql count (svref child 4)))
                              (hir-code-error child "closure capture count mismatch"))))
                         ((:branch :jump :checked-jump :block-enter)
@@ -263,7 +262,7 @@
             (svref function 3) (svref function 4) block-copy
             (copy-hir-debug-info (svref function 6) registers (svref function 4))
             max-inputs (coerce (nreverse targets) 'simple-vector) (copy-seq (svref function 7))
-            (copy-hir-parameters (svref function 8)) single-calls)))))
+            (copy-hir-parameters (svref function 8)) single-calls (svref function 9))))))
     (vector literals copy)))
 
 (defun load-hir-code (payload)
@@ -279,7 +278,7 @@
         (svref function 4)
         (pack-hir-blocks (svref function 5))
         (copy-hir-debug-info (svref function 6) (svref function 1) (svref function 4))
-        (copy-seq (svref function 9)) (copy-list (svref function 10)))) (svref payload 1))))
+        (copy-seq (svref function 9)) (copy-list (svref function 10)) (svref function 12))) (svref payload 1))))
 
 (defun disassemble-hir-code (payload &optional (index 0))
   "Print executable HIR without requiring the compiler or retained source."
@@ -302,6 +301,8 @@
                (literal (id) (svref literals id)))
         (format t "~&; HIR function ~S (#~D), ~D registers, entry B~D~%"
           (or (svref function 0) 'lambda) index (length names) (svref function 3))
+        (format t "; Packed HIR code: ~D bytes (literals and lexical environment excluded).~%"
+          (loop for block across blocks sum (length (svref block 2))))
         (loop for i from 0 below (length captures) by 2 do
           (format t "; Capture ~D: ~S~%" (floor i 2) (svref captures i)))
         (dotimes (bi (length blocks))
