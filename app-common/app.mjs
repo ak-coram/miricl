@@ -48,6 +48,7 @@ for (const entry of current.entries) if (entry.state === 'running') entry.state 
 let worker, active, activeNode, ready = false, busy = false, viewing = current.entries.length > 0;
 let recording = true, replay = null, evaluated = false;
 let starting = false, readyAction;
+let sharedImport = 0;
 const debuggerUI = config.createDebugger?.({send: data => worker?.postMessage(data),
   onStatus: text => setStatus(text), isBusy: () => busy});
 const inputHistory = [];
@@ -200,10 +201,12 @@ function recordOutput(text, className = '', entry = active, node = activeNode) {
   save();
 }
 function openSession(id) {
+  sharedImport++;
   cancel(); const session = store.select(id); if (!session) return;
   current = structuredClone(session); viewing = current.entries.length > 0; render(); prepareSession();
 }
 function fresh(forceRestart = false) {
+  sharedImport++;
   cancel(); current = newSession(); viewing = false; source.value = ''; answers.value = '';
   if (mode) mode.value = defaultMode;
   saveDraft(); render(); if (forceRestart) start(); else prepareSession();
@@ -216,6 +219,7 @@ function replayNext() {
   sendEvaluation(entry);
 }
 $('#resume').onclick = () => {
+  sharedImport++;
   cancel(); const entries = current.entries.filter(entry => entry.state === 'complete');
   const restore = () => {busy = true; replay = {entries, index: 0, replyIndex: 0}; controls(); replayNext();};
   if (ready && !evaluated) restore(); else start(restore);
@@ -260,7 +264,9 @@ $('#export').onclick = () => {
   link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 async function copySessionLink(session) {
-  const url = sharedSessionURL(session, location.href, config.storageKey);
+  let url;
+  try {url = await sharedSessionURL(session, location.href, config.storageKey);}
+  catch (error) {$('#save-status').textContent = error.message; return;}
   try {
     await navigator.clipboard.writeText(url);
     if ($('#share-link')) $('#share-link').hidden = true;
@@ -276,10 +282,17 @@ async function copySessionLink(session) {
   }
 }
 $('#share').onclick = () => copySessionLink(current);
-function importSharedSession() {
+async function importSharedSession() {
+  const request = ++sharedImport, href = location.href;
   let session;
-  try {session = sessionFromURL(location.href, config.storageKey, config.modes ?? []);}
-  catch (error) {$('#save-status').textContent = error.message; return false;}
+  try {session = await sessionFromURL(href, config.storageKey, config.modes ?? []);}
+  catch (error) {
+    if (request !== sharedImport || href !== location.href) return true;
+    $('#save-status').textContent = error.message; return false;
+  }
+  // An older asynchronous decode must not replace a newer navigation or a
+  // session the user has opened while decompression was in progress.
+  if (request !== sharedImport || href !== location.href) return true;
   if (!session) return false;
   cancel(); current = session; viewing = true;
   const saved = store.save(current);
@@ -314,4 +327,4 @@ for (const example of examples) {
 }
 window.addEventListener('pagehide', save);
 window.addEventListener('hashchange', importSharedSession);
-render(); if (!importSharedSession()) start();
+render(); importSharedSession().then(imported => {if (!imported) prepareSession();});

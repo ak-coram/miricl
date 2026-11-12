@@ -19,8 +19,10 @@ await Promise.all([
   fs.writeFile(path.join(output, 'miricl.wasm'), image),
   fs.writeFile(path.join(output, 'maxima.core'), core),
   ...['miricl.mjs', 'maxima.mjs'].map(name => fs.copyFile(path.join(root, 'scripts', name), path.join(output, name))),
-  ...['index.html', 'worker.mjs', 'app.mjs', 'examples.mjs', 'session-store.mjs'].map(name =>
+  ...['index.html', 'worker.mjs', 'examples.mjs'].map(name =>
     fs.copyFile(path.join(root, 'maxima', name), path.join(output, name))),
+  ...['app.mjs', 'session-store.mjs'].map(name =>
+    fs.copyFile(path.join(root, 'app-common', name), path.join(output, name))),
   fs.copyFile(path.join(root, 'vendor/maxima/COPYING'), path.join(output, 'COPYING')),
   fs.copyFile(path.join(root, 'LICENSE'), path.join(output, 'MIRICL-LICENSE')),
 ]);

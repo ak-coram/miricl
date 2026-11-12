@@ -59,7 +59,7 @@ await Promise.all([
   ...['miricl.wasm', 'filesystem.bin.gz', 'acl2.wasm', 'acl2-image.wasm.gz'].map(name =>
     data[name] ? fs.writeFile(path.join(output, name), data[name]) : fs.rm(path.join(output, name), {force: true})),
   ...['index.html', 'examples.mjs', 'worker.mjs'].map(name => fs.copyFile(path.join(root, 'acl2', name), path.join(output, name))),
-  ...['app.mjs', 'session-store.mjs'].map(name => fs.copyFile(path.join(root, 'maxima', name), path.join(output, name))),
+  ...['app.mjs', 'session-store.mjs'].map(name => fs.copyFile(path.join(root, 'app-common', name), path.join(output, name))),
   ...['miricl.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs'].map(name => fs.copyFile(path.join(root, 'scripts', name), path.join(output, name))),
   fs.copyFile(path.join(upstream, 'LICENSE'), path.join(output, 'LICENSE')),
   fs.copyFile(path.join(root, 'LICENSE'), path.join(output, 'MIRICL-LICENSE')),

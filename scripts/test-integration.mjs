@@ -44,7 +44,7 @@ const groups = {
   ],
   asdf: [test('asdf-build'), test('asdf', wasm, asdf), test('asdf-bundle', wasm, asdf),
     test('bundle-command', wasm, repl, image('miricl-asdf.wasm')), test('application-setup')],
-  browser: [test('session-sharing'), test('browser-session-sharing'),
+  browser: [test('session-sharing'), test('browser-session-sharing', image('miricl.html')),
     test('browser-repl', image('miricl.html')), test('browser-todo', image('todo.html')),
     test('browser-compiler', wasm, image('miricl.js')),
     test('browser-compiler', precompiled, image('miricl.js'), '--precompiled'),

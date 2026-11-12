@@ -45,7 +45,7 @@ await Promise.all([
   fs.copyFile(path.join(root, 'coalton/client.mjs'), path.join(output, 'client.mjs')),
   fs.writeFile(path.join(output, 'examples.mjs'),
     exampleSource.replaceAll('@@REVISION@@', revision)),
-  ...['app.mjs', 'session-store.mjs'].map(name => fs.copyFile(path.join(root, 'maxima', name), path.join(output, name))),
+  ...['app.mjs', 'session-store.mjs'].map(name => fs.copyFile(path.join(root, 'app-common', name), path.join(output, name))),
   ...['miricl.mjs', 'coalton.mjs', 'repl-debugger.mjs'].map(name => fs.copyFile(path.join(root, 'scripts', name), path.join(output, name))),
   fs.copyFile(path.join(root, 'vendor/coalton/LICENSE.txt'), path.join(output, 'LICENSE.txt')),
   fs.copyFile(path.join(root, 'LICENSE'), path.join(output, 'MIRICL-LICENSE')),

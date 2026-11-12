@@ -22,7 +22,7 @@ await Promise.all([
   fs.writeFile(path.join(output, 'filesystem.bin.gz'), gzipSync(encodeFilesystem(shipped), {level: 9})),
   ...['miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs'].map(name => fs.copyFile(path.join(root, 'scripts', name), path.join(output, name))),
   ...['index.html', 'worker.mjs', 'examples.mjs'].map(name => fs.copyFile(path.join(root, 'fricas', name), path.join(output, name))),
-  ...['app.mjs', 'session-store.mjs'].map(name => fs.copyFile(path.join(root, 'maxima', name), path.join(output, name))),
+  ...['app.mjs', 'session-store.mjs'].map(name => fs.copyFile(path.join(root, 'app-common', name), path.join(output, name))),
   fs.copyFile(path.join(root, 'vendor/fricas/LICENSE.txt'), path.join(output, 'LICENSE.txt')),
   fs.copyFile(path.join(root, 'vendor/fricas/license/LICENSE.AXIOM'), path.join(output, 'LICENSE.AXIOM')),
   fs.copyFile(path.join(root, 'LICENSE'), path.join(output, 'MIRICL-LICENSE')),

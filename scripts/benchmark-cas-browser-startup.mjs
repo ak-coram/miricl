@@ -32,7 +32,7 @@ for (const [name, image] of [['before', before], ['after', after]]) {
       copy(path.join(app, asset), path.join(directory, asset)); assets.push(asset);
     }
     for (const asset of ['app.mjs', 'session-store.mjs']) {
-      copy(path.join('maxima', asset), path.join(directory, asset)); assets.push(asset);
+      copy(path.join('app-common', asset), path.join(directory, asset)); assets.push(asset);
     }
     for (const asset of ['miricl.mjs', `${app}.mjs`, ...(app === 'fricas'
       ? ['filesystem-archive.mjs', 'mounted-filesystem.mjs'] : [])]) {
