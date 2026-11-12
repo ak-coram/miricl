@@ -390,7 +390,8 @@
 (named-readtables:in-readtable :miricl-wat)
 
 (define-runtime-function $initialize-loop () ()
-  (:locals ($names (ref $bootstrap-bytes)))
+  (:locals ($names (ref $bootstrap-bytes)) ($forms :nullable-object) ($scan :nullable-object))
+  #@(call $reset-library-strings)
   #@(local.set $names (array.new_data $bootstrap-bytes $loop-name-data
     (i32.const 0) (i32.const ,(length (bootstrap-private-symbol-bytes *loop-library-symbols*)))))
   #@(data.drop $loop-name-data)
@@ -403,7 +404,11 @@
   #@(data.drop $loop-library-data)
   #@(block $done (loop $next
     (br_if $done (i32.ge_u (global.get $cursor) (global.get $limit)))
-    (drop (call $eval (call $read-library-literal) (ref.null eq))) (br $next)))
+    (local.set $forms (call $cons (call $read-library-literal) (local.get $forms))) (br $next)))
+  #@(call $reset-library-strings)
+  #@(local.set $scan (call $reverse-onto (local.get $forms) (ref.null eq) (i32.const 0)))
+  (wat-list-loop ($scan)
+    #@(drop (call $eval (call $car (local.get $scan)) (ref.null eq))))
   #@(call $clear-values))
 
 (define-runtime-function $loop-word-p (($word :nullable-object) ($text :nullable-object)) (i32)

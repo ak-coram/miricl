@@ -55,7 +55,7 @@
            (#x83 . "i64.and") (#x84 . "i64.or") (#x85 . "i64.xor")
            (#xa7 . "i32.wrap_i64") (#xac . "i64.extend_i32_s") (#xd1 . "ref.is_null")))))
          (indexed (cdr (assoc code '((#x08 . "throw") (#x0c . "br") (#x0d . "br_if")
-           (#x20 . "local.get") (#x21 . "local.set") (#x22 . "local.tee") (#x41 . "i32.const"))))))
+           (#x20 . "local.get") (#x21 . "local.set") (#x22 . "local.tee") (#x41 . "i32.const") (#x42 . "i64.const"))))))
     (cond (plain plain)
           (indexed (format nil "~A ~D" indexed argument))
           ((member code '(#x02 #x03 #x04))

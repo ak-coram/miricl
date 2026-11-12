@@ -1,5 +1,58 @@
 // These forms run unchanged in Node and in the browser's Lisp environment.
 export const compilerCases = [
+  ['literal membership conditions', `(let ((function (miricl-compiler:compile-native
+      '(lambda (key) (let ((events nil))
+         (values (if (member (progn (push :key events) (values key :extra)) '(nil 1 :target #\\A))
+                     :yes :no) (reverse events))))))
+      (empty (miricl-compiler:compile-native '(lambda () (let ((calls 0))
+        (values (if (member (incf calls) '()) :bad :empty) calls)))))
+      (local (miricl-compiler:compile-native '(lambda ()
+        (flet ((member (item list) (declare (ignore item list)) :local))
+          (if (member :missing '(:target)) :local :bad)))))
+      (keywords (miricl-compiler:compile-native '(lambda ()
+        (if (member 2 '((1 . :one) (2 . :two)) :key #'car) :key :bad)))))
+    (and (equal (multiple-value-list (funcall function nil)) '(:yes (:key)))
+         (equal (multiple-value-list (funcall function #\\A)) '(:yes (:key)))
+         (equal (multiple-value-list (funcall function 1.0)) '(:no (:key)))
+         (equal (multiple-value-list (funcall function :target)) '(:yes (:key)))
+         (equal (multiple-value-list (funcall function :missing)) '(:no (:key)))
+         (equal (multiple-value-list (funcall empty)) '(:empty 1))
+         (eq (funcall local) :local) (eq (funcall keywords) :key)
+         (let ((form 'x))
+           (dotimes (i 200)
+             (setq form (list 'if (list 'member form '(quote (1 2))) '(values 1 :deep) 0)))
+           (let ((deep (miricl-compiler:compile-native (list 'lambda '(x) form))))
+             (and (equal (multiple-value-list (funcall deep 1)) '(1 :deep))
+                  (= (funcall deep 9) 0))))))`],
+  ['CASE match context and values', `(let ((function (miricl-compiler:compile-native
+      '(lambda (key) (let ((evaluations 0))
+         (values (case (progn (incf evaluations) key)
+                   (nil :unreachable) ((nil) :nil) (1 :integer) (1 :shadowed)
+                   (1.0f0 :single) (1.0d0 :double) (#\\A :character)
+                   ((t) :true) ((otherwise) :symbol) ((2 3) :group) (4)
+                   (otherwise :default)) evaluations)))))
+      (counts (miricl-compiler:compile-native
+        '(lambda (key) (case key (0 (values)) (1 (values 17 23))))))
+      (strict (miricl-compiler:compile-native
+        '(lambda (key) (ecase key (1 (values 17 23)) ((2 3) :group)))))
+      (member-tail (miricl-compiler:compile-native '(lambda (key) (member key '(1 2 3))))))
+    (and (equal (mapcar (lambda (key) (multiple-value-list (funcall function key)))
+                        '(nil 1 1.0f0 1.0d0 #\\A t otherwise 2 3 4 :missing))
+                '((:nil 1) (:integer 1) (:single 1) (:double 1) (:character 1)
+                  (:true 1) (:symbol 1) (:group 1) (:group 1) (nil 1) (:default 1)))
+         (null (multiple-value-list (funcall counts 0)))
+         (equal (multiple-value-list (funcall counts 1)) '(17 23))
+         (equal (multiple-value-list (funcall counts 9)) '(nil))
+         (equal (multiple-value-list (funcall strict 1)) '(17 23))
+         (handler-case (progn (funcall strict :missing) nil)
+           (type-error (condition)
+             (and (eq (type-error-datum condition) :missing)
+                  (typep 1 (type-error-expected-type condition))
+                  (typep 3 (type-error-expected-type condition))
+                  (not (typep :missing (type-error-expected-type condition))))))
+         (eq (funcall strict 2) :group)
+         (equal (funcall member-tail 2) '(2 3))
+         (eq (cdr (funcall member-tail 1)) (funcall member-tail 2))))`],
   ['deep compiler expression trees', `(let ((form '(values x :deep)))
     (dotimes (i 1000)
       (setq form (list 'let '((y x)) (list 'if 'y
@@ -300,6 +353,8 @@ export const compilerCases = [
 // Runtime/browser smoke coverage checks the native ABI. The complete set runs
 // once in FILE-CODE-SHARING through a fresh FASL; ANSI owns broad conformance.
 const smokeNames = new Set([
+  'literal membership conditions',
+  'CASE match context and values',
   'deep compiler expression trees',
   'general tail calls',
   'integer tier boundaries',

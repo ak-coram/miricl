@@ -19,6 +19,12 @@ try {
     assert.equal(vm.evaluate(`(compiler-list-length (make-list ${count}) "list spine")`).output,
       `${count}\n`);
   }
+  for (const reader of ['native-read-uleb', 'native-read-sleb']) {
+    for (const bytes of ['#()', '#(128)', '#(128 128 128 128 128 128 128 128 128 128 0)'])
+      reject(`(${reader} ${bytes} 0)`, /truncated|exceeds 64 bits/);
+  }
+  for (const bytes of ['#(0 65)', '#(0 66)', '#(0 66 128)'])
+    reject(`(native-read-ops ${bytes})`, /missing operand|truncated/);
   assert.equal(vm.evaluate(`(let ((function (compile-native
     '(lambda (x &aux (before (lambda () x)) (x (1+ x))
                     (between (lambda () x)) (x (1+ x)))
@@ -105,6 +111,9 @@ try {
     ['(setf (hir-function-value-count function) -1)', /counts/],
     ['(setf (hir-function-value-count function) #xffffffff)', /counts/],
     ['(setf (hir-function-parent function) function)', /parent chain/],
+    ['(setf (hir-block-id block) -1)', /block record or ID/],
+    ['(setf (hir-block-id block) 1)', /dense and ordered/],
+    ['(setf (hir-block-id block) #xffffffff)', /dense and ordered/],
     ['(setf (hir-block-instructions block) 7)', /block instructions/],
     ['(setf (hir-block-terminator block) #())', /instruction record/],
     ['(setf (hir-instruction-inputs instruction) #(1))', /instruction operands/],
@@ -131,11 +140,28 @@ try {
   // Literal data and macro arguments have their own syntax. Do not mistake
   // dotted/circular data or a shared executable DAG for malformed code.
   vm.evaluate(`(defmacro input-dotted ((head . tail)) (list 'quote (cons head tail))) (values)`);
+  reject(`(compile-native '(lambda () (if (member 1 (quote)) :yes :no)))`, /exactly one argument/);
+  reject(`(compile-native '(lambda () (if (member 1 . bad) :yes :no)))`, /proper list|dotted/);
+  reject(`(let* ((test (list 'member 1 '(quote (1))))
+                  (source (list 'lambda nil (list 'if test :yes :no))))
+    (setf (cdr (last test)) test) (compile-native source))`, /circular/);
+  for (const literal of ["'(1 . 2)", "'#1=(1 . #1#)"])
+    assert.equal(vm.evaluate(`(compiled-function-p
+      (compile-native '(lambda (x) (if (member x ${literal}) :yes :no))))`).output, 'T\n');
   assert.equal(vm.evaluate(`(equal (funcall (compile-native '(lambda () (input-dotted (1 . 2))))) '(1 . 2))`).output, 'T\n');
   assert.equal(vm.evaluate(`(let ((object (list :cycle)))
     (setf (cdr object) object)
     (eq object (funcall (compile-native (list 'lambda nil (list 'quote object))))))`).output, 'T\n');
   assert.equal(vm.evaluate(`(let ((shared '(+ x 1)))
     (equal (funcall (compile-native (list 'lambda '(x) (list 'list shared shared))) 1) '(2 2)))`).output, 'T\n');
+  // Diagnostic strings remain fresh even when their image bytes are pooled.
+  // Mutating one condition must not damage subsequent errors or output text.
+  assert.equal(vm.evaluate(`(flet ((reason ()
+      (handler-case (read-hir-code-instruction (string (code-char 63)) 0 (make-array 8))
+        (hir-code-input-error (condition) (hir-code-error-reason condition)))))
+    (let ((first (reason)) (second (reason)))
+      (and (string= first "unknown HIR opcode") (string= second first) (not (eq first second))
+           (progn (setf (char first 0) #\\X)
+             (string= second (reason))))))`).output, 'T\n');
   console.log('Compiler boundaries: malformed source, macroexpansions and HIR produce bounded Lisp diagnostics; compilation recovers.');
 } finally {vm.close();}

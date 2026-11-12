@@ -18,6 +18,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-function-relocations* nil)
 (defvar *wasm-current-function*)
 (defvar *wasm-static-closures*)
+(defvar *wasm-label-depths*)
 (defvar *wasm-body-keys*)
 (defvar *wasm-function-plans* nil)
 (defvar *wasm-inline-constants* nil)
@@ -37,6 +38,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-object-types*)
 (defvar *wasm-builtin-codes*)
 (defvar *wasm-dispatch-depth*)
+(defvar *wasm-dispatch-indices*)
 (defvar *wasm-dynamic-bindings*)
 (defvar *wasm-entry-environment*)
 (defvar *wasm-exceptions*)
@@ -289,7 +291,12 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defun wasm-literal (value)
   (cond ((null value) (wasm-null))
     ((and (integerp value) (<= -1073741824 value 1073741823))
-     (wasm-integer value) (wasm-gc #x1c) (wasm-gc #x1b))
+     (if (and *wasm-optimize* *wasm-import-counts* (gethash "native-int64" *wasm-import-counts*))
+         ;; Reuse an existing boxing import: CONST + CALL is two bytes less
+         ;; than repeating REF.I31 + EXTERN.CONVERT_ANY at every literal.
+         ;; Small modules keep immediate boxing and acquire no new import.
+         (progn (wasm-byte #x42) (wasm-s32 value) (wasm-call "native-int64"))
+         (progn (wasm-integer value) (wasm-gc #x1c) (wasm-gc #x1b))))
     ((and *wasm-literal-locals* (gethash value *wasm-literal-locals*))
      (wasm-local (gethash value *wasm-literal-locals*)))
     (t
@@ -578,7 +585,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
          (literal (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant)
                        (first (hir-instruction-attributes producer)))))
     (cond ((and (integerp literal) (<= -2147483648 literal 2147483647))
-           (wasm-integer literal) (wasm-byte #xac))
+           ;; Signed LEB32 is also the canonical LEB64 encoding for this range.
+           (wasm-byte #x42) (wasm-s32 literal))
           (t
            (wasm-get operand)
            (if (<= width 31)
@@ -631,7 +639,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   ;; boxed at generic HIR boundaries and retain the ordinary value count.
   (dolist (operand (cddr inputs))
     (emit-native-unboxed-integer operand (native-integer-width operand)))
-  (when (= (length inputs) 3) (wasm-integer 1) (wasm-byte #xac))
+  (when (= (length inputs) 3) (wasm-byte #x42) (wasm-s32 1))
   (wasm-byte opcode)
   (wasm-call (if (< opcode #x60) "native-boolean" "native-int64")))
 
@@ -749,7 +757,17 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                            (native-list-value-p (third inputs))
                            (if (member name '(car first)) :car :cdr)))
                      (eq (and (= (length inputs) 4) :eq))
-                     (eql (and (= (length inputs) 4) :eql))
+                     (eql (and (= (length inputs) 4)
+                       ;; EQL differs from EQ only for numbers and characters.
+                       ;; A nonnumeric, noncharacter literal proves identity
+                       ;; comparison sufficient, even when the other type is T.
+                       (if (some (lambda (input)
+                             (let ((producer (hir-value-producer input)))
+                               (and (%hir-instruction-p producer)
+                                    (eq (hir-instruction-opcode producer) :constant)
+                                    (let ((literal (first (hir-instruction-attributes producer))))
+                                      (not (or (numberp literal) (characterp literal))))))) (cddr inputs))
+                           :eq :eql)))
                      (cons (and (= (length inputs) 4) :cons))
                      (consp (and (= (length inputs) 3) :consp))
                      (simple-vector-p (and (= (length inputs) 3) :simple-vector-p))
@@ -808,7 +826,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                    (setter (and (consp name) (eq (car name) 'setf) (= (length name) 2)))
                    (operator (if setter (second name) name))
                    (operands (if setter (cdddr inputs) (cddr inputs))))
-              (when (and (= (length inputs) (if setter 5 4))
+              (when (and (zerop (hir-instruction-safety-level instruction))
+                         (= (length inputs) (if setter 5 4))
                          (member operator '(svref aref row-major-aref))
                          (native-simple-vector-value-p (first operands))
                          (native-integer-width (second operands)))
@@ -829,15 +848,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
          (operands (if setter (cdddr inputs) (cddr inputs))))
     (when setter (wasm-get (third inputs)))
     (wasm-get (first operands))
-    (let* ((index (second operands)) (producer (hir-value-producer index))
-           (literal (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant)
-                         (first (hir-instruction-attributes producer)))))
-      (cond ((and (integerp literal) (<= -2147483648 literal 2147483647))
-             (wasm-integer literal) (wasm-byte #xac))
-            (t (wasm-get index)
-               (if (<= (native-integer-width index) 31)
-                   (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
-                   (wasm-call "native-unbox-int64")))))
+    (let ((index (second operands)))
+      (emit-native-unboxed-integer index (native-integer-width index)))
     (wasm-call (if setter "native-vector-set-inline" "native-vector-ref-inline"))))
 
 (defun native-tail-forward-p (block)
@@ -1168,15 +1180,67 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (wasm-null) (wasm-call "native-cons"))
     (wasm-set (first (hir-block-parameters block)))))
 
+(defun native-dispatch-targets (function targets)
+  (declare (type simple-vector function) (type list targets))
+  ;; Most blocks are reached directly. Give only entry, backward and landing
+  ;; targets dense dispatch indices, retaining their block IDs for layout.
+  (let* ((blocks (hir-function-blocks function))
+         (indices (make-array (length blocks) :initial-element nil))
+         (depths nil) (count 0))
+    (declare (type simple-vector indices) (type (unsigned-byte 32) count))
+    (setf (svref indices (hir-block-id (hir-function-entry function))) t)
+    (dolist (target targets) (setf (svref indices (hir-block-id (hir-target-block target))) t))
+    (dolist (block blocks)
+      (dolist (successor (hir-instruction-attributes (hir-block-terminator block)))
+        (when (<= (hir-block-id successor) (hir-block-id block))
+          (setf (svref indices (hir-block-id successor)) t))))
+    (dotimes (id (length indices))
+      (when (svref indices id)
+        (setf (svref indices id) count) (incf count) (push id depths)))
+    (cons indices (nreverse depths))))
+
+(defun native-block-label-depths (function blocks dispatch)
+  (declare (type simple-vector function) (type list blocks dispatch))
+  ;; Fallthrough needs no label. Count only labels that an explicit edge or
+  ;; the dispatcher can name; the prefix counts also give branch depths.
+  ;; An acyclic ordering can omit unreachable blocks without renumbering IDs.
+  (let ((depths (make-array (length (hir-function-blocks function)) :initial-element 0)) (count 0))
+    (declare (type simple-vector depths) (type (unsigned-byte 32) count))
+    (dolist (id dispatch) (setf (svref depths id) 1))
+    (loop for tail on blocks for block = (car tail) for next = (cadr tail) do
+      (dolist (successor (hir-instruction-attributes (hir-block-terminator block)))
+        (unless (eq successor next) (setf (svref depths (hir-block-id successor)) 1))))
+    (dolist (block blocks)
+      (incf count (svref depths (hir-block-id block)))
+      (setf (svref depths (hir-block-id block)) count))
+    depths))
+
+(defun emit-native-dispatch-target (block from)
+  (declare (type simple-vector block from))
+  ;; The dispatcher's remaining nested labels already name every forward
+  ;; block. Only backward edges need to reload the program counter.
+  (let ((distance (- (hir-block-id block) (hir-block-id from))))
+    (if (plusp distance)
+        (unless (= distance 1)
+          (wasm-byte #x0c)
+          (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id block))
+                       (svref *wasm-label-depths* (hir-block-id from)) 1)))
+        (progn
+          (wasm-integer (svref *wasm-dispatch-indices* (hir-block-id block)))
+          (wasm-byte #x21) (wasm-u32 2)
+          (wasm-byte #x0c) (wasm-u32 *wasm-dispatch-depth*)))))
+
 (defun emit-native-jump (block value from)
   (emit-native-jump-value block value)
   ;; Every cycle has a backward/self edge under this total block ordering.
   ;; Inlining all calls in a loop must not remove its scheduling safepoint.
-  (when *wasm-dynamic-bindings*
-    (wasm-get (hir-block-environment block)) (wasm-call "native-restore-environment"))
-  (when (<= (hir-block-id block) (hir-block-id from)) (wasm-call "native-poll"))
-  (wasm-integer (hir-block-id block)) (wasm-byte #x21) (wasm-u32 2)
-  (wasm-byte #x0c) (wasm-u32 *wasm-dispatch-depth*))
+  (when (<= (hir-block-id block) (hir-block-id from))
+    ;; Restore before yielding on a backedge. Forward transfers arrive at
+    ;; the target's restore without an intervening call or scheduling point.
+    (when *wasm-dynamic-bindings*
+      (wasm-get (hir-block-environment block)) (wasm-call "native-restore-environment"))
+    (wasm-call "native-poll"))
+  (emit-native-dispatch-target block from))
 
 (defun emit-native-return (value)
   (when *wasm-dynamic-bindings*
@@ -1205,15 +1269,15 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun emit-native-forward (blocks)
   (declare (type list blocks))
-  (let ((positions (make-hash-table :test 'eq)) (position 0))
-    (declare (type hash-table positions) (type (unsigned-byte 32) position))
-    (dolist (block blocks) (setf (gethash block positions) position) (incf position))
+  (let ((position 0) (depth 0))
+    (declare (type (unsigned-byte 32) position depth))
     ;; The innermost label names the next block, the next label the one after
     ;; it, and so on. Close a label just before emitting its block.
-    (dotimes (i (1- (length blocks))) (wasm-byte #x02) (wasm-byte #x40))
-    (setq position 0)
+    (dotimes (i (svref *wasm-label-depths* (hir-block-id (car (last blocks)))))
+      (wasm-byte #x02) (wasm-byte #x40))
     (loop for tail on blocks for block = (car tail) for next = (cadr tail) do
-      (unless (zerop position) (wasm-byte #x0b))
+      (let ((current (svref *wasm-label-depths* (hir-block-id block))))
+        (unless (= current depth) (wasm-byte #x0b) (setq depth current)))
       (when (and *wasm-dynamic-bindings* (not (zerop position)))
         (wasm-get (hir-block-environment block)) (wasm-call "native-restore-environment"))
       (dolist (instruction (hir-block-instructions block)) (emit-native-instruction instruction))
@@ -1232,15 +1296,17 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                  (emit-native-jump-value target (if (eq (hir-instruction-opcode terminator) :jump)
                                                   (first inputs) (third inputs)))
                  (unless (eq target next)
-                   (wasm-byte #x0c) (wasm-u32 (- (gethash target positions) position 1))))))
+                   (wasm-byte #x0c)
+                   (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1))))))
           (:branch
            (let ((no (second successors)))
              (wasm-get (first inputs)) (wasm-byte #xd1)
              (when (eq no next) (wasm-byte #x45))
              (wasm-byte #x0d)
-             (wasm-u32 (- (gethash (if (eq no next) target no) positions) position 1))
+             (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id (if (eq no next) target no))) depth 1))
              (unless (or (eq target next) (eq no next))
-               (wasm-byte #x0c) (wasm-u32 (- (gethash target positions) position 1)))))))
+               (wasm-byte #x0c)
+               (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1)))))))
       (incf position))
     (wasm-byte #x0b)))
 
@@ -1264,10 +1330,14 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (let ((seen (make-hash-table :test 'eq)) (literals nil))
       (dolist (block blocks)
         (dolist (instruction (hir-block-instructions block))
-          (when (member (hir-instruction-opcode instruction)
-                        '(:constant :function-reference :global-read :global-write :dynamic-bind))
+          (when (and (member (hir-instruction-opcode instruction)
+                            '(:constant :function-reference :global-read :global-write :dynamic-bind))
+                     (not (and (native-removable-p instruction)
+                               (not (native-value-slot *wasm-live-values* (hir-instruction-output instruction))))))
             (let ((value (first (hir-instruction-attributes instruction))))
-              (when value
+              ;; Immediate literals bypass the cache in WASM-LITERAL. Giving
+              ;; them cache slots adds unused prologue work and locals.
+              (when (and value (not (and (integerp value) (<= -1073741824 value 1073741823))))
                 (unless (gethash value seen) (push value literals))
                 (incf (gethash value seen 0)))))))
       ;; A one-site cache adds a prologue load, store and local to save a
@@ -1293,7 +1363,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
         (*wasm-single-calls* (native-single-calls function *wasm-scalar-groups*))
         (locals nil) (count 0)
         (literals (native-loop-literals function blocks))
-        (literal-locals (make-hash-table :test 'eq)))
+        (literal-locals (make-hash-table :test 'eq))
+        (dispatch (unless forward (native-dispatch-targets function targets))))
     (declare (type (unsigned-byte 32) count) (type list targets blocks literals)
              (type hash-table literal-locals) (type (or null simple-vector) locals))
     (multiple-value-setq (locals count)
@@ -1303,7 +1374,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (vector targets forward *wasm-inline-constants* *wasm-local-cells*
             *wasm-dynamic-bindings* *wasm-entry-environment* *wasm-live-values*
             *wasm-scalar-groups* *wasm-single-calls* locals count literal-locals literals
-            (native-tail-calls function) (native-value-table function :unknown))))
+            (native-tail-calls function) (native-value-table function :unknown)
+            dispatch (native-block-label-depths function blocks (cdr dispatch)))))
 
 (defun emit-native-function-body (function)
   (declare (type simple-vector function))
@@ -1326,6 +1398,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                     plan)))
         (targets (svref plan 0)) (forward (svref plan 1))
         (blocks (or forward (hir-function-blocks function)))
+        (dispatch (svref plan 15))
+        (*wasm-label-depths* (svref plan 16))
+        (*wasm-dispatch-indices* (car dispatch))
         (*wasm-inline-constants* (svref plan 2)) (*wasm-local-cells* (svref plan 3))
         (*wasm-dynamic-bindings* (svref plan 4)) (*wasm-entry-environment* (svref plan 5))
         (*wasm-live-values* (svref plan 6)) (*wasm-scalar-groups* (svref plan 7))
@@ -1334,8 +1409,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
         (*wasm-tail-calls* (svref plan 13)) (*wasm-integer-widths* (svref plan 14)))
    (declare (type simple-vector plan *wasm-integer-widths* *wasm-inline-constants*
                   *wasm-local-cells* *wasm-live-values* *wasm-scalar-groups*
-                  *wasm-single-calls* *wasm-locals*)
-            (type (unsigned-byte 32) count) (type hash-table *wasm-literal-locals*))
+                  *wasm-single-calls* *wasm-locals* *wasm-label-depths*)
+            (type (unsigned-byte 32) count)
+            (type hash-table *wasm-literal-locals*))
    (when *wasm-function-relocations*
      (setf (gethash function *wasm-function-relocations*) nil))
    (with-wasm-bytes
@@ -1350,7 +1426,10 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (when forward
       (emit-native-forward blocks)
       (return-from emit-native-function-body *wasm-bytes*))
-    (wasm-integer (hir-block-id (hir-function-entry function))) (wasm-byte #x21) (wasm-u32 2)
+    ;; Fresh i32 locals already contain zero. No prologue work writes the
+    ;; dispatcher local, so only a nonzero initial dispatch index needs a store.
+    (let ((initial (svref *wasm-dispatch-indices* (hir-block-id (hir-function-entry function)))))
+      (unless (zerop initial) (wasm-integer initial) (wasm-byte #x21) (wasm-u32 2)))
     (when targets
       (setq *wasm-exceptions* t)
       (wasm-byte #x03) (wasm-byte #x40) ; resume after a caught lexical exit
@@ -1359,15 +1438,17 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (dolist (byte '(#x1f #x40 1 0 0 0)) (wasm-byte byte)))
     (wasm-byte #x03) (wasm-byte #x40) ; dispatch loop
     (wasm-byte #x02) (wasm-byte #x40) ; invalid program counter
-    (dotimes (i (length (hir-function-blocks function))) (wasm-byte #x02) (wasm-byte #x40))
-    (wasm-local 2) (wasm-byte #x0e) (wasm-u32 (length (hir-function-blocks function)))
-    (dotimes (i (length (hir-function-blocks function))) (wasm-u32 i))
-    (wasm-u32 (length (hir-function-blocks function)))
+    (dotimes (i (svref *wasm-label-depths* (1- (length blocks)))) (wasm-byte #x02) (wasm-byte #x40))
+    (wasm-local 2) (wasm-byte #x0e) (wasm-u32 (length (cdr dispatch)))
+    (dolist (id (cdr dispatch)) (wasm-u32 (1- (svref *wasm-label-depths* id))))
+    (wasm-u32 (svref *wasm-label-depths* (1- (length blocks))))
     ;; BR_TABLE selects a block in constant time. The earlier chain of IFs
     ;; rescanned every preceding block on each edge of a compiler's inner loop.
-    (let ((*wasm-dispatch-depth* (length (hir-function-blocks function))))
+    (let ((*wasm-dispatch-depth* (1+ (svref *wasm-label-depths* (1- (length blocks))))) (depth 0))
      (dolist (block (hir-function-blocks function))
-      (wasm-byte #x0b)
+      (let ((current (svref *wasm-label-depths* (hir-block-id block))))
+        (unless (= current depth)
+          (wasm-byte #x0b) (decf *wasm-dispatch-depth*) (setq depth current)))
       (when *wasm-dynamic-bindings*
         (wasm-get (hir-block-environment block)) (wasm-call "native-restore-environment"))
       (dolist (instruction (hir-block-instructions block)) (emit-native-instruction instruction))
@@ -1384,15 +1465,26 @@ Bind to NIL to interpret forms, including forms without native lowering.")
           (:branch
            (when (some (lambda (successor) (<= (hir-block-id successor) (hir-block-id block))) successors)
              (wasm-call "native-poll"))
-           (wasm-get (first inputs)) (wasm-byte #xd1)
-           (wasm-byte #x04) (wasm-byte #x40)
-           (wasm-integer (hir-block-id (second successors)))
-           (wasm-byte #x21) (wasm-u32 2)
-           (wasm-byte #x05)
-           (wasm-integer (hir-block-id (first successors)))
-           (wasm-byte #x21) (wasm-u32 2) (wasm-byte #x0b)
-           (wasm-byte #x0c) (wasm-u32 *wasm-dispatch-depth*))))
-      (decf *wasm-dispatch-depth*)))
+           (let* ((yes (first successors)) (no (second successors))
+                  (target (cond ((and (= (hir-block-id no) (1+ (hir-block-id block)))
+                                      (> (hir-block-id yes) (hir-block-id no))) yes)
+                                ((> (hir-block-id no) (hir-block-id block)) no)
+                                ((> (hir-block-id yes) (hir-block-id block)) yes))))
+             (if target
+                 (progn
+                   (wasm-get (first inputs)) (wasm-byte #xd1)
+                   (when (eq target yes) (wasm-byte #x45))
+                   (wasm-byte #x0d)
+                   (wasm-u32 (- (svref *wasm-label-depths* (hir-block-id target)) depth 1))
+                   (emit-native-dispatch-target (if (eq target yes) no yes) block))
+                 (progn
+                   (wasm-get (first inputs)) (wasm-byte #xd1)
+                   (wasm-byte #x04) (wasm-byte #x7f)
+                   (wasm-integer (svref *wasm-dispatch-indices* (hir-block-id no))) (wasm-byte #x05)
+                   (wasm-integer (svref *wasm-dispatch-indices* (hir-block-id yes))) (wasm-byte #x0b)
+                   (wasm-byte #x21) (wasm-u32 2)
+                   (wasm-byte #x0c) (wasm-u32 *wasm-dispatch-depth*)))))))
+      ))
     (wasm-byte #x0b) (wasm-byte #x00) ; invalid program counter traps
     (wasm-byte #x0b) (wasm-byte #x00)
     (when targets
@@ -1406,7 +1498,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
               (progn (when (native-value-slot *wasm-scalar-groups* parameter) (wasm-call "native-primary"))
                      (wasm-set parameter))
               (wasm-byte #x1a)))
-        (wasm-integer (hir-block-id (hir-target-block target)))
+        (wasm-integer (svref *wasm-dispatch-indices* (hir-block-id (hir-target-block target))))
         (wasm-byte #x21) (wasm-u32 2)
         (wasm-byte #x0c) (wasm-u32 1) (wasm-byte #x0b))
       (wasm-byte #x08) (wasm-u32 0) ; propagate foreign transfers unchanged
@@ -1749,7 +1841,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-simple-vector-value-p native-list-value-p emit-native-vector-call emit-native-list-call
                    native-plan-inline-simple native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-call
-                   emit-native-cons-access native-fixed-arity emit-native-instruction emit-native-jump-value emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
+                   emit-native-cons-access native-fixed-arity emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    hir-capture hir-cell-for-binding
                    hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
                    hir-type-without-null hir-type-truth-premise hir-type-branch-guards
@@ -1757,16 +1849,16 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-inline-environment hir-function-result-type hir-inline-size hir-inline-candidate hir-inline-body hir-shadow-specials
                    compiler-source-policy
                    hir-bind-value hir-read-variable hir-write-variable hir-function-reference
-                   hir-small-membership hir-call-arguments hir-literal-apply-form hir-case-form hir-macro-environment hir-assert-form
+                   hir-small-membership hir-membership-branches hir-call-arguments hir-literal-apply-form hir-case-form hir-macro-environment hir-assert-form
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
                    hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir verify-hir-contents
                    native-inline-constants native-loop-literals native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-checked emit-native-module
-                   hir-body hir-close hir-choice hir-expand-local-macros hir-lambda
-                   hir-let-form hir-tagbody-form hir-setq-form hir-local-functions-form
+                   hir-body hir-close hir-expand-local-macros hir-lambda
+                   hir-tagbody-form hir-setq-form hir-local-functions-form
                    hir-multiple-value-bind-form hir-block-form hir-simple-restart-form
                    hir-restart-signal-form hir-symbol-iterate-form hir-while-form
-                   hir-multiple-value-call-form hir-return-from-form hir-values-form
-                   hir-application-form hir-recursive-form hir-form compile-to-hir compile-module-to-hir compile-native-module
+                   hir-multiple-value-call-form hir-return-from-form
+                   hir-literal-membership hir-application-form hir-recursive-form hir-form compile-to-hir compile-module-to-hir compile-native-module
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
                    native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-prune-module

@@ -29,6 +29,7 @@ try {
       '(2 3 127 5 111 2 64 3 64 4 64 5 11 11 11
         8 128 1 12 0 13 1 16 128 1 18 2 32 3 33 4 34 5
         65 64 65 192 0 65 128 128 128 128 120 65 255 255 255 255 7
+        66 64 66 192 0 66 128 128 128 128 120 66 255 255 255 255 7
         208 111 210 255 1 14 2 0 128 1 2
         31 64 4 0 1 2 1 3 4 2 5 3 6
         251 2 0 1 251 20 111 251 22 111 251 23 111
@@ -55,6 +56,14 @@ try {
       (and (null (compiler-primitive 38 bytes nil))
         (equalp (multiple-value-list (native-read-ops bytes))
           (multiple-value-list (native-read-ops-portable bytes))))))`);
+  // Wide i64 constants use the general reader; neither reader may truncate
+  // them to i32 when retained native bodies are inspected.
+  check(`(every (lambda (entry)
+    (let ((bytes (first entry)))
+      (and (null (compiler-primitive 38 bytes nil))
+        (= (native-op-argument (svref (native-read-ops bytes) 0)) (second entry)))))
+    (list (list #(0 66 128 128 128 128 128 128 128 128 128 127 11) -9223372036854775808)
+          (list #(0 66 255 255 255 255 255 255 255 255 255 0 11) 9223372036854775807)))`);
   // The direct simplifier must match the Lisp reference, including mutations
   // to removed instructions, modular arithmetic, traps and scope cleanup.
   check(`(labels ((same (ops bytes)
@@ -150,7 +159,7 @@ try {
                (*native-import-stack-effects* nil)
                (exceptions (oddp trial))
                (codes #(nil 0 2 3 4 5 8 11 12 13 14 15 16 18 26 31
-                        32 32 32 33 33 34 65 69 70 72 74 76 78
+                        32 32 32 33 33 34 65 66 69 70 72 74 76 78
                         83 85 87 89 113 124 125 126 167 172 208 209 210 251))
                (ops (make-array 300)))
           (dotimes (i (length ops))

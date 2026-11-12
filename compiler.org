@@ -558,7 +558,11 @@ together when this format changes.
 The native emitter imports only the runtime operations used by the module,
 keeps uncaptured variables in Wasm locals and omits closure declarations when
 there are no closures. Acyclic control flow uses nested Wasm blocks and forward
-branches without a dispatcher; cyclic graphs use BR_TABLE dispatch. Immutable
+branches without a dispatcher; cyclic graphs use BR_TABLE dispatch for backward
+edges while forward edges branch directly to the existing block labels or fall
+through to the next block. Only entry, backward and captured-exit targets occupy
+the dense dispatch table. Backward edges restore dynamic state before scheduling
+polls; forward transfers use the destination's environment restore. Immutable
 captures store values directly; captured mutable variables retain shared heap
 cells. Global calls remain indirect so redefinition continues to work in development.
 Native entries with a known fixed arity of at most four accept a private argument
@@ -628,7 +632,37 @@ copies are folded after coloring. Local numbers favor frequently accessed
 values; unused declarations disappear. Runtime imports are ordered by use count,
 and sufficiently large modules similarly order shared function bodies after
 deduplication, updating exports and closure references with their new indices.
+The linked runtime counts ordinary calls, tail calls and function references,
+including those from the native compiler, when assigning one-byte function
+indices. Snapshot accessors follow the runtime helpers so they do not displace
+those helpers from the short-index range. Compiler-free images omit the native
+optimizer kernels while retaining input validation and compiled-code loading.
+The bootstrap symbol-reference bank is selected from the forms actually shipped
+in each image, including the native compiler's literal graph after its source
+definitions have been removed.
+Spare bootstrap tags are selected by their encoded savings from frequent list
+prefixes and integer constants. Integers use zero-length entries in the existing
+prefix table, with a ZigZag payload; other entries identify a list's head symbol,
+namespace and length. The dictionary is private to each built image.
+Bootstrap strings use references to earlier encoded contents and reconstruct
+fresh strings. Each character-data, LOOP and CLOS stream owns its dictionary;
+reference indices are checked before use. LOOP and CLOS forms are decoded
+before evaluation so initialization cannot overwrite bytes still needed by a
+reference. Record macros register their host inline metadata when cached
+definitions load, and library expansion uses a local temporary-name counter.
+Fresh and cached host loads consequently produce identical source images.
 Inputs at their last use can share a local with the instruction's result.
+The emitter omits untargeted block labels before local optimization and relies
+on Wasm's zero initialization for an initially zero dispatcher local. Literal
+caches exclude immediate integers and instructions removed by inlining or
+liveness. Small integer literals can share an already imported integer-boxing
+helper rather than repeat their conversion instructions.
+CASE tests branch directly to the selected clause: a truth-only membership
+consumer needs no matching-tail literal or value-producing join. Actual MEMBER
+calls still return and share the appropriate tail of their literal list.
+INLINE EQL uses identity comparison when either operand is a literal outside
+NUMBER and CHARACTER. The ordinary numeric/character comparison and canonical
+definition checks remain in place.
 Adjacent stores and loads become =local.tee=, and copies of a local to itself
 are omitted. Single-use constants are loaded at their use; NIL needs no local
 even when used repeatedly. Literal lookup preserves the original object's

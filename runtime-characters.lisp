@@ -165,6 +165,7 @@
 
 (define-runtime-function $initialize-character-properties () ()
   (:locals ($names :nullable-object) ($entry :nullable-object))
+  #@(call $reset-library-strings)
   #@(global.set $cursor (i32.const 0))
   #@(global.set $limit (i32.const ,(length (character-property-bytes))))
   #@(call $reserve (global.get $limit))
@@ -173,6 +174,7 @@
   #@(global.set $character-alpha-ranges (ref.as_non_null
     (struct.get $obj $digits (ref.cast (ref $obj) (call $read-library-literal)))))
   #@(global.set $character-names (call $read-library-literal))
+  #@(call $reset-library-strings)
   #@(global.set $character-name-index (array.new_default $objects
     (i32.const ,(1+ (reduce #'max *character-names* :key #'car)))))
   #@(local.set $names (global.get $character-names))

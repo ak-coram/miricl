@@ -12,6 +12,10 @@ try {
       [['t t', '1\n'], ['t nil', '2\n'], ['nil t', '3\n'], ['nil nil', '4\n']]],
     ['exits', '(lambda (x y) (block done (if x (return-from done (values 1 2))) (if y (return-from done (values))) 3))', 380,
       [['t nil', '1\n2\n'], ['nil t', ''], ['nil nil', '3\n']]],
+    ['loop', '(lambda (n) (let ((a 1) (b 2)) (dotimes (i n) (if (evenp i) (incf a b) (incf b a))) (values a b)))', 650,
+      [['0', '1\n2\n'], ['6', '21\n34\n']]],
+    ['nested-loop', '(lambda (n) (let ((sum 0)) (dotimes (i n) (dotimes (j i) (incf sum j))) sum))', 630,
+      [['0', '0\n'], ['6', '20\n']]],
   ]) {
     vm.evaluate(`(multiple-value-bind (bytes literals)
       (miricl-compiler:emit-native-module (miricl-compiler:compile-to-hir '${source}))
@@ -38,6 +42,45 @@ try {
        (let ((a 1) (b 2))
          (dotimes (i n) (if (evenp i) (incf a b) (incf b a)))
          (values a b)))`, [['0', '1\n2\n'], ['6', '21\n34\n']]],
+    ['(lambda (&optional (x :default supplied)) (values x supplied))',
+      [['', ':DEFAULT\nNIL\n'], ['nil', 'NIL\nT\n'], ['17', '17\nT\n']]],
+    [`(lambda (flag)
+       (values (block done
+                 (if flag (return-from done 11) (return-from done 22))
+                 :unreachable)
+               :tail))`, [['t', '11\n:TAIL\n'], ['nil', '22\n:TAIL\n']]],
+    [`(lambda (n) (declare (type (signed-byte 32) n) (optimize (safety 0)))
+       (values (+ n -2147483648) (- n 2147483647)))`,
+      [['-2147483648', '-4294967296\n-4294967295\n'], ['0', '-2147483648\n-2147483647\n'],
+       ['2147483647', '-1\n0\n']]],
+    [`(lambda (n)
+       (declare (type (signed-byte 31) n) (optimize (safety 0)) (inline +))
+       (list (+ n 1) -1073741824 1073741823 -1073741825 1073741824))`,
+      [['0', '(1 -1073741824 1073741823 -1073741825 1073741824)\n']]],
+    [`(lambda (n flag)
+       (let ((answer 0))
+         (tagbody
+          start (when (zerop n) (go done))
+                (incf answer) (decf n) (go choose)
+          other (when (zerop n) (go done))
+                (incf answer 10) (decf n)
+          choose (if flag (go start) (go other))
+          done)
+         answer))`, [['0 t', '0\n'], ['5 t', '5\n'], ['5 nil', '41\n']]],
+    [`(lambda (n)
+       (let ((events nil) (*size-dynamic* :outer))
+         (declare (special *size-dynamic*))
+         (dotimes (i n)
+           (let ((*size-dynamic* i))
+             (declare (special *size-dynamic*))
+             (when (evenp i) (push *size-dynamic* events))))
+         (values (reverse events) *size-dynamic*)))`,
+      [['0', 'NIL\n:OUTER\n'], ['6', '(0 2 4)\n:OUTER\n']]],
+    [`(lambda (n)
+       (block done
+         (let ((escape (lambda (x) (return-from done (values x 99)))))
+           (dotimes (i n) (when (= i 3) (funcall escape i))))
+         (values n -1)))`, [['0', '0\n-1\n'], ['6', '3\n99\n']]],
     [`(lambda (flag)
        (let ((x 7))
          (block done
@@ -57,6 +100,22 @@ try {
         assert.equal(vm.evaluate(`(funcall *size-function* ${args})`).output, output,
           `${source}: ${args}, optimize ${optimize}`);
     }
+  }
+  // Public HIR need not place its entry block first. Rotating a cyclic CFG
+  // keeps IDs dense while requiring a nonzero initial dispatcher index.
+  for (const optimize of ['nil', 't']) {
+    vm.evaluate(`(let* ((miricl-compiler::*wasm-optimize* ${optimize})
+                       (unit (miricl-compiler:compile-to-hir
+                         '(lambda (n) (let ((sum 0)) (dotimes (i n) (incf sum i)) sum))))
+                       (function (first (miricl-compiler::hir-unit-functions unit)))
+                       (blocks (miricl-compiler::hir-function-blocks function)))
+      (setf (miricl-compiler::hir-function-blocks function) (append (cdr blocks) (list (car blocks))))
+      (loop for block in (miricl-compiler::hir-function-blocks function) for id from 0
+            do (setf (miricl-compiler::hir-block-id block) id))
+      (multiple-value-bind (bytes literals) (miricl-compiler:emit-native-module unit)
+        (defparameter *size-reordered* (miricl-compiler::compiler-primitive 17 bytes literals nil))))`);
+    assert.equal(vm.evaluate('(funcall *size-reordered* 0)').output, '0\n');
+    assert.equal(vm.evaluate('(funcall *size-reordered* 6)').output, '15\n');
   }
   const bindings = Array.from({length: 140}, (_, i) => `(v${i} (+ n ${i}))`).join(' ');
   // Removing a constant arm also removes its now-unused imports. The surviving

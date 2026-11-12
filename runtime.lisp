@@ -9,14 +9,17 @@
          (*clos-library-symbols* (if compiler *clos-library-symbols*
             (stable-sort (copy-list (union *clos-primitives* (runtime-library-symbols *clos-library*)))
                          #'string< :key #'symbol-name)))
-         (*runtime-library-symbol-codes* (if compiler *runtime-library-symbol-codes*
+         (*compile-evaluations-default* (and *native-compiler-image* (not wasi) t))
+         (libraries (list (list *loop-library* *loop-library-symbols* 25 *loop-library-symbols*)
+                          (list (compiler-image-library-forms) *clos-library-symbols* 24 *loop-library-symbols*)))
+         (*runtime-library-prefixes* (if *runtime-library-optimize-prefixes*
+                                        (runtime-library-prefixes libraries) *runtime-library-prefixes*))
+         (*runtime-library-symbol-codes*
             (runtime-library-symbol-codes
-              (list (list *loop-library* *loop-library-symbols* 25)
-                    (list *clos-library* *clos-library-symbols* 24 *loop-library-symbols*)))))
+              libraries))
          (*core-types* nil)
          (*core-roots* nil)
          (*wat-declaration-hook* (unless wasi #'core-wat-declaration))
-         (*compile-evaluations-default* (and *native-compiler-image* (not wasi) t))
         (*runtime-function-definitions*
           (make-array 0 :adjustable t :fill-pointer 0))
         (*runtime-output-literals* (make-hash-table :test 'equal))
@@ -99,10 +102,12 @@
       ,@(when wasi (list (wasi-repl-wat)))
       ,($evaluate)
       ,@(when wasi (list (thread-native-wat)))
-      ,@(unless wasi (list (core-image-runtime-wat)))
       (data $output-literal-data ,(runtime-library-data *runtime-output-bytes*))
-      ;; Use the same layout in both images, leaving room for the two raw
-      ;; function declarations and the five optional WASI imports.
+      (global $output-literal-length i32 (i32.const ,(length *runtime-output-bytes*)))
+      ;; Put common runtime functions before the snapshot accessors, so the
+      ;; latter do not consume the short indices reserved by this layout.
       ,(runtime-function-layout *runtime-function-definitions*
-                                :reserved-functions 7)
+                                :reserved-functions (if wasi 7 2)
+                                :references (first *native-compiler-image*))
+      ,@(unless wasi (list (core-image-runtime-wat)))
       ,(wat-fragment (if *native-compiler-image* (first *native-compiler-image*) "")))))

@@ -37,6 +37,10 @@
 (defvar *native-compiler-image* nil)
 (defvar *compile-evaluations-default* nil)
 (defun read-clos-library (&optional (compiler t))
+  ;; Record-macro expansion creates fresh lexical symbols. Keep their names
+  ;; compact and independent of how much ASDF compiled before loading us.
+  ;; GENSYM still creates distinct symbols throughout this library read.
+  (let ((*gensym-counter* 0))
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
                                   "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-types.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
     unless (if compiler (equal file "interpreter-library.lisp")
@@ -90,7 +94,7 @@
                  (shadowing-import ',(remove-if-not
                    (lambda (symbol) (eq (symbol-package symbol) package)) symbols) package)
                  (export ',exports package))) forms)))
-        forms))))
+        forms)))))
 (defparameter *clos-library* (read-clos-library))
 (defparameter *interpreter-library* (read-clos-library nil))
 (defparameter *clos-library-symbols*
@@ -649,11 +653,36 @@
   #@(call $int64 (i64.xor (i64.shr_u (local.get $bits) (i64.const 1))
     (i64.sub (i64.const 0) (i64.and (local.get $bits) (i64.const 1))))))
 
+(define-runtime-function $reset-library-strings () ()
+  #@(global.set $library-string-count (i32.const 0))
+  #@(global.set $library-string-offsets (array.new_default $digits (i32.const 0))))
+
+(define-runtime-function $read-library-string () (:object)
+  (:locals ($n i32) ($i i32) ($digits :digits))
+  #@(local.set $n (call $read-library-unsigned))
+  #@(local.set $digits (array.new_default $digits (local.get $n)))
+  #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+    (array.set $digits (local.get $digits) (local.get $i) (call $read-library-unsigned))
+    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
+  #@(call $text (local.get $digits)))
+
 (define-runtime-function $read-library-literal () (:nullable-object)
-  (:locals ($tag i32) ($n i32) ($i i32) ($dotted i32) ($prefix i32) ($digits :digits)
+  (:locals ($tag i32) ($n i32) ($dotted i32) ($prefix i32)
+           ($position i32) ($offsets :digits)
            ($a :nullable-object) ($head :nullable-object) ($tail :nullable-object))
   #@(local.set $tag (call $read-library-byte))
   #@(if (i32.eqz (local.get $tag)) (then (return (ref.null eq))))
+  #@(if (i32.eq (local.get $tag) (i32.const 127))
+    (then
+      (local.set $n (call $read-library-unsigned))
+      ,(wat-fail-when #@(i32.ge_u (local.get $n) (global.get $library-string-count)) :malformed-form)
+      ;; Re-read the earlier bytes, rather than sharing a mutable string object.
+      ;; Library evaluation starts only after this entire byte stream is read.
+      (local.set $position (global.get $cursor))
+      (global.set $cursor (array.get $digits (global.get $library-string-offsets) (local.get $n)))
+      (local.set $a (call $read-library-string))
+      (global.set $cursor (local.get $position))
+      (return (local.get $a))))
   #@(if (i32.ge_u (local.get $tag) (i32.const 128))
     (then (return (call $library-symbol
       (array.get $digits (global.get $library-prefixes) (local.get $tag))))))
@@ -672,6 +701,13 @@
   #@(if (i32.or (i32.lt_u (local.get $tag) (i32.const 32)) (i32.ge_u (local.get $tag) (i32.const 64)))
     (then (local.set $prefix (array.get $digits (global.get $library-prefixes)
       (local.get $tag)))))
+  ;; Zero-length entries use the remaining bits for a ZigZag integer plus one.
+  #@(if (i32.and (i32.ne (local.get $prefix) (i32.const 0))
+                (i32.eqz (i32.and (local.get $prefix) (i32.const 7))))
+    (then
+      (local.set $n (i32.sub (i32.shr_u (local.get $prefix) (i32.const 3)) (i32.const 1)))
+      (return (call $int (i32.xor (i32.shr_u (local.get $n) (i32.const 1))
+        (i32.sub (i32.const 0) (i32.and (local.get $n) (i32.const 1))))))))
   #@(if (i32.or (local.get $prefix)
         (i32.or (i32.eq (local.get $tag) (i32.const 7))
                 (i32.ge_u (local.get $tag) (i32.const 32))))
@@ -701,15 +737,20 @@
       (if (local.get $dotted)
         (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (call $read-library-literal))))
       (return (local.get $head))))
-  #@(local.set $n (call $read-library-unsigned))
-  #@(local.set $digits (array.new_default $digits (local.get $n)))
-  #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-    (array.set $digits (local.get $digits) (local.get $i) (call $read-library-unsigned))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(call $text (local.get $digits)))
+  #@(if (i32.eq (global.get $library-string-count) (array.len (global.get $library-string-offsets)))
+    (then
+      (local.set $offsets (array.new_default $digits
+        (i32.add (i32.mul (global.get $library-string-count) (i32.const 2)) (i32.const 16))))
+      (array.copy $digits $digits (local.get $offsets) (i32.const 0)
+        (global.get $library-string-offsets) (i32.const 0) (global.get $library-string-count))
+      (global.set $library-string-offsets (local.get $offsets))))
+  #@(array.set $digits (global.get $library-string-offsets) (global.get $library-string-count) (global.get $cursor))
+  #@(global.set $library-string-count (i32.add (global.get $library-string-count) (i32.const 1)))
+  #@(return_call $read-library-string))
 
 (define-runtime-function $initialize-clos () ()
   (:locals ($names (ref $bootstrap-bytes)) ($forms :nullable-object) ($scan :nullable-object))
+  #@(call $reset-library-strings)
   #@(local.set $names (array.new_data $bootstrap-bytes $clos-name-data
     (i32.const 0) (i32.const ,(length (bootstrap-private-symbol-bytes *clos-library-symbols* *clos-primitives*)))))
   #@(data.drop $clos-name-data)
@@ -724,6 +765,7 @@
   #@(block $done (loop $next
     (br_if $done (i32.ge_u (global.get $cursor) (global.get $limit)))
     (local.set $forms (call $cons (call $read-library-literal) (local.get $forms))) (br $next)))
+  #@(call $reset-library-strings)
   #@(local.set $scan (call $reverse-onto (local.get $forms) (ref.null eq) (i32.const 0)))
   (wat-list-loop ($scan)
     #@(drop (call $eval (call $car (local.get $scan)) (ref.null eq)))
@@ -733,6 +775,8 @@
   #@(call $clear-values))
 
 (define-runtime-section clos-runtime-wat ()
+  #@(global $library-string-offsets (mut (ref $digits)) (array.new_default $digits (i32.const 0)))
+  #@(global $library-string-count (mut i32) (i32.const 0))
   #@(data $clos-name-data ,(runtime-library-data (bootstrap-private-symbol-bytes *clos-library-symbols* *clos-primitives*)))
   #@(data $clos-library-data ,(clos-library-data))
   #@(global $library-prefixes (ref $digits) (array.new_fixed $digits 256
@@ -746,4 +790,4 @@
   ($direct-function) ($direct-function-call) ($structure-sequence-element) ($typed-structure-p)
   ($structure-access) ($print-structure-default) ($structure-copy) ($structure-make)
   ($named-class) ($set-named-class) ($clos-primitive) ($clos-find-class) ($class-subclassp) ($clos-typep)
-  ($read-library-byte) ($read-library-unsigned) ($read-library-integer) ($library-symbol) ($read-library-literal) ($initialize-clos))
+  ($read-library-byte) ($read-library-unsigned) ($read-library-integer) ($reset-library-strings) ($read-library-string) ($library-symbol) ($read-library-literal) ($initialize-clos))

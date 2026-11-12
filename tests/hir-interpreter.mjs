@@ -84,6 +84,12 @@ try {
     ['(lambda (x &optional (y (+ x 2)) &aux (z (+ y 3))) (values x y z))', '4'],
     ['(lambda (&key (x 2) (y 3 yp)) (values x y yp))', ':y 9'],
     ['(lambda () (values))', ''],
+    ["(lambda (x) (if (member x '(1 2)) (values :match x) (values :missing x)))", '2'],
+    ["(lambda (x) (if (member (progn (incf x) x) '()) :bad (values :empty x)))", '2'],
+    ['(lambda (x) (case x (nil :unreachable) ((nil) (values :nil 2)) (1 (values)) ((2 3) :group) (otherwise (values :default 4))))', 'nil'],
+    ['(lambda (x) (case x (1 (values)) ((2 3) (values :group 9))))', '1'],
+    ['(lambda (x) (case x (1 :one) ((2 3) (values :group 9))))', '3'],
+    ['(lambda (x) (case x (1 :one) ((2 3) :group)))', '9'],
     ['(lambda (fn) (+ 1 (funcall fn)))', "#'(lambda () (values 7 :extra))"],
     ...Array.from({length: 6}, (_, arity) => {
       const names = Array.from({length: arity}, (_, i) => `x${i}`);

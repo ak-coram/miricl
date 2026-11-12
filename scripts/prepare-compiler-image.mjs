@@ -90,6 +90,7 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
   const blockType = () => {
     const type = byte();
     if (type === 0x40) return '';
+    if (type === 0x7f) return ' (result i32)';
     if (type === 0x6f) return ' (result externref)';
     throw new Error(`Unexpected native block type ${type}`);
   };
@@ -142,6 +143,7 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
             case 0x21: instructions.push(`local.set ${unsigned()}`); break;
             case 0x22: instructions.push(`local.tee ${unsigned()}`); break;
             case 0x41: instructions.push(`i32.const ${signed()}`); break;
+            case 0x42: instructions.push(`i64.const ${signed()}`); break;
             case 0x45: instructions.push('i32.eqz'); break;
             case 0x46: instructions.push('i32.eq'); break;
             case 0x48: instructions.push('i32.lt_s'); break;

@@ -10,6 +10,7 @@
   (let* ((package (symbol-package name))
          (predicate (intern (concatenate 'string (symbol-name name) "-P") package))
          (constructor (intern (concatenate 'string "MAKE-" (symbol-name name) "-RECORD") package))
+         (inline-macros (list constructor))
          (forms (list (list* 'defstruct (list name '(:type vector) :named) slots))))
     ;; Hot compiler paths know their record layout. Expand positional creation
     ;; to VECTOR, avoiding interpreted DEFSTRUCT construction and keyword/slot
@@ -24,8 +25,10 @@
       (let ((accessor (intern (concatenate 'string (symbol-name name) "-"
                                (symbol-name (if (consp slot) (car slot) slot))) package)))
         (setf (get accessor 'miricl::runtime-inline-macro) t)
+        (push accessor inline-macros)
         (push (list 'defmacro accessor '(object)
                 (list 'list ''svref (list 'list ''the ''simple-vector 'object) index)) forms)))
+    (push (intern (concatenate 'string "%" (symbol-name predicate)) package) inline-macros)
     (setf (get (intern (concatenate 'string "%" (symbol-name predicate)) package)
                'miricl::runtime-inline-macro) t)
     (push (list 'defmacro (intern (concatenate 'string "%" (symbol-name predicate)) package) '(object)
@@ -35,6 +38,11 @@
                   (list 'list ''>= (list 'list ''length 'record) (1+ (length slots)))
                   (list 'list ''eq (list 'list ''svref (list 'list ''the ''simple-vector 'record) 0)
                     (list 'list ''quote (list 'quote name))))))) forms)
+    ;; Macroexpansion side effects alone disappear when loading a cached host
+    ;; FASL. Register the same metadata when the generated definitions load.
+    (push (list 'eval-when '(:load-toplevel :execute)
+            (list 'dolist (list 'macro (list 'quote inline-macros))
+              (list 'setf (list 'get 'macro (list 'quote 'miricl::runtime-inline-macro)) t))) forms)
     (cons 'progn (nreverse forms))))
 
 (defstruct hir-unit functions)
@@ -411,17 +419,6 @@
                    (hir-function-captures child))))
     (hir-emit :closure captures :single (list child) :allocation)))
 
-(defun hir-choice (test yes-form no-form variables functions targets)
-  (declare (type simple-vector test) (type list variables functions targets))
-  (let ((yes (hir-new-block)) (no (hir-new-block)) (join (hir-new-block :multiple)))
-    (hir-terminate :branch (list test) (list yes no))
-    (loop for block in (list yes no) for form in (list yes-form no-form) do
-      (setq *hir-block* block)
-      (let ((value (catch 'hir-path-ended (hir-form form variables functions targets))))
-        (unless (hir-block-terminator *hir-block*)
-          (hir-terminate :jump (list (hir-multiple value)) (list join)))))
-    (setq *hir-block* join) (first (hir-block-parameters join))))
-
 (defun hir-small-membership (item elements)
   (declare (type simple-vector item) (type list elements))
   ;; The literal tails are shared with the original quoted list. MEMBER must
@@ -437,6 +434,23 @@
         (setq *hir-block* no)))
     (hir-terminate :jump (list (hir-multiple (hir-constant nil))) (list join))
     (setq *hir-block* join) (first (hir-block-parameters join))))
+
+(defun hir-membership-branches (item elements)
+  (declare (type simple-vector item) (type list elements))
+  ;; A truth-only consumer needs no matching list tail or value-producing
+  ;; joins. Keep first-match order and one EQL lookup for this key group.
+  (let ((eql (and elements (hir-function-reference 'eql nil))) (branches nil))
+    (dolist (element elements)
+      (let ((test (hir-single (hir-emit :call
+                    (list *hir-dynamic* eql item (hir-constant element)) :multiple nil :call)))
+            (next (hir-new-block)))
+        ;; Allocate the shared true block after the test chain, so its edges
+        ;; stay forward. Complete these private edges before exposing the HIR.
+        (push (hir-terminate :branch (list test) (list nil next)) branches)
+        (setq *hir-block* next)))
+    (let ((yes (hir-new-block)))
+      (dolist (branch branches) (setf (first (hir-instruction-attributes branch)) yes))
+      (values yes *hir-block*))))
 
 (defun hir-call-arguments (function arguments variables functions targets)
   (declare (type simple-vector function) (type list arguments variables functions targets))
@@ -488,12 +502,15 @@
           (if typed (return) (error "CASE default must be last.")))
         (unless otherwise
           (dolist (item keys) (push item expected))
-          (let ((test (hir-single (if typed
-                         (hir-emit :call (list *hir-dynamic* (hir-function-reference 'typep nil)
-                                              key (hir-constant head)) :multiple nil :call)
-                         (hir-small-membership key keys))))
-                (yes (hir-new-block)) (no (hir-new-block)))
-            (hir-terminate :branch (list test) (list yes no))
+          (multiple-value-bind (yes no)
+              (if typed
+                  (let ((test (hir-single (hir-emit :call
+                                (list *hir-dynamic* (hir-function-reference 'typep nil)
+                                      key (hir-constant head)) :multiple nil :call)))
+                        (yes (hir-new-block)) (no (hir-new-block)))
+                    (hir-terminate :branch (list test) (list yes no))
+                    (values yes no))
+                  (hir-membership-branches key keys))
             (setq *hir-block* yes)
             (let ((value (catch 'hir-path-ended (hir-body (cdr clause) variables functions targets))))
               (unless (hir-block-terminator *hir-block*)
@@ -747,33 +764,6 @@
         (list* *hir-dynamic* function no-error (or payload (hir-constant nil)) (nreverse bindings))
         :multiple (list mode) :call))))
 
-;; Keep the recursive dispatcher's frame small. Each lowering case otherwise
-;; contributes locals to every HIR-FORM visit, even in an unrelated branch.
-(defun hir-let-form (form variables functions targets)
-  (multiple-value-bind (body specials types policy) (hir-declarations (cddr form))
-    (let ((*hir-dynamic* *hir-dynamic*) (*hir-types* *hir-types*)
-          (entry *hir-dynamic*) (local variables) (pending nil))
-      ;; LET evaluates every initializer before installing bindings.
-      (dolist (binding (second form))
-        (let ((name (if (consp binding) (first binding) binding))
-              (value (hir-single (hir-form (if (consp binding) (second binding) nil)
-                                  (if (eq (car form) 'let*) local variables) functions targets))))
-          (if (eq (car form) 'let*)
-              (progn (setq local (hir-bind-value name value local specials))
-                (when types (setq *hir-types* (hir-bound-type-environment name local types))))
-              (push (cons name value) pending))))
-      (dolist (binding (nreverse pending))
-        (setq local (hir-bind-value (car binding) (cdr binding) local specials)))
-      (setq local (hir-shadow-specials local specials))
-      (let ((value (let ((*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*))
-                        (*hir-safety-level* (native-safety-level (cddr form) *hir-safety-level*))
-                        (*hir-types* (hir-type-environment local types))
-                        (*hir-inline-policy* (hir-inline-environment functions policy)))
-                     (hir-body body local functions targets))))
-        (when (and (not (eq entry *hir-dynamic*)) (not (hir-block-terminator *hir-block*)))
-          (hir-emit :environment-restore (list entry) nil nil :control))
-        value))))
-
 (defun hir-tagbody-form (form variables functions targets)
   (let ((local targets) (tags nil) (exit (hir-new-block)) (*hir-dynamic* *hir-dynamic*))
     ;; Classify tags before macro expansion. An atomic macro expansion
@@ -971,14 +961,18 @@
         (when local (list (hir-target-block target))))
       (throw 'hir-path-ended nil))))
 
-(defun hir-values-form (form variables functions targets)
-  (let ((function (and (assoc 'values functions) (hir-function-reference 'values functions)))
-        (arguments nil))
-    (dolist (argument (cdr form))
-      (push (hir-single (hir-form argument variables functions targets)) arguments))
-    (if function
-        (hir-emit :call (list* *hir-dynamic* function (nreverse arguments)) :multiple nil :call)
-        (hir-emit :values (nreverse arguments) :multiple))))
+(defun hir-literal-membership (form functions)
+  (declare (type list functions))
+  (when (and (consp form) (eq (car form) 'member) (< *hir-debug-level* 2)
+             (not (assoc 'member functions)) (not (macro-function 'member)))
+    ;; IF may recognize this call before its normal lowering task. Validate
+    ;; syntax before inspecting it; quoted data can still be dotted or cyclic.
+    (compiler-source-form form)
+    (when (and (= (length form) 3) (consp (third form)) (eq (car (third form)) 'quote))
+      (compiler-source-form (third form))
+      (let* ((elements (second (third form)))
+             (size (and (listp elements) (ignore-errors (list-length elements)))))
+        (when (and size (<= size 8)) (cons (second form) elements))))))
 
 (defun hir-application-form (form variables functions targets)
   (when (and (symbolp (car form)) (not (assoc (car form) functions :test #'equal)))
@@ -991,15 +985,10 @@
                    miricl::%%numeric-collect miricl::%%arithmetic-step miricl::%%symbol-iterate
                    miricl::quasiquote miricl::unquote miricl::unquote-splicing))))
     (error "HIR lowering is not implemented for ~S." (car form)))
-  (when (and (eq (car form) 'member) (not (assoc 'member functions)) (= (length form) 3)
-             (consp (third form)) (eq (car (third form)) 'quote))
-    (let* ((elements (second (third form)))
-           (size (and (listp elements) (ignore-errors (list-length elements)))))
-      ;; Bound code growth. Larger lists and keyword/test variants
-      ;; retain the ordinary library call.
-      (when (and size (<= size 8))
-        (return-from hir-application-form
-          (hir-small-membership (hir-single (hir-form (second form) variables functions targets)) elements)))))
+  (let ((membership (hir-literal-membership form functions)))
+    (when membership
+      (return-from hir-application-form
+        (hir-small-membership (hir-single (hir-form (car membership) variables functions targets)) (cdr membership)))))
   (hir-call-arguments
     (if (symbolp (car form)) (hir-function-reference (car form) functions)
         (hir-single (hir-form (car form) variables functions targets)))
@@ -1009,7 +998,7 @@
   ;; Lower expression trees with heap continuations. Each task carries the
   ;; source and lexical dynamic context in which its instructions are emitted;
   ;; *HIR-BLOCK* alone follows control flow between tasks. Branch boundaries
-  ;; catch ended paths, just as HIR-CHOICE does in the recursive frontend.
+  ;; catch ended paths before lowering the next arm or continuation.
   (let ((work nil) (result nil) (*hir-safety-level* *hir-safety-level*))
     (declare (type list variables functions targets work)
              (type (integer 0 3) *hir-safety-level*))
@@ -1097,10 +1086,15 @@
                                          (hir-read-variable form variables) (hir-constant form)))))
                    ((eq (car form) 'if)
                     (unless (<= 3 (length form) 4) (error "Malformed IF."))
+                    (let ((membership (hir-literal-membership (second form) functions)))
                     (defer
                       (lambda ()
-                        (let ((yes (hir-new-block)) (no (hir-new-block)) (join (hir-new-block :multiple)))
-                          (hir-terminate :branch (list (hir-single result)) (list yes no))
+                        (multiple-value-bind (yes no)
+                            (if membership (hir-membership-branches (hir-single result) (cdr membership))
+                                (let ((yes (hir-new-block)) (no (hir-new-block)))
+                                  (hir-terminate :branch (list (hir-single result)) (list yes no))
+                                  (values yes no)))
+                         (let ((join (hir-new-block :multiple)))
                           (setq *hir-block* yes)
                           (defer
                             (lambda ()
@@ -1113,8 +1107,8 @@
                                     (hir-terminate :jump (list (hir-multiple result)) (list join)))
                                   (setq *hir-block* join result (first (hir-block-parameters join)))) t)
                               (lower (fourth form) variables functions targets)) t)
-                          (lower (third form) variables functions targets))))
-                    (lower (second form) variables functions targets))
+                          (lower (third form) variables functions targets)))))
+                    (lower (if membership (car membership) (second form)) variables functions targets)))
                    ((eq (car form) 'progn) (body (cdr form) variables functions targets))
                    ((eq (car form) 'locally)
                     (let ((*hir-debug-level* (native-debug-level (cdr form) *hir-debug-level*))
@@ -1202,12 +1196,7 @@
       (setf (hir-function-debug-level *hir-function*)
             (max *hir-debug-level* (hir-function-debug-level *hir-function*))))
     (cond
-      ((and (symbolp form) form (not (eq form t)) (not (keywordp form)))
-       (unless (assoc form variables)
-         (multiple-value-bind (expansion expanded) (macroexpand-1 form)
-           (when expanded (return-from hir-recursive-form (hir-form expansion variables functions targets)))))
-       (hir-read-variable form variables))
-      ((atom form) (hir-constant form))
+      ((atom form) (hir-form form variables functions targets))
       (t
        (case (car form)
          (quote (unless (= (length form) 2) (error "Malformed QUOTE.")) (hir-constant (second form)))
@@ -1223,7 +1212,10 @@
                                 (and (symbolp value) (symbol-package value)))))
               (setf (gethash value *hir-load-time-recipes*) (second form)))
             (hir-constant value)))
-         (progn (hir-body (cdr form) variables functions targets))
+         ;; HIR-FORM owns these common forms. Normal lowering handles them
+         ;; before entering this fallback; retain one implementation here too.
+         ((if progn the let let* values funcall apply locally)
+          (hir-form form variables functions targets))
          ((catch handler-bind handler-case unwind-protect restart-bind restart-case with-condition-restarts progv)
           (hir-control-form form variables functions targets))
          (miricl::%%condition-form
@@ -1257,10 +1249,6 @@
           (hir-form (hir-expand-parallel-places form variables functions) variables functions targets))
          (miricl::%%arithmetic-step
           (hir-form (hir-expand-arithmetic-step form) variables functions targets))
-         (if
-          (unless (<= 3 (length form) 4) (error "Malformed IF."))
-          (hir-choice (hir-single (hir-form (second form) variables functions targets))
-            (third form) (fourth form) variables functions targets))
          ((case ecase typecase etypecase)
           (if (assoc (car form) functions)
               (hir-call-arguments (hir-function-reference (car form) functions) (cdr form) variables functions targets)
@@ -1270,12 +1258,6 @@
           (let ((expanded (cons (nth (second form) '(case typecase ecase etypecase ccase ctypecase)) (cddr form))))
             (hir-form (if (< (second form) 4) expanded
                           (hir-correctable-place-form expanded variables functions)) variables functions targets)))
-         (the
-          (unless (= (length form) 3) (error "Malformed THE."))
-          (let ((value (hir-form (third form) variables functions targets)))
-            ;; THE preserves the entire value group, including zero values.
-            ;; Its declaration is an optimization fact, not a runtime TYPEP call.
-            (setf (hir-value-type value) (hir-intersect-types (hir-value-type value) (second form))) value))
          (eval-when
           (if (intersection (second form) '(:execute eval))
               (hir-body (cddr form) variables functions targets) (hir-constant nil)))
@@ -1301,7 +1283,6 @@
                 (hir-terminate :block-return
                   (list *hir-dynamic* (hir-capture target :dynamic) (hir-multiple (hir-constant nil))) nil))
             (throw 'hir-path-ended nil)))
-         ((let let*) (hir-let-form form variables functions targets))
          (setq (hir-setq-form form variables functions targets))
          (function
           (unless (= (length form) 2) (error "Malformed FUNCTION."))
@@ -1326,30 +1307,11 @@
           (hir-emit :checked-argument
             (list (hir-single (hir-form (second form) variables functions targets)))
             :single (list (third form)) :read))
-         (apply
-          (let ((expanded (hir-literal-apply-form form functions)))
-            (if expanded (hir-form expanded variables functions targets)
-                (hir-call-arguments (hir-function-reference 'apply functions) (cdr form) variables functions targets))))
-         (funcall
-          (when (null (cdr form)) (error "FUNCALL requires a function."))
-          (hir-call-arguments
-            (if (assoc 'funcall functions) (hir-function-reference 'funcall functions)
-                (hir-single (hir-form (second form) variables functions targets)))
-            (if (assoc 'funcall functions) (cdr form) (cddr form)) variables functions targets))
-         (values (hir-values-form form variables functions targets))
          (multiple-value-prog1
           (let ((value (hir-multiple (hir-form (second form) variables functions targets))))
             (hir-body (cddr form) variables functions targets) value))
          (block (hir-block-form form variables functions targets))
          (return-from (hir-return-from-form form variables functions targets))
-         (locally
-          (let ((*hir-debug-level* (native-debug-level (cdr form) *hir-debug-level*))
-                (*hir-safety-level* (native-safety-level (cdr form) *hir-safety-level*)))
-            (multiple-value-bind (body specials types policy) (hir-declarations (cdr form))
-              (let* ((variables (hir-shadow-specials variables specials))
-                     (*hir-types* (hir-type-environment variables types))
-                     (*hir-inline-policy* (hir-inline-environment functions policy)))
-                (hir-body body variables functions targets)))))
          (otherwise (hir-application-form form variables functions targets)))))))
 
 (defun hir-lambda (form parent variables functions targets name &optional implicit-block)
@@ -1768,7 +1730,8 @@ global definitions. Internal calls refer to this group's lexical definitions."
         (setf (aref values (hir-value-id value)) value) (incf count))
       (unless (= count (length values)) (error "HIR value count does not match its values."))
       (dolist (block blocks)
-        (unless (= (hir-block-id block) id) (error "HIR block IDs must be dense and ordered."))
+        (unless (= (hir-block-id block) id)
+          (compiler-input-fail "HIR block ID" block "block IDs must be dense and ordered"))
         (incf id) (setf (gethash block index) t (hir-block-predecessors block) nil))
       (dolist (block blocks)
         (unless (hir-block-terminator block) (error "Unterminated HIR block."))

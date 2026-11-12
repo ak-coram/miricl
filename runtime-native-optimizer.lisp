@@ -88,9 +88,10 @@
       (local.set $position (i32.add (local.get $position) (i32.const 1)))
       (local.set $argument (ref.null eq))
       (block $decoded
-        (if ,(wat-native-op-member '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x41 #xd0 #xd2))
+        (if ,(wat-native-op-member '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x41 #x42 #xd0 #xd2))
           (then
-            ,(wat-native-op-operand '(i32.eq (local.get $code) (i32.const 65)))
+            ,(wat-native-op-operand '(i32.or (i32.eq (local.get $code) (i32.const 65))
+                                           (i32.eq (local.get $code) (i32.const 66))))
             (local.set $argument (call $int64 (local.get $value))) (br $decoded)))
         (if (i32.eq (local.get $code) (i32.const 14))
           (then
@@ -246,7 +247,7 @@
         (then (array.set $digits (local.get $epochs) (local.get $local) (i32.const 0))))
       (local.set $consumed (i32.const 0)) (local.set $produced (i32.const 0))
       (block $effect-done
-        (if ,(wat-native-op-member '(#x20 #x41 #xd0 #xd2))
+        (if ,(wat-native-op-member '(#x20 #x41 #x42 #xd0 #xd2))
           (then (local.set $produced (i32.const 1)) (br $effect-done)))
         (if ,(wat-native-op-member '(#x21 #x1a))
           (then (local.set $consumed (i32.const 1)) (br $effect-done)))
@@ -673,6 +674,9 @@
     (i32.or (i32.shl (local.get $clean) (i32.const 1)) (i32.shl (local.get $void) (i32.const 2))))))
 
 (define-runtime-section native-optimizer-runtime-wat ()
-  ($native-op-operand) ($native-read-ops) ($native-stackify-ops) ($compiler-list-length)
-  ($native-op-liveness) ($native-simplify-code) ($native-simplify-argument)
-  ($native-fold-i32) ($native-simplify-matches) ($native-simplify-ops))
+  (if *include-compiler*
+      (runtime-wat-sequence
+        ($native-op-operand) ($native-read-ops) ($native-stackify-ops) ($compiler-list-length)
+        ($native-op-liveness) ($native-simplify-code) ($native-simplify-argument)
+        ($native-fold-i32) ($native-simplify-matches) ($native-simplify-ops))
+      ($compiler-list-length)))

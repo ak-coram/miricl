@@ -32,6 +32,27 @@ try {
             (hir-block-instructions block))) (hir-function-blocks function)))
         (hir-unit-functions *safety-unit*)))`);
   }
+  // INLINE permits capturing a definition; it does not lower SAFETY or make
+  // an out-of-bounds vector access eligible for an unchecked Wasm operation.
+  for (const safety of [1, 2, 3]) {
+    const read = await compile(`(lambda (v i)
+      (declare (inline svref) (optimize (safety ${safety}))
+               (type simple-vector v) (type (signed-byte 30) i)) (list (svref v i)))`);
+    assert.ok(!read.includes('native-vector-ref-inline'));
+    check(`(and (equal (funcall *safety-function* #(42) 0) '(42))
+      (every (lambda (i) (handler-case (progn (funcall *safety-function* #(42) i) nil)
+        (type-error (condition) (= (type-error-datum condition) i)))) '(-1 1))
+      (equal (funcall *safety-function* #(43) 0) '(43)))`);
+    const write = await compile(`(lambda (v i value)
+      (declare (inline (setf svref)) (optimize (safety ${safety}))
+               (type simple-vector v) (type (signed-byte 30) i)) (list (setf (svref v i) value)))`);
+    assert.ok(!write.includes('native-vector-set-inline'));
+    check(`(let ((v (vector 17)))
+      (and (equal (funcall *safety-function* v 0 42) '(42))
+        (every (lambda (i) (handler-case (progn (funcall *safety-function* v i 99) nil)
+          (type-error (condition) (= (type-error-datum condition) i)))) '(-1 1))
+        (= (svref v 0) 42)))`);
+  }
   for (const source of [
     `(lambda (v i) (declare (type simple-vector v) (type (signed-byte 30) i))
        (list (locally (declare (optimize (safety 0))) (svref v i)) (svref v i)))`,

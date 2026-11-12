@@ -38,7 +38,7 @@
              (wat-fragment ""))
       definition))
 
-(defun runtime-function-layout (definitions &key (reserved-functions 0))
+(defun runtime-function-layout (definitions &key (reserved-functions 0) references)
   "Give frequently referenced functions short binary indices.
 Only declaration order changes: all names, signatures, and bodies are retained.
 Keep source order within each index range to preserve compression locality."
@@ -46,16 +46,23 @@ Keep source order within each index range to preserve compression locality."
     (labels ((count-calls (text)
                ;; This is a layout heuristic, not a WAT transformation. Even a
                ;; call-like string or comment can only affect the ordering.
-               (loop with marker = "(call " with start = 0
-                     for call = (search marker text :start2 start) while call do
-                 (let* ((name-start (+ call (length marker)))
-                        (end (or (position-if (lambda (char) (find char '(#\Space #\))))
-                                             text :start name-start)
-                                 (length text))))
-                   (incf (gethash (subseq text name-start end) counts 0))
-                   (setf start end)))))
+               ;; Count folded runtime WAT and the flat linked compiler WAT,
+               ;; including tail calls and function references.
+               (dolist (marker '("call " "return_call " "ref.func "))
+                 (loop with start = 0
+                       for call = (search marker text :start2 start) while call do
+                   (let* ((name-start (+ call (length marker)))
+                          (end (or (position-if
+                                     (lambda (char) (find char '(#\Space #\Tab #\Newline #\Return #\))))
+                                     text :start name-start)
+                                   (length text))))
+                     (when (or (zerop call)
+                               (find (char text (1- call)) '(#\( #\Space #\Tab #\Newline #\Return)))
+                       (incf (gethash (subseq text name-start end) counts 0)))
+                     (setf start end))))))
       (loop for (name . definition) across definitions do
-        (count-calls (wat-fragment-text definition))))
+        (count-calls (wat-fragment-text definition)))
+      (when references (count-calls references)))
     (let* ((ranked (stable-sort (copy-seq definitions) #'>
                      :key (lambda (entry) (gethash (wat-string (car entry)) counts 0))))
            (short (subseq ranked 0 (min (max 0 (- 128 reserved-functions)) (length ranked)))))
@@ -100,12 +107,26 @@ of converting them to the ordinary top-level host trap."
                       #@(call $trap) #@(unreachable))
                     `(runtime-wat-sequence ,@body)))))))))
 
-(defun wat-text-literal (string)
-  `(call $text (array.new_fixed $digits ,(length string)
-                 ,@(loop for char across string collect `(i32.const ,(char-code char))))))
-
 (defvar *runtime-output-literals* nil)
 (defvar *runtime-output-bytes* nil)
+(defvar *runtime-pack-text-literals* t)
+
+(defun runtime-text-literal-entry (string)
+  (or (gethash string *runtime-output-literals*)
+      (setf (gethash string *runtime-output-literals*)
+        (let ((offset (length *runtime-output-bytes*)))
+          (cffi:with-foreign-string ((data length) string :encoding :utf-8)
+            (loop for i below (1- length) do
+              (vector-push-extend (cffi:mem-aref data :uint8 i) *runtime-output-bytes*)))
+          (cons offset (- (length *runtime-output-bytes*) offset))))))
+
+(defun wat-text-literal (string)
+  (if (and *runtime-pack-text-literals* *runtime-output-literals* (>= (length string) 8)
+           (every (lambda (char) (< (char-code char) 128)) string))
+      (let ((entry (runtime-text-literal-entry string)))
+        `(call $ascii-text-literal (i32.const ,(car entry)) (i32.const ,(cdr entry))))
+      `(call $text (array.new_fixed $digits ,(length string)
+                     ,@(loop for char across string collect `(i32.const ,(char-code char)))))))
 
 (defun emit-text (string)
   ;; Static printer text can go directly to its UTF-8 output buffer. Keep
@@ -113,13 +134,7 @@ of converting them to the ordinary top-level host trap."
   (cond ((zerop (length string)) '(nop))
         ((= (length string) 1) `(call $emit-char (i32.const ,(char-code (char string 0)))))
         (*runtime-output-literals*
-         (let ((entry (or (gethash string *runtime-output-literals*)
-                      (setf (gethash string *runtime-output-literals*)
-                        (let ((offset (length *runtime-output-bytes*)))
-                          (cffi:with-foreign-string ((data length) string :encoding :utf-8)
-                            (loop for i below (1- length) do
-                              (vector-push-extend (cffi:mem-aref data :uint8 i) *runtime-output-bytes*)))
-                          (cons offset (- (length *runtime-output-bytes*) offset)))))))
+         (let ((entry (runtime-text-literal-entry string)))
            `(call $emit-literal (i32.const ,(car entry)) (i32.const ,(cdr entry)))))
         (t `(call $print-text ,(wat-text-literal string)))))
 

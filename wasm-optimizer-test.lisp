@@ -1,6 +1,17 @@
 (in-package :miricl-test)
 (in-suite :miricl)
 
+(test compiler-record-inline-metadata-on-load
+  ;; Loading compiled definitions does not repeat macroexpansion side effects.
+  ;; Clear those effects before evaluating the already expanded definition.
+  (let ((definition (macroexpand-1
+                     '(miricl-compiler::define-hir-record inline-host-record-fixture value)))
+        (macros '(make-inline-host-record-fixture-record
+                  inline-host-record-fixture-value %inline-host-record-fixture-p)))
+    (dolist (name macros) (remprop name 'm::runtime-inline-macro))
+    (eval definition)
+    (dolist (name macros) (is (get name 'm::runtime-inline-macro)))))
+
 (defun check-module-optimization (wat expected &optional arguments)
   (let* ((original (wt:wat-to-wasm wat))
          (optimized (miricl-compiler::optimize-wasm-module original)))
@@ -17,6 +28,10 @@
     optimized))
 
 (test module-optimizer-mixed-types-and-calls
+  (dolist (value '(-9223372036854775808 9223372036854775807))
+    (check-module-optimization
+      (format nil "(module (func (export ~S) (result i64) i64.const ~D))" "answer" value)
+      (list value)))
   (check-module-optimization
     "(module (memory 1)
        (func $pair (param i32) (result i32 i64) local.get 0 i64.const 40)
@@ -35,6 +50,31 @@
        (func (export \"answer\") (result i32) (local $n i32)
          i32.const 40 i32.const 0 call_indirect (type $sig) local.set $n
          local.get $n ref.func $inc call_ref $sig))" '(42)))
+
+(test module-optimizer-integral-f64-constants
+  (dolist (value '(-2147483648 -65536 -64 -1 0 1 63 64 65536 2147483647))
+    (let* ((wat (format nil "(module (func (export ~S) (result i32)
+                   f64.const ~D i32.const ~D f64.convert_i32_s f64.eq))" "answer" value value))
+           (original (wt:wat-to-wasm wat))
+           (optimized (check-module-optimization wat '(1))))
+      (is (< (length optimized) (length original)))))
+  ;; Reinterpretation observes every bit, including signed zero, subnormals,
+  ;; infinities and NaN payloads. None can be rounded or canonicalized here.
+  (dolist (entry '(("-0" #x8000000000000000)
+                   ("0.5" #x3fe0000000000000) ("-0.5" #xbfe0000000000000)
+                   ("inf" #x7ff0000000000000) ("-inf" #xfff0000000000000)
+                   ("nan:0x1234" #x7ff0000000001234) ("-nan:0x1234" #xfff0000000001234)
+                   ("0x0.0000000000001p-1022" 1)
+                   ("2147483648" #x41e0000000000000)))
+    (let ((bits (second entry)))
+      (when (logbitp 63 bits) (decf bits (ash 1 64)))
+      (check-module-optimization
+        (format nil "(module (func (export ~S) (result i64) f64.const ~A i64.reinterpret_f64))"
+          "answer" (first entry)) (list bits))))
+  ;; Constant-expression rules differ from instructions inside functions.
+  (check-module-optimization
+    "(module (global $zero f64 (f64.const 0))
+       (func (export \"answer\") (result i32) global.get $zero f64.const 0 f64.eq))" '(1)))
 
 (test module-optimizer-gc-definite-initialization
   ;; Inline reference block types contain a second LEB. Heap type 32 would be

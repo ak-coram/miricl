@@ -82,6 +82,45 @@ The exhaustive start/end matrix is covered by upstream ANSI tests."
     (setf (aref compact 0) 255)
     (is (= 0 (aref (m:interpreter-wasm) 0)))))
 
+(test bootstrap-string-references-copy
+  (let* ((strings (loop for i below 140 collect (format nil "bootstrap entry ~D" i)))
+         (payload (append strings
+                    (list (copy-seq (first strings)) (copy-seq (nth 127 strings))
+                          (copy-seq (nth 139 strings)) "" (copy-seq "") "é𝄞" (copy-seq "é𝄞"))))
+         (fixture (list 'set (list 'intern "BOOTSTRAP-STRING-FIXTURE" "CL-USER") (list 'quote payload)))
+         (m::*interpreter-library* (append m::*interpreter-library* (list fixture)))
+         (m::*interpreter-wasm* (wt:wat-to-wasm (m::interpreter-wat :compiler nil))))
+    ;; The codec shares encoded contents, including wide reference indices,
+    ;; while retaining separate empty, ASCII and Unicode string objects.
+    (m:with-interpreter (vm)
+      (is (eq t (m:evaluate-string vm
+        "(let ((items cl-user::bootstrap-string-fixture))
+           (and (= (length items) 147)
+                (string= (first items) (nth 140 items))
+                (not (eq (first items) (nth 140 items)))
+                (string= (nth 127 items) (nth 141 items))
+                (string= (nth 139 items) (nth 142 items))
+                (string= (nth 143 items) (nth 144 items))
+                (not (eq (nth 143 items) (nth 144 items)))
+                (string= (nth 145 items) (nth 146 items))
+                (not (eq (nth 145 items) (nth 146 items)))))"))))))
+
+(test bootstrap-constant-tags
+  (let* ((numbers '(0 1 -1 63 64 -64 -65 127 128 -128
+                   -134217727 134217727 -134217728 134217728
+                   -9223372036854775808 9223372036854775807))
+         (payload (append (loop repeat 24 append numbers)
+                          (list (cons -1 1) '(nil 1 -1) '(quote 0))))
+         (fixture (list 'set (list 'intern "BOOTSTRAP-CONSTANT-FIXTURE" "CL-USER") (list 'quote payload)))
+         (m::*interpreter-library* (append m::*interpreter-library* (list fixture)))
+         (m::*interpreter-wasm* (wt:wat-to-wasm (m::interpreter-wat :compiler nil))))
+    ;; Frequent integers and syntax lists share the tag bank. Boundary values
+    ;; outside the packed table's range still use the full 64-bit encoding;
+    ;; dotted tails and NIL-headed lists must retain their original structure.
+    (m:with-interpreter (vm)
+      (is (eq t (m:evaluate-string vm
+        (format nil "(equalp cl-user::bootstrap-constant-fixture '~S)" payload)))))))
+
 (test runtime-function-layout
   ;; Cross the one-byte function-index boundary, including recursive calls and
   ;; exported functions. Both modules must retain identical observable results.
@@ -150,6 +189,42 @@ The exhaustive start/end matrix is covered by upstream ANSI tests."
                   (is (< 65536 (wt:wasmtime-memory-data-size context memory)))
                   (is (equal expected (foreign-string-to-lisp (inc-pointer data 65530)
                     :count (- end 65530) :encoding :utf-8))))))))))))
+
+(test static-text-literals-copy
+  (let* ((m::*runtime-output-literals* (make-hash-table :test 'equal))
+         (m::*runtime-output-bytes* (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+         (pieces (list "" "short" "ASCII literal" (make-string 70000 :initial-element #\x)
+                       (concatenate 'string "alpha" (string (code-char 0)) "omega") "λ🙂 Unicode literal"))
+         (checks
+           (loop for string in pieces for literal = (m::wat-text-literal string) append
+             `((local.set $first ,literal) (local.set $second ,literal)
+               (if (ref.eq (local.get $first) (local.get $second)) (then (return (i32.const 0))))
+               ,@(loop for index in (remove-duplicates (list 0 5 (floor (length string) 2) (1- (length string))))
+                       when (< -1 index (length string)) collect
+                         `(if (i32.ne (array.get $digits
+                           (struct.get $text-box 0 (ref.cast (ref $text-box) (local.get $second)))
+                           (i32.const ,index)) (i32.const ,(char-code (char string index))))
+                           (then (return (i32.const 0)))))
+               ,@(when (plusp (length string))
+                   `((array.set $digits (struct.get $text-box 0 (ref.cast (ref $text-box) (local.get $first)))
+                       (i32.const 0) (i32.const 0))
+                     (if (i32.ne (array.get $digits
+                       (struct.get $text-box 0 (ref.cast (ref $text-box) (local.get $second))) (i32.const 0))
+                       (i32.const ,(char-code (char string 0)))) (then (return (i32.const 0))))))))))
+    (wt:with-engine (engine)
+      (wt:with-store ((store context) engine)
+        (wt:with-module (module engine #@(module
+          (type $digits (array (mut i32))) (type $bootstrap-bytes (array i8))
+          (type $text-box (struct (field (ref $digits))))
+          (global $literal-text-bytes (mut (ref $bootstrap-bytes)) (array.new_default $bootstrap-bytes (i32.const 0)))
+          (global $output-literal-length i32 (i32.const ,(length m::*runtime-output-bytes*)))
+          (func $text (param (ref $digits)) (result (ref eq)) (struct.new $text-box (local.get 0)))
+          ,(m::$ascii-text-literal)
+          (func (export "run") (result i32) (local $first (ref null eq)) (local $second (ref null eq))
+            ,(m::runtime-wat-forms checks) (i32.const 1))
+          (data $output-literal-data ,(m::runtime-library-data m::*runtime-output-bytes*))))
+          (wt:with-instance (instance context module)
+            (is (= 1 (wt:instance-call context instance "run")))))))))
 
 (test numeric-bindings
   (wt:with-engine (engine)

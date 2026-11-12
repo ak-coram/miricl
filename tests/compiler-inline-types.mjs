@@ -17,6 +17,36 @@ try {
   };
   const scalar64 = [-(1n << 63n), -(1n << 31n), -1n, 0n, 1n, 1n << 32n, (1n << 63n) - 1n];
   const scalar32 = [-(1n << 31n), -1n, 0n, 1n, (1n << 31n) - 1n];
+  // EQL needs only identity when either literal is outside NUMBER/CHARACTER.
+  // This fact comes from the value itself and is valid at every safety level.
+  for (const safety of [0, 3]) {
+    for (const literal of [':target', 'nil', '"target"', "'(1 2)", "'#(1 2)"]) {
+      const shared = ![':target', 'nil'].includes(literal);
+      const result = await compile(`(lambda (x) (declare (inline eql) (optimize (safety ${safety})))
+        (values (eql x ${shared ? '#1=' : ''}${literal}) ${shared ? '#1#' : literal}))`);
+      assert.ok(result.imports.includes('native-eq-inline'), literal);
+      assert.ok(!result.imports.includes('native-eql-inline'), literal);
+      check(`(multiple-value-bind (match literal) (funcall *inline-function* :missing)
+        (and (not match) (funcall *inline-function* literal)
+             (or (null literal) (not (typep literal 'sequence))
+                 (not (funcall *inline-function* (copy-seq literal))))))`);
+    }
+  }
+  for (const [literal, fresh] of [
+    ['1099511627776', '(+ 549755813888 549755813888)'],
+    ['1.0f0', '(+ 1.0f0 0.0f0)'], ['1.0d0', '(+ 1.0d0 0.0d0)'],
+    ['#\\A', '(code-char 65)'], ['1/2', '(/ 1 2)'], ['#c(3 4)', '(complex 3 4)'],
+  ]) {
+    const result = await compile(`(lambda (x) (declare (inline eql)) (eql x ${literal}))`);
+    assert.ok(result.imports.includes('native-eql-inline'), literal);
+    check(`(and (funcall *inline-function* ${fresh}) (not (funcall *inline-function* :missing)))`);
+  }
+  await compile(`(lambda (x) (declare (inline eql))
+    (let ((events nil))
+      (values (eql (progn (push :left events) (values x :extra))
+                   (progn (push :right events) :target)) (reverse events))))`);
+  check(`(and (equal (multiple-value-list (funcall *inline-function* :target)) '(t (:left :right)))
+              (equal (multiple-value-list (funcall *inline-function* :other)) '(nil (:left :right))))`);
   // Integer identities apply to bignums as well as scalar representations.
   // Both operand expressions still execute in order and contribute only
   // their primary values, even when the result no longer uses one of them.

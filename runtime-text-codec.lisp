@@ -142,6 +142,21 @@
   #@(memory.init $output-literal-data (global.get $cursor) (local.get $start) (local.get $length))
   #@(global.set $cursor (i32.add (global.get $cursor) (local.get $length))))
 
+(define-runtime-function $ascii-text-literal (($start i32) ($length i32)) (:object)
+  (:locals ($data :digits) ($i i32))
+  ;; This cache is derived from the immutable image, outside persistent roots.
+  ;; Lazy initialization also works when a saved heap bypasses Lisp bootstrap.
+  #@(if (i32.eqz (array.len (global.get $literal-text-bytes)))
+    (then (global.set $literal-text-bytes (array.new_data $bootstrap-bytes $output-literal-data
+      (i32.const 0) (global.get $output-literal-length)))))
+  #@(local.set $data (array.new_default $digits (local.get $length)))
+  #@(block $done (loop $copy (br_if $done (i32.ge_u (local.get $i) (local.get $length)))
+    (array.set $digits (local.get $data) (local.get $i)
+      (array.get_u $bootstrap-bytes (global.get $literal-text-bytes)
+        (i32.add (local.get $start) (local.get $i))))
+    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $copy)))
+  #@(return_call $text (local.get $data)))
+
 (define-runtime-function $print-text
     (($text :nullable-object))
     ()
@@ -153,6 +168,7 @@
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next))))
 
 (define-runtime-section text-codec-wat ()
+  #@(global $literal-text-bytes (mut (ref $bootstrap-bytes)) (array.new_default $bootstrap-bytes (i32.const 0)))
   #@(global $source (mut (ref $digits)) (array.new_default $digits (i32.const 0)))
   #@(global $source-generic (mut i32) (i32.const 0))
   #@(global $source-end (mut i32) (i32.const 0))
@@ -174,4 +190,5 @@
   ($emit-byte)
   ($emit-char)
   ($emit-literal)
+  ($ascii-text-literal)
   ($print-text))

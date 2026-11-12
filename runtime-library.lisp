@@ -102,12 +102,65 @@
     (112 symbolp 2) (113 class-of 2) (114 third 2) (115 ignore 2)
     (116 second 2) (117 %map 3 :clos) (118 %cell 3 :clos) (119 list 5)
     (120 defun 5) (121 %word 3 :loop) (122 %quote 2 :clos) (123 %member 3 :clos)
-    (124 %%while 3 :loop) (125 %get 3 :clos) (126 %popped 2 :clos) (127 fifth 2)))
+    (124 %%while 3 :loop) (125 %get 3 :clos) (126 %popped 2 :clos)))
+
+(defvar *runtime-library-optimize-prefixes* t)
+
+(defun runtime-library-prefixes (libraries)
+  "Choose profitable list prefixes and integer constants, retaining existing tags."
+  (let ((counts (make-hash-table :test 'equal)) (costs (make-hash-table :test 'equal)) (order nil))
+    (labels ((key (entry) (list (second entry) (third entry) (fourth entry)))
+             (table-cost (entry)
+               (let ((value (runtime-library-prefix-value (cons 0 entry))) (size 0))
+                 (when (logbitp 31 value) (decf value #x100000000))
+                 (loop for byte = (logand value 127) do
+                   (incf size) (setq value (ash value -7))
+                   (when (or (and (zerop value) (< byte 64)) (and (= value -1) (>= byte 64)))
+                     (return (1- size))))))
+             (score (entry) (- (* (gethash entry counts) (gethash entry costs)) (table-cost entry)))
+             (record (entry cost)
+               (unless (gethash entry counts)
+                 (push entry order) (setf (gethash entry costs) cost))
+               (incf (gethash entry counts 0))))
+      (dolist (library libraries)
+        (destructuring-bind (forms symbols private-tag &optional loop-symbols) library
+          (labels ((walk (form)
+                     (cond
+                      ((and (integerp form) (<= -134217727 form 134217727))
+                       ;; A zero list length distinguishes an integer in the
+                       ;; same table. Include the ZigZag payload's full cost.
+                       (let ((bits (logxor (ash form 1) (ash form -63))) (size 1))
+                         (loop while (>= bits 128) do (incf size) (setq bits (ash bits -7)))
+                         (record (list form 0 :integer) size)))
+                      ((consp form)
+                       (let ((tail form) (size 0))
+                         (loop while (consp tail) do (incf size) (setq tail (cdr tail)))
+                         (when (and (null tail) (<= size 7) (symbolp (car form)))
+                           (let* ((symbol (car form)) (id (position symbol *runtime-symbols*))
+                                  (namespace (unless id (if (or (= private-tag 25) (member symbol *shared-loop-symbols*)) :loop :clos)))
+                                  (entry (list symbol size namespace))
+                                  (compact (find-if (lambda (item) (and (eq symbol (first item)) (eq namespace (third item)))) *runtime-library-symbol-codes*))
+                                  (index (or id (position symbol (if (eq namespace :loop) loop-symbols symbols)))))
+                             (record entry (if (or (null symbol) compact) 1 (if (< index 128) 2 3))))))
+                       (loop while (consp form) do (walk (car form)) (setq form (cdr form)))
+                       (walk form)))))
+            (mapc #'walk forms))))
+      (let* ((tags (loop for tag from 2 below 127
+                        unless (or (member tag '(3 4 6 7 10 16 24 25)) (<= 32 tag 63)) collect tag))
+             (selected (stable-sort (remove-if-not (lambda (entry) (plusp (score entry))) (nreverse order)) #'> :key #'score))
+             (selected (subseq selected 0 (min (length tags) (length selected))))
+             (kept (remove-if-not (lambda (entry) (member (key entry) selected :test #'equal)) *runtime-library-prefixes*))
+             (remaining (remove-if (lambda (entry) (find entry kept :key #'key :test #'equal)) selected))
+             (free (remove-if (lambda (tag) (assoc tag kept)) tags)))
+        (sort (append (copy-list kept) (loop for tag in free for entry in remaining collect (cons tag entry))) #'< :key #'first)))))
 
 (defun runtime-library-prefix-value (entry)
   (if (null entry) 0
     (destructuring-bind (tag symbol length &optional namespace) entry
       (declare (ignore tag))
+      (when (eq namespace :integer)
+        (return-from runtime-library-prefix-value
+          (ash (1+ (logxor (ash symbol 1) (ash symbol -63))) 3)))
       (let* ((table (case namespace
                       (:clos (symbol-value '*clos-library-symbols*))
                       (:loop (symbol-value '*loop-library-symbols*))
@@ -118,6 +171,7 @@
 
 (defun runtime-library-prefix-namespace-p (entry symbols private-tag loop-symbols)
   (case (fourth entry)
+    (:integer nil)
     (:clos (and (= private-tag 24) (boundp '*clos-library-symbols*)
                 (eq symbols (symbol-value '*clos-library-symbols*))))
     (:loop (and (boundp '*loop-library-symbols*)
@@ -167,8 +221,11 @@ Entries retain symbol and namespace identities, rather than table offsets."
   "Pack library literals using byte tags, LEB128 payloads, and ZigZag integers.
 Tags 32..63 encode proper lists of 1..32 elements; 128..255 encode common
 symbols from the public and private tables. Tag 7 carries a counted spine and a dotted-tail flag.
-Other tags abbreviate the proper list prefixes in *RUNTIME-LIBRARY-PREFIXES*."
-  (let ((bytes (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+Tag 127 references earlier string contents; decoding still creates a fresh string.
+Other tags abbreviate proper list prefixes or frequent integer constants
+from *RUNTIME-LIBRARY-PREFIXES*."
+  (let ((bytes (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+        (strings (make-hash-table :test 'equal)))
     (labels ((emit-byte (n) (vector-push-extend n bytes))
              (u32 (n) (dotimes (i 4) (emit-byte (ldb (byte 8 (* 8 i)) n))))
              (uleb (n)
@@ -204,7 +261,11 @@ Other tags abbreviate the proper list prefixes in *RUNTIME-LIBRARY-PREFIXES*."
                                         (error "Unknown library symbol ~S" form)))))))
                      ((integerp form)
                       (assert (typep form '(signed-byte 64)))
-                      (emit-byte 1) (uleb (logxor (ash form 1) (ash form -63))))
+                      (let ((constant (find-if (lambda (entry)
+                                        (and (eq (fourth entry) :integer) (= form (second entry))))
+                                      *runtime-library-prefixes*)))
+                        (if constant (emit-byte (first constant))
+                            (progn (emit-byte 1) (uleb (logxor (ash form 1) (ash form -63)))))))
                      ((floatp form)
                       (emit-byte (if (typep form 'double-float) 4 3))
                       (cffi:with-foreign-object (value :double)
@@ -212,8 +273,14 @@ Other tags abbreviate the proper list prefixes in *RUNTIME-LIBRARY-PREFIXES*."
                         (let ((bits (cffi:mem-ref value :uint64)))
                           (u32 (ldb (byte 32 0) bits)) (u32 (ldb (byte 32 32) bits)))))
                      ((characterp form) (emit-byte 16) (uleb (char-code form)))
-                     ((stringp form) (emit-byte 10) (uleb (length form))
-                      (loop for char across form do (uleb (char-code char))))
+                     ((stringp form)
+                      (multiple-value-bind (index present) (gethash form strings)
+                         (if present
+                            (progn (emit-byte 127) (uleb index))
+                            (progn
+                              (setf (gethash form strings) (hash-table-count strings))
+                              (emit-byte 10) (uleb (length form))
+                              (loop for char across form do (uleb (char-code char)))))))
                      (t (error "Unsupported library literal ~S" form)))))
       (mapc #'emit forms)) bytes))
 

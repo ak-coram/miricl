@@ -36,6 +36,8 @@
 
 (defun native-read-uleb (bytes position)
   (declare (type vector bytes) (type (unsigned-byte 32) position))
+  (when (>= position (length bytes))
+    (compiler-input-fail "native LEB128" bytes "truncated unsigned operand"))
   ;; Most operands are a single byte, including opcodes, small indices and
   ;; block types. Avoid entering the general shift/accumulate loop for them.
   (let ((byte (aref bytes position)))
@@ -43,12 +45,19 @@
     (when (< byte 128) (return-from native-read-uleb (values byte (1+ position)))))
   (let ((value 0) (shift 0))
     (declare (type (integer 0 *) value) (type fixnum shift))
-    (loop for byte = (aref bytes position) do
+    (loop do
+      (when (>= position (length bytes))
+        (compiler-input-fail "native LEB128" bytes "truncated unsigned operand"))
+      (let ((byte (aref bytes position)))
+      (when (and (= shift 63) (> byte 1))
+        (compiler-input-fail "native LEB128" bytes "unsigned operand exceeds 64 bits"))
       (incf position) (setq value (logior value (ash (logand byte 127) shift)))
-      (when (< byte 128) (return (values value position))) (incf shift 7))))
+      (when (< byte 128) (return (values value position))) (incf shift 7)))))
 
 (defun native-read-sleb (bytes position)
   (declare (type vector bytes) (type (unsigned-byte 32) position))
+  (when (>= position (length bytes))
+    (compiler-input-fail "native LEB128" bytes "truncated signed operand"))
   (let ((byte (aref bytes position)))
     (declare (type (unsigned-byte 8) byte))
     (when (< byte 128)
@@ -56,11 +65,16 @@
         (values (if (< byte 64) byte (- byte 128)) (1+ position)))))
   (let ((value 0) (shift 0))
     (declare (type (integer 0 *) value) (type fixnum shift))
-    (loop for byte = (aref bytes position) do
+    (loop do
+      (when (>= position (length bytes))
+        (compiler-input-fail "native LEB128" bytes "truncated signed operand"))
+      (let ((byte (aref bytes position)))
+      (when (and (= shift 63) (not (member byte '(0 127))))
+        (compiler-input-fail "native LEB128" bytes "signed operand exceeds 64 bits"))
       (incf position) (setq value (logior value (ash (logand byte 127) shift)))
       (incf shift 7)
       (when (< byte 128)
-        (return (values (if (logbitp 6 byte) (- value (ash 1 shift)) value) position))))))
+        (return (values (if (logbitp 6 byte) (- value (ash 1 shift)) value) position)))))))
 
 (defun native-read-ops (bytes &optional references-only)
   (declare (type vector bytes))
@@ -89,17 +103,19 @@
         (declare (type (unsigned-byte 32) start) (type (unsigned-byte 8) code))
         (incf position)
         (cond
-          ((member code '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x41 #xd0 #xd2))
+          ((member code '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x41 #x42 #xd0 #xd2))
            ;; Constants and heap types only need their encoded extent here.
            ;; Decode the common one-byte case here, avoiding a helper call
            ;; and multiple-value packet for nearly every instruction operand.
+           (when (>= position (length bytes))
+             (compiler-input-fail "native instruction" bytes "missing operand"))
            (let ((byte (aref bytes position)))
              (declare (type (unsigned-byte 8) byte))
              (if (< byte 128)
-                 (progn (setq argument (if (and (= code #x41) (>= byte 64)) (- byte 128) byte))
+                 (progn (setq argument (if (and (member code '(#x41 #x42)) (>= byte 64)) (- byte 128) byte))
                    (incf position))
                  (multiple-value-setq (argument position)
-                   (if (= code #x41) (native-read-sleb bytes position) (native-read-uleb bytes position))))))
+                   (if (member code '(#x41 #x42)) (native-read-sleb bytes position) (native-read-uleb bytes position))))))
           ((= code #x0e)
            (let ((count nil))
              (multiple-value-setq (count position) (native-read-uleb bytes position))
@@ -291,7 +307,7 @@
         (unless effect (error "Missing module instruction stack effect."))
         (return-from native-op-stack (values (car effect) (cdr effect)))))
     (case code
-      ((#x20 #x41 #xd0 #xd2) (values 0 1))
+      ((#x20 #x41 #x42 #xd0 #xd2) (values 0 1))
       ((#x21 #x1a) (values 1 0))
       ((#x22 #x45 #xa7 #xac #xd1 #xfb) (values 1 1))
       ((#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85) (values 2 1))
@@ -696,6 +712,11 @@
                              (wasm-byte code) (wasm-u32 (native-op-argument op)))
                             ((= code #x1a) (wasm-byte code))
                             ((= code #x41) (wasm-byte code) (wasm-s32 (native-op-argument op)))
+                            ((and (= code #x44) (integerp (native-op-argument op)))
+                             ;; The host module reader proved exact conversion.
+                             ;; Keep F64 stack semantics during analysis and
+                             ;; expand only while writing function instructions.
+                             (wasm-integer (native-op-argument op)) (wasm-byte #xb7))
                             ((and (member code '(#x0c #x0d #x0e))
                                   (member (aref bytes (native-op-start op)) '(#x0c #x0d #x0e)))
                              (wasm-byte code)
