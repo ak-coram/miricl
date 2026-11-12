@@ -42,7 +42,6 @@ native compiler, with compiler state =:ready= and origin =:image= at startup.
 It uses the same adapter and REPL bridge as =miricl.wasm= and works in browsers
 and Node without companion images or experimental flags. Native compilation
 and the shared size passes run during the build rather than on first use.
-At introduction, the artifact measured 702353 bytes raw, 276190 gzip and 233412 Brotli.
 The build caches this core and also embeds it in the REPL component, without
 WASI or native stack-switching instructions, for Node. The Node command uses
 that embedded core when =miricl-repl.wasm= is beside the interpreter; with only
@@ -151,6 +150,9 @@ function has not escaped. Captured cells and debugger-visible bindings stay
 conservative. Unknown global calls retain unknown results. Multiple-value
 cardinality remains a separate analysis, so inferred primary types cannot
 discard extra values or turn zero values into one value.
+Explicit native exports are open to outside callers. The emitter passes its
+=:entries= to inference; =infer-hir-types= accepts the same option for clients
+requesting facts with an explicit export set.
 
 Explicitly inlined canonical built-ins provide further result facts: =cons=
 returns a cons, simple-vector =length= returns a bounded nonnegative integer,
@@ -169,6 +171,49 @@ The analysis uses dependencies and a worklist. Lowering requests only facts
 needed by its current numeric and vector optimizations; clients may also
 request facts for an entire HIR unit. Inferred facts never overwrite source
 assertions, and emitting a rewritten HIR graph recomputes them.
+The shared target type rules interpret =and= intersections, =or= unions,
+=member= and =eql= types, =mod=, and inclusive/exclusive integer intervals.
+Unbounded endpoints can become finite when intersected. Union intervals are
+conservative hulls; gaps are not treated as possible evidence for a rewrite.
+Integer joins reuse an existing interval when it already covers the union;
+intersections reuse an operand when its bounds already describe the result.
+This reduces allocation without treating holes in =member= or union types as
+continuous intervals.
+Unknown type specifiers remain opaque and do not run host =deftype= expanders
+or =satisfies= predicates. Literal arguments of =member= and =eql= retain
+=eql= identity, including cyclic objects. Structural type comparisons memoize
+shared DAGs, and recursive proof queries have depth and total-work limits.
+An exhausted query provides no additional proof.
+
+Truth tests and canonical explicitly inlined =null=/=not= calls narrow
+nullable types in dominated acyclic regions. A join is included only after
+every predecessor has established the premise. Outside predecessors and
+unresolved loop backedges stop propagation. Dense block IDs index the small
+predecessor-count and traversal tables. The premises are dependencies
+of the affected reads, so they participate in the same worklist as module
+argument and return summaries. Actual cell uses must establish no writes,
+aliasing or capture; client-provided binding flags alone are insufficient.
+Debug-visible functions and possible captured nonlocal entries are excluded.
+A linear visit budget bounds region analysis, keeping the analysis small
+and predictable.
+Canonical predicate results can pass through read-only temporaries, including
+those introduced by =cond= expansion. Writes or aliases that expose the cell
+prevent using the temporary as a predicate certificate.
+
+The same integer rules prove binary identities for addition, subtraction,
+multiplication, =logand=, =logior=, =logxor= and =ash=. A singleton integer
+operand can make the result equal to an existing operand, including unbounded
+bignums. Inference retains that operand's type; safety-0 canonical =inline=
+calls can return its value directly. Both operands must be proven integers,
+and their expressions still run in order. Unknown, floating-point and complex
+operands retain ordinary arithmetic and its type conversions or errors.
+
+At safety 0, these facts can select direct =1+=/=1-= operations, prove
+arithmetic fits =i64= even when operand widths alone are insufficient, and
+fold known =consp=, =simple-vector-p=, =null= and =not= results. Operand effects
+and multiple-value behavior are preserved. Arithmetic outside the proven
+scalar domain retains promotion. Type structure is checked at source and
+public HIR boundaries before inference enters unchecked kernels.
 Scalar arithmetic entries accept proven =i64= operands and share the actual
 built-in function guard. Redefined functions use the ordinary Lisp call path.
 The overflow checks are shared in the runtime rather than copied at each call
@@ -263,6 +308,11 @@ single paired run is exploratory; repeated samples are needed before claiming
 small performance differences. FriCAS calculation measurements explicitly
 include lazy algebra compilation. ACL2 validation includes theorem admission,
 false-theorem rejection and recovery.
+The optional =--acl2-load-only= selects default-stack native-core loading and
+native-entry checks when a separate CI run covers logical-world initialization
+and proofs. Reports record the selected validation scope. =--resume= reuses
+completed stages after checking the compiler, runtime and input fingerprints,
+so interrupted long comparisons need not repeat successful compilations.
 Keep ACL2's portable input consistent with the host adaptations used during
 validation: logical-world initialization rereads its sources. Rebuild that input
 after changing the adaptations; matching the upstream revision alone does not
@@ -585,6 +635,14 @@ Liveness likewise has a direct Wasm kernel over the shared records, retaining
 arbitrary-width integer bitmaps, cyclic CFG iteration and exceptional-call
 conservatism. The Lisp implementations remain available for host compilation
 and differential regression checks.
+The instruction simplifier also runs directly in Wasm, using unboxed instruction
+indices for its active stack and scope matches. Its Lisp reference checks both
+the surviving instructions and mutations to removed records. Constant arithmetic,
+discarded producers and constant branches preserve the same traps and effects;
+scope cleanup still uses the shared Lisp pass.
+Public HIR validation indexes opcode shapes in a shared =eq= table while keeping
+graph-specific ownership and cycle tables fresh for every validation. Empty list
+spines return immediately; nonempty spines retain structural and cycle checks.
 Native two-argument =vector-push= and =vector-push-extend= calls append directly
 when capacity is available; growth uses the ordinary array implementation.
 Native modules emit each function once against the complete ABI. The final

@@ -31,7 +31,7 @@
       (error "Embedded module ~A contains an HTML script terminator." pathname))
     source))
 
-(defun build-browser-page (template-name output-name output-directory)
+(defun build-browser-page (template-name output-name output-directory &key (compiler t))
   (let* ((root *browser-page-root*)
          (output (uiop:ensure-directory-pathname output-directory))
          (path (merge-pathnames output-name output))
@@ -53,7 +53,7 @@
     (let ((replacements
             (list (cons "@@MIRICL_ADAPTER@@" adapter)
                   (cons "@@MIRICL_WASM@@"
-                        (html-repl-base64 (uiop:symbol-call :miricl :interpreter-wasm))))))
+                        (html-repl-base64 (uiop:symbol-call :miricl :interpreter-wasm :compiler compiler))))))
       (dolist (replacement replacements)
         (let ((start (search (car replacement) template)))
           (unless (and start (not (search (car replacement) template :start2 (1+ start))))

@@ -143,6 +143,7 @@
          (elses (make-array size :initial-element nil)) (scopes nil))
     (declare (type (unsigned-byte 32) size) (type simple-vector ends elses) (type list scopes))
     (dotimes (i size)
+      (declare (type (unsigned-byte 32) i))
       (case (native-op-code (aref ops i))
         ((#x02 #x03 #x04 #x1f) (push i scopes))
         (#x05 (setf (aref elses (first scopes)) i))
@@ -156,6 +157,7 @@
    (let ((size (length ops)) (scopes nil) (exceptions nil))
     (declare (type (unsigned-byte 32) size) (type list scopes))
     (dotimes (i size)
+      (declare (type (unsigned-byte 32) i))
       (let* ((op (aref ops i)) (code (native-op-code op)) (next (and (< (1+ i) size) (1+ i)))
              (successors (and next (list next))))
         (case code
@@ -401,7 +403,9 @@
              (type simple-vector conflicts uses mapping colors color-conflicts)
              (type (or null simple-vector) color-types) (type list order)
              (type (integer 0 *) entry-live))
-    (dotimes (i offset) (setf (aref mapping i) i))
+    (dotimes (i offset)
+      (declare (type (unsigned-byte 32) i))
+      (setf (aref mapping i) i))
     (loop for op across ops do
       (when (member (native-op-code op) '(#x20 #x21 #x22))
         (let ((local (native-op-argument op)))
@@ -417,6 +421,7 @@
     ;; locals to reuse dead parameter slots of the exact same type. Locals
     ;; live on entry need their implicit zero/NIL, unlike arbitrary parameters.
     (dotimes (i offset)
+      (declare (type (unsigned-byte 32) i))
       (setf (aref colors i) (ash 1 i) (aref color-conflicts i) (aref conflicts i))
       (when types (setf (aref color-types i) (aref types i))))
     (loop for i from offset below total do (when (plusp (aref uses i)) (push i order)))
@@ -523,6 +528,7 @@
              (when (< depth top)
                (setf (aref used (aref scopes (- top depth 1))) t)))))))
     (dotimes (i size)
+      (declare (type (unsigned-byte 32) i))
       (when (and (member (aref codes i) '(#x02 #x03))
                  (eql (native-op-argument (aref ops i)) #x40) (not (aref used i)))
         (setf changed t (aref removed i) t
@@ -549,7 +555,7 @@
             (#x0e (setf (native-op-argument op) (mapcar #'depth (native-op-argument op))))))))
     ops))
 
-(defun native-simplify-ops (ops bytes &optional (clean-scopes t))
+(defun native-simplify-ops-lisp (ops bytes &optional (clean-scopes t))
   (declare (type simple-vector ops) (type vector bytes))
   ;; Precompute, Vacuum and DCE on the linear instruction stream. Replacements
   ;; preserve operand evaluation, and control frames stay until depths can be
@@ -559,9 +565,12 @@
     (declare (type (unsigned-byte 32) size top) (type simple-vector active)
              (type (or null simple-vector) ends elses))
     (dotimes (i size)
+      (declare (type (unsigned-byte 32) i))
       (let* ((op (aref ops i)) (code (native-op-code op))
              (previous (and (plusp top) (aref ops (aref active (1- top)))))
              (prior (and (> top 1) (aref ops (aref active (- top 2))))))
+        (declare (type simple-vector op) (type (or null (unsigned-byte 8)) code)
+                 (type (or null simple-vector) previous prior))
         (cond
           ((null code))
           ((= code #x01) (setf (native-op-code op) nil))
@@ -617,14 +626,28 @@
                       (loop for j from (if zero (1+ i) (or otherwise end))
                             below (if zero (if otherwise (1+ otherwise) end) end)
                             do (setf (native-op-code (aref ops j)) nil)))))))))
-           (setq code (native-op-code op))
-           (when code
-             (setf (aref active top) i) (incf top)
-             (when (and (member code '(#x02 #x03)) (eql (native-op-argument op) #x40))
-               (setq void-scopes t))
-             (setq dead (member code '(#x00 #x08 #x0c #x0e #x0f #x12))))))))
+           ;; Keep the original opcode binding immutable: the surrounding
+           ;; NULL test can then prove it is a byte throughout the branch.
+           ;; Rewrites change the record, so inspect its new opcode separately.
+           (let ((live-code (native-op-code op)))
+             (declare (type (or null (unsigned-byte 8)) live-code))
+             (when live-code
+               (setf (aref active top) i) (incf top)
+               (when (and (member live-code '(#x02 #x03)) (eql (native-op-argument op) #x40))
+                 (setq void-scopes t))
+               (setq dead (member live-code '(#x00 #x08 #x0c #x0e #x0f #x12)))))))))
     (when (and clean-scopes void-scopes) (native-clean-scopes ops bytes))
     (remove-if-not (lambda (op) (native-op-code op)) ops)))
+
+(defun native-simplify-ops (ops bytes &optional (clean-scopes t))
+  (declare (type simple-vector ops) (type vector bytes))
+  (let ((status (compiler-primitive 42 ops bytes)))
+    (when status
+      (when (and (logbitp 2 status) (or clean-scopes (logbitp 1 status)))
+        (native-clean-scopes ops bytes))
+      (return-from native-simplify-ops
+        (remove-if-not (lambda (op) (native-op-code op)) ops))))
+  (native-simplify-ops-lisp ops bytes clean-scopes))
 
 (defun native-optimize-body (bytes &optional decoded-ops parameter-count local-count local-types)
   (declare (type vector bytes) (type (or null simple-vector) decoded-ops local-types)

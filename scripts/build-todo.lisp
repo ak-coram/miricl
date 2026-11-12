@@ -2,4 +2,4 @@
 (require :asdf)
 (load (merge-pathnames "html-builder.lisp" *load-truename*))
 (build-browser-page "scripts/todo.html" "todo.html"
-  (or (first (uiop:command-line-arguments)) (uiop:getcwd)))
+  (or (first (uiop:command-line-arguments)) (uiop:getcwd)) :compiler nil)

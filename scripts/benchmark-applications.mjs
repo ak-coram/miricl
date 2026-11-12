@@ -1,5 +1,5 @@
 // Full application builds, with identical inputs and independent validation.
-// node scripts/benchmark-applications.mjs OUTPUT BEFORE.wasm AFTER.wasm [APP ...]
+// node scripts/benchmark-applications.mjs OUTPUT BEFORE.wasm AFTER.wasm [APP ...] [--resume] [--acl2-load-only]
 // Applications: maxima, fricas, acl2, coalton. Node records CLI CPU time and RSS.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -10,19 +10,37 @@ import {createHash} from 'node:crypto';
 import {measureFile} from './wasm-size.mjs';
 import {coaltonFiles} from './coalton-files.mjs';
 
-const [output, before, after, ...requested] = process.argv.slice(2);
+const resume = process.argv.includes('--resume'), acl2LoadOnly = process.argv.includes('--acl2-load-only');
+const [output, before, after, ...requested] = process.argv.slice(2)
+  .filter(arg => !['--resume', '--acl2-load-only'].includes(arg));
 if (!output || !before || !after) throw new Error('Expected OUTPUT BEFORE.wasm AFTER.wasm [APP ...]');
 const applications = requested.length ? requested : ['maxima', 'fricas', 'acl2', 'coalton'];
 assert.ok(applications.every(app => ['maxima', 'fricas', 'acl2', 'coalton'].includes(app)));
 await fs.mkdir(output, {recursive: true});
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-const report = {node: process.version, platform: process.platform, architecture: process.arch,
+const reportPath = path.join(output, 'results.json');
+const report = resume ? JSON.parse(await fs.readFile(reportPath, 'utf8')) : {
+  node: process.version, platform: process.platform, architecture: process.arch,
   rounds: 1, scope: 'Full builds and fresh-session correctness checks; exploratory paired run',
   started: new Date().toISOString(), variants: []};
-for (const [name, file] of [['before', before], ['after', after]])
-  report.variants.push({name, image: file, imageSha256: hash(await fs.readFile(file)),
+if (resume) {
+  assert.equal(report.node, process.version, 'Cannot resume with a different Node version');
+  assert.equal(report.platform, process.platform, 'Cannot resume on a different platform');
+  assert.equal(report.architecture, process.arch, 'Cannot resume on a different architecture');
+}
+for (const [name, file] of [['before', before], ['after', after]]) {
+  const imageSha256 = hash(await fs.readFile(file));
+  if (resume) {
+    const previous = report.variants.find(v => v.name === name);
+    assert.ok(previous, `Missing ${name} variant in resumed report`);
+    assert.equal(previous.imageSha256, imageSha256, `Cannot resume with a different ${name} compiler`);
+    assert.equal(path.resolve(previous.image), path.resolve(file), 'Compiler image path changed');
+  } else report.variants.push({name, image: file, imageSha256,
     imageSizes: measureFile(file), applications: []});
-const save = () => fs.writeFile(path.join(output, 'results.json'), JSON.stringify(report, null, 2) + '\n');
+}
+if (resume) (report.resumptions ??= []).push(new Date().toISOString());
+delete report.finished;
+const save = () => fs.writeFile(reportPath, JSON.stringify(report, null, 2) + '\n');
 await save();
 
 async function run(directory, phase, args, environment = {}) {
@@ -56,8 +74,19 @@ for (const app of applications) {
   for (const variant of report.variants) {
     const directory = path.join(output, app, variant.name);
     await fs.mkdir(directory, {recursive: true});
-    const item = {app, input, inputSha256: inputHash, sourceSha256: sourceHash, stages: [], passed: false};
-    variant.applications.push(item); await save();
+    let item = variant.applications.find(previous => previous.app === app);
+    const validation = app === 'acl2' && acl2LoadOnly ? 'native-core-load' : 'full';
+    const validationChanged = item && item.validation && item.validation !== validation;
+    if (item) {
+      assert.equal(item.inputSha256, inputHash, 'Cannot resume with changed application input');
+      assert.equal(item.sourceSha256, sourceHash, 'Cannot resume with changed application sources');
+      if (item.passed && !validationChanged) {console.log(`${directory}: already passed`); continue;}
+      item.passed = false; delete item.failure;
+    } else {
+      item = {app, input, inputSha256: inputHash, sourceSha256: sourceHash, stages: [], passed: false};
+      variant.applications.push(item);
+    }
+    item.validation = validation; await save();
     const core = path.join(directory, `${app}-native.wasm`), image = variant.image;
     const steps = app === 'coalton' ? [
       ['bootstrap-source', ['scripts/probe-coalton.mjs', image, path.join(directory, 'bootstrap/compile.json'), 'compiler'],
@@ -73,13 +102,20 @@ for (const app of applications) {
     ] : [
       ['compile', [`scripts/optimize-${app}.mjs`, image, input, core]],
       ['validate', app === 'acl2'
-        ? ['tests/acl2-native.mjs', image, core, path.join(directory, 'validation.json')]
+        ? [acl2LoadOnly ? 'tests/acl2-load.mjs' : 'tests/acl2-native.mjs', image, core, path.join(directory, 'validation.json')]
         : app === 'maxima' ? ['tests/maxima.mjs', image, core]
           : ['scripts/benchmark-application-session.mjs', image, core, path.join(directory, 'validation.json')]],
     ];
     try {
       if (input) assert.equal(hash(await fs.readFile(input)), inputHash, 'Application input changed');
       for (const [phase, args, environment] of steps) {
+        const previous = item.stages.findIndex(stage => stage.phase === phase);
+        if (previous >= 0) {
+          if (item.stages[previous].status === 0 && !(phase === 'validate' && validationChanged)) {
+            console.log(`${directory}: ${phase} already passed`); continue;
+          }
+          (item.previousAttempts ??= []).push(item.stages.splice(previous, 1)[0]);
+        }
         const measurement = await run(directory, phase, args, environment);
         item.stages.push(measurement); await save();
         assert.equal(measurement.status, 0, `${app} ${variant.name} ${phase} failed; see ${measurement.log}`);
@@ -89,5 +125,8 @@ for (const app of applications) {
     await save();
   }
 }
-report.finished = new Date().toISOString(); await save();
-if (report.variants.some(variant => variant.applications.some(app => !app.passed))) process.exitCode = 1;
+if (report.variants.every(variant => variant.applications.every(app => app.passed)))
+  report.finished = new Date().toISOString();
+await save();
+if (report.variants.some(variant => variant.applications.some(app => applications.includes(app.app) && !app.passed)))
+  process.exitCode = 1;

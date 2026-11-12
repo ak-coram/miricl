@@ -6,6 +6,55 @@ const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
 try {
   vm.evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
+  // One CL type domain supplies representation proofs and module summaries.
+  for (const [type, low, high] of [
+    ['(integer (0) (256))', 1, 255], ['(mod 256)', 0, 255],
+    ['(eql -7)', -7, -7], ['(member -9 0 17)', -9, 17],
+    ['(and (integer 0 *) (integer * 255))', 0, 255],
+    ['(or (integer -9 -4) (unsigned-byte 8))', -9, 255],
+    ['(and (or (eql 1) (eql 8)) (satisfies identity))', 1, 8],
+  ]) check(`(multiple-value-bind (low high known) (hir-integer-bounds '${type})
+      (and known (= low ${low}) (= high ${high})))`);
+  for (const type of ['(or null (unsigned-byte 8))', '(or (integer 0 4) number)',
+                      '(integer 0 *)', '(and)', '(member 1 :other)', '(or)', '(member)'])
+    check(`(not (nth-value 2 (hir-integer-bounds '${type})))`);
+  check(`(and (hir-type-proves-p '(and sequence (simple-vector 4)) 'simple-vector)
+    (hir-type-proves-p '(eql t) '(not null))
+    (hir-type-proves-p '(member :a :b) '(not null))
+    (hir-type-proves-p '(or null (cons integer t)) 'list)
+    (not (hir-type-proves-p '(or null simple-vector) 'simple-vector))
+    (not (hir-type-proves-p '(or cons integer) 'list)))`);
+  check(`(and (eq (hir-inline-result-type '+ '(integer (eql 0))) 'integer)
+    (equal (hir-inline-result-type '* '((eql 0) integer)) '(eql 0))
+    (equal (hir-inline-result-type 'logior '(integer (integer -1 -1))) '(integer -1 -1))
+    (eq (hir-inline-result-type 'ash '(integer (mod 1))) 'integer)
+    (null (hir-integer-identity '+ 'number '(eql 0)))
+    (null (hir-integer-identity 'logand 't '(eql 0)))
+    (null (hir-integer-identity '+ 'integer '(member 0 1))))`);
+  check(`(let* ((a (list :same)) (b (list :same))
+                (left (list 'eql a)) (right (list 'eql b)))
+    (and (not (hir-type-equal-p left right))
+      (= (length (cdr (hir-type-join left right))) 2)))`);
+  // Check the lattice against runtime CL membership, including types with
+  // holes whose interval hull is not interchangeable with the actual type.
+  check(`(let ((types '((integer -4 -1) (integer 0 4) (integer -4 4)
+                       (signed-byte 3) (unsigned-byte 3) (mod 4)
+                       (member 0 2) (eql 1) (or (eql -2) (eql 2)))))
+    (every (lambda (a)
+      (every (lambda (b)
+        (let ((join (hir-type-join a b)) (meet (hir-type-restrict a b)))
+          (loop for x from -5 to 8 always
+            (and (or (not (or (typep x a) (typep x b))) (typep x join))
+                 (or (not (and (typep x a) (typep x b))) (typep x meet)))))) types)) types))`);
+  check(`(let ((a (list :cycle)) (b (list :cycle)))
+    (setf (cdr a) a (cdr b) b)
+    (and (not (hir-type-equal-p (list 'member a) (list 'member b)))
+      (hir-type-proves-p (list 'eql a) 'cons)))`);
+  check(`(let ((left '(integer 0 255)) (right (list 'integer 0 255)))
+    (dotimes (i 24) (setq left (list 'or left left) right (list 'or right right)))
+    (and (hir-type-equal-p left right)
+      (not (nth-value 2 (hir-integer-bounds left)))
+      (not (hir-type-proves-p left 'integer))))`);
   const compile = async source => {
     vm.evaluate(`(defparameter *flow-unit* (compile-to-hir '${source}))
       (multiple-value-bind (bytes literals) (emit-native-module *flow-unit*)
@@ -16,6 +65,10 @@ try {
     return WebAssembly.Module.imports(module).map(entry => entry.name);
   };
   for (const [source, args, expected, entry = 'native-add-int64'] of [
+    [`(lambda (x) (declare (type (and (integer 0 *) (integer * 255)) x) (inline 1+))
+       (list (* (1+ x) 2)))`, '255', '(512)\n', 'native-mul-int64'],
+    [`(lambda (x) (declare (type (or (mod 256) (eql -1)) x) (inline 1-))
+       (list (* (1- x) 2)))`, '-1', '(-4)\n', 'native-mul-int64'],
     [`(lambda (x) (declare (type (unsigned-byte 8) x) (inline +))
        (list (* (+ x 1) 2)))`, '255', '(512)\n', 'native-mul-int64'],
     [`(lambda (x) (declare (type (integer -4 7) x) (inline -))
@@ -64,6 +117,42 @@ try {
   check(`(let* ((unit (compile-to-hir '(lambda (flag) (if flag 4 8))))
                 (facts (infer-hir-types unit)))
     (equal (gethash (first (hir-unit-functions unit)) facts) '(integer 4 8)))`);
+  // Private module callees receive the union of every caller's argument
+  // types. Their derived results feed back into callers without inlining.
+  check(`(let* ((unit (compile-module-to-hir
+      '((defun step-value (x) (declare (inline 1+)) (1+ x))
+        (defun entry (flag a b)
+          (declare (type (mod 256) a) (type (integer -8 -1) b))
+          (if flag (step-value a) (step-value b))))
+      :entry-points '(entry) :inline nil))
+      (facts (infer-hir-types unit))
+      (bindings (hir-function-bindings (first (hir-unit-functions unit))))
+      (step (hir-local-function (hir-binding-local
+        (find 'step-value bindings :key (lambda (binding) (hir-binding-name binding))))))
+      (entry (hir-local-function (hir-binding-local
+        (find 'entry bindings :key (lambda (binding) (hir-binding-name binding)))))))
+    (and step entry (equal (gethash step facts) '(integer -7 256))
+      (equal (gethash entry facts) '(integer -7 256))
+      (eq (gethash step (infer-hir-types unit :entries (list step))) t)))`);
+  check(`(let* ((unit (compile-module-to-hir
+      '((defun step-value (x) (declare (inline 1+)) (1+ x))
+        (defun entry (x) (declare (type (or null (mod 256)) x))
+          (if x (step-value x) -1))) :entry-points '(entry) :inline nil))
+      (facts (infer-hir-types unit))
+      (binding (find 'step-value (hir-function-bindings (first (hir-unit-functions unit)))
+        :key (lambda (binding) (hir-binding-name binding)))))
+    (equal (gethash (hir-local-function (hir-binding-local binding)) facts) '(integer 1 256)))`);
+  check(`(multiple-value-bind (entries bytes unit)
+    (compile-native-module
+      '((defun guarded-step (x) (declare (inline 1+)) (if x (1+ x) 0))
+        (defun entry (x) (declare (type (or null (mod 256)) x)) (guarded-step x)))
+      :entry-points '(entry) :inline nil)
+    (declare (ignore bytes))
+    (let* ((facts (infer-hir-types unit))
+           (binding (find 'guarded-step (hir-function-bindings (first (hir-unit-functions unit)))
+             :key (lambda (binding) (hir-binding-name binding)))))
+      (and (equal (gethash (hir-local-function (hir-binding-local binding)) facts) '(integer 0 256))
+        (= (funcall (cdar entries) nil) 0) (= (funcall (cdar entries) 255) 256))))`);
   assert.ok((await compile(`(lambda (n) (declare (type (unsigned-byte 8) n))
     (flet ((helper (x) (list (+ x 1)))) (declare (notinline helper)) (helper n)))`)).includes('native-add-int64'));
   assert.equal(vm.evaluate('(funcall *flow-function* 255)').output, '(256)\n');

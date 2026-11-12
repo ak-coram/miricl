@@ -59,6 +59,9 @@ try {
     ["'(lambda () (declare (special 7)) 1)", /SPECIAL declaration/],
     ["'(lambda () (declare (type integer :bad)) 1)", /TYPE declaration variable/],
     ["'(lambda () (declare (optimize (safety 4))) 1)", /level from 0 through 3/],
+    ["'(lambda (x) (declare (type (integer (0 1) 9) x)) x)", /integer type bound/],
+    ["'(lambda (x) (declare (type (signed-byte -1) x)) x)", /byte width/],
+    ["'(lambda () (the (mod 0) 0))", /positive integer modulus/],
     ["'(lambda () (if t))", /IF form/],
     ["'(lambda () (quote 1 2))", /exactly one argument/],
     ["'(lambda () (setq x))", /variable\/value pairs/],
@@ -90,6 +93,13 @@ try {
 
   for (const source of ['(verify-hir 4)', '(emit-native-module #())', '(infer-hir-types nil)'])
     reject(source, /HIR unit/);
+  reject(`(let* ((unit (compile-to-hir '(lambda (x) (+ x 1))))
+      (type (list 'and 'integer))
+      (value (first (hir-function-values (first (hir-unit-functions unit))))))
+    (setf (second type) type (hir-value-type value) type) (infer-hir-types unit))`, /circular type/);
+  reject(`(let* ((type (list 'or 'integer)))
+    (setf (cdr (last type)) type)
+    (compile-to-hir (list 'lambda '(x) (list 'declare (list 'type type 'x)) 'x)))`, /circular list/);
   for (const [mutation, reason] of [
     ['(setf (first (hir-unit-functions unit)) #())', /function record/],
     ['(setf (hir-function-value-count function) -1)', /counts/],
@@ -110,6 +120,8 @@ try {
     ${mutation} (emit-native-module unit))`, reason);
   reject(`(let ((unit (compile-to-hir '(lambda () 1))))
     (emit-native-module unit :entries (list #())))`, /native entry point/);
+  reject(`(let ((unit (compile-to-hir '(lambda () 1))))
+    (infer-hir-types unit :entries (list #())))`, /type-inference entry point/);
   reject(`(let* ((body (list 'progn nil))
                  (source (list 'lambda nil
                    (list 'labels (list (list 'helper nil body))

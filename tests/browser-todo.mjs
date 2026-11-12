@@ -105,6 +105,7 @@ try {
   await command('Network.emulateNetworkConditions', {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
   await command('Page.navigate', {url: pathToFileURL(html).href});
   await waitFor(ready);
+  assert.equal(await js(`todoInterpreter.evaluate("(not (fboundp 'miricl-compiler:compile-native))").output`), 'T\n');
   assert.equal(await js("document.querySelector('script[type=\"text/x-common-lisp\"]').id"), '');
   assert.match(await js("document.getElementById('lisp-source').textContent"), /\(defclass todo-item/);
   assert.deepEqual(await titles(), []);

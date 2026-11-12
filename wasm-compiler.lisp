@@ -207,33 +207,42 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (let ((index (gethash name (cdr *native-import-indices*))))
     (unless index (error "Unknown native ABI operation ~S." name))
     (wasm-byte #x10) (wasm-u32 index)))
+(defun wasm-remember-local (index start kind)
+  (declare (type (unsigned-byte 32) index start) (type (unsigned-byte 8) kind))
+  ;; A function owns one mutable lookbehind record. Recording each local
+  ;; access used to allocate a fresh five-cons list in this emission loop.
+  (let ((previous (or *wasm-last-local* (setq *wasm-last-local* (make-array 5)))))
+    (declare (type simple-vector previous))
+    (setf (svref previous 0) *wasm-bytes* (svref previous 1) (length *wasm-bytes*)
+          (svref previous 2) index (svref previous 3) start (svref previous 4) kind)))
+
 (defun wasm-get (value)
-  (declare (type simple-vector value *wasm-locals*))
+  (declare (type simple-vector value *wasm-locals*) (type (or null simple-vector) *wasm-last-local*))
   (cond
     ((and *wasm-inline-constants* (native-value-slot *wasm-inline-constants* value))
      (wasm-literal (first (hir-instruction-attributes (hir-value-producer value)))))
-    ((and *wasm-last-local* (eq (first *wasm-last-local*) *wasm-bytes*)
-          (= (second *wasm-last-local*) (length *wasm-bytes*))
-          (= (fifth *wasm-last-local*) #x21)
-          (eql (third *wasm-last-local*) (native-value-slot *wasm-locals* value)))
+    ((and *wasm-last-local* (eq (svref *wasm-last-local* 0) *wasm-bytes*)
+          (= (svref *wasm-last-local* 1) (length *wasm-bytes*))
+          (= (svref *wasm-last-local* 4) #x21)
+          (eql (svref *wasm-last-local* 2) (native-value-slot *wasm-locals* value)))
      ;; LOCAL.SET followed immediately by LOCAL.GET is one LOCAL.TEE.
-     (setf (aref *wasm-bytes* (fourth *wasm-last-local*)) #x22)
-     (setq *wasm-last-local* nil))
+     (setf (aref *wasm-bytes* (svref *wasm-last-local* 3)) #x22
+           (svref *wasm-last-local* 4) 0))
     (t (wasm-local (or (native-value-slot *wasm-locals* value) (error "Missing native operand local."))))))
 (defun wasm-set (value)
-  (declare (type (or null simple-vector) value) (type simple-vector *wasm-locals*))
+  (declare (type (or null simple-vector) value *wasm-last-local*) (type simple-vector *wasm-locals*))
   (let ((local (native-value-slot *wasm-locals* value)))
     (if local
-        (if (and *wasm-last-local* (eq (first *wasm-last-local*) *wasm-bytes*)
-                 (= (second *wasm-last-local*) (length *wasm-bytes*))
-                 (= (fifth *wasm-last-local*) #x20) (= (third *wasm-last-local*) local))
+        (if (and *wasm-last-local* (eq (svref *wasm-last-local* 0) *wasm-bytes*)
+                 (= (svref *wasm-last-local* 1) (length *wasm-bytes*))
+                 (= (svref *wasm-last-local* 4) #x20) (= (svref *wasm-last-local* 2) local))
             ;; A value's last use can share the result's local. Copying that
             ;; local to itself has no effect on either the stack or the local.
-            (progn (setf (fill-pointer *wasm-bytes*) (fourth *wasm-last-local*))
-                   (setq *wasm-last-local* nil))
+            (setf (fill-pointer *wasm-bytes*) (svref *wasm-last-local* 3)
+                  (svref *wasm-last-local* 4) 0)
             (let ((start (length *wasm-bytes*)))
               (wasm-byte #x21) (wasm-u32 local)
-              (setq *wasm-last-local* (list *wasm-bytes* (length *wasm-bytes*) local start #x21))))
+              (wasm-remember-local local start #x21)))
         (wasm-byte #x1a))))
 (defun wasm-integer (value)
   (declare (type (signed-byte 32) value))
@@ -242,7 +251,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (declare (type (unsigned-byte 32) index))
   (let ((start (length *wasm-bytes*)))
     (wasm-byte #x20) (wasm-u32 index)
-    (setq *wasm-last-local* (list *wasm-bytes* (length *wasm-bytes*) index start #x20))))
+    (wasm-remember-local index start #x20)))
 (defun wasm-null () (wasm-byte #xd0) (wasm-byte #x6f))
 (defun wasm-gc (opcode &rest immediates)
   (declare (type (unsigned-byte 32) opcode) (type list immediates))
@@ -530,25 +539,13 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4"))))
 
 (defun native-type-integer-width (type)
-  (cond ((eq type 'bit) 2) ((eq type 'fixnum) 64)
-    ((consp type)
-     (case (car type)
-       (integer (when (and (integerp (second type)) (integerp (third type))
-                           (<= (second type) (third type)))
-                  (1+ (max (integer-length (second type)) (integer-length (third type))))))
-       (signed-byte (and (integerp (second type)) (plusp (second type)) (second type)))
-       (unsigned-byte (and (integerp (second type)) (>= (second type) 0) (1+ (second type))))
-       (and (let ((width nil))
-              (dolist (part (cdr type) width)
-                (let ((next (native-type-integer-width part)))
-                  (when next (setq width (if width (min width next) next)))))))
-       (or (let ((width 1))
-             (dolist (part (cdr type) width)
-               (let ((next (native-type-integer-width part)))
-                 (unless next (return nil))
-                 (setq width (max width next))))))
-       (values (unless (member (second type) lambda-list-keywords)
-                 (native-type-integer-width (second type))))))))
+  ;; One target CL type domain drives declarations, module summaries and
+  ;; representation selection. Never ask the host about target FIXNUMs.
+  (if (and (consp type) (eq (car type) 'values))
+      (unless (member (second type) lambda-list-keywords)
+        (native-type-integer-width (second type)))
+      (multiple-value-bind (low high bounded) (hir-integer-bounds type)
+        (when bounded (1+ (max (integer-length low) (integer-length high)))))))
 
 (defun native-compute-integer-width (value)
   "A proven signed integer width of at most 64, or NIL when unknown."
@@ -588,17 +585,42 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
                (wasm-call "native-unbox-int64"))))))
 
+(defun native-integer-result-fits-p (name inputs)
+  (declare (type symbol name) (type list inputs))
+  ;; Derive this from operand types, rather than treating a result assertion
+  ;; as evidence that the arithmetic itself cannot overflow.
+  (let ((result (hir-inline-result-type name
+                  (mapcar (lambda (value)
+                    (if *wasm-inferred-types* (gethash value *wasm-inferred-types* t)
+                        (hir-value-type value))) (cddr inputs)))))
+    (multiple-value-bind (low high bounded) (hir-integer-bounds result)
+      (and bounded (<= -9223372036854775808 low high 9223372036854775807)))))
+
 (defun native-inline-integer-opcode (name inputs)
   (declare (type symbol name) (type list inputs))
+  (when (and (= (length inputs) 3) (member name '(1+ 1-)))
+    (let ((width (native-integer-width (third inputs))))
+      (return-from native-inline-integer-opcode
+        (and width (or (<= width 63) (native-integer-result-fits-p name inputs))
+             (if (eq name '1+) #x7c #x7d)))))
   (when (= (length inputs) 4)
+    (let ((identity (hir-integer-identity name
+                      (if *wasm-inferred-types* (gethash (third inputs) *wasm-inferred-types* t)
+                          (hir-value-type (third inputs)))
+                      (if *wasm-inferred-types* (gethash (fourth inputs) *wasm-inferred-types* t)
+                          (hir-value-type (fourth inputs))))))
+      (when identity (return-from native-inline-integer-opcode identity)))
     (let ((left (native-integer-width (third inputs)))
           (right (native-integer-width (fourth inputs))))
       (when (and left right)
         (locally (declare (type (integer 1 64) left right))
           (case name
-            (+ (and (<= left 63) (<= right 63) #x7c))
-            (- (and (<= left 63) (<= right 63) #x7d))
-            (* (and (<= (+ left right) 64) #x7e))
+            (+ (and (or (and (<= left 63) (<= right 63))
+                        (native-integer-result-fits-p name inputs)) #x7c))
+            (- (and (or (and (<= left 63) (<= right 63))
+                        (native-integer-result-fits-p name inputs)) #x7d))
+            (* (and (or (<= (+ left right) 64)
+                        (native-integer-result-fits-p name inputs)) #x7e))
             (logand #x83) (logior #x84) (logxor #x85)
             (= #x51) (/= #x52) (< #x53) (> #x55) (<= #x57) (>= #x59)))))))
 
@@ -609,6 +631,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   ;; boxed at generic HIR boundaries and retain the ordinary value count.
   (dolist (operand (cddr inputs))
     (emit-native-unboxed-integer operand (native-integer-width operand)))
+  (when (= (length inputs) 3) (wasm-integer 1) (wasm-byte #xac))
   (wasm-byte opcode)
   (wasm-call (if (< opcode #x60) "native-boolean" "native-int64")))
 
@@ -641,6 +664,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (when (and arithmetic
                (not (if (eq name '*) (<= (+ (first widths) (second widths)) 64)
                         (<= (max (first widths) (second widths)) 63)))
+               (not (native-integer-result-fits-p name inputs))
                (not (and (zerop safety) output
                          (let ((result-width (native-type-integer-width (hir-value-type output))))
                            (and result-width (<= result-width 64))))))
@@ -655,7 +679,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (declare (type simple-vector value))
   (let ((type (if *wasm-inferred-types* (gethash value *wasm-inferred-types* t) (hir-value-type value)))
         (producer (hir-value-producer value)))
-    (or (eq type 'simple-vector) (and (consp type) (eq (car type) 'simple-vector))
+    (or (hir-type-proves-p type 'simple-vector)
         (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :primary)
              (native-simple-vector-value-p (first (hir-instruction-inputs producer)))))))
 
@@ -684,7 +708,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defun native-list-value-p (value)
   (declare (type simple-vector value))
   (let ((type (if *wasm-inferred-types* (gethash value *wasm-inferred-types* t) (hir-value-type value))))
-    (or (member type '(list cons null)) (and (consp type) (eq (car type) 'cons)))))
+    (hir-type-proves-p type 'list)))
 
 (defun emit-native-list-call (inputs safety)
   (declare (type list inputs) (type (integer 0 3) safety))
@@ -717,7 +741,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                      (hir-instruction-attributes producer)))
                    (name (and (eq (second attributes) 'inline) (first attributes)))
                    (kind (case name
-                     ((+ - * logand logior logxor < > <= >= = /=)
+                     ((1+ 1- + - * logand logior logxor ash < > <= >= = /=)
                       (and (zerop (hir-instruction-safety-level instruction))
                            (native-inline-integer-opcode name inputs)))
                      ((car first cdr rest)
@@ -737,6 +761,11 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                      ((null not) (and (= (length inputs) 3) :null))
                      (otherwise (and (equal name '(setf gethash))
                                      (member (length inputs) '(5 6)) :puthash)))))
+              (when (and kind *wasm-inferred-types* (zerop (hir-instruction-safety-level instruction))
+                         (member name '(consp simple-vector-p null not)))
+                (let ((type (gethash (hir-instruction-output instruction) *wasm-inferred-types* t)))
+                  (cond ((equal type '(eql t)) (setq kind :true))
+                        ((eq type 'null) (setq kind :false)))))
               (when (and kind (eq (second attributes) 'inline))
                 (multiple-value-bind (canonical found) (gethash name checked)
                   (unless found
@@ -1026,6 +1055,10 @@ Bind to NIL to interpret forms, including forms without native lowering.")
          (when kind
            (cond
              ((integerp kind) (emit-native-inline-integer inputs kind))
+             ((eq kind :true) (wasm-literal t))
+             ((eq kind :false) (wasm-null))
+             ((eq kind :left) (wasm-get (third inputs)))
+             ((eq kind :right) (wasm-get (fourth inputs)))
              (t
               (wasm-get (third inputs))
               (case kind
@@ -1542,10 +1575,16 @@ Bind to NIL to interpret forms, including forms without native lowering.")
               (when (and (%hir-instruction-p producer)
                          (eq (hir-instruction-opcode producer) :function-reference)
                          (not (eq (second (hir-instruction-attributes producer)) 'notinline))
-                         (member (first (hir-instruction-attributes producer))
-                           '(+ - * logand logior logxor ash < > <= >= = /= car first cdr rest length svref aref row-major-aref
-                             (setf svref) (setf aref) (setf row-major-aref)) :test #'equal))
-                (dolist (input (cddr inputs)) (push input roots))))))))
+                         (or (member (first (hir-instruction-attributes producer))
+                           '(1+ 1- + - * logand logior logxor ash < > <= >= = /= car first cdr rest length svref aref row-major-aref
+                             (setf svref) (setf aref) (setf row-major-aref)) :test #'equal)
+                             (and (zerop (hir-instruction-safety-level instruction))
+                                  (eq (second (hir-instruction-attributes producer)) 'inline)
+                                  (member (first (hir-instruction-attributes producer))
+                                    '(consp simple-vector-p null not)))))
+                (dolist (input (cddr inputs)) (push input roots))
+                (when (member (first (hir-instruction-attributes producer)) '(consp simple-vector-p null not))
+                  (push (hir-instruction-output instruction) roots))))))))
     roots))
 
 (defun emit-native-module (unit &key entries)
@@ -1567,7 +1606,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
          (*wasm-literal-groups* (and entries (native-literal-groups entries)))
          (*native-functions* (hir-unit-functions unit))
          ;; These roots come directly from validated instruction operands.
-         (*wasm-inferred-types* (infer-hir-types-checked unit (native-type-roots unit) t))
+         (*wasm-inferred-types* (infer-hir-types-checked unit (native-type-roots unit) t entries))
          (*wasm-debug* (some (lambda (function) (>= (hir-function-debug-level function) 2)) *native-functions*))
          (*wasm-function-plans* (make-hash-table :test 'eq))
          (*native-function-indices* (native-function-indices *native-functions*))
@@ -1679,10 +1718,10 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
 (defparameter *native-compiler-seeds*
   '(compiler-primitive
                    wasm-byte wasm-append wasm-u32 wasm-s32 wasm-name wasm-type wasm-section wasm-call
-                   wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
+                   wasm-remember-local wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
                    ;; These small constructors and declaration readers are
                    ;; exercised while compiling nearly every remaining kernel.
-                   compiler-input-summary compiler-input-fail compiler-list-length compiler-variable-name compiler-function-name
+                   compiler-input-summary compiler-input-fail compiler-list-length compiler-type-specifier compiler-variable-name compiler-function-name
                    compiler-lambda-list compiler-body compiler-source-form validate-hir-shapes
                    hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant
                    hir-special-p hir-declarations hir-intersect-types hir-type-environment hir-bound-type-environment
@@ -1690,14 +1729,15 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-canonical-builtin-code native-builtin-code emit-native-object-types wasm-literal wasm-list
                    native-removable-p native-live-inputs native-direct-cells native-forward-blocks native-live-values native-local-layout native-single-calls native-full-groups native-scalar-groups native-block-targets
                    emit-native-fixed-call native-type-integer-width native-compute-integer-width native-integer-width
-                   emit-native-unboxed-integer native-inline-integer-opcode emit-native-inline-integer emit-native-integer-call
+                   emit-native-unboxed-integer native-integer-result-fits-p native-inline-integer-opcode emit-native-inline-integer emit-native-integer-call
                    native-simple-vector-value-p native-list-value-p emit-native-vector-call emit-native-list-call
                    native-plan-inline-simple native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-call
                    emit-native-cons-access native-fixed-arity emit-native-instruction emit-native-jump-value emit-native-jump emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    hir-capture hir-cell-for-binding
-                   hir-value-type-at hir-integer-bounds hir-type-join hir-type-restrict hir-constant-type hir-type-cell
-                   hir-inline-primitive hir-inline-result-type infer-hir-types infer-hir-types-checked
+                   hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
+                   hir-type-without-null hir-type-truth-premise hir-type-branch-guards
+                   hir-inline-primitive hir-integer-identity hir-inline-result-type infer-hir-types infer-hir-types-checked
                    hir-inline-environment hir-function-result-type hir-inline-size hir-inline-candidate hir-inline-body hir-shadow-specials
                    compiler-source-policy
                    hir-bind-value hir-read-variable hir-write-variable hir-function-reference
@@ -1713,7 +1753,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-application-form hir-recursive-form hir-form compile-to-hir compile-module-to-hir compile-native-module
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
-                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops native-prune-module
+                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-prune-module
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
                    definition-info namespace form-references
                    miricl::%normalize-lambda-1 miricl::%normalize-lambda
@@ -1751,7 +1791,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
       (append documentation (list '(declare (optimize (safety 0))
         (inline svref aref row-major-aref (setf svref) (setf aref) (setf row-major-aref)
                 length logand logior logxor ash car first cdr rest eq eql null not cons
-                gethash (setf gethash) consp simple-vector-p + - * < > <= >= = /=))) body))))
+                gethash (setf gethash) consp simple-vector-p 1+ 1- + - * < > <= >= = /=))) body))))
 
 (defun ensure-compiler ()
   "Compile the compiler once on first use; startup only loads its packed source."

@@ -17,6 +17,171 @@ try {
   };
   const scalar64 = [-(1n << 63n), -(1n << 31n), -1n, 0n, 1n, 1n << 32n, (1n << 63n) - 1n];
   const scalar32 = [-(1n << 31n), -1n, 0n, 1n, (1n << 31n) - 1n];
+  // Integer identities apply to bignums as well as scalar representations.
+  // Both operand expressions still execute in order and contribute only
+  // their primary values, even when the result no longer uses one of them.
+  for (const [operator, left, right, constant] of [
+    ['+', 'x', '0'], ['+', '0', 'x'], ['-', 'x', '0'],
+    ['*', 'x', '1'], ['*', '1', 'x'], ['*', 'x', '0', 0n], ['*', '0', 'x', 0n],
+    ['logand', 'x', '-1'], ['logand', '-1', 'x'],
+    ['logand', 'x', '0', 0n], ['logand', '0', 'x', 0n],
+    ['logior', 'x', '0'], ['logior', '0', 'x'],
+    ['logior', 'x', '-1', -1n], ['logior', '-1', 'x', -1n],
+    ['logxor', 'x', '0'], ['logxor', '0', 'x'],
+    ['ash', 'x', '0'], ['ash', '0', 'x', 0n],
+  ]) {
+    const expression = `(${operator} (progn (push :left events) (values ${left} :extra))
+      (progn (push :right events) (values ${right} :extra)))`;
+    const result = await compile(`(lambda (x) (declare (optimize (safety 0))
+      (inline ${operator}) (type integer x)) (${operator} ${left} ${right}))`);
+    assert.ok(!result.imports.includes('native-function-reference'), expression);
+    await compile(`(lambda (x) (declare (optimize (safety 0))
+      (inline ${operator}) (type integer x))
+      (let ((events nil)) (values ${expression} (reverse events))))`);
+    for (const x of [...scalar64, -(1n << 160n), 1n << 160n])
+      check(`(equal (multiple-value-list (funcall *inline-function* ${x}))
+        '(${constant ?? x} (:left :right)))`);
+  }
+  // A singleton declaration is evidence even when the operand is not literal.
+  const declaredIdentity = await compile(`(lambda (x zero)
+    (declare (optimize (safety 0)) (inline +) (type integer x) (type (mod 1) zero))
+    (+ x zero))`);
+  assert.ok(!declaredIdentity.imports.includes('native-function-reference'));
+  check(`(equal (multiple-value-list (funcall *inline-function* 1267650600228229401496703205376 0))
+    '(1267650600228229401496703205376))`);
+  for (const [operator, expression, declarations] of [
+    ['+', '(+ x 0)', ''], ['*', '(* x 0)', ''],
+    ['logand', '(logand x 0)', ''], ['logior', '(logior x -1)', ''],
+    ['ash', '(ash 0 x)', ''], ['+', '(+ x 0)', '(type number x)'],
+  ]) {
+    const result = await compile(`(lambda (x) (declare (optimize (safety 0))
+      (inline ${operator}) ${declarations}) ${expression})`);
+    assert.ok(result.imports.includes('native-function-reference'), expression);
+    check(`(handler-case (progn (funcall *inline-function* :invalid) nil) (type-error () t))`);
+  }
+  await compile(`(lambda (x) (declare (optimize (safety 0)) (inline +) (type number x)) (+ x 0))`);
+  check(`(typep (funcall *inline-function* 1.5) 'single-float)`);
+  const safeIdentity = await compile(`(lambda (x) (declare (optimize (safety 3))
+    (inline logand) (type integer x)) (logand x 0))`);
+  assert.ok(safeIdentity.imports.includes('native-function-reference'));
+  check(`(handler-case (progn (funcall *inline-function* :invalid) nil) (type-error () t))`);
+  for (const [operator, type, arg, answer, entry] of [
+    ['simple-vector-p', 'simple-vector', '#(42)', 'T', 'native-simple-vector-p-inline'],
+    ['consp', '(cons integer t)', "'(42)", 'T', 'native-consp-inline'],
+    ['consp', 'null', 'nil', 'NIL', 'native-consp-inline'],
+    ['null', '(mod 256)', '0', 'NIL', 'native-boolean'],
+    ['not', 'simple-vector', '#()', 'NIL', 'native-boolean'],
+  ]) {
+    const result = await compile(`(lambda (x) (declare (optimize (safety 0))
+      (type ${type} x) (inline ${operator})) (${operator} x))`);
+    assert.ok(!result.imports.includes(entry), `${operator}: predicate must fold`);
+    assert.equal(vm.evaluate(`(funcall *inline-function* ${arg})`).output, `${answer}\n`);
+  }
+  await compile(`(lambda (v) (declare (optimize (safety 0)) (type simple-vector v)
+    (inline simple-vector-p))
+    (let ((calls 0)) (values (simple-vector-p (progn (incf calls) v)) calls)))`);
+  check(`(equal (multiple-value-list (funcall *inline-function* #())) '(t 1))`);
+  for (const [operator, delta] of [['1+', 1n], ['1-', -1n]]) {
+    const result = await compile(`(lambda (a) (declare (optimize (safety 0))
+      (inline ${operator}) (type (or (signed-byte 32) (eql 4294967295)) a)) (${operator} a))`);
+    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    for (const a of [...scalar32, 4294967295n])
+      assert.equal(vm.evaluate(`(funcall *inline-function* ${a})`).output, `${a + delta}\n`);
+    const wide = await compile(`(lambda (a) (declare (optimize (safety 0))
+      (inline ${operator}) (fixnum a)) (${operator} a))`);
+    assert.ok(wide.imports.includes('native-function-reference'));
+    for (const a of scalar64)
+      assert.equal(vm.evaluate(`(funcall *inline-function* ${a})`).output, `${a + delta}\n`);
+  }
+  for (const [operator, type, value, answer] of [
+    ['1+', '(integer -9223372036854775808 9223372036854775806)', '9223372036854775806', '9223372036854775807'],
+    ['1-', '(integer -9223372036854775807 9223372036854775807)', '-9223372036854775807', '-9223372036854775808'],
+  ]) {
+    const result = await compile(`(lambda (a) (declare (optimize (safety 0))
+      (inline ${operator}) (type ${type} a)) (${operator} a))`);
+    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.equal(vm.evaluate(`(funcall *inline-function* ${value})`).output, `${answer}\n`);
+  }
+  for (const [operator, left, right, args, answer] of [
+    ['+', '(integer -9223372036854775808 0)', '(integer 0 9223372036854775807)', '-9223372036854775808 9223372036854775807', '-1'],
+    ['-', '(integer -9223372036854775808 -1)', '(integer -9223372036854775808 -1)', '-9223372036854775808 -1', '-9223372036854775807'],
+    ['*', 'fixnum', '(eql 0)', '-9223372036854775808 0', '0'],
+  ]) {
+    const result = await compile(`(lambda (a b) (declare (optimize (safety 0))
+      (inline ${operator}) (type ${left} a) (type ${right} b)) (${operator} a b))`);
+    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.equal(vm.evaluate(`(funcall *inline-function* ${args})`).output, `${answer}\n`);
+  }
+  const nullableVector = await compile(`(lambda (v) (declare (optimize (safety 0))
+    (inline svref) (type (or null simple-vector) v)) (if v (svref v 0) :empty))`);
+  assert.ok(nullableVector.imports.includes('native-vector-ref-inline'));
+  check(`(and (eq (funcall *inline-function* nil) :empty)
+    (= (funcall *inline-function* #(42)) 42))`);
+  // Both paths of the inner conditional carry the outer type premise.
+  const joinedVector = await compile(`(lambda (v flag) (declare (optimize (safety 0))
+    (inline svref) (type (or null simple-vector) v))
+    (if v (let ((i (if flag 0 1))) (svref v i)) :empty))`);
+  assert.ok(joinedVector.imports.includes('native-vector-ref-inline'));
+  check(`(and (= (funcall *inline-function* #(41 42) t) 41)
+    (= (funcall *inline-function* #(41 42) nil) 42)
+    (eq (funcall *inline-function* nil t) :empty))`);
+  for (const expression of [
+    '(cond ((null v)) (t (svref v 0)))',
+    '(let ((empty (null v))) (if empty t (svref v 0)))',
+    '(let* ((empty (null v)) (alias empty)) (if alias t (svref v 0)))',
+  ]) {
+    const result = await compile(`(lambda (v) (declare (optimize (safety 0))
+      (inline svref null) (type (or null simple-vector) v)) ${expression})`);
+    assert.ok(result.imports.includes('native-vector-ref-inline'), expression);
+    check(`(and (= (funcall *inline-function* #(42)) 42)
+      (eq (funcall *inline-function* nil) t))`);
+  }
+  const changedPredicate = await compile(`(lambda (v) (declare (optimize (safety 0))
+    (inline svref null) (type (or null simple-vector) v))
+    (let ((empty (null v))) (setq empty nil) (if empty t (svref v 0))))`);
+  assert.ok(!changedPredicate.imports.includes('native-vector-ref-inline'));
+  check(`(handler-case (progn (funcall *inline-function* nil) nil) (type-error () t))`);
+  const changedSource = await compile(`(lambda (v) (declare (optimize (safety 0))
+    (inline svref null) (type (or null simple-vector) v))
+    (let ((empty (null v))) (setq v nil) (if empty t (svref v 0))))`);
+  assert.ok(!changedSource.imports.includes('native-vector-ref-inline'));
+  check(`(handler-case (progn (funcall *inline-function* #(42)) nil) (type-error () t))`);
+  const outsideJoin = await compile(`(lambda (v flag) (declare (optimize (safety 0))
+    (inline svref) (type (or null simple-vector) v))
+    (let ((i (if v (if flag 0 1) 0))) (svref v i)))`);
+  assert.ok(!outsideJoin.imports.includes('native-vector-ref-inline'));
+  check(`(and (= (funcall *inline-function* #(41 42) nil) 42)
+    (handler-case (progn (funcall *inline-function* nil t) nil) (type-error () t)))`);
+  for (const test of ['(null v)', '(not v)']) {
+    const result = await compile(`(lambda (v) (declare (optimize (safety 0))
+      (inline svref null not) (type (or null simple-vector) v))
+      (if ${test} :empty (svref v 0)))`);
+    assert.ok(result.imports.includes('native-vector-ref-inline'));
+    check(`(and (eq (funcall *inline-function* nil) :empty)
+      (= (funcall *inline-function* #(42)) 42))`);
+  }
+  const nullableInteger = await compile(`(lambda (x) (declare (optimize (safety 0))
+    (inline 1+) (type (or null (mod 256)) x)) (if x (1+ x) :empty))`);
+  assert.ok(!nullableInteger.imports.includes('native-function-reference'));
+  check(`(and (eq (funcall *inline-function* nil) :empty)
+    (= (funcall *inline-function* 0) 1) (= (funcall *inline-function* 255) 256))`);
+  for (const mutation of ['(setq v nil)', '(funcall (lambda () (setq v nil)))']) {
+    const result = await compile(`(lambda (v) (declare (optimize (safety 0))
+      (inline svref) (type (or null simple-vector) v))
+      (if v (progn ${mutation} (svref v 0)) :empty))`);
+    assert.ok(!result.imports.includes('native-vector-ref-inline'));
+    check(`(handler-case (progn (funcall *inline-function* #(42)) nil) (type-error () t))`);
+  }
+  for (const body of [
+    '(if v (let ((v nil)) (svref v 0)) :empty)',
+    '(flet ((null (x) (declare (ignore x)) nil)) (declare (notinline null)) (if (null v) :empty (svref v 0)))',
+  ]) {
+    const result = await compile(`(lambda (v) (declare (optimize (safety 0))
+      (inline svref null) (type (or null simple-vector) v)) ${body})`);
+    assert.ok(!result.imports.includes('native-vector-ref-inline'));
+    check(`(handler-case (progn (funcall *inline-function* ${body.startsWith('(if') ? '#(42)' : 'nil'}) nil)
+      (type-error () t))`);
+  }
   for (const [operator, operation, bits, inputs] of [
     ['+', (a, b) => a + b, 32, scalar32], ['-', (a, b) => a - b, 32, scalar32],
     ['*', (a, b) => a * b, 32, scalar32],

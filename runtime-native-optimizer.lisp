@@ -463,6 +463,216 @@
     (local.set $b (i32.add (local.get $b) (i32.const 1))) (br $instruction-block)))
   #@(call $bool (i32.const 1)))
 
+;;;; The native instruction simplifier. Keep the Lisp implementation as the
+;;;; reference and host fallback; this kernel only changes code/argument slots.
+(defun wat-native-simplify-field (name index)
+  `(array.get $objects (ref.as_non_null (local.get ,name)) (i32.const ,index)))
+
+(defun wat-native-simplify-clear (name)
+  `(array.set $objects (ref.as_non_null (local.get ,name)) (i32.const 0) (ref.null eq)))
+
+(define-runtime-function $native-simplify-code (($op (ref null $objects))) (i32)
+  (:locals ($value :nullable-object))
+  #@(if (ref.is_null (local.get $op)) (then (return (i32.const -1))))
+  #@(local.set $value ,(wat-native-simplify-field '$op 0))
+  #@(if (ref.is_null (local.get $value)) (then (return (i32.const -1))))
+  #@(call $natural-count (local.get $value)))
+
+(define-runtime-function $native-simplify-argument (($op (ref null $objects))) (i32)
+  #@(i32.wrap_i64 (call $scalar-integer-value
+    (ref.as_non_null ,(wat-native-simplify-field '$op 1)))))
+
+(defun wat-native-fold-i32-cases ()
+  (apply #'runtime-wat-sequence
+    (loop for (code opcode) in
+      '((#x46 i32.eq) (#x47 i32.ne) (#x48 i32.lt_s) (#x49 i32.lt_u)
+        (#x4a i32.gt_s) (#x4b i32.gt_u) (#x4c i32.le_s) (#x4d i32.le_u)
+        (#x4e i32.ge_s) (#x4f i32.ge_u) (#x6a i32.add) (#x6b i32.sub)
+        (#x6c i32.mul) (#x71 i32.and) (#x72 i32.or) (#x73 i32.xor)
+        (#x74 i32.shl) (#x75 i32.shr_s) (#x76 i32.shr_u))
+      collect (wat-fragment (wat-string
+        `(if (i32.eq (local.get $code) (i32.const ,code))
+           (then (return (,opcode (local.get $left) (local.get $right))))))))))
+
+(define-runtime-function $native-fold-i32 (($code i32) ($left i32) ($right i32)) (i32)
+  (wat-native-fold-i32-cases)
+  #@(unreachable))
+
+(define-runtime-function $native-simplify-matches (($ops (ref $objects))) ((ref $digits) (ref $digits))
+  (:locals ($ends (ref $digits)) ($elses (ref $digits)) ($stack (ref $digits))
+           ($op (ref $objects)) ($i i32) ($top i32) ($code i32) ($start i32))
+  #@(local.set $ends (array.new $digits (i32.const -1) (array.len (local.get $ops))))
+  #@(local.set $elses (array.new $digits (i32.const -1) (array.len (local.get $ops))))
+  #@(local.set $stack (array.new_default $digits (array.len (local.get $ops))))
+  #@(block $done (loop $next
+    (br_if $done (i32.ge_u (local.get $i) (array.len (local.get $ops))))
+    (local.set $op (call $vector-data (array.get $objects (local.get $ops) (local.get $i))))
+    (local.set $code (call $native-simplify-code (local.get $op)))
+    (if ,(wat-native-op-member '(#x02 #x03 #x04 #x1f))
+      (then
+        (array.set $digits (local.get $stack) (local.get $top) (local.get $i))
+        (local.set $top (i32.add (local.get $top) (i32.const 1)))))
+    (if (i32.eq (local.get $code) (i32.const 5))
+      (then (array.set $digits (local.get $elses)
+        (array.get $digits (local.get $stack) (i32.sub (local.get $top) (i32.const 1))) (local.get $i))))
+    (if (i32.and (i32.eq (local.get $code) (i32.const 11)) (i32.gt_u (local.get $top) (i32.const 0)))
+      (then
+        (local.set $top (i32.sub (local.get $top) (i32.const 1)))
+        (array.set $digits (local.get $ends)
+          (array.get $digits (local.get $stack) (local.get $top)) (local.get $i))))
+    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
+  #@(local.get $ends)
+  #@(local.get $elses))
+
+(define-runtime-function $native-simplify-ops (($source :nullable-object) ($bytes :nullable-object)) (:nullable-object)
+  (:locals ($ops (ref $objects)) ($op (ref $objects))
+           ($previous (ref null $objects)) ($prior (ref null $objects))
+           ($active (ref $digits)) ($ends (ref null $digits)) ($elses (ref null $digits))
+           ($i i32) ($top i32) ($code i32) ($previous-code i32) ($prior-code i32)
+           ($argument i32) ($result i32) ($dead i32) ($clean i32) ($void i32)
+           ($zero i32) ($otherwise i32) ($end i32) ($j i32) ($limit i32))
+  #@(local.set $ops (call $vector-data (local.get $source)))
+  #@(local.set $active (array.new_default $digits (array.len (local.get $ops))))
+  #@(block $done (loop $next
+    (br_if $done (i32.ge_u (local.get $i) (array.len (local.get $ops))))
+    (block $continue
+      (local.set $op (call $vector-data (array.get $objects (local.get $ops) (local.get $i))))
+      (local.set $code (call $native-simplify-code (local.get $op)))
+      (br_if $continue (i32.lt_s (local.get $code) (i32.const 0)))
+      (if (i32.eq (local.get $code) (i32.const 1))
+        (then ,(wat-native-simplify-clear '$op) (br $continue)))
+      (if (i32.and (local.get $dead)
+            (i32.eqz ,(wat-native-op-member '(#x02 #x03 #x04 #x05 #x0b #x1f))))
+        (then ,(wat-native-simplify-clear '$op) (br $continue)))
+      (local.set $previous (ref.null $objects)) (local.set $prior (ref.null $objects))
+      (if (i32.gt_u (local.get $top) (i32.const 0))
+        (then (local.set $previous (call $vector-data (array.get $objects (local.get $ops)
+          (array.get $digits (local.get $active) (i32.sub (local.get $top) (i32.const 1))))))))
+      (if (i32.gt_u (local.get $top) (i32.const 1))
+        (then (local.set $prior (call $vector-data (array.get $objects (local.get $ops)
+          (array.get $digits (local.get $active) (i32.sub (local.get $top) (i32.const 2))))))))
+      (local.set $previous-code (call $native-simplify-code (local.get $previous)))
+      (local.set $prior-code (call $native-simplify-code (local.get $prior)))
+      (block $rewritten
+        (if (i32.eq (local.get $code) (i32.const 209))
+          (then
+            (if (i32.or (i32.eq (local.get $previous-code) (i32.const 208))
+                        (i32.eq (local.get $previous-code) (i32.const 210)))
+              (then
+                (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 1)
+                  (call $int (i32.eq (local.get $previous-code) (i32.const 208))))
+                (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 0) (call $int (i32.const 65)))
+                ,(wat-native-simplify-clear '$op)))
+            (br $rewritten)))
+        (if (i32.eq (local.get $code) (i32.const 69))
+          (then
+            (if (i32.eq (local.get $previous-code) (i32.const 65))
+              (then
+                (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 1)
+                  (call $int (i32.eqz (call $native-simplify-argument (local.get $previous)))))
+                ,(wat-native-simplify-clear '$op)))
+            (br $rewritten)))
+        (if ,(wat-native-op-member '(#x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f
+                                    #x6a #x6b #x6c #x71 #x72 #x73 #x74 #x75 #x76))
+          (then
+            (if (i32.and (i32.eq (local.get $previous-code) (i32.const 65))
+                         (i32.eq (local.get $prior-code) (i32.const 65)))
+              (then
+                (local.set $result (call $native-fold-i32 (local.get $code)
+                  (call $native-simplify-argument (local.get $prior))
+                  (call $native-simplify-argument (local.get $previous))))
+                (array.set $objects (ref.as_non_null (local.get $prior)) (i32.const 1) (call $int (local.get $result)))
+                ,(wat-native-simplify-clear '$previous) ,(wat-native-simplify-clear '$op)
+                (local.set $top (i32.sub (local.get $top) (i32.const 1))) (br $rewritten)))
+            (if (i32.eq (local.get $previous-code) (i32.const 65))
+              (then
+                (local.set $argument (call $native-simplify-argument (local.get $previous)))
+                (if (i32.or
+                      (i32.and ,(wat-native-op-member '(#x6a #x6b #x72 #x73)) (i32.eqz (local.get $argument)))
+                      (i32.or
+                        (i32.and (i32.eq (local.get $code) (i32.const 108)) (i32.eq (local.get $argument) (i32.const 1)))
+                        (i32.and (i32.eq (local.get $code) (i32.const 113)) (i32.eq (local.get $argument) (i32.const -1)))))
+                  (then ,(wat-native-simplify-clear '$previous) ,(wat-native-simplify-clear '$op)
+                    (local.set $top (i32.sub (local.get $top) (i32.const 1)))))))
+            (br $rewritten)))
+        (if (i32.eq (local.get $code) (i32.const 36))
+          (then
+            (if (i32.eq (local.get $previous-code) (i32.const 35))
+              (then (if (i32.eq (call $native-simplify-argument (local.get $op))
+                               (call $native-simplify-argument (local.get $previous)))
+                (then ,(wat-native-simplify-clear '$previous) ,(wat-native-simplify-clear '$op)
+                  (local.set $top (i32.sub (local.get $top) (i32.const 1)))))))
+            (br $rewritten)))
+        (if (i32.eq (local.get $code) (i32.const 26))
+          (then
+            (block $drop-done (loop $drop
+              (br_if $drop-done (i32.eqz (local.get $top)))
+              (local.set $previous (call $vector-data (array.get $objects (local.get $ops)
+                (array.get $digits (local.get $active) (i32.sub (local.get $top) (i32.const 1))))))
+              (local.set $previous-code (call $native-simplify-code (local.get $previous)))
+              (if ,(subst '$previous-code '$code (wat-native-op-member '(#x20 #x23 #x41 #x42 #x43 #x44 #xd0 #xd2)))
+                (then ,(wat-native-simplify-clear '$previous) ,(wat-native-simplify-clear '$op)
+                  (local.set $top (i32.sub (local.get $top) (i32.const 1))) (br $drop-done)))
+              (if (i32.eq (local.get $previous-code) (i32.const 34))
+                (then
+                  (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 0) (call $int (i32.const 33)))
+                  ,(wat-native-simplify-clear '$op) (br $drop-done)))
+              (if ,(subst '$previous-code '$code
+                  (wat-native-op-member '(#x45 #x50 #x67 #x68 #x69 #x79 #x7a #x7b #xa7 #xac #xad #xc0 #xc1 #xc2 #xc3 #xc4 #xd1)))
+                (then ,(wat-native-simplify-clear '$previous)
+                  (local.set $top (i32.sub (local.get $top) (i32.const 1))) (br $drop)))
+              (br $drop-done)))
+            (br $rewritten)))
+        (if ,(wat-native-op-member '(#x04 #x0d))
+          (then
+            (if (if (result i32) (i32.eq (local.get $previous-code) (i32.const 65))
+                  (then (if (result i32) (i32.eq (local.get $code) (i32.const 4))
+                    (then (i32.const 1))
+                    (else (i32.eq (call $natural-count (call $array-raw-element (local.get $bytes)
+                      (call $natural-count ,(wat-native-simplify-field '$op 2)) (ref.null eq) (i32.const 0))) (i32.const 13)))))
+                  (else (i32.const 0)))
+              (then
+                (local.set $zero (i32.eqz (call $native-simplify-argument (local.get $previous))))
+                ,(wat-native-simplify-clear '$previous)
+                (local.set $top (i32.sub (local.get $top) (i32.const 1)))
+                (local.set $clean (i32.const 1))
+                (if (i32.eq (local.get $code) (i32.const 13))
+                  (then
+                    (if (local.get $zero) (then ,(wat-native-simplify-clear '$op))
+                      (else (array.set $objects (local.get $op) (i32.const 0) (call $int (i32.const 12))))))
+                  (else
+                    (if (ref.is_null (local.get $ends))
+                      (then (call $native-simplify-matches (local.get $ops)) (local.set $elses) (local.set $ends)))
+                    (local.set $otherwise (array.get $digits (ref.as_non_null (local.get $elses)) (local.get $i)))
+                    (local.set $end (array.get $digits (ref.as_non_null (local.get $ends)) (local.get $i)))
+                    (array.set $objects (local.get $op) (i32.const 0) (call $int (i32.const 2)))
+                    (local.set $j (select (i32.add (local.get $i) (i32.const 1))
+                      (select (local.get $otherwise) (local.get $end) (i32.ge_s (local.get $otherwise) (i32.const 0)))
+                      (local.get $zero)))
+                    (local.set $limit (select
+                      (select (i32.add (local.get $otherwise) (i32.const 1)) (local.get $end)
+                        (i32.ge_s (local.get $otherwise) (i32.const 0))) (local.get $end) (local.get $zero)))
+                    (block $pruned (loop $prune
+                      (br_if $pruned (i32.ge_u (local.get $j) (local.get $limit)))
+                      (array.set $objects (call $vector-data (array.get $objects (local.get $ops) (local.get $j)))
+                        (i32.const 0) (ref.null eq))
+                      (local.set $j (i32.add (local.get $j) (i32.const 1))) (br $prune))))))))))
+      (local.set $code (call $native-simplify-code (local.get $op)))
+      (if (i32.ge_s (local.get $code) (i32.const 0))
+        (then
+          (array.set $digits (local.get $active) (local.get $top) (local.get $i))
+          (local.set $top (i32.add (local.get $top) (i32.const 1)))
+          (if ,(wat-native-op-member '(#x02 #x03))
+            (then (if (call $eql ,(wat-native-simplify-field '$op 1) (call $int (i32.const 64)))
+              (then (local.set $void (i32.const 1))))))
+          (local.set $dead ,(wat-native-op-member '(#x00 #x08 #x0c #x0e #x0f #x12))))))
+    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
+  ;; Success plus clean-scopes/void-scopes flags; zero is never an unsupported
+  ;; marker (NIL is the host fallback marker).
+  #@(call $int (i32.or (i32.const 1)
+    (i32.or (i32.shl (local.get $clean) (i32.const 1)) (i32.shl (local.get $void) (i32.const 2))))))
+
 (define-runtime-section native-optimizer-runtime-wat ()
   ($native-op-operand) ($native-read-ops) ($native-stackify-ops) ($compiler-list-length)
-  ($native-op-liveness))
+  ($native-op-liveness) ($native-simplify-code) ($native-simplify-argument)
+  ($native-fold-i32) ($native-simplify-matches) ($native-simplify-ops))

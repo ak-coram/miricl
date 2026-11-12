@@ -11,6 +11,13 @@ const repl = image('miricl-repl.wasm');
 const precompiled = image('miricl-precompiled.wasm');
 const asdf = image('build/asdf/asdf.lisp');
 const test = (name, ...args) => [`tests/${name}.mjs`, ...args];
+// These suites exercise backend behavior and already support the ready image.
+// Keep first-use/bootstrap coverage in compiler-runtime, native-compilation,
+// native-bundle and the separate cold compiler-input run below.
+const readyCompilerTests = new Set([
+  'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-inline-types',
+  'compiler-inline-writes', 'compiler-modules', 'compiler-throughput', 'native-size',
+]);
 const groups = {
   runtime: [
     test('interpreter-only', image('miricl-interpreter.wasm'), wasm, asdf),
@@ -33,7 +40,7 @@ const groups = {
       'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-input', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-modules', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',
       'fasl-format', 'fasl-hash-tables', 'fasl-shared-initialization', 'saved-slots', 'file-compilation', 'file-code-sharing', 'nested-backquote',
       'structure-printers', 'ansi-compiler-runner', 'ansi-runner', 'ansi-upstream-runner']
-      .map(name => test(name, wasm)),
+      .map(name => test(name, readyCompilerTests.has(name) ? precompiled : wasm)),
   ],
   asdf: [test('asdf-build'), test('asdf', wasm, asdf), test('asdf-bundle', wasm, asdf),
     test('bundle-command', wasm, repl, image('miricl-asdf.wasm')), test('application-setup')],

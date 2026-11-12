@@ -1372,6 +1372,8 @@
   #@(if (i32.eq (local.get $mode) (i32.const 41))
     (then (return_call $native-op-liveness (local.get $a) (local.get $b)
       (call $natural-count (local.get $c)))))
+  #@(if (i32.eq (local.get $mode) (i32.const 42))
+    (then (return_call $native-simplify-ops (local.get $a) (local.get $b))))
   #@(if (i32.eq (local.get $mode) (i32.const 35))
     (then (return_call $fasl-dependencies (local.get $a) (local.get $b))))
   #@(if (i32.eq (local.get $mode) (i32.const 36))

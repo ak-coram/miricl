@@ -53,6 +53,9 @@
 
 (defun compiler-list-length (object context)
   (declare (optimize (safety 3)))
+  ;; Empty operand and attribute lists are frequent at checked boundaries.
+  ;; They need no native-service call or multiple-value result packet.
+  (when (null object) (return-from compiler-list-length 0))
   (multiple-value-bind (count native) (compiler-primitive 40 object)
     (when native
       (case count
@@ -70,6 +73,58 @@
       (unless (consp fast) (compiler-input-fail context object "expected a proper list; found a dotted tail"))
       (setq fast (cdr fast) slow (cdr slow)) (incf size)
       (when (eq fast slow) (compiler-input-fail context object "circular list")))))
+
+(defun compiler-type-specifier (type &optional checked)
+  "Validate type structure consumed by inference, without running type expanders.
+Objects inside MEMBER and EQL remain literal data, including cyclic objects."
+  (declare (optimize (safety 3)))
+  (let ((seen (or checked (make-hash-table :test 'eq))) (work (list (cons type nil))))
+    (loop while work do
+      (let* ((job (pop work)) (item (car job)))
+        (when (consp item)
+          (cond
+            ((cdr job) (setf (gethash item seen) :done))
+            ((eq (gethash item seen) :active)
+             (compiler-input-fail "type specifier" item "circular type expression"))
+            ((not (gethash item seen))
+             (let ((size (compiler-list-length item "type specifier")))
+               (setf (gethash item seen) :active) (push (cons item t) work)
+               (case (car item)
+                 ((and or values)
+                  (dolist (part (cdr item)) (push (cons part nil) work)))
+                 ((not cons)
+                  (unless (if (eq (car item) 'not) (= size 2) (<= 1 size 3))
+                    (compiler-input-fail "type specifier" item "invalid type argument count"))
+                  (dolist (part (cdr item)) (push (cons part nil) work)))
+                 (function
+                  (unless (<= 1 size 3)
+                    (compiler-input-fail "function type" item "invalid type argument count"))
+                  (when (= size 3) (push (cons (third item) nil) work)))
+                 (integer
+                  (unless (<= 1 size 3)
+                    (compiler-input-fail "integer type" item "expected at most two interval bounds"))
+                  (dolist (bound (cdr item))
+                    (unless (or (eq bound '*) (integerp bound)
+                                (and (consp bound) (= (compiler-list-length bound "integer type bound") 1)
+                                     (integerp (car bound))))
+                      (compiler-input-fail "integer type bound" bound "expected an integer, *, or (integer)"))))
+                 ((signed-byte unsigned-byte)
+                  (unless (and (<= 1 size 2)
+                               (or (= size 1) (eq (second item) '*)
+                                   (and (integerp (second item))
+                                        (>= (second item) (if (eq (car item) 'signed-byte) 1 0)))))
+                    (compiler-input-fail "integer type" item "invalid byte width")))
+                 (mod
+                  (unless (and (= size 2) (integerp (second item)) (plusp (second item)))
+                    (compiler-input-fail "MOD type" item "expected a positive integer modulus")))
+                 (simple-vector
+                  (unless (and (<= 1 size 2)
+                               (or (= size 1) (eq (second item) '*)
+                                   (and (integerp (second item)) (<= 0 (second item)))))
+                    (compiler-input-fail "simple-vector type" item "expected a nonnegative size or *")))
+                 (eql
+                  (unless (= size 2) (compiler-input-fail "EQL type" item "expected exactly one object"))))))))))
+    type))
 
 (defun compiler-variable-name (name context)
   (declare (optimize (safety 3)))
@@ -151,11 +206,13 @@
          (dolist (name (cdr declaration)) (compiler-variable-name name "SPECIAL declaration")))
         (type
          (unless (cdr declaration) (compiler-input-fail "TYPE declaration" declaration "missing type specifier"))
+         (compiler-type-specifier (second declaration))
          (dolist (name (cddr declaration)) (compiler-variable-name name "TYPE declaration variable")))
         ((inline notinline)
          (dolist (name (cdr declaration)) (compiler-function-name name "function declaration")))
         (ftype
          (unless (cdr declaration) (compiler-input-fail "FTYPE declaration" declaration "missing function type"))
+         (compiler-type-specifier (second declaration))
          (dolist (name (cddr declaration)) (compiler-function-name name "FTYPE declaration name"))))
       (when (eq (first declaration) 'optimize)
         (dolist (quality (cdr declaration))
@@ -178,7 +235,8 @@
         ((quote function go)
          (unless (= size 2) (compiler-input-fail "source form" form "expected exactly one argument")))
         (if (unless (<= 3 size 4) (compiler-input-fail "IF form" form "expected a test, consequent and optional alternative")))
-        (the (unless (= size 3) (compiler-input-fail "THE form" form "expected a type and a value form")))
+        (the (unless (= size 3) (compiler-input-fail "THE form" form "expected a type and a value form"))
+             (compiler-type-specifier (second form)))
         (load-time-value
          (unless (and (<= 2 size 3) (member (third form) '(nil t)))
            (compiler-input-fail "LOAD-TIME-VALUE form" form "expected a form and optional boolean read-only flag")))

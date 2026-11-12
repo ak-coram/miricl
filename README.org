@@ -478,7 +478,8 @@ production sizes and fresh application loading; results are in
 =game-of-life/build/sizes.json=.
 
 The [[./scripts/todo.html][TODO source]] demonstrates lightweight scripting in the browser: DOM
-access, events, callbacks and persistence through JS interop. See the
+access, events, callbacks and persistence through JS interop. Its standalone
+page embeds the smaller interpreter-only image, without the compiler. See the
 [[./justfile][justfile]] for more build and test targets.
 
 ** Legal

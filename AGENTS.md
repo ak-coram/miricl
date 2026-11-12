@@ -20,6 +20,41 @@ more useful as declared and inferred type information improves.
 
 Full ANSI Common Lisp compliance is important.
 
+# Type proofs for optimization
+
+Build a small, compiler-integrated proof engine around Common Lisp type
+system semantics. Its scope is deriving facts that justify optimizations,
+not general theorem proving. Share the target's type rules between inference,
+proof queries and lowering instead of maintaining separate approximations.
+
+Use declared and inferred types, singleton values, integer intervals,
+predicates and control/data flow to establish facts. Propagate them within
+functions, across closed module calls and returns, and through whole-program
+analysis where ownership and visibility permit. Exported or escaping functions
+must account for outside callers. Mutable state, aliases, capture and changes
+to the HIR must invalidate facts that depend on them.
+
+Proofs must be sound but may be incomplete. Bound reasoning depth and total
+work; an unknown relationship or exhausted budget supplies no proof and keeps
+the ordinary implementation. Respect target Common Lisp semantics rather
+than assuming the host's type relationships or numeric representation.
+Opaque type specifiers must not trigger arbitrary DEFTYPE expansion or
+SATISFIES execution inside the proof engine.
+
+Apply proven facts under the relevant declaration, safety and redefinition
+contracts. Preserve operand effects and order, multiple values, numeric
+contagion, bignum promotion, and observable errors and traps. Structural input
+validation remains mandatory before unchecked compiler internals; an
+optimization proof does not replace boundary checks.
+
+Keep the engine small enough to ship with the compiler. Treat it as a
+long-term investment: retain useful generic rules with modest image cost even
+when mostly untyped examples show little immediate gain. Iterate primarily on
+the compiled compiler compiling a fixed original compiler-source corpus;
+validate and instantiate its output without installing further compiler
+generations. Measure speed and generated size, use typed regression cases,
+and periodically compare full Maxima, FriCAS, ACL2 and Coalton compilations.
+
 # Common Lisp semantics
 
 Consult the [Common Lisp HyperSpec](https://www.lispworks.com/documentation/HyperSpec/Front/index.htm)
