@@ -83,6 +83,50 @@ try {
             (equal (multiple-value-list (funcall second)) '(:base 19))
             (equal (multiple-value-list (funcall first 11)) '(:base 11))))))`);
   check('(check-method-context)');
+  check(`(let* ((getter (miricl-compiler:compile-native
+                    '(lambda (gf) (list (miricl-mop:generic-function-name gf)))))
+               (put (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%PUT")))
+               (info (funcall (symbol-function
+                       (miricl-compiler::compiler-primitive 10 1 "%%GENERIC-INFO")) #'context-dispatch)))
+    (and (equal (funcall getter #'context-dispatch) '(context-dispatch))
+      (progn
+        (funcall put #'context-dispatch :metadata-extra :replacement)
+        (let* ((slots (funcall (symbol-function
+                        (miricl-compiler::compiler-primitive 10 1 "%%RAW-SLOTS")) info))
+               (name (loop for tail on slots by #'cddr when (eq (car tail) :name) return tail))
+               (extra (loop for tail on slots by #'cddr when (eq (car tail) :metadata-extra) return tail)))
+          (unwind-protect
+              (progn (rotatef (car name) (car extra))
+                     (equal (funcall getter #'context-dispatch) '(:replacement)))
+            (setf (car name) :name (car extra) :metadata-extra))))))`);
+  check(`(let* ((planner (symbol-function
+                   (miricl-compiler::compiler-primitive 10 1 "%%PROPERTY-EFFECTIVE")))
+               (method (find-method #'context-dispatch nil (list (find-class 'integer))))
+               (next (list method)))
+    (setf (cdr next) next)
+    (and (handler-case
+             (progn (funcall planner nil (list 'call-method method next) #'context-dispatch '(7)) nil)
+           (type-error () t))
+         (functionp (context-dispatch 7))))`);
+  vm.evaluate(`
+    (defgeneric keyword-context-dispatch (x &key))
+    (defmethod keyword-context-dispatch ((x t) &key (value 17)) (values x value))
+    (defmethod keyword-context-dispatch ((x integer) &key value)
+      (declare (ignore value))
+      (values (lambda (&rest args) (apply #'call-next-method args)) (next-method-p)))
+    (defparameter *keyword-next-first* (keyword-context-dispatch 31 :value 7))
+    (defparameter *keyword-next-second* (keyword-context-dispatch 47 :value 11))
+    (defgeneric optional-context-dispatch (x &optional y))
+    (defmethod optional-context-dispatch ((x t) &optional (y 17 supplied) &aux (sum (+ x y)))
+      (values sum supplied))
+    (defmethod optional-context-dispatch ((x integer) &optional y)
+      (declare (ignore y)) (call-next-method))`);
+  check(`(and
+    (equal (multiple-value-list (funcall *keyword-next-first*)) '(31 7))
+    (equal (multiple-value-list (funcall *keyword-next-second*)) '(47 11))
+    (equal (multiple-value-list (funcall *keyword-next-first* 53 :value 13)) '(53 13))
+    (equal (multiple-value-list (optional-context-dispatch 25)) '(42 nil))
+    (equal (multiple-value-list (optional-context-dispatch 25 4)) '(29 t)))`);
   // Presentation systems customize dispatch on a generic-function subclass.
   // Its dynamic protocol must run on every call while unrelated generics
   // retain cached plans, including the native slot metadata readers.
@@ -183,6 +227,8 @@ try {
     assert.equal(restored.evaluate(`(and (check-eql-dispatch) (check-method-context)
       (equal (multiple-value-list (funcall *saved-next-first*)) '(:base 31))
       (equal (multiple-value-list (funcall *saved-next-second*)) '(:base 47))
+      (equal (multiple-value-list (funcall *keyword-next-first*)) '(31 7))
+      (equal (multiple-value-list (funcall *keyword-next-second* 53 :value 13)) '(53 13))
       (equal (multiple-value-list (funcall *saved-next-first* 53)) '(:base 53)))`).output, 'T\n');
   } finally {restored.close();}
   console.log('Generic dispatch: native method plans, bounded EQL cache, types, multiple values, method edits, escaped primary/around contexts and native callers pass.');

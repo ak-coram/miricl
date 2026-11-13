@@ -33,6 +33,27 @@ try {
   check(`(equal (declared-read-widths '(lambda (x)
     (multiple-value-bind (a b) (values x x)
       (declare (type (unsigned-byte 8) a b)) (list (+ a 1) (- b 1))))) '(nil nil 9 9))`);
+  // Guard removal needs evidence independent of unchecked parameter, THE,
+  // and external FTYPE assertions. Closed callers and literals supply it;
+  // assignments, captures and unknown callees must not manufacture it.
+  vm.evaluate(`(defun proven-result-type (source)
+    (let* ((unit (compile-to-hir source))
+           (facts (infer-hir-types-checked unit nil nil nil t)))
+      (gethash (first (hir-unit-functions unit)) facts t))) (values)`);
+  for (const source of [
+    '(lambda (x) (declare (type (eql 7) x)) x)',
+    '(lambda (x) (the (eql 7) x))',
+    `(lambda () (declare (ftype (function () (eql 7)) unknown-proof-producer))
+       (unknown-proof-producer))`,
+    `(lambda () (declare (ftype (function () (values t (eql 7))) unknown-proof-producer))
+       (nth-value 1 (unknown-proof-producer)))`,
+    '(lambda () (let ((x 7)) (funcall (lambda () (setq x 8))) x))',
+    '(lambda (flag) (let ((x 7)) (when flag (setq x 8)) x))',
+  ]) check(`(not (hir-type-proves-p (proven-result-type '${source}) '(eql 7)))`);
+  for (const source of [
+    '(lambda () 7)',
+    '(lambda () (flet ((pass (x) x)) (declare (notinline pass)) (pass 7)))',
+  ]) check(`(hir-type-proves-p (proven-result-type '${source}) '(eql 7))`);
   // The initializer sees the outer binding; its free declaration covers only
   // the body. Assigning a bignum after that scope is valid and must promote.
   for (const [source, args, expected] of [

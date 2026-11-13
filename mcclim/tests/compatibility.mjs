@@ -70,6 +70,23 @@ try {
            (handler-case (mcclim-streams:write-string "abc" s :start 2 :end 1) (error () t))
            (handler-case (mcclim-streams:write-string "abc" s :end 4) (error () t))
            (progn (mcclim-streams:write-string "ok" s) (string= "ok" (capture-text s)))))`);
+  await check('Gray printers preserve printer controls, values and stream designators', `
+    (let* ((s (make-instance 'capture-stream))
+           (*standard-output* s) (*terminal-io* s)
+           (*print-base* 16) (*print-readably* nil)
+           (object '(31 "lambda")))
+      (and (eq object (mcclim-streams:prin1 object))
+           (eq object (mcclim-streams:princ object t))
+           (eq object (mcclim-streams:print object nil))
+           (eq object (mcclim-streams:write object :stream s :base 8 :base 10))
+           (null (multiple-value-list (mcclim-streams:pprint object s)))
+           (string= (capture-text s)
+             (with-output-to-string (native)
+               (cl:prin1 object native)
+               (cl:princ object native)
+               (cl:print object native)
+               (cl:write object :stream native :base 8)
+               (cl:pprint object native)))))`);
   await check('read-line multiple values and end of file', `
     (let ((s (make-instance 'input-test-stream :input (make-string-input-stream (format nil "λ~%last")))))
       (and (equal (multiple-value-list (mcclim-streams:read-line s)) '("λ" nil))

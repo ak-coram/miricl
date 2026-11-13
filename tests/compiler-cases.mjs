@@ -130,6 +130,29 @@ export const compilerCases = [
       '(lambda (n &key (initial 0))
          (let ((sum initial)) (dotimes (i n sum) (incf sum i)))))))
     (= (funcall function 10 :initial 7) 52))`],
+  ['keyword parameter scope and rest identity', `(progn
+    (defvar *keyword-parameter-special* :outside)
+    (let ((special (miricl-compiler:compile-native
+            '(lambda (*keyword-parameter-special* &rest tail
+                      &key (value *keyword-parameter-special* supplied))
+               (declare (special *keyword-parameter-special*))
+               (values value supplied tail *keyword-parameter-special*))))
+          (shadow (miricl-compiler:compile-native
+            '(lambda (x &key (y x) &aux (x :aux))
+               (declare (type symbol x)) (list y x))))
+          (typed (miricl-compiler:compile-native
+            '(lambda (x &key (y (1+ x)))
+               (declare (type (unsigned-byte 8) x)) (list y x)))))
+      (and (equal (multiple-value-list (funcall special 7)) '(7 nil nil 7))
+        (equal (multiple-value-list (funcall special 9 :value 11 :value 13))
+               '(11 t (:value 11 :value 13) 9))
+        (eq *keyword-parameter-special* :outside)
+        (equal (funcall shadow 42) '(42 :aux))
+        (equal (funcall typed 255) '(256 255))
+        (handler-case (progn (funcall special) nil) (program-error () t))
+        (handler-case (progn (funcall special 7 :unknown t) nil) (program-error () t))
+        (equal (multiple-value-list (funcall special 17)) '(17 nil nil 17))
+        (eq *keyword-parameter-special* :outside))))`],
   ['global redefinition', `(progn
     (defun compiler-test-callee (x) (+ x 1))
     (let ((caller (miricl-compiler:compile-native '(lambda (x) (compiler-test-callee x)))))

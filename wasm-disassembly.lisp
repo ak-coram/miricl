@@ -7,14 +7,49 @@
     ;; Native module/import names are the compiler's ASCII ABI identifiers.
     (values (map 'string #'code-char (subseq bytes next (+ next length))) (+ next length))))
 
+(defun native-disassembly-types (bytes position)
+  ;; Read actual function signatures, including modules with WasmGC type
+  ;; groups. Aggregate types occupy indices but have no callable signature.
+  (let ((types nil) (count nil))
+    (labels ((uleb () (multiple-value-bind (value next) (native-read-uleb bytes position)
+                       (setq position next) value))
+             (value-type ()
+               (let ((type (aref bytes position)))
+                 (incf position)
+                 (if (member type '(#x63 #x64))
+                     (multiple-value-bind (heap next) (native-read-sleb bytes position)
+                       (setq position next)
+                       (format nil "(ref ~A~D)" (if (= type #x63) "null " "") heap))
+                     (or (cdr (assoc type '((#x7f . "i32") (#x7e . "i64") (#x7d . "f32")
+                                           (#x7c . "f64") (#x6f . "externref") (#x70 . "funcref")
+                                           (#x6d . "eqref"))))
+                         (format nil "type-~X" type)))))
+             (field () (value-type) (incf position))
+             (type-definition ()
+               (let ((kind (aref bytes position)))
+                 (incf position)
+                 (case kind
+                   (#x4e (let ((members (uleb))) (dotimes (i members) (type-definition))))
+                   ((#x4f #x50) (let ((supers (uleb))) (dotimes (i supers) (uleb))) (type-definition))
+                   (#x60 (let* ((parameters (loop repeat (uleb) collect (value-type)))
+                                (results (loop repeat (uleb) collect (value-type))))
+                           (push (list parameters results) types)))
+                   (#x5f (let ((fields (uleb))) (dotimes (i fields) (field))) (push nil types))
+                   (#x5e (field) (push nil types))
+                   (otherwise (error "Unexpected native type kind ~D." kind))))))
+      (setq count (uleb))
+      (dotimes (i count) (type-definition))
+      (coerce (nreverse types) 'vector))))
+
 (defun native-disassembly-body (bytes index)
   (declare (type vector bytes) (type (unsigned-byte 32) index))
-  (let ((position 8) (imports nil))
+  (let ((position 8) (imports nil) (types nil) (functions nil))
     (loop while (< position (length bytes)) do
       (let ((section (aref bytes position)) (size nil))
         (multiple-value-setq (size position) (native-read-uleb bytes (1+ position)))
         (let ((end (+ position size)) (count nil))
           (case section
+            (1 (setq types (native-disassembly-types bytes position)))
             (2
              (multiple-value-setq (count position) (native-read-uleb bytes position))
              (dotimes (i count)
@@ -27,13 +62,20 @@
                    (4 (incf position))
                    (otherwise (error "Unexpected native import kind ~D." kind)))
                  (multiple-value-setq (ignored position) (native-read-uleb bytes position)))))
+            (3
+             (multiple-value-setq (count position) (native-read-uleb bytes position))
+             (setq functions (make-array count))
+             (dotimes (i count)
+               (multiple-value-setq (size position) (native-read-uleb bytes position))
+               (setf (aref functions i) size)))
             (10
              (multiple-value-setq (count position) (native-read-uleb bytes position))
              (dotimes (i count)
                (multiple-value-setq (size position) (native-read-uleb bytes position))
                (when (= index (+ i (length imports)))
                  (return-from native-disassembly-body
-                   (values (subseq bytes position (+ position size)) (coerce (nreverse imports) 'vector) position)))
+                   (values (subseq bytes position (+ position size)) (coerce (nreverse imports) 'vector) position
+                     (aref types (aref functions i)))))
                (incf position size))))
           (setq position end))))
     (error "Native function ~D has no retained body." index)))
@@ -100,12 +142,14 @@
 
 (defun disassemble-native (bytes index)
   (declare (type vector bytes) (type (unsigned-byte 32) index))
-  (multiple-value-bind (body imports offset) (native-disassembly-body bytes index)
+  (multiple-value-bind (body imports offset signature) (native-disassembly-body bytes index)
     ;; Share the optimizer's decoder, including instruction boundaries and
     ;; signed immediates. No recompilation or execution of the target is needed.
-    (let ((ops (native-read-ops body)) (position 0) (groups nil) (local 2) (depth 1))
+    (let ((ops (native-read-ops body)) (position 0) (groups nil) (local (length (first signature))) (depth 1))
       (format t "; Wasm instructions for function ~D (~D body bytes).~%" index (length body))
-      (format t "(func $function~D (param externref externref) (result externref)~%" index)
+      (format t "(func $function~D~A~A~%" index
+        (if (first signature) (format nil " (param~{ ~A~})" (first signature)) "")
+        (if (second signature) (format nil " (result~{ ~A~})" (second signature)) ""))
       (multiple-value-setq (groups position) (native-read-uleb body position))
       (dotimes (i groups)
         (let ((count nil) (type nil))

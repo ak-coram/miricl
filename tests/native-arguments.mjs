@@ -44,5 +44,34 @@ try {
     assert.equal(vm.vm['native-argument'](packet, arity - 1), values[arity - 1]);
     assert.equal(vm.evaluate('(+ 40 2)').output, '42\n');
   }
+  // Direct entries receive their operands as Wasm parameters; the ordinary
+  // checked entry remains usable by older modules and general APPLY callers.
+  for (let arity = 0; arity <= values.length; arity++) {
+    const direct = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.from([
+      0,97,115,109,1,0,0,0,
+      1,10,1,96,5,111,111,111,111,111,1,111,
+      3,2,1,0, 7,8,1,4,97,114,103,115,0,0,
+      10,6,1,4,0,32,arity,11,
+    ]))).exports.args;
+    const fn = vm.vm['native-close-fixed'](entry, parent, null, arity);
+    const expected = arity ? values[arity - 1] : fn;
+    assert.equal(vm.vm['native-attach-direct'](fn, direct), fn);
+    assert.equal(vm.vm[`native-call${arity}`](fn, ...values.slice(0, arity)), expected);
+    fails(() => vm.vm['native-attach-direct'](fn, entry), /malformed/i);
+    fails(() => vm.vm['native-attach-direct'](null, direct), /malformed/i);
+    fails(() => vm.vm['native-attach-direct'](parent, direct), /malformed/i);
+    fails(() => vm.vm['native-attach-direct'](
+      vm.vm['native-close-fixed'](entry, parent, null, values.length + 1), direct), /malformed/i);
+    assert.equal(vm.vm[`native-call${arity}`](fn, ...values.slice(0, arity)), expected);
+    // A live later operand must survive when earlier operands are unused.
+    // Usage is a bit mask, not a boolean; exercise each operand position.
+    const arguments_ = values.slice(0, arity).reduceRight((tail, value) =>
+      vm.vm['native-cons'](value, tail), null);
+    vm.vm['native-set-argument-usage'](fn, arity ? 1 << (arity - 1) : 0);
+    assert.equal(vm.vm['native-shared-entry'](fn, arguments_), expected);
+    fails(() => vm.vm['native-shared-entry'](fn,
+      vm.vm['native-cons'](null, arguments_)), /argument/i);
+    assert.equal(vm.vm['native-shared-entry'](fn, arguments_), expected);
+  }
   console.log('Native argument arrays: fixed calls, identity, REST, bounds, arity and recovery pass.');
 } finally {vm.close();}

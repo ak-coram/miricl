@@ -40,7 +40,7 @@
   form)
 
 (defun core-field-code (type)
-  (cond ((consp type) (if (string-equal (car (last type)) '$native-entry) #\e #\r))
+  (cond ((consp type) (if (member (car (last type)) '($native-entry $native-direct-entry) :test #'string-equal) #\e #\r))
         ((string-equal type 'i32) #\i)
         ((or (string-equal type 'i64) (string-equal type 'f64)) #\l)
         (t (error "Unsupported core image field type ~S" type))))

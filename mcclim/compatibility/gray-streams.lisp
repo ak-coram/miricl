@@ -77,12 +77,12 @@
            #:stream-element-type #:close #:format #:write-string #:write-line
            #:write-char #:terpri #:fresh-line #:finish-output #:force-output
            #:clear-output #:read-char #:read-char-no-hang #:unread-char #:listen
-           #:clear-input #:read-line)
+           #:clear-input #:read-line #:write #:prin1 #:princ #:print #:pprint)
   (:export #:streamp #:input-stream-p #:output-stream-p #:open-stream-p
            #:stream-element-type #:close #:format #:write-string #:write-line
            #:write-char #:terpri #:fresh-line #:finish-output #:force-output
            #:clear-output #:read-char #:read-char-no-hang #:unread-char #:listen
-           #:clear-input #:read-line))
+           #:clear-input #:read-line #:write #:prin1 #:princ #:print #:pprint))
 (in-package #:mcclim-streams)
 (defgeneric streamp (stream)
   (:method ((stream t)) (cl:streamp stream))
@@ -127,6 +127,40 @@
     (if (typep stream 'fundamental-stream)
         (progn (write-string (apply #'cl:format nil control arguments) stream) nil)
         (apply #'cl:format destination control arguments))))
+(defun write (object &key (array *print-array*) (base *print-base*)
+                         (case *print-case*) (circle *print-circle*)
+                         (escape *print-escape*) (gensym *print-gensym*)
+                         (length *print-length*) (level *print-level*)
+                         (lines *print-lines*) (miser-width *print-miser-width*)
+                         (pprint-dispatch *print-pprint-dispatch*)
+                         (pretty *print-pretty*) (radix *print-radix*)
+                         (readably *print-readably*) (right-margin *print-right-margin*)
+                         stream)
+  (let* ((stream (%output stream))
+         (gray-p (typep stream 'fundamental-stream))
+         (destination (if gray-p (make-string-output-stream) stream)))
+    (cl:write object :stream destination :array array :base base :case case
+              :circle circle :escape escape :gensym gensym :length length
+              :level level :lines lines :miser-width miser-width
+              :pprint-dispatch pprint-dispatch :pretty pretty :radix radix
+              :readably readably :right-margin right-margin)
+    (when gray-p (write-string (get-output-stream-string destination) stream))
+    object))
+(defun prin1 (object &optional stream)
+  (write object :stream stream :escape t))
+(defun princ (object &optional stream)
+  (write object :stream stream :escape nil :readably nil))
+(defun print (object &optional stream)
+  (let ((stream (%output stream)))
+    (terpri stream)
+    (prin1 object stream)
+    (write-char #\Space stream))
+  object)
+(defun pprint (object &optional stream)
+  (let ((stream (%output stream)))
+    (terpri stream)
+    (write object :stream stream :escape t :pretty t))
+  (values))
 (macrolet ((forward (name gray)
              `(defun ,name (&optional stream)
                 (let ((stream (%output stream)))

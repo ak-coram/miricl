@@ -1144,8 +1144,19 @@ export class Miricl {
         }
         const index = this.vm['native-code-entry']?.(code) ?? -1;
         const install = this.vm['core-native-function'] ?? this.vm['native-function'];
-        return install(compiled.instance.exports[index < 0 ? 'entry' : `entry${index}`],
+        const exportName = index < 0 ? 'entry' : `entry${index}`;
+        let function_ = install(compiled.instance.exports[exportName],
           literals, name, compiled.length, compiled.code);
+        for (let arity = 0; arity <= 4; arity++) {
+          const direct = compiled.instance.exports[`direct-${exportName}-${arity}`];
+          if (direct) {
+            function_ = this.vm['native-attach-direct-root'](function_, direct, arity);
+            const usage = compiled.instance.exports[`argument-usage-${exportName}`]?.value;
+            if (typeof usage === 'number') function_ = this.vm['native-set-argument-usage'](function_, usage);
+            break;
+          }
+        }
+        return function_;
       }}});
       this.vm['native-services'].set(0, bridge.exports.service);
     }

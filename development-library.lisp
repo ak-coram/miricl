@@ -1236,6 +1236,14 @@
 (setf (macro-function 'formatter) #'%%formatter-expander)
 
 (defgeneric make-load-form (object &optional environment))
+(defmethod make-load-form ((object t) &optional environment)
+  (declare (ignore environment))
+  ;; A private guarded-call plan is an optional optimization cache, not
+  ;; application data. A different runtime has different method identities
+  ;; and epochs. NIL restores the ordinary call path without compiling at
+  ;; load time or changing the portable FASL format.
+  (if (= (%%tag object) 54) (values nil nil)
+      (error "MAKE-LOAD-FORM has no representation for an object of type ~S." (type-of object))))
 (defmethod make-load-form ((object standard-object) &optional environment)
   (declare (ignore environment)) (error 'error))
 (defmethod make-load-form ((object structure-object) &optional environment)

@@ -31,6 +31,26 @@ are presented together, including nested groups on panes sharing a window.
 loads backend source for iteration. The first frame fixture checks Canvas
 drawing and delivery of pointer events to a real CLIM gadget.
 
+=node mcclim/tests/upstream.mjs= runs upstream's =mcclim/test= FiveAM
+suite inside the reusable Wasm image. ASDF discovers the test files from
+upstream's system definition; the runner reports failures and exits with
+an error if the suite fails. It checks success rather than a fixed number
+of tests. Results are saved under =mcclim/build/upstream-results.sexp=.
+This complements browser checks for drawing and input.
+
+For a local run, prepare disposable test framework checkouts:
+
+#+begin_src sh
+git clone --depth 1 https://github.com/lispci/fiveam.git mcclim/build/test-deps/fiveam
+git clone --depth 1 https://github.com/didierverna/asdf-flv.git mcclim/build/test-deps/asdf-flv
+git clone --depth 1 https://github.com/hraban/trivial-backtrace.git mcclim/build/test-deps/trivial-backtrace
+node mcclim/tests/upstream.mjs
+#+end_src
+
+The runner accepts an image, dependency directory, and optional FiveAM
+suite as arguments. Test framework dependencies are used only by the
+runner and are absent from the delivered image.
+
 The page is written to =build/mcclim/site/= and launches
 =(clim-demo:demodemo)= on one desktop. CI includes it in the existing
 GitHub Pages site under =mcclim/=. The reusable image is included in the

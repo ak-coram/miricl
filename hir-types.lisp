@@ -206,6 +206,45 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
         ((consp value) 'cons) ((characterp value) 'character) ((stringp value) 'string)
         ((floatp value) 'float) (t t)))
 
+(defun hir-dispatch-candidate (type &optional (depth 16) (fuel (list 64)))
+  "A class-name or singleton candidate for a guarded generic call.
+Nominal declarations include subclasses: this is not an exact-class proof.
+Lowering must retain an exact runtime class guard. Opaque compound types
+provide no candidate, and no DEFTYPE or SATISFIES code is executed here."
+  (when (or (zerop depth) (zerop (car fuel)))
+    (return-from hir-dispatch-candidate nil))
+  (decf (car fuel))
+  (multiple-value-bind (low high bounded) (hir-integer-bounds type)
+    (when (and bounded (= low high))
+      (return-from hir-dispatch-candidate (list :eql low))))
+  (cond ((or (eq type t) (null type)) nil)
+        ((eq type 'null) (list :eql nil))
+        ((hir-type-proves-p type 'fixnum) (list :class 'fixnum))
+        ((symbolp type) (list :class type))
+        ((consp type)
+         (case (car type)
+           (eql (list :eql (second type)))
+           (member (when (and (cdr type) (every (lambda (x) (eql x (second type))) (cddr type)))
+                     (list :eql (second type))))
+           (and (dolist (part (cdr type))
+                  (let ((candidate (hir-dispatch-candidate part (1- depth) fuel)))
+                    (when candidate (return candidate)))))
+           (or (let ((candidate nil))
+                 (dolist (part (cdr type) candidate)
+                   (let ((next (hir-dispatch-candidate part (1- depth) fuel)))
+                     (unless (and next
+                                  (or (not candidate)
+                                      (and (eq (car next) (car candidate))
+                                           (eql (second next) (second candidate)))))
+                       (return nil))
+                     (setq candidate next)))))
+           ((cons simple-vector vector array simple-array string simple-string)
+            (list :class (case (car type)
+                           ((array simple-array) 'array)
+                           ((vector simple-vector) 'vector)
+                           ((string simple-string) 'string)
+                           (otherwise 'cons))))))))
+
 (defun hir-type-cell (value)
   (declare (type simple-vector value))
   (let ((producer (hir-value-producer value)))
@@ -536,7 +575,7 @@ Captured cells and debug-enabled functions keep conservative inferred types."
       (compiler-input-fail "type-inference root" root "value does not belong to this HIR unit")))
   (infer-hir-types-checked unit roots rootsp entries))
 
-(defun infer-hir-types-checked (unit roots rootsp &optional entries)
+(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only)
   "Internal inference kernel; UNIT and ROOTS have passed the public boundary."
   (declare (type hir-unit unit) (type list roots entries))
   ;; Explicitly requesting no facts needs no dependency or escape graph.
@@ -683,16 +722,21 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                                     (index (first (hir-instruction-attributes producer))))
                                (if (and (%hir-instruction-p origin) (eq (hir-instruction-opcode origin) :values))
                                    (if (gethash value sources) (joined value) 'null)
-                                   (hir-value-type-at (hir-value-type group) index))))
+                                   (if proven-only t (hir-value-type-at (hir-value-type group) index)))))
                             (:closure 'function)
                             (:call
                              (cond ((gethash value calls) (joined value))
                                    ((gethash value intrinsics)
                                     (hir-inline-result-type (gethash value intrinsics)
                                       (mapcar (lambda (input) (gethash input facts)) (cddr inputs))))
-                                   (t (hir-value-type-at (hir-function-result-type (hir-value-type (second inputs))) 0))))
+                                   (t (if proven-only t
+                                          (hir-value-type-at (hir-function-result-type (hir-value-type (second inputs))) 0)))))
                             (otherwise t))))))
-               (refined (if function derived (hir-type-restrict derived (hir-value-type value))))
+               ;; Guard elimination needs facts established by executable
+               ;; producers and closed data flow, not unchecked declarations
+               ;; or FTYPE promises about outside callers and callees.
+               (refined (if (or function proven-only) derived
+                            (hir-type-restrict derived (hir-value-type value))))
                (next
                  (progn
                    (dolist (premise (gethash value guards))
@@ -713,7 +757,8 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                     (let ((count (1+ (gethash value growth 0))))
                       (setf (gethash value growth) count)
                       (when (>= count 4)
-                        (setq next (if function t (hir-type-restrict t (hir-value-type value))))))))))
+                        (setq next (if (or function proven-only) t
+                                       (hir-type-restrict t (hir-value-type value))))))))))
             (setf (gethash value facts) next)
             (dolist (user (gethash value users)) (enqueue user)))))
       facts)))

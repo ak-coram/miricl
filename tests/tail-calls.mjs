@@ -67,6 +67,29 @@ try {
       (equal order '(3 2 1))))`);
   console.log('PASS closures, global redefinition and argument order');
 
+  define('tail-live-operands', `(lambda (unused b c d)
+    (declare (ignore unused)) (values b c d))`);
+  check(`(and
+    (equal (multiple-value-list (apply #'tail-live-operands '(nil 17 23 29))) '(17 23 29))
+    (handler-case (progn (apply #'tail-live-operands '(nil 17 23)) nil)
+      (program-error () t))
+    (equal (multiple-value-list (apply #'tail-live-operands '(nil 31 37 41))) '(31 37 41)))`);
+
+  // The scalar builtin tail path must retain the ordinary path when the
+  // resolved definition changes, including zero or multiple return values.
+  define('tail-numeric-equal', '(lambda (a b) (= a b))');
+  check("(equal (multiple-value-list (tail-numeric-equal 42 42)) '(t))");
+  check(`(let ((original #'=))
+    (unwind-protect
+        (progn
+          (setf (fdefinition '=) (lambda (a b) (declare (ignore a b)) (values :changed 17)))
+          (and (equal (multiple-value-list (tail-numeric-equal 42 42)) '(:changed 17))
+            (progn (setf (fdefinition '=) (lambda (a b) (declare (ignore a b)) (values)))
+              (null (multiple-value-list (tail-numeric-equal 42 42))))))
+      (setf (fdefinition '=) original)))`);
+  check(`(and (handler-case (tail-numeric-equal "bad" 42) (type-error () t))
+    (equal (multiple-value-list (tail-numeric-equal 42 42)) '(t)))`);
+
   evaluate('(defparameter *tail-special* :outer) (defparameter *tail-cleanup* nil) (values)');
   define('tail-observe-special', '(lambda () *tail-special*)');
   define('tail-special', '(lambda () (let ((*tail-special* :inner)) (tail-observe-special)))');

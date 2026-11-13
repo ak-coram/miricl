@@ -12,6 +12,7 @@
 (defparameter %cache-permitted t)
 (defparameter %standard-dispatch-protocols nil)
 (defparameter %compiling-effective-function nil)
+(defparameter %planning-generic-call nil)
 
 (defun %remove (item items)
   ;; A generic function can have thousands of methods. Keep removal on the
@@ -918,7 +919,14 @@
       (shared-initialize method t)
       (add-method gf method) method)))
 (defun %specializer-matches (specializer arg)
-  (if (%classp specializer) (%instancep arg specializer) (eql arg (eql-specializer-object specializer))))
+  (if (%classp specializer) (%instancep arg specializer)
+      (progn
+        (unless (%instancep specializer (find-class 'eql-specializer))
+          (error 'type-error :datum specializer :expected-type 'eql-specializer))
+        ;; Applicability must not dispatch EQL-SPECIALIZER-OBJECT recursively:
+        ;; COMPUTE-APPLICABLE-METHODS can itself have an EQL specializer.
+        ;; Its object is fixed by INTERN-EQL-SPECIALIZER (AMOP).
+        (eql arg (%get specializer :object)))))
 (defun %applicable (method args)
   (let ((specs (%get method :specializers)) (ok t))
     (%%while specs
@@ -1208,6 +1216,70 @@
       (%%eval form)))
 (defun %compile-effective-function (gf form)
   (if (%dispatch-cache-permitted-p gf) (%compile-generated-function form) (%%eval form)))
+(defun %make-effective-function (gf methods args)
+  (let* ((form (compute-effective-method gf (%get gf :method-combination) methods))
+         (function (%%property-effective nil form gf args)))
+    (or function
+        (%compile-effective-function gf (list 'lambda '(%effective-args)
+          (%effective-keyword-form gf methods (%expand-effective-form gf form)))))))
+
+(defun %generic-call-candidate (name)
+  (when (and (not %booting) (not %planning-generic-call) (not %compiling-effective-function)
+             (fboundp name))
+    (let ((function (fdefinition name)))
+      (when (and (not (eq function (%%generic-info function)))
+                 (not (%member name '(compute-applicable-methods compute-effective-method compute-discriminating-function))))
+        (%%generic-call-plan function nil nil nil)))))
+
+(defun %plan-generic-call (gf candidates)
+  ;; CANDIDATES comes from verified HIR and bounded type queries. Resolve
+  ;; nominal names against target metadata, never host classes or DEFTYPE.
+  (let ((%planning-generic-call t)
+        (version %dispatch-version) (token (%get gf :cache-token))
+        (slot-token (%%invalidate-slot-access))
+        (ll (%get gf :lambda-list)) (guards nil) (args nil) (mask 0) (position 0))
+    (unless (and (<= (%proper-list-length candidates "generic call candidates") 4)
+                 (= (length candidates) (length ll))
+                 (not (intersection ll lambda-list-keywords))
+                 (equal (%get gf :method-combination-name) '(standard))
+                 (%dispatch-cache-permitted-p gf))
+      (return-from %plan-generic-call nil))
+    (let ((profile (or (%get gf :dispatch-profile) (%compute-dispatch-profile gf))))
+      (dolist (candidate candidates)
+        (let ((flags (pop profile)))
+          (cond
+            ((and candidate (eq (car candidate) :eql))
+             (push (cadr candidate) guards) (push (cadr candidate) args)
+             (setq mask (logior mask (ash 1 position))))
+            ((zerop flags) (push nil guards) (push nil args))
+            ((and candidate (eq (car candidate) :class) (not (logbitp 1 flags)))
+             (let* ((name (cadr candidate))
+                    (class (and (symbolp name) (not (%%derived-type 0 name nil nil)) (%%named-class name))))
+               (unless (and class (%get class :finalized))
+                 (return-from %plan-generic-call nil))
+               (push class guards)
+               (push (%%allocate class nil) args)))
+            (t (return-from %plan-generic-call nil))))
+        (incf position)))
+    (setq args (reverse args))
+    (let ((methods (%compute-applicable gf args)))
+      ;; A nominal declaration admits subclasses. Its exact representative
+      ;; can have auxiliary methods but no primary, while a real subclass
+      ;; argument has a valid effective method. Keep invocation errors at the
+      ;; invocation; they are not evidence for an optimization while compiling.
+      (unless (and (%qualified methods nil)
+                   (every (lambda (method)
+                            (let ((qualifiers (%get method :qualifiers)))
+                              (or (null qualifiers)
+                                  (and (null (cdr qualifiers))
+                                       (%member (car qualifiers) '(:before :after :around))))))
+                          methods))
+        (return-from %plan-generic-call nil))
+      (let ((function (%make-effective-function gf methods args)))
+        (when (and (= version %dispatch-version) (eq token (%get gf :cache-token))
+                   (eq slot-token (%%invalidate-slot-access)))
+          (%%generic-call-plan gf function (coerce (reverse guards) 'simple-vector) mask
+                              version token slot-token))))))
 (defun %invoke-effective (gf args)
   (if (%member (%get gf :name) '(compute-applicable-methods compute-effective-method compute-discriminating-function))
       (let ((methods (%compute-applicable gf args)))
@@ -1239,14 +1311,7 @@
                                (= (car entry) version) (%list-eq methods (%nth 4 entry)))
                       (setq function (caddr entry)))))))
             (unless function
-              (let ((form (compute-effective-method gf (%get gf :method-combination) methods)))
-                ;; Select an existing Wasm plan before invoking the compiler.
-                ;; Otherwise simple accessors and primary calls would compile
-                ;; a lambda only to discard it for a direct runtime adapter.
-                (setq function (%%property-effective nil form gf args))
-                (unless function
-                  (setq function (%compile-effective-function gf (list 'lambda '(%effective-args)
-                    (%effective-keyword-form gf methods (%expand-effective-form gf form))))))))
+              (setq function (%make-effective-function gf methods args)))
             (when (and cache-permitted (= version %dispatch-version)
                        (eq slot-token (%%invalidate-slot-access))
                        (eq token (%get gf :cache-token)))
@@ -1350,7 +1415,8 @@
 
 (defun %expand-method (args)
   (let ((name (pop args)) (qualifiers nil) (params nil) (ll nil) (specializers nil) (body nil)
-        (context (gensym)) (declarations nil) (doc nil) (scanning t) (expansion nil) (call-ll nil))
+        (context (gensym)) (declarations nil) (doc nil) (scanning t) (expansion nil) (call-ll nil)
+        (plain-body nil))
     (%%while (and args (car args) (atom (car args))) (push (pop args) qualifiers))
     (unless args (error 'program-error))
     (setq params (pop args) body args)
@@ -1371,19 +1437,28 @@
       (cond ((and (consp (car body)) (eq (caar body) 'declare)) (push (pop body) declarations))
             ((and (not doc) (cdr body) (stringp (car body))) (setq doc (pop body)))
             (t (setq scanning nil))))
-    (setq body (%map (lambda (form) (%rewrite-next form context)) body))
-    (setq body (append (reverse declarations)
-      (list (cons 'block (cons (if (symbolp name) name (cadr name)) body)))))
-    ;; The inner closure captures the current next-method context on each
-    ;; invocation. Its lambda-list lowering is independent of that context.
-    (when (or (%member '&optional call-ll) (%member '&key call-ll) (%member '&aux call-ll))
-      (let ((normalized (%normalize-lambda call-ll body)))
-        (setq call-ll (car normalized) body (cadr normalized))))
-    (setq expansion (list '%ensure-method (%quote name) (%quote (reverse qualifiers)) (%quote ll)
-      (cons 'list (reverse specializers))
-      (list 'lambda '(%method-arguments %next-methods)
-        (list 'let (list (list context '%next-context))
-          (list 'apply (cons 'lambda (cons call-ll body)) '%method-arguments)))))
+    (setq plain-body (cons 'block (cons (if (symbolp name) name (cadr name)) body)))
+    ;; Every method receives its lexical next-method context explicitly.
+    ;; Lambda-list lowering handles optional, rest, keyword and AUX bindings
+    ;; once, without constructing an inner closure on every invocation.
+    (let ((function (gensym)))
+      (setq expansion
+          (list 'let (list (list function
+                  (list* 'lambda (cons context call-ll)
+                    (append (reverse declarations)
+                      (list (list* 'flet
+                              (list (list 'call-next-method '(&rest %next-arguments)
+                                      (list '%call-next context '%next-arguments))
+                                    (list 'next-method-p nil
+                                      (list 'not (list 'not (list '%nth 4 context)))))
+                              (append (reverse declarations) (list plain-body))))))))
+            (list '%ensure-method (%quote name) (%quote (reverse qualifiers)) (%quote ll)
+              (cons 'list (reverse specializers))
+              (list '%%structure-function
+                (list 'lambda '(%method-arguments %next-methods)
+                  (list 'declare (list 'ignore '%next-methods))
+                  (list 'apply function '%next-context '%method-arguments))
+                nil function 18)))))
     (if doc
         (let ((method (gensym)))
           (list 'let (list (list method expansion))

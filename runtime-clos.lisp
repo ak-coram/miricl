@@ -70,6 +70,7 @@
     ((setf standard-instance-access) . %%set-raw-instance-access)
     ((setf funcallable-standard-instance-access) . %%set-raw-instance-access)))
 (setf *clos-primitives* (append *clos-primitives* '(%%raw-instance-access %%set-raw-instance-access)))
+(setf *clos-primitives* (append *clos-primitives* '(%%generic-call-plan)))
 (defparameter *native-clos-symbols* '(:initarg-profile))
 
 (assert (<= (length *clos-primitives*) (- 2147483641 +clos-primitive-base+)))
@@ -166,8 +167,17 @@
 
 (define-runtime-function $direct-function
     (($function :nullable-object) ($class :nullable-object) ($slot :nullable-object) ($mode i32)) (:object)
-  (wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 16)) :malformed-form)
+  (wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 18)) :malformed-form)
   (wat-fail-when #@(i32.ne (call $tag (local.get $function)) (i32.const 8)) :malformed-form)
+  #@(if (i32.ge_u (local.get $mode) (i32.const 17))
+    (then
+      ,(wat-fail-when #@(i32.ne (call $tag (local.get $slot)) (i32.const 8)) :malformed-form)
+      ;; Keep the actual protocol entry, including HIR/native closures, rather
+      ;; than interpreting their fields as the older source closure layout.
+      (return (struct.new $direct-function (call $allocate-object-tag (i32.const 8))
+        (i32.const 0) (f64.const 1) (ref.null $digits)
+        (ref.null eq) (ref.null eq) (ref.null eq)
+        (local.get $function) (local.get $slot) (local.get $mode)))))
   (wat-fail-when #@(call $value-n (local.get $function)) :malformed-form)
   #@(struct.new $direct-function (call $allocate-object-tag (i32.const 8)) (i32.const 0)
     (struct.get $obj $f (ref.cast (ref $obj) (local.get $function))) (struct.get $obj $digits (ref.cast (ref $obj) (local.get $function)))
@@ -179,6 +189,14 @@
   (:locals ($class :nullable-object) ($object :nullable-object) ($value :nullable-object) ($mode i32))
   #@(local.set $class (struct.get $direct-function $owner (local.get $function)))
   #@(local.set $mode (struct.get $direct-function $mode (local.get $function)))
+  #@(if (i32.eq (local.get $mode) (i32.const 18))
+    (then (return_call $apply (local.get $class) (local.get $args))))
+  ;; The externally visible method-function protocol remains two arguments.
+  ;; Ordinary method invocation bypasses this adapter below $INVOKE-METHOD.
+  #@(if (i32.eq (local.get $mode) (i32.const 17))
+    (then ,(wat-arity 2)
+      (return_call $apply (struct.get $direct-function $slot (local.get $function))
+        (call $car (local.get $args)))))
   #@(if (i32.ge_u (local.get $mode) (i32.const 15))
     (then (return_call $specialized-slot-call (local.get $function) (local.get $args))))
   ;; Standard DEFCLASS accessors use the same slot protocol as SLOT-VALUE.
@@ -497,6 +515,8 @@
 (define-runtime-function $clos-primitive (($op i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($a :nullable-object) ($b :nullable-object) ($cell :nullable-object) ($value :nullable-object)
            ($start i32) ($column i32))
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%generic-call-plan)))
+    (then (return_call $make-generic-call-plan (local.get $args))))
   #@(if (i32.or (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%raw-instance-access)))
                 (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%set-raw-instance-access))))
     (then (return_call $raw-instance-access (local.get $op) (local.get $args))))

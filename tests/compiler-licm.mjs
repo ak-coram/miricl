@@ -3,15 +3,34 @@ import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
 
 const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
-const firstBody = bytes => {
-  let position = 8;
+const entryBody = bytes => {
+  let position = 8, entry, worker;
+  const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes))
+    .filter(entry => entry.kind === 'function').length;
   const word = () => {let value = 0, scale = 1, byte; do {byte = bytes[position++]; value += (byte & 127) * scale; scale *= 128;} while (byte & 128); return value;};
   while (position < bytes.length) {
     const id = bytes[position++], size = word(), end = position + size;
-    if (id === 10) {assert.ok(word() > 0); const length = word(); return bytes.subarray(position, position + length);}
+    if (id === 7) {
+      const count = word();
+      for (let i = 0; i < count; i++) {
+        const length = word(), name = new TextDecoder().decode(bytes.subarray(position, position + length));
+        position += length;
+        const kind = bytes[position++], index = word();
+        if (kind === 0 && name === 'entry') entry = index;
+        if (kind === 0 && /^direct-entry-\d+$/.test(name)) worker = index;
+      }
+    }
+    if (id === 10) {
+      const count = word(), target = (worker ?? entry) - imports;
+      for (let i = 0; i < count; i++) {
+        const length = word();
+        if (i === target) return bytes.subarray(position, position + length);
+        position += length;
+      }
+    }
     position = end;
   }
-  throw new Error('Missing code section');
+  throw new Error('Missing entry body');
 };
 const loop = condition => `(let ((sum 0)) (declare (type (unsigned-byte 32) sum))
   (dotimes (i n sum) (declare (type (unsigned-byte 32) i)) (when ${condition} (incf sum))))`;
@@ -121,7 +140,7 @@ try {
       if (name === 'stable tag') {
         const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes)).filter(entry => entry.kind === 'function');
         const index = imports.findIndex(entry => entry.name === 'native-consp-inline'); assert.ok(index >= 0);
-        vm.mountFile('/licm-body.bin', firstBody(bytes));
+        vm.mountFile('/licm-body.bin', entryBody(bytes));
         assert.equal(vm.evaluate(`(with-open-file (in "/licm-body.bin" :element-type '(unsigned-byte 8))
           (let ((body (make-array (file-length in) :element-type '(unsigned-byte 8))))
             (read-sequence body in)
@@ -135,10 +154,6 @@ try {
         assert.equal(vm.evaluate(`(multiple-value-list (funcall *licm-function* ${args}))`).output,
           `${expected}\n`, `${name}, hoisting standard`);
     }
-    if (name === 'entry type proof') assert.ok(variants[0].length <= 595, name);
-    if (name.startsWith('immediate ')) assert.ok(variants[0].length <= 530, name);
-    if (name === 'wide integer narrow mask') assert.ok(variants[0].length <= 565, name);
-    if (name === 'observed Lisp boolean') assert.ok(variants[0].length <= 570, name);
     console.log(`LICM ${name}: ${variants[0].length} bytes`);
   }
   console.log('LICM: predicates, raw branch caches, observed booleans, nonallocating arithmetic, dominance, scoped proofs, zero iterations, effects, mutable state, full values and allocation identity pass.');

@@ -401,9 +401,7 @@
 
 (define-runtime-function $specialized-slot-call
     (($function (ref $direct-function)) ($args :nullable-object)) (:nullable-object)
-  (:locals ($plan (ref $objects)) ($object :nullable-object) ($value :nullable-object)
-           ($cell :nullable-object) ($scan :nullable-object) ($name :nullable-object)
-           ($slot :nullable-object) ($locations (ref null $objects)) ($writer i32) ($offset i32))
+  (:locals ($object :nullable-object) ($value :nullable-object) ($writer i32))
   (wat-arity 1)
   #@(local.set $args (call $car (local.get $args)))
   #@(local.set $writer (i32.eq (struct.get $direct-function $mode (local.get $function)) (i32.const 16)))
@@ -412,6 +410,13 @@
   #@(local.set $value (call $car (local.get $args)))
   #@(local.set $object (if (result (ref null eq)) (local.get $writer)
     (then (call $car (call $cdr (local.get $args)))) (else (local.get $value))))
+  #@(return_call $specialized-slot-operation (local.get $function) (local.get $object) (local.get $value)))
+
+(define-runtime-function $specialized-slot-operation
+    (($function (ref $direct-function)) ($object :nullable-object) ($value :nullable-object)) (:nullable-object)
+  (:locals ($plan (ref $objects)) ($cell :nullable-object) ($scan :nullable-object) ($name :nullable-object)
+           ($slot :nullable-object) ($locations (ref null $objects)) ($writer i32) ($offset i32))
+  #@(local.set $writer (i32.eq (struct.get $direct-function $mode (local.get $function)) (i32.const 16)))
   (wat-fail-when #@(i32.eqz (ref.test (ref $objects) (struct.get $direct-function $slot (local.get $function)))) :malformed-form)
   #@(local.set $plan (ref.cast (ref $objects) (struct.get $direct-function $slot (local.get $function))))
   (wat-fail-when #@(i32.ne (array.len (local.get $plan)) (i32.const 8)) :malformed-form)
@@ -510,7 +515,7 @@
 
 (define-runtime-section clos-defaults-runtime-wat ()
   #@(global $slot-access-token (mut (ref null eq)) (ref.null eq))
-  ($invalidate-slot-access) ($slot-protocols-standard-p) ($specialize-accessor) ($specialized-slot-call)
+  ($invalidate-slot-access) ($slot-protocols-standard-p) ($specialize-accessor) ($specialized-slot-call) ($specialized-slot-operation)
   ($raw-instance-access)
   ($clos-meta-value) ($standard-slot-cell) ($standard-slot-call)
   ($standard-allocate-instance) ($standard-shared-initialize) ($standard-default-initargs)

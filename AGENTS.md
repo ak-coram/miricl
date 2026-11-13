@@ -78,6 +78,33 @@ Add regression coverage for malformed input and recovery after rejection.
 
 # Performance
 
+For compiler and Lisp runtime experiments, prefer a persistent Wasm REPL with
+the source compiler over rebuilding images for each edit. Start the ordinary
+cold compiler image with `node scripts/repl.mjs miricl.wasm --directory .`, set
+`miricl-compiler:*compile-evaluations*` to NIL and
+`miricl-compiler::*compiler-state*` to `:interpreted`, then LOAD the affected
+compiler source (for example, `/wasm-compiler.lisp`). Explicit COMPILE-NATIVE
+still emits and instantiates Wasm without bootstrapping the compiler. Reload
+edited definitions, inspect their generated code and run warmed small benchmarks
+in the same session. For optimized code whose DEBUG policy omits a listing,
+use `miricl-compiler::disassemble-native` on the emitted bytes and actual
+function index rather than changing the optimization policy to inspect it.
+Precompiled compiler modules can retain sealed internal function bindings, so
+redefining one global function there may not update its callers. Use the source
+compiler for this loop. Runtime WAT/import changes require rebuilding a matching
+cold image, and representation/bootstrap changes may require a fresh session.
+When a source file also defines record layouts or registration tables, reload
+the affected definitions while preserving the target's existing private symbol
+identities. Successful small emissions do not establish that linker and
+bootstrap registrations were reloaded consistently; check those paths in a
+fresh compiled image before changing their tests.
+Confirm promising changes with the precompiled compiler and application checks
+before relying on them; interpreter compilation timings are not native compiler
+performance measurements.
+Do full compiler builds at meaningful checkpoints and full application rebuilds
+less frequently. Reuse an existing native application bundle for runtime-only
+experiments, and rebuild the application after measured changes justify it.
+
 Keep compiler optimizations generic: derive them from Common Lisp
 semantics, types, values, and control/data flow. Libraries and
 applications, including Game of Life, Maxima and FriCAS are benchmarks

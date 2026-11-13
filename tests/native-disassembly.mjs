@@ -85,6 +85,7 @@ try {
     (miricl-compiler:compile-native-bundle "/debug-source.wasm" "/debug-bundle.wasm")`);
   const fresh = await createCompilerTestVM(image);
   try {
+    const initialCompilerState = fresh.evaluate('miricl-compiler::*compiler-state*').output;
     fresh.mountFile('/debug-bundle.wasm', await vm.readFile('/debug-bundle.wasm'));
     const output = fresh.evaluate(`(progn (load "/debug-bundle.wasm")
       (let ((fn (debug-bundle-factory 10)))
@@ -94,8 +95,7 @@ try {
           (= (funcall fn 1) 11) (= (funcall fn 2) 13)
           (null (miricl-compiler::compiler-primitive 32 #'debug-bundle-plain)))))`, {eof: true}).output;
     assert.equal(output, 'T\n');
-    if (!process.argv[2]?.includes('precompiled'))
-      assert.equal(fresh.evaluate('miricl-compiler::*compiler-state*').output, ':COLD\n');
+    assert.equal(fresh.evaluate('miricl-compiler::*compiler-state*').output, initialCompilerState);
   } finally { fresh.close(); }
   evaluate(`(setq miricl-compiler:*compile-evaluations* t)
     (defun automatic-debug (x) (declare (optimize (debug 2))) (+ x 1))

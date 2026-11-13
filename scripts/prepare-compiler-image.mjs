@@ -9,6 +9,7 @@ if (!bootstrap || !output) throw new Error('Usage: node prepare-compiler-image.m
 const vm = await Miricl.instantiate(await fs.readFile(bootstrap));
 try {
   vm.evaluate(`(in-package :miricl-compiler)
+    (setq *compiler-bootstrapping* t)
     (defparameter *image-sources* (mapcar (lambda (name)
       (list name (compiler-source-policy (function-lambda-expression (symbol-function name))))) *native-compiler-seeds*))
     (multiple-value-bind (installed unsupported) (compile-compiler)
@@ -31,7 +32,10 @@ try {
             ;; internal function bindings. Preserve only its literal graph;
             ;; runtime startup creates and installs the native entry points.
             (let ((entries (funcall (compiler-primitive 17 code literals nil))))
-              (dolist (entry entries) (setf (symbol-function (car entry)) (cdr entry))))
+              ;; Validate and instantiate the output without installing another
+              ;; compiler generation. Keep compiling the fixed original corpus.
+              (unless (every (lambda (entry) (compiled-function-p (cdr entry))) entries)
+                (error "Module compiler output contains an uncompiled entry")))
             (unless (= 42 (funcall (compile-native '(lambda (x) (+ x 2))) 40))
               (error "Module-compiled compiler failed its compilation check"))
             (push (coerce code 'list) codes)

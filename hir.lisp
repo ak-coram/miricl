@@ -1314,6 +1314,42 @@
          (return-from (hir-return-from-form form variables functions targets))
          (otherwise (hir-application-form form variables functions targets)))))))
 
+(defun hir-normalize-keywords (params body)
+  (declare (type list params body))
+  ;; The source boundary validated this lambda list. Keep required bindings
+  ;; in the native entry and lower only its remaining keyword machinery.
+  (let ((prefix nil) (remaining params)
+        (normalizer #'miricl::%normalize-lambda))
+    (loop while (and remaining (not (member (car remaining) lambda-list-keywords)))
+          do (push (pop remaining) prefix))
+    (setq prefix (nreverse prefix))
+    ;; AUX may shadow an earlier parameter. Keep the original normalization
+    ;; unless the declaration's binding identity is unambiguous.
+    (when (or (null prefix)
+              (some (lambda (spec) (member (if (consp spec) (car spec) spec) prefix))
+                    (cdr (member '&aux params))))
+      (return-from hir-normalize-keywords (funcall normalizer params body)))
+    (multiple-value-bind (forms specials types policy) (hir-declarations body t)
+      (declare (ignore forms policy))
+      (let ((outer nil) (normalized (funcall normalizer remaining body)))
+        (let ((names (intersection prefix specials)))
+          (when names (push (cons 'special names) outer)))
+        (dolist (entry types)
+          (when (member (car entry) prefix)
+            (push (list 'type (cdr entry) (car entry)) outer)))
+        ;; Without optional arguments, no parser operation advances the rest
+        ;; spine. Its private mutable box is redundant: bind rest/key views
+        ;; directly to the native rest parameter.
+        (unless (member '&optional remaining)
+          (let* ((args (second (first normalized))) (form (first (second normalized)))
+                 (bindings (second form)) (box (caar bindings)))
+            (dolist (binding (cdr bindings))
+              (when (equal (second binding) (list 'car box))
+                (setf (second binding) args)))
+            (setf (second form) (cdr bindings))))
+        (list (append prefix (first normalized))
+              (append (when outer (list (cons 'declare (nreverse outer)))) (second normalized)))))))
+
 (defun hir-lambda (form parent variables functions targets name &optional implicit-block)
   (declare (type (or null simple-vector) parent)
            (type list variables functions targets implicit-block))
@@ -1335,7 +1371,7 @@
         (setq form (list* 'lambda (second form)
                      (append (nreverse prefix) (list (list* 'block (first implicit-block) body))))
               implicit-block nil)))
-    (let ((normalized (miricl::%normalize-lambda (second form) (cddr form))))
+    (let ((normalized (hir-normalize-keywords (second form) (cddr form))))
       (setq form (list* 'lambda (first normalized) (second normalized)))))
   (let* ((*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*))
          (*hir-safety-level* (native-safety-level (cddr form) *hir-safety-level*))
