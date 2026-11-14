@@ -2,60 +2,55 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defun $format-small-cl ()
+  (runtime-function-definition '$format-small-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$format-small-cl 'miricl-runtime:format-small-integer))))
+
 (define-runtime-function $format-small (($x :nullable-object)) (i32)
-  (wat-fail-when #@(i32.ne (call $tag (local.get $x)) (i32.const 1)) :expected-designator)
-  (wat-fail-when #@(i32.gt_u (call $bitlength (ref.as_non_null (local.get $x))) (i32.const 30)) :unsupported)
-  #@(i32.mul (call $value-n (local.get $x))
-    (i32.or (call $digit (ref.as_non_null (local.get $x)) (i32.const 0))
-      (i32.shl (call $digit (ref.as_non_null (local.get $x)) (i32.const 1)) (i32.const 15)))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $format-small-cl (local.get $x))))))
+
+(defun $format-param-cl ()
+  (runtime-function-definition '$format-param-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$format-param-cl 'miricl-runtime:format-parameter-value))))
 
 (define-runtime-function $format-param (($params (ref $objects)) ($i i32) ($default i32)) (i32)
-  (:locals ($value :nullable-object))
   #@(if (i32.ge_u (local.get $i) (array.len (local.get $params))) (then (return (local.get $default))))
-  #@(local.set $value (array.get $objects (local.get $params) (local.get $i)))
-  #@(if (ref.is_null (local.get $value)) (then (return (local.get $default))))
-  #@(if (result i32) (i32.eq (call $tag (local.get $value)) (i32.const 16))
-    (then (call $value-n (local.get $value))) (else (call $format-small (local.get $value)))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $format-param-cl (array.get $objects (local.get $params) (local.get $i)) (call $int (local.get $default)))))))
+
+(defun $format-index-cl ()
+  (runtime-function-definition '$format-index-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$format-index-cl 'miricl-runtime:format-index-value))))
 
 (define-runtime-function $format-index (($value :nullable-object)) (i32)
-  (wat-fail-when #@(i32.ne (call $tag (local.get $value)) (i32.const 1)) :expected-designator)
-  #@(if (i32.gt_u (call $bitlength (ref.as_non_null (local.get $value))) (i32.const 30))
-    (then (return (i32.const -1))))
-  #@(call $format-small (local.get $value)))
+  #@(local.set $value (call $require-integer (local.get $value)))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $format-index-cl (local.get $value))))))
 
-;; Escape parameters are numeric comparisons, not output widths or indices.
-;; Retain arbitrary integers and use NIL for omitted parameters, rather than
-;; narrowing them to i32 or reserving an otherwise valid integer sentinel.
+(defun $format-comparison-param-cl ()
+  (runtime-function-definition '$format-comparison-param-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$format-comparison-param-cl 'miricl-runtime:format-comparison-value))))
+
 (define-runtime-function $format-comparison-param (($params (ref $objects)) ($i i32)) (:nullable-object)
-  (:locals ($value :nullable-object))
-  #@(local.set $value (array.get $objects (local.get $params) (local.get $i)))
-  #@(if (ref.is_null (local.get $value)) (then (return (ref.null eq))))
-  #@(if (i32.eq (call $tag (local.get $value)) (i32.const 16))
-    (then (return (call $int (call $value-n (local.get $value))))))
-  (wat-fail-when #@(i32.ne (call $tag (local.get $value)) (i32.const 1)) :expected-designator)
-  #@(local.get $value))
+  #@(call $format-comparison-param-cl (array.get $objects (local.get $params) (local.get $i))))
+
+(defun $format-escape-p-cl ()
+  (runtime-function-definition '$format-escape-p-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$format-escape-p-cl 'miricl-runtime:format-escape-value-p :result :truth))))
 
 (define-runtime-function $format-escape-p (($params (ref $objects)) ($remaining :nullable-object)) (i32)
-  (:locals ($a :nullable-object) ($b :nullable-object) ($c :nullable-object))
-  #@(local.set $a (call $format-comparison-param (local.get $params) (i32.const 0)))
-  #@(local.set $b (call $format-comparison-param (local.get $params) (i32.const 1)))
-  #@(local.set $c (call $format-comparison-param (local.get $params) (i32.const 2)))
-  #@(if (ref.is_null (local.get $a)) (then (return (ref.is_null (local.get $remaining)))))
-  #@(if (ref.is_null (local.get $b)) (then (return (i32.eqz (call $value-n (local.get $a))))))
-  #@(if (ref.is_null (local.get $c)) (then (return (i32.eqz (call $compare (local.get $a) (local.get $b))))))
-  #@(i32.and (i32.le_s (call $compare (local.get $a) (local.get $b)) (i32.const 0))
-             (i32.le_s (call $compare (local.get $b) (local.get $c)) (i32.const 0))))
+  #@(call $format-escape-p-cl (call $format-comparison-param (local.get $params) (i32.const 0))
+    (call $format-comparison-param (local.get $params) (i32.const 1))
+    (call $format-comparison-param (local.get $params) (i32.const 2)) (local.get $remaining)))
+
+(defun $format-mincol-cl ()
+  (runtime-function-definition '$format-mincol-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$format-mincol-cl 'miricl-runtime:format-minimum-column))))
 
 (define-runtime-function $format-mincol (($params (ref $objects)) ($i i32)) (i32)
-  (:locals ($value :nullable-object))
   #@(if (i32.ge_u (local.get $i) (array.len (local.get $params))) (then (return (i32.const 0))))
-  #@(local.set $value (array.get $objects (local.get $params) (local.get $i)))
-  #@(if (ref.is_null (local.get $value)) (then (return (i32.const 0))))
-  #@(if (i32.eq (call $tag (local.get $value)) (i32.const 1))
-    (then (if (i32.le_s (call $value-n (local.get $value)) (i32.const 0)) (then (return (i32.const 0))))))
-  #@(call $format-small (local.get $value)))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $format-mincol-cl (array.get $objects (local.get $params) (local.get $i)))))))
 
-;; START points just past ~. SCAN parses syntax without consuming V arguments.
 (define-runtime-function $format-parse
     (($digits :digits) ($i i32) ($end i32) ($args :nullable-object) ($scan i32))
     (i32 i32 i32 i32 (ref $objects) :nullable-object i32)
@@ -1086,7 +1081,7 @@
   #@(i32.add (local.get $n) (global.get $format-column)))
 
 (define-runtime-section format-runtime-wat ()
-  ($format-small) ($format-index) ($format-param) ($format-comparison-param) ($format-escape-p) ($format-mincol) ($format-parse) ($format-close)
+  ($format-small-cl) ($format-small) ($format-index-cl) ($format-index) ($format-param-cl) ($format-param) ($format-comparison-param-cl) ($format-comparison-param) ($format-escape-p-cl) ($format-escape-p) ($format-mincol-cl) ($format-mincol) ($format-parse) ($format-close)
   ($format-repeat) ($format-pad) ($format-aesthetic-radix) ($format-integer) ($format-real-parts) ($format-rounded) ($format-number-sign) ($format-mantissa) ($format-leading-zero) ($format-fixed) ($format-exponential) ($format-run) ($format-line-column)
   ($format-slash-end) ($format-slash) ($format-flush) ($format-segment) ($format-constant)
   ($format-roman) ($format-logical-body) ($format-pretty-pop) ($format-restricted) ($format-clause) ($format-justify) ($format-fill-body) ($format-logical))

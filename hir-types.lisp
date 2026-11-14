@@ -158,6 +158,7 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
         ((eq required 'simple-vector) (and (consp type) (eq (car type) 'simple-vector)))
         ((eq required 'list) (or (member type '(null cons)) (and (consp type) (eq (car type) 'cons))))
         ((eq required 'cons) (and (consp type) (eq (car type) 'cons)))
+        ((eq required 'symbol) (member type '(null keyword)))
         ((equal required '(not null))
          (or (member type '(cons simple-vector vector array simple-array string simple-string
                             character number integer rational real float complex function compiled-function
@@ -297,8 +298,9 @@ provide no candidate, and no DEFTYPE or SATISFIES code is executed here."
 
 (defun hir-type-truth-premise (test cache &optional cells)
   "Recover a truth or canonical type predicate through immutable temporaries.
-The third value is a type established by a positive predicate, or NIL for
-ordinary truth. CELLS records actual read-only uses, not client binding flags."
+The third value is a type established by a positive predicate, an integer
+predicate name, or NIL for ordinary truth. CELLS records actual private uses,
+not client binding flags."
   (declare (type simple-vector test) (type hash-table cache))
   (let ((current test) (inverse nil) (predicate nil))
     (dotimes (depth 32)
@@ -315,16 +317,25 @@ ordinary truth. CELLS records actual read-only uses, not client binding flags."
              ((null not)
               (setq predicate t inverse (not inverse)
                     current (third (hir-instruction-inputs producer))))
-             ((consp simple-vector-p)
+             ((consp simple-vector-p vectorp stringp symbolp integerp characterp)
               (return-from hir-type-truth-premise
                 (values (third (hir-instruction-inputs producer)) inverse
-                  (if (eq (hir-inline-primitive producer cache) 'consp) 'cons 'simple-vector))))
+                  (case (hir-inline-primitive producer cache)
+                    (consp 'cons) (simple-vector-p 'simple-vector) (vectorp 'vector) (stringp 'string) (symbolp 'symbol) (integerp 'integer) (characterp 'character)))))
+             ((zerop minusp plusp)
+              ;; Numeric predicates currently select their canonical inline
+              ;; implementation only at SAFETY 0. Other calls stay replaceable.
+              (when (zerop (hir-instruction-safety-level producer))
+                (return-from hir-type-truth-premise
+                  (values (third (hir-instruction-inputs producer)) inverse
+                    (hir-inline-primitive producer cache))))
+              (return))
              (otherwise (return))))
           (:cell-read
            (when predicate (return-from hir-type-truth-premise (values current inverse)))
            (let* ((cell (first (hir-instruction-inputs producer)))
                   (origin (hir-value-producer cell)))
-             (unless (and cells (gethash cell cells) (%hir-instruction-p origin)
+             (unless (and cells (eq (gethash cell cells) t) (%hir-instruction-p origin)
                           (eq (hir-instruction-opcode origin) :cell-new))
                (return))
              (setq current (first (hir-instruction-inputs origin)))))
@@ -336,8 +347,11 @@ ordinary truth. CELLS records actual read-only uses, not client binding flags."
         (values test nil)))))
 
 (defun hir-type-branch-guards (unit)
-  "Type premises established by truth tests of structurally read-only cells.
+  "Type premises established by truth tests of structurally private cells.
 Joins are followed only after all predecessors establish the premise.
+A mutable cell's premise ends at its next write. Its tested read must be in
+the branch block with no intervening write; immutable predicate temporaries
+must not reestablish an old observation after mutation.
 A budget limits cost; stopping early only loses optimization opportunities."
   (declare (type hir-unit unit))
   (let ((cells (make-hash-table :test 'eq)) (guards (make-hash-table :test 'eq))
@@ -350,9 +364,9 @@ A budget limits cost; stopping early only loses optimization opportunities."
         (let ((producer (hir-value-producer value)))
           (when (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :cell-new))
             (setf (gethash value cells) t)))))
-    ;; Inspect actual uses, not just the client-visible assigned/captured
-    ;; flags. Writes, aliases, capture and passing a cell to a call forbid
-    ;; extending a test of its contents to subsequent reads.
+    ;; Inspect actual uses, not client-visible assigned/captured flags.
+    ;; Direct writes kill premises locally. Aliasing, capture or passing the
+    ;; cell itself to any other operation forbids premises across reads.
     (dolist (function (hir-unit-functions unit))
       (dolist (block (hir-function-blocks function))
         (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
@@ -362,8 +376,11 @@ A budget limits cost; stopping early only loses optimization opportunities."
           ;; A verified CELL-READ has exactly one operand, its cell. Skip
           ;; those common uses altogether instead of hashing every read.
           (unless (eq (hir-instruction-opcode instruction) :cell-read)
-            (dolist (input (hir-instruction-inputs instruction))
-              (when (gethash input cells) (remhash input cells)))))))
+            (loop for input in (hir-instruction-inputs instruction) for index from 0 do
+              (when (gethash input cells)
+                (if (and (eq (hir-instruction-opcode instruction) :cell-write) (zerop index))
+                    (setf (gethash input cells) :mutable)
+                    (remhash input cells))))))))
     (let ((budget (max 256 (* size 4))))
       (dolist (function (hir-unit-functions unit))
         (let* ((count (hir-function-block-count function))
@@ -388,23 +405,34 @@ A budget limits cost; stopping early only loses optimization opportunities."
                    (source (and (%hir-instruction-p producer)
                                 (eq (hir-instruction-opcode producer) :copy)
                                 (hir-copy-source observed)))
-                   (arms (hir-instruction-attributes branch)))
+                   (arms (hir-instruction-attributes branch))
+                   (private (gethash cell cells)))
               (when (and (plusp budget) (< (hir-function-debug-level function) 2)
                          (eq (hir-instruction-opcode branch) :branch)
-                         (or source (gethash cell cells)) (not (eq (first arms) (second arms))))
+                         (or source (eq private t)
+                             (and (eq private :mutable)
+                               (let ((available nil))
+                                 (dolist (instruction (hir-block-instructions block) available)
+                                   (when (minusp (decf budget)) (setq available nil) (return))
+                                   (when (eq instruction producer) (setq available t))
+                                   (when (and (eq (hir-instruction-opcode instruction) :cell-write)
+                                              (eq (first (hir-instruction-inputs instruction)) cell))
+                                     (setq available nil))))))
+                         (not (eq (first arms) (second arms))))
                 (loop for arm in arms for positive in '(t nil) do
                   (incf serial)
                   ;; The initial edge must itself establish the premise.
                   ;; Subsequent joins need every predecessor inside this region.
                   (let* ((positive (if (second premise) (not positive) positive))
                          (restriction (third premise))
-                         ;; A false type predicate currently contributes no
-                         ;; complement fact. Plain truth keeps both branches.
-                         (pending (when (and (or (null restriction) positive)
+                         ;; Integer predicates have useful facts on both arms.
+                         ;; False type predicates still supply no complement.
+                         (pending (when (and (or (null restriction) positive
+                                                (member restriction '(zerop minusp plusp)))
                                              (= (aref incoming (the (unsigned-byte 32) (hir-block-id arm))) 1))
                                     (list arm))))
                     (loop while (and pending (plusp budget)) do
-                      (let* ((current (pop pending)) (id (hir-block-id current)))
+                      (let* ((current (pop pending)) (id (hir-block-id current)) (killed nil))
                         (declare (type (unsigned-byte 32) id))
                         (decf budget)
                         (when (and (not (gethash current barriers))
@@ -413,15 +441,23 @@ A budget limits cost; stopping early only loses optimization opportunities."
                           (setf (aref epochs id) serial (aref remaining id) -1)
                           (dolist (instruction (hir-block-instructions current))
                             (when (minusp (decf budget)) (return))
+                            (when (and cell (eq (hir-instruction-opcode instruction) :cell-write)
+                                       (eq (first (hir-instruction-inputs instruction)) cell))
+                              (compiler-statistic :proof/branch-write-barrier)
+                              (setq killed t)
+                              (return))
                             (when (or (and cell (eq (hir-instruction-opcode instruction) :cell-read)
                                            (eq (first (hir-instruction-inputs instruction)) cell))
-                                      (and source (eq (hir-instruction-opcode instruction) :copy)
-                                           (eq (hir-copy-source (hir-instruction-output instruction)) source)))
+                                      (and (eq (hir-instruction-opcode instruction) :copy)
+                                           (eq (hir-copy-source (hir-instruction-output instruction))
+                                               (or source observed))))
                               (compiler-statistic :proof/branch-premise (or restriction positive))
-                              (push (cons observed (or restriction positive))
+                              (push (cons observed (if (member restriction '(zerop minusp plusp))
+                                                      (cons restriction positive)
+                                                      (or restriction positive)))
                                     (gethash (hir-instruction-output instruction) guards))))
                           (let ((terminator (hir-block-terminator current)) (previous nil))
-                            (when (member (hir-instruction-opcode terminator) '(:jump :branch))
+                            (when (and (not killed) (member (hir-instruction-opcode terminator) '(:jump :branch)))
                               (dolist (successor (hir-instruction-attributes terminator))
                                 ;; Predecessors are unique even if both branch
                                 ;; arms name the same successor.
@@ -447,7 +483,7 @@ A budget limits cost; stopping early only loses optimization opportunities."
          (name (first attributes)))
     ;; INLINE is the contract that permits relying on the definition selected
     ;; at compilation. Ordinary calls retain their unrestricted result types.
-    (when (and (eq (second attributes) 'inline) (member name '(length cons consp simple-vector-p null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor ash)))
+    (when (and (eq (second attributes) 'inline) (member name '(char char-code code-char sbit row-major-aref length integer-length mod truncate cons consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor lognot ash)))
       (multiple-value-bind (canonical found) (gethash name cache)
         (unless found
           (setq canonical
@@ -485,6 +521,29 @@ A budget limits cost; stopping early only loses optimization opportunities."
             (ash (when (or zero-a zero-b) :left)))))
             (compiler-statistic (if result :proof/integer-identity-known :proof/integer-identity-unknown) name)
             result))))))
+
+(defun hir-integer-branch-type (type name positive)
+  "An upper bound of integer TYPE's members satisfying this predicate arm.
+Numeric predicates alone cannot establish INTEGER: floats and other numeric
+types retain their existing type. Removing an interior zero would leave a
+hole, so keep the original interval in that case."
+  (declare (type symbol name))
+  (multiple-value-bind (low high integer) (hir-integer-interval type)
+    (unless integer (return-from hir-integer-branch-type type))
+    (let ((a low) (b high))
+      (case name
+        (zerop
+         (cond (positive (setq a 0 b 0))
+               ((and low (>= low 0)) (setq a (max low 1)))
+               ((and high (<= high 0)) (setq b (min high -1)))))
+        (minusp (if positive (setq b (if high (min high -1) -1))
+                            (setq a (if low (max low 0) 0))))
+        (plusp (if positive (setq a (if low (max low 1) 1))
+                           (setq b (if high (min high 0) 0)))))
+      (cond ((and a b (> a b)) nil)
+            ((and (eql a low) (eql b high)) type)
+            (t (compiler-statistic :proof/integer-branch-refinement name)
+               (list 'integer (or a '*) (or b '*)))))))
 
 (defun hir-integer-predicate-type (name type)
   (declare (type symbol name))
@@ -537,15 +596,36 @@ numbers, including bignums, and is never proved true by this rule."
 (defun hir-inline-result-type (name types)
   (declare (type symbol name) (type list types))
   (when (member nil types) (return-from hir-inline-result-type nil))
+  ;; These describe successful returns of canonical target operations. Keep
+  ;; the target's Unicode repertoire independent of host CHAR-CODE-LIMIT.
+  (when (and (eq name 'char) (= (length types) 2))
+    (return-from hir-inline-result-type 'character))
+  (when (and (eq name 'char-code) (= (length types) 1))
+    (return-from hir-inline-result-type '(integer 0 #x10ffff)))
+  (when (and (eq name 'code-char) (= (length types) 1))
+    (multiple-value-bind (low high known) (hir-integer-bounds (first types))
+      (return-from hir-inline-result-type
+        (if (and known (<= 0 low high #x10ffff) (or (< high #xd800) (> low #xdfff)))
+            'character '(or null character)))))
+  (when (and (eq name 'sbit) (= (length types) 2))
+    ;; A successful canonical SBIT returns one bit. Bounds, rank and array
+    ;; checks remain in lowering; this fact never validates its operands.
+    (return-from hir-inline-result-type '(integer 0 1)))
+  (when (and (eq name 'integer-length) (= (length types) 1))
+    ;; Successful canonical returns are nonnegative; do not assume a host
+    ;; word size or finite operand representation for arbitrary integers.
+    (return-from hir-inline-result-type 'unsigned-byte))
   (when (and (member name '(eq eql = /= < <= > >=)) (= (length types) 2))
     (return-from hir-inline-result-type
       (hir-integer-comparison-type name (first types) (second types))))
   (when (and (= (length types) 1) (member name '(zerop minusp plusp evenp oddp)))
     (return-from hir-inline-result-type (hir-integer-predicate-type name (first types))))
-  (when (and (= (length types) 1) (member name '(consp simple-vector-p null not)))
+  (when (and (= (length types) 1) (member name '(consp simple-vector-p vectorp stringp symbolp integerp characterp null not)))
     (let* ((type (first types))
-           (positive (case name (consp 'cons) (simple-vector-p 'simple-vector) (otherwise 'null)))
-           (negative (if (member name '(null not)) '(not null) 'null)))
+           (positive (case name (consp 'cons) (simple-vector-p 'simple-vector) (vectorp 'vector) (stringp 'string) (symbolp 'symbol) (integerp 'integer) (characterp 'character) (otherwise 'null)))
+           ;; NIL is a symbol. Unlike the other tag predicates, its type
+           ;; therefore proves SYMBOLP true, never a negative result.
+           (negative (case name ((null not) '(not null)) (symbolp '(not symbol)) (otherwise 'null))))
       (return-from hir-inline-result-type
         (cond ((hir-type-proves-p type positive) '(eql t))
               ((hir-type-proves-p type negative) 'null) (t 'boolean)))))
@@ -554,6 +634,14 @@ numbers, including bignums, and is never proved true by this rule."
   (when (and (member name '(1+ 1-)) (= (length types) 1))
     (return-from hir-inline-result-type
       (hir-inline-result-type (if (eq name '1+) '+ '-) (list (first types) '(integer 1 1)))))
+  (when (and (eq name 'lognot) (= (length types) 1))
+    (multiple-value-bind (low high known) (hir-integer-bounds (first types))
+      ;; Complement reverses integer order. Bound the work and retain the
+      ;; same signed-i64 closure used by native bitwise lowering.
+      (return-from hir-inline-result-type
+        (if (and known (<= -9223372036854775808 low high 9223372036854775807))
+            (progn (compiler-statistic :proof/integer-complement-range)
+                   (list 'integer (lognot high) (lognot low))) t))))
   (when (and (eq name 'length) (= (length types) 1))
     (let ((type (first types)))
       (when (or (eq type 'simple-vector) (and (consp type) (eq (first type) 'simple-vector)))
@@ -561,7 +649,12 @@ numbers, including bignums, and is never proved true by this rule."
         ;; a nonnegative signed-i32 length; sized vectors can be more precise.
         (let ((size (and (consp type) (second type))))
           (return-from hir-inline-result-type
-            (if (typep size '(integer 0 2147483647)) (list 'integer size size) '(integer 0 2147483647)))))))
+            (if (typep size '(integer 0 2147483647)) (list 'integer size size) '(integer 0 2147483647)))))
+      ;; General target vectors also have bounded storage and fill pointers.
+      ;; This proves only the returned integer range, never a stable length:
+      ;; callbacks can still change an adjustable vector or its fill pointer.
+      (when (hir-type-proves-p type 'vector)
+        (return-from hir-inline-result-type '(integer 0 2147483647)))))
   (when (= (length types) 2)
     (let ((identity (hir-integer-identity name (first types) (second types))))
       (when identity
@@ -585,6 +678,17 @@ numbers, including bignums, and is never proved true by this rule."
             (when (or left right)
               (return-from hir-inline-result-type
                 (list 'integer (if (and left right) (max left right) (or left right)) -1)))))
+        (when (and (eq name 'ash) integer-a integer-b (= c d) (<= c 64)
+                   (<= -9223372036854775808 a b 9223372036854775807))
+          ;; Scalar arithmetic right shifts saturate at the sign bit, even
+          ;; when the singleton count is a bignum. Never construct a huge
+          ;; positive-shift intermediate while answering a proof query.
+          (let* ((count (max -63 c)) (low (ash a count)) (high (ash b count)))
+            (return-from hir-inline-result-type
+              (if (<= -9223372036854775808 low high 9223372036854775807)
+                  (progn (compiler-statistic :proof/integer-shift-result-range
+                           (if (minusp c) :right :left))
+                         (list 'integer low high)) t))))
         (when (and integer-a integer-b (<= -9223372036854775808 a b 9223372036854775807)
                    (<= -9223372036854775808 c d 9223372036854775807))
           (when (member name '(+ - *))
@@ -609,15 +713,12 @@ numbers, including bignums, and is never proved true by this rule."
               ((logior logxor)
                (return-from hir-inline-result-type
                  (if (and (>= a 0) (>= c 0)) (list 'integer 0 (1- (ash 1 bits)))
-                     (list 'signed-byte (1+ bits)))))
-              (ash
-               (when (and (= c d) (<= -64 c 64))
-                 (let ((low (ash a c)) (high (ash b c)))
-                   (when (<= -9223372036854775808 low high 9223372036854775807)
-                     (return-from hir-inline-result-type (list 'integer low high))))))))))))
+                     (list 'signed-byte (1+ bits)))))))))))
   ;; Stop expanding interval chains once they leave the scalar domain. This
   ;; keeps inference terminating for loops such as X := (ASH X 1).
-  t)
+  ;; Exact integer primitives still retain their coarse successful-return type;
+  ;; this is not a finite-width proof and cannot enable unchecked scalar code.
+  (if (and (= (length types) 2) (member name '(ash logand))) 'integer t))
 
 (defun infer-hir-types (unit &key (roots nil rootsp) entries)
   "Return fresh primary-value type facts keyed by HIR values and functions.
@@ -807,7 +908,19 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                        (case (cdr premise)
                          ((t) (hir-type-without-null (gethash (car premise) facts)))
                          ((nil) 'null)
-                         (otherwise (cdr premise))))))
+                         (otherwise
+                          (if (and (consp (cdr premise))
+                                   (member (cadr premise) '(zerop minusp plusp)))
+                              (let ((type (gethash (car premise) facts t)))
+                                ;; A scalar operand guarantees the backend
+                                ;; selects the canonical predicate. A wider
+                                ;; fallback can still call a replaced global
+                                ;; definition, so it supplies no branch premise.
+                                (multiple-value-bind (low high bounded) (hir-integer-bounds type)
+                                  (if (and bounded (<= -9223372036854775808 low high 9223372036854775807))
+                                      (hir-integer-branch-type type (cadr premise) (cddr premise))
+                                      type)))
+                              (cdr premise)))))))
                    (hir-type-join previous refined))))
           (remhash value queued)
           (unless (hir-type-equal-p previous next)

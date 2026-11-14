@@ -184,21 +184,13 @@
 ;; Keep these as ordinary macro functions: MACROLET and *MACROEXPAND-HOOK*
 ;; still use the standard expansion path. Variable places need no temporary
 ;; bindings or interpreted lambda-list destructuring on every iteration.
+(defun $values-expansion-cl ()
+  (runtime-function-definition '$values-expansion-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$values-expansion-cl 'miricl-runtime:expand-values-form))))
+
 (define-runtime-function $values-expansion (($form :nullable-object)) (:nullable-object)
-  (:locals ($args :nullable-object) ($expansion :nullable-object) ($nth i32))
-  #@(local.set $args (call $cdr (local.get $form)))
-  #@(local.set $nth (i32.eq (call $operator (local.get $form)) (i32.const ,(runtime-symbol-id 'nth-value))))
-  #@(call $arity (local.get $args) (i32.add (i32.const 1) (local.get $nth))
-    (i32.add (i32.const 1) (local.get $nth)))
-  #@(local.set $expansion (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'multiple-value-call)))
-    (call $cons (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'function)))
-      (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'list))) (ref.null eq)))
-      (call $cons (if (result (ref null eq)) (local.get $nth)
-        (then (call $car (call $cdr (local.get $args)))) (else (call $car (local.get $args)))) (ref.null eq)))))
-  #@(if (local.get $nth)
-    (then (return (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'nth)))
-      (call $cons (call $car (local.get $args)) (call $cons (local.get $expansion) (ref.null eq)))))))
-  #@(local.get $expansion))
+  #@(call $check-apply-list (local.get $form))
+  #@(call $values-expansion-cl (local.get $form)))
 
 (define-runtime-function $modifier-expansion
     (($form :nullable-object) ($env :nullable-object) ($decrement i32)) (:nullable-object)
@@ -234,93 +226,41 @@
     (call $cons (local.get $place) (call $cons (local.get $operator)
       (call $cons (local.get $delta) (call $cons (local.get $env) (ref.null eq)))))))
 
-(define-runtime-function $if-form
-    (($test :nullable-object) ($yes :nullable-object) ($no :nullable-object)) (:nullable-object)
-  #@(call $cons (call $symbol (i32.const ,(runtime-symbol-id 'if)))
-    (call $cons (local.get $test) (call $cons (local.get $yes)
-      (call $cons (local.get $no) (ref.null eq))))))
+(defun $if-form ()
+  (runtime-function-definition '$if-form
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$if-form 'miricl-runtime:if-expression))))
+
+(defun $logical-expansion-cl ()
+  (runtime-function-definition '$logical-expansion-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$logical-expansion-cl 'miricl-runtime:expand-logical-form))))
 
 (define-runtime-function $logical-expansion (($form :nullable-object)) (:nullable-object)
-  (:locals ($args :nullable-object) ($result :nullable-object) ($test :nullable-object)
-           ($temp :nullable-object) ($and i32))
-  #@(local.set $and (i32.eq (call $operator (local.get $form)) (i32.const ,(runtime-symbol-id 'and))))
-  #@(local.set $args (call $reverse-list (call $cdr (local.get $form))))
-  #@(if (ref.is_null (local.get $args)) (then (return (call $bool (local.get $and)))))
-  #@(local.set $result (call $car (local.get $args)))
-  #@(local.set $args (call $cdr (local.get $args)))
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $args)))
-    (local.set $test (call $car (local.get $args)))
-    (if (local.get $and)
-      (then (local.set $result (call $if-form (local.get $test) (local.get $result) (ref.null eq))))
-      (else
-        (local.set $temp (call $new-symbol ,(wat-text-literal "VALUE") (ref.null eq)))
-        (local.set $result (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'let)))
-          (call $cons (call $cons (call $cons (local.get $temp)
-            (call $cons (local.get $test) (ref.null eq))) (ref.null eq))
-            (call $cons (call $if-form (local.get $temp) (local.get $temp) (local.get $result))
-              (ref.null eq)))))))
-    (local.set $args (call $cdr (local.get $args))) (br $next)))
-  #@(local.get $result))
+  #@(call $check-apply-list (local.get $form))
+  #@(call $logical-expansion-cl (local.get $form)))
 
-(define-runtime-function $conditional-expansion
-    (($form :nullable-object) ($kind i32)) (:nullable-object)
-  (:locals ($args :nullable-object) ($clause :nullable-object) ($test :nullable-object)
-           ($body :nullable-object) ($alternative :nullable-object) ($temp :nullable-object))
-  #@(local.set $args (call $cdr (local.get $form)))
-  #@(if (i32.lt_u (local.get $kind) (i32.const 2))
-    (then ,(wat-arity 1 2147483647)
-      (local.set $body (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'progn)))
-        (call $cdr (local.get $args))))
-      (return (call $if-form (call $car (local.get $args))
-        (if (result (ref null eq)) (local.get $kind) (then (ref.null eq)) (else (local.get $body)))
-        (if (result (ref null eq)) (local.get $kind) (then (local.get $body)) (else (ref.null eq)))))))
-  #@(if (ref.is_null (local.get $args)) (then (return (ref.null eq))))
-  #@(local.set $clause (call $car (local.get $args)))
-  #@(call $arity (local.get $clause) (i32.const 1) (i32.const 2147483647))
-  #@(local.set $test (call $car (local.get $clause)))
-  #@(local.set $alternative (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'cond)))
-    (call $cdr (local.get $args))))
-  #@(if (i32.eqz (ref.is_null (call $cdr (local.get $clause))))
-    (then (return (call $if-form (local.get $test)
-      (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'progn))) (call $cdr (local.get $clause)))
-      (local.get $alternative)))))
-  ;; A test-only clause returns its primary value and evaluates it once.
-  #@(local.set $temp (call $new-symbol ,(wat-text-literal "TEST") (ref.null eq)))
-  #@(call $cons (call $symbol (i32.const ,(runtime-symbol-id 'let)))
-    (call $cons (call $cons (call $cons (local.get $temp) (call $cons (local.get $test) (ref.null eq)))
-      (ref.null eq)) (call $cons (call $if-form (local.get $temp) (local.get $temp) (local.get $alternative))
-        (ref.null eq)))))
+(defun $conditional-expansion-cl ()
+  (runtime-function-definition '$conditional-expansion-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$conditional-expansion-cl 'miricl-runtime:expand-conditional-form))))
 
-;; CASE remains an ordinary macro, including lexical lookup and expansion hooks.
-;; Its internal form selects literal EQL keys without allocating a gensym or
-;; traversing an interpreted LET/COND/MEMBER expansion on every invocation.
+(define-runtime-function $conditional-expansion (($form :nullable-object) ($kind i32)) (:nullable-object)
+  #@(call $check-apply-list (local.get $form))
+  #@(call $conditional-expansion-cl (local.get $form) (call $int (local.get $kind))))
+
 (define-runtime-function $case-expansion (($form :nullable-object) ($mode i32)) (:nullable-object)
   (:locals ($args :nullable-object))
+  #@(call $check-apply-list (local.get $form))
   #@(local.set $args (call $cdr (local.get $form)))
-  (wat-arity 1 2147483647)
+  #@(call $arity (local.get $args) (i32.const 1) (i32.const 2147483647))
   #@(call $selection-expansion (call $car (local.get $args)) (call $cdr (local.get $args)) (local.get $mode)))
 
-;; Modes: CASE=0, TYPECASE=1, ECASE=2, ETYPECASE=3, CCASE=4, CTYPECASE=5.
-;; Public macro functions retain lexical lookup and *MACROEXPAND-HOOK*.
+(defun $selection-expansion-cl ()
+  (runtime-function-definition '$selection-expansion-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$selection-expansion-cl 'miricl-runtime:expand-selection-form))))
+
 (define-runtime-function $selection-expansion
     (($keyform :nullable-object) ($clauses :nullable-object) ($mode i32)) (:nullable-object)
-  (:locals ($scan :nullable-object) ($clause :nullable-object) ($keys :nullable-object))
-  #@(local.set $scan (local.get $clauses))
-  #@(block $done (loop $validate (br_if $done (ref.is_null (local.get $scan)))
-    (local.set $clause (call $car (local.get $scan)))
-    (call $arity (local.get $clause) (i32.const 1) (i32.const 2147483647))
-    (local.set $keys (call $car (local.get $clause)))
-    (if (i32.eqz (local.get $mode))
-      (then
-        (if (i32.or (ref.eq (local.get $keys) (call $symbol (i32.const 1)))
-                    (ref.eq (local.get $keys) ,(clos-library-reference 'otherwise)))
-          (then ,(wat-fail-when #@(i32.eqz (ref.is_null (call $cdr (local.get $scan)))) :malformed-form)))))
-    (if (i32.and (i32.eqz (i32.and (local.get $mode) (i32.const 1)))
-      (i32.eq (call $tag (local.get $keys)) (i32.const 7)))
-      (then (drop (call $length (local.get $keys)))))
-    (local.set $scan (call $cdr (local.get $scan))) (br $validate)))
-  #@(call $cons ,(loop-library-reference '%%case-form)
-    (call $cons (call $int (local.get $mode)) (call $cons (local.get $keyform) (local.get $clauses)))))
+  #@(call $check-apply-list (local.get $clauses))
+  #@(call $selection-expansion-cl (local.get $keyform) (local.get $clauses) (call $int (local.get $mode)) (call $cons ,(loop-library-reference '%%case-form) ,(clos-library-reference 'otherwise))))
 
 (define-runtime-function $eval-case (($args :nullable-object) ($env :nullable-object)) (:nullable-object)
   (:locals ($value :nullable-object) ($clause :nullable-object) ($keys :nullable-object) ($match i32) ($mode i32)
@@ -747,79 +687,37 @@
 
 ;; Match '*' within one pathname component; Unicode code points are compared
 ;; directly. Keeping ranges avoids allocating substrings for every candidate.
-(define-runtime-function $path-component-match
-    (($x :digits) ($i i32) ($end i32) ($pattern :digits) ($p i32) ($stop i32)) (i32)
-  (:locals ($star i32) ($retry i32) ($c i32))
-  #@(local.set $star (i32.const -1))
-  #@(loop $match
-    (if (i32.ge_u (local.get $i) (local.get $end))
-      (then
-        (block $done (loop $stars (br_if $done (i32.ge_u (local.get $p) (local.get $stop)))
-          (br_if $done (i32.ne (array.get $digits (local.get $pattern) (local.get $p)) (i32.const 42)))
-          (local.set $p (i32.add (local.get $p) (i32.const 1))) (br $stars)))
-        (return (i32.eq (local.get $p) (local.get $stop)))))
-    (if (i32.lt_u (local.get $p) (local.get $stop))
-      (then
-        (local.set $c (array.get $digits (local.get $pattern) (local.get $p)))
-        (if (i32.eq (local.get $c) (i32.const 42))
-          (then (local.set $star (local.get $p)) (local.set $retry (local.get $i))
-            (local.set $p (i32.add (local.get $p) (i32.const 1))) (br $match)))
-        (if (i32.eq (local.get $c) (array.get $digits (local.get $x) (local.get $i)))
-          (then (local.set $p (i32.add (local.get $p) (i32.const 1)))
-            (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $match)))))
-    (if (i32.lt_s (local.get $star) (i32.const 0)) (then (return (i32.const 0))))
-    (local.set $p (i32.add (local.get $star) (i32.const 1)))
-    (local.set $retry (i32.add (local.get $retry) (i32.const 1)))
-    (local.set $i (local.get $retry)) (br $match))
-  #@(unreachable))
+(defun $path-component-match-cl ()
+  (runtime-function-definition '$path-component-match-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$path-component-match-cl 'miricl-runtime:path-component-value-p :result :truth))))
+
+(define-runtime-function $path-component-match (($x :digits) ($i i32) ($end i32) ($pattern :digits) ($p i32) ($stop i32)) (i32)
+  #@(call $path-component-match-cl (call $text (local.get $x)) (call $text (local.get $pattern))
+    (call $cons (call $int (local.get $i)) (call $cons (call $int (local.get $end))
+      (call $cons (call $int (local.get $p)) (call $cons (call $int (local.get $stop)) (ref.null eq)))))))
+
+(defun $path-directory-end-cl ()
+  (runtime-function-definition '$path-directory-end-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$path-directory-end-cl 'miricl-runtime:path-directory-end-value))))
 
 (define-runtime-function $path-directory-end (($chars :digits)) (i32)
-  (:locals ($i i32) ($end i32))
-  #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (array.len (local.get $chars))))
-    (if (i32.eq (array.get $digits (local.get $chars) (local.get $i)) (i32.const 47))
-      (then (local.set $end (i32.add (local.get $i) (i32.const 1)))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(local.get $end))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $path-directory-end-cl (call $text (local.get $chars)))))))
+
+(defun $path-name-end-cl ()
+  (runtime-function-definition '$path-name-end-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$path-name-end-cl 'miricl-runtime:path-name-end-value))))
 
 (define-runtime-function $path-name-end (($chars :digits) ($i i32)) (i32)
-  (:locals ($end i32))
-  #@(local.set $end (array.len (local.get $chars)))
-  #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (array.len (local.get $chars))))
-    (if (i32.eq (array.get $digits (local.get $chars) (local.get $i)) (i32.const 46))
-      (then (local.set $end (local.get $i))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(local.get $end))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $path-name-end-cl (call $text (local.get $chars)) (call $int (local.get $i)))))))
 
-;; A directory '*' consumes one component, while '**' consumes zero or more.
-(define-runtime-function $path-directories-match
-    (($x :digits) ($i i32) ($end i32) ($pattern :digits) ($p i32) ($stop i32)) (i32)
-  (:locals ($next i32) ($pnext i32) ($recursive i32))
-  #@(if (i32.ge_u (local.get $p) (local.get $stop))
-    (then (return (i32.eq (local.get $i) (local.get $end)))))
-  #@(local.set $pnext (local.get $p))
-  #@(block $pdone (loop $pstep
-    (br_if $pdone (i32.eq (array.get $digits (local.get $pattern) (local.get $pnext)) (i32.const 47)))
-    (local.set $pnext (i32.add (local.get $pnext) (i32.const 1))) (br $pstep)))
-  #@(if (i32.eq (i32.sub (local.get $pnext) (local.get $p)) (i32.const 2))
-    (then (local.set $recursive (i32.and
-      (i32.eq (array.get $digits (local.get $pattern) (local.get $p)) (i32.const 42))
-      (i32.eq (array.get $digits (local.get $pattern) (i32.add (local.get $p) (i32.const 1))) (i32.const 42))))))
-  #@(if (local.get $recursive)
-    (then (if (call $path-directories-match (local.get $x) (local.get $i) (local.get $end)
-      (local.get $pattern) (i32.add (local.get $pnext) (i32.const 1)) (local.get $stop))
-      (then (return (i32.const 1))))))
-  #@(if (i32.ge_u (local.get $i) (local.get $end)) (then (return (i32.const 0))))
-  #@(local.set $next (local.get $i))
-  #@(block $xdone (loop $xstep
-    (br_if $xdone (i32.eq (array.get $digits (local.get $x) (local.get $next)) (i32.const 47)))
-    (local.set $next (i32.add (local.get $next) (i32.const 1))) (br $xstep)))
-  #@(if (local.get $recursive)
-    (then (return (call $path-directories-match (local.get $x) (i32.add (local.get $next) (i32.const 1))
-      (local.get $end) (local.get $pattern) (local.get $p) (local.get $stop)))))
-  #@(if (i32.eqz (call $path-component-match (local.get $x) (local.get $i) (local.get $next)
-    (local.get $pattern) (local.get $p) (local.get $pnext))) (then (return (i32.const 0))))
-  #@(call $path-directories-match (local.get $x) (i32.add (local.get $next) (i32.const 1)) (local.get $end)
-    (local.get $pattern) (i32.add (local.get $pnext) (i32.const 1)) (local.get $stop)))
+(defun $path-directories-match-cl ()
+  (runtime-function-definition '$path-directories-match-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$path-directories-match-cl 'miricl-runtime:path-directory-value-p :result :truth))))
+
+(define-runtime-function $path-directories-match (($x :digits) ($i i32) ($end i32) ($pattern :digits) ($p i32) ($stop i32)) (i32)
+  #@(call $path-directories-match-cl (call $text (local.get $x)) (call $text (local.get $pattern))
+    (call $cons (call $int (local.get $i)) (call $cons (call $int (local.get $end))
+      (call $cons (call $int (local.get $p)) (call $cons (call $int (local.get $stop)) (ref.null eq)))))))
 
 (define-runtime-function $source-path-match (($x :digits) ($pattern :digits)) (i32)
   (:locals ($dir i32) ($pdir i32) ($name i32) ($pname i32) ($end i32) ($stop i32))
@@ -1001,15 +899,12 @@
   #@(call $clear-values)
   #@(call $symbol (i32.const 1)))
 
-(define-runtime-function $hash-key-match
-    (($test i32) ($key :nullable-object) ($candidate :nullable-object)) (i32)
-  #@(if (ref.eq (local.get $key) (local.get $candidate)) (then (return (i32.const 1))))
-  #@(if (i32.eq (local.get $test) (i32.const ,(runtime-symbol-id 'eq))) (then (return (i32.const 0))))
-  #@(if (i32.eq (local.get $test) (i32.const ,(runtime-symbol-id 'eql)))
-    (then (return (call $eql (local.get $key) (local.get $candidate)))))
-  #@(if (i32.eq (local.get $test) (i32.const ,(runtime-symbol-id 'equal)))
-    (then (return (call $object-equal (local.get $key) (local.get $candidate)))))
-  #@(call $object-equalp (local.get $key) (local.get $candidate)))
+(defun $hash-key-match-cl ()
+  (runtime-function-definition '$hash-key-match-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$hash-key-match-cl 'miricl-runtime:hash-key-value-p :result :truth))))
+
+(define-runtime-function $hash-key-match (($test i32) ($key :nullable-object) ($candidate :nullable-object)) (i32)
+  #@(call $hash-key-match-cl (call $symbol (local.get $test)) (local.get $key) (local.get $candidate)))
 
 (define-runtime-function $maphash-native (($function :nullable-object) ($table :nullable-object)) (:nullable-object)
   (:locals ($scan :nullable-object) ($entry :nullable-object) ($next :nullable-object))
@@ -1533,8 +1428,8 @@
   #@(global $source-files (mut (ref null eq)) (ref.null eq))
   ($compiler-macro-access) ($setf-expander-access) ($make-symbol-macro-binding) ($symbol-macro-binding) ($define-symbol-macro)
   ($eval-compiled) ($fasl-cons-new) ($fasl-atom) ($fasl-object) ($fasl-cons) ($fasl-execute) ($fasl-dependencies) ($compile-primitive)
-  ($function-environment) ($lexical-function-id) ($lexical-function) ($set-macro) ($macro-function) ($constant-function) ($constant-macro-function) ($macroexpand-1) ($values-expansion)
-  ($modifier-expansion) ($if-form) ($logical-expansion) ($conditional-expansion) ($case-expansion) ($selection-expansion) ($eval-case) ($native-place-p) ($capture-place) ($captured-place-function) ($read-captured-place) ($write-captured-place) ($parallel-place-expansion) ($psetq-expansion) ($eval-parallel-places) ($development-eval)
-  ($local-source-file) ($source-file) ($path-component-match) ($path-directory-end) ($path-name-end)
-  ($path-directories-match) ($source-path-match) ($directory-add) ($directory-path) ($directory-native)
-  ($load-source-file) ($hash-key-match) ($maphash-native) ($development-apply) ($read-string))
+  ($function-environment) ($lexical-function-id) ($lexical-function) ($set-macro) ($macro-function) ($constant-function) ($constant-macro-function) ($macroexpand-1) ($values-expansion-cl) ($values-expansion)
+  ($modifier-expansion) ($if-form) ($logical-expansion-cl) ($logical-expansion) ($conditional-expansion-cl) ($conditional-expansion) ($case-expansion) ($selection-expansion-cl) ($selection-expansion) ($eval-case) ($native-place-p) ($capture-place) ($captured-place-function) ($read-captured-place) ($write-captured-place) ($parallel-place-expansion) ($psetq-expansion) ($eval-parallel-places) ($development-eval)
+  ($local-source-file) ($source-file) ($path-component-match-cl) ($path-component-match) ($path-directory-end-cl) ($path-directory-end) ($path-name-end-cl) ($path-name-end)
+  ($path-directories-match-cl) ($path-directories-match) ($source-path-match) ($directory-add) ($directory-path) ($directory-native)
+  ($load-source-file) ($hash-key-match-cl) ($hash-key-match) ($maphash-native) ($development-apply) ($read-string))

@@ -400,17 +400,12 @@
   #@(call $idiv (local.get $a) (local.get $b))
   #@(drop))
 
-(define-runtime-function $gcd
-    (($a :object) ($b :object))
-    (:object)
-  (:locals ($r :object))
-  #@(local.set $a (call $iabs (local.get $a)))
-  #@(local.set $b (call $iabs (local.get $b)))
-  #@(block $done (loop $next
-    (br_if $done (i32.eqz (call $value-n (local.get $b))))
-    (call $idiv (local.get $a) (local.get $b)) (local.set $r) (drop)
-    (local.set $a (local.get $b)) (local.set $b (local.get $r)) (br $next)))
-  #@(local.get $a))
+(defun $gcd-cl ()
+  (runtime-function-definition '$gcd-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$gcd-cl 'miricl-runtime:integer-gcd))))
+
+(define-runtime-function $gcd (($a :object) ($b :object)) (:object)
+  #@(ref.as_non_null (call $gcd-cl (local.get $a) (local.get $b))))
 
 (define-runtime-section integer-runtime-wat ()
   ($int64) ($scalar-integer-p) ($scalar-integer-value) ($magnitude64) ($integer-length)
@@ -426,7 +421,7 @@
   ($imul)
   ($idiv)
   ($quotient)
-  ($gcd))
+  ($gcd-cl) ($gcd))
 
 (define-runtime-function $ratio
     (($a :object) ($b :object))
@@ -683,39 +678,23 @@
       (call $negate-number (ref.as_non_null (struct.get $obj $b (ref.cast (ref $obj) (local.get $x)))))))))
   #@(call $float (call $tag (local.get $x)) (f64.neg (struct.get $obj $f (ref.cast (ref $obj) (local.get $x))))))
 
+(defun $lcm-native-cl ()
+  (runtime-function-definition '$lcm-native-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$lcm-native-cl 'miricl-runtime:integer-lcm-list))))
+
 (define-runtime-function $lcm-native (($args :nullable-object)) (:nullable-object)
-  (:locals ($result :object) ($value :object))
-  #@(local.set $result (call $int (i32.const 1)))
-  (wat-list-loop ($args)
-    #@(local.set $value (call $iabs (call $require-integer (call $car (local.get $args)))))
-    #@(if (i32.and (call $value-n (local.get $result)) (call $value-n (local.get $value)))
-      (then (local.set $result (call $imul
-        (call $quotient (local.get $result) (call $gcd (local.get $result) (local.get $value)))
-        (local.get $value))))
-      (else (local.set $result (call $int (i32.const 0))))))
-  #@(local.get $result))
+  #@(call $check-apply-list (local.get $args))
+  #@(call $lcm-native-cl (local.get $args)))
+
+(defun $isqrt-native-cl ()
+  (runtime-function-definition '$isqrt-native-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$isqrt-native-cl 'miricl-runtime:integer-square-root))))
 
 (define-runtime-function $isqrt-native (($x :nullable-object)) (:nullable-object)
-  (:locals ($value :object) ($root :object) ($next :object) ($bits i32))
-  #@(local.set $value (call $require-integer (local.get $x)))
-  #@(if (i32.lt_s (call $value-n (local.get $value)) (i32.const 0))
-    (then (call $type-fail (local.get $value)
-      (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
-        (call $cons (call $int (i32.const 0)) (ref.null eq)))
-      (i32.const ,(runtime-error-code :expected-number)))))
-  #@(local.set $bits (call $bitlength (local.get $value)))
-  #@(if (i32.le_u (local.get $bits) (i32.const 30))
-    (then (return (call $int (i32.trunc_f64_u (f64.sqrt (call $to-float (local.get $value))))))))
-  #@(local.set $root (ref.as_non_null (call $ash-native (call $int (i32.const 1))
-    (call $int (i32.shr_u (i32.add (local.get $bits) (i32.const 1)) (i32.const 1))))))
-  #@(loop $newton
-    (local.set $next (ref.as_non_null (call $ash-native
-      (call $iadd (local.get $root) (call $quotient (local.get $value) (local.get $root)))
-      (call $int (i32.const -1)))))
-    (if (i32.ge_s (call $cmpabs (local.get $next) (local.get $root)) (i32.const 0))
-      (then (return (local.get $root))))
-    (local.set $root (local.get $next)) (br $newton))
-  #@(unreachable))
+  #@(local.set $x (call $require-integer (local.get $x)))
+  #@(if (i32.lt_s (call $value-n (local.get $x)) (i32.const 0))
+    (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'unsigned-byte)))))
+  #@(call $isqrt-native-cl (local.get $x)))
 
 (define-runtime-function $hypotenuse (($x f64) ($y f64)) (f64)
   (:locals ($scale f64) ($ratio f64))
@@ -1048,7 +1027,7 @@
 
 (define-runtime-section numeric-runtime-wat ()
   ($zero)
-  ($negate-number) ($lcm-native) ($isqrt-native)
+  ($negate-number) ($lcm-native-cl) ($lcm-native) ($isqrt-native-cl) ($isqrt-native)
   ($hypotenuse) ($complex-absolute) ($root-signum-native)
   ($real-op)
   ($part)

@@ -123,11 +123,12 @@
       (then (return (struct.get $array $fill (ref.cast (ref $array) (local.get $x))))))))
   #@(call $array-length (local.get $x)))
 
+(defun $bit-value-cl ()
+  (runtime-function-definition '$bit-value-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$bit-value-cl 'miricl-runtime:checked-bit-value))))
+
 (define-runtime-function $bit-value (($value :nullable-object)) (i32)
-  #@(if (call $eql (local.get $value) (call $int (i32.const 0))) (then (return (i32.const 0))))
-  #@(if (call $eql (local.get $value) (call $int (i32.const 1))) (then (return (i32.const 1))))
-  #@(call $list-type-error (local.get $value) (i32.const ,(runtime-symbol-id 'bit)))
-  #@(i32.const 0))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $bit-value-cl (local.get $value))))))
 
 (define-runtime-function $make-bit-vector (($length i32) ($initial :nullable-object)) (:object)
   (wat-new-object :bit-vector :n #@(local.get $length)
@@ -187,29 +188,13 @@
     (then (call $car (local.get $sequence)))
     (else (call $array-raw-element (local.get $sequence) (local.get $index) (ref.null eq) (i32.const 0)))))
 
-(define-runtime-function $array-subscript-index
-    (($array :nullable-object) ($subscripts :nullable-object) ($query i32)) (i32)
-  (:locals ($rank i32) ($axis i32) ($dimension i32) ($index i32) ($subscript i32) ($value :nullable-object) ($outside i32))
-  #@(local.set $rank (call $array-rank-value (local.get $array)))
-  (wat-fail-when #@(i32.ne (call $length (local.get $subscripts)) (local.get $rank)) :wrong-arity)
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $axis) (local.get $rank)))
-    (local.set $dimension (call $array-dimension-value (local.get $array) (local.get $axis)))
-    (local.set $value (call $car (local.get $subscripts)))
-    (local.set $subscripts (call $cdr (local.get $subscripts)))
-    (if (i32.ne (call $tag (local.get $value)) (i32.const 1))
-      (then (call $list-type-error (local.get $value) (i32.const ,(runtime-symbol-id 'integer)))))
-    (if (i32.lt_s (call $value-n (local.get $value)) (i32.const 0))
-      (then (local.set $outside (i32.const 1)))
-      (else (local.set $subscript (call $natural-count (local.get $value)))
-        (if (i32.ge_u (local.get $subscript) (local.get $dimension)) (then (local.set $outside (i32.const 1))))))
-    (if (i32.and (local.get $outside) (i32.eqz (local.get $query)))
-      (then (call $type-fail (local.get $value)
-        (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
-          (call $cons (call $int (i32.const 0)) (call $cons (call $cons (call $int (local.get $dimension)) (ref.null eq)) (ref.null eq))))
-        (i32.const ,(runtime-error-code :expected-designator)))))
-    (local.set $index (i32.add (i32.mul (local.get $index) (local.get $dimension)) (local.get $subscript)))
-    (local.set $axis (i32.add (local.get $axis) (i32.const 1))) (br $next)))
-  #@(select (i32.const -1) (local.get $index) (local.get $outside)))
+(defun $array-subscript-index-cl ()
+  (runtime-function-definition '$array-subscript-index-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$array-subscript-index-cl 'miricl-runtime:array-subscript-value))))
+
+(define-runtime-function $array-subscript-index (($array :nullable-object) ($subscripts :nullable-object) ($query i32)) (i32)
+  #@(call $check-apply-list (local.get $subscripts))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $array-subscript-index-cl (local.get $array) (local.get $subscripts) (call $bool (local.get $query)))))))
 
 (define-runtime-function $array-new
     (($shape :digits) ($flags i32) ($storage :nullable-object) ($offset i32) ($fill i32)) (:object)
@@ -217,16 +202,12 @@
     (ref.null $digits) (local.get $storage) (ref.null eq) (ref.null eq)
     (local.get $shape) (local.get $offset) (local.get $fill)))
 
+(defun $array-contents-length-cl ()
+  (runtime-function-definition '$array-contents-length-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$array-contents-length-cl 'miricl-runtime:array-contents-count))))
+
 (define-runtime-function $array-contents-length (($contents :nullable-object) ($reader i32)) (i32)
-  (:locals ($length i32))
-  #@(if (i32.eqz (local.get $reader)) (then (return (call $proper-sequence-length (local.get $contents)))))
-  #@(if (call $vectorp-native (local.get $contents))
-    (then (return (call $array-sequence-length (local.get $contents)))))
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $contents)))
-    ,(wat-fail-when #@(i32.ne (call $tag (local.get $contents)) (i32.const 7)) :reader-syntax)
-    (local.set $length (i32.add (local.get $length) (i32.const 1)))
-    (local.set $contents (call $cdr (local.get $contents))) (br $next)))
-  #@(local.get $length))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $array-contents-length-cl (local.get $contents) (call $bool (local.get $reader)))))))
 
 (define-runtime-function $array-initialize-contents
     (($storage :nullable-object) ($shape :digits) ($axis i32) ($contents :nullable-object)
@@ -315,18 +296,12 @@
     (then (return (local.get $storage))))
   #@(call $array-new (local.get $shape) (local.get $flags) (local.get $storage) (i32.const 0) (local.get $fill-value)))
 
+(defun $require-fill-pointer-cl ()
+  (runtime-function-definition '$require-fill-pointer-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$require-fill-pointer-cl 'miricl-runtime:checked-fill-pointer-value))))
+
 (define-runtime-function $require-fill-pointer (($array :nullable-object)) ((ref $array))
-  #@(if (i32.eq (call $tag (local.get $array)) (i32.const 35))
-    (then (if (i32.ge_s (struct.get $array $fill (ref.cast (ref $array) (local.get $array))) (i32.const 0))
-      (then (return (ref.cast (ref $array) (local.get $array)))))))
-  #@(call $type-fail (local.get $array)
-    (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'and)))
-      (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'vector)))
-        (call $cons (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'satisfies)))
-          (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'array-has-fill-pointer-p))) (ref.null eq)))
-          (ref.null eq))))
-    (i32.const ,(runtime-error-code :expected-designator)))
-  #@(unreachable))
+  #@(ref.cast (ref $array) (call $require-fill-pointer-cl (local.get $array))))
 
 (define-runtime-function $array-fill-pointer
     (($array :nullable-object) ($value :nullable-object) ($write i32)) (:nullable-object)
@@ -561,64 +536,27 @@
     (then (return (local.get $storage))))
   #@(call $array-new (local.get $shape) (local.get $flags) (local.get $storage) (i32.const 0) (local.get $fill)))
 
+(defun $sequence-allocate-like-cl ()
+  (runtime-function-definition '$sequence-allocate-like-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$sequence-allocate-like-cl 'miricl-runtime:allocate-like-vector))))
+
 (define-runtime-function $sequence-allocate-like (($source :nullable-object) ($length i32)) (:nullable-object)
-  (:locals ($kind i32))
-  #@(local.set $kind (call $array-kind (local.get $source)))
-  #@(if (i32.eqz (local.get $kind))
-    (then (return (call $vector-new (array.new_default $objects (local.get $length))))))
-  #@(if (i32.eq (local.get $kind) (i32.const 1))
-    (then (return (call $text (array.new_default $digits (local.get $length))))))
-  #@(if (i32.eq (local.get $kind) (i32.const 2))
-    (then (return (call $make-bit-vector (local.get $length) (call $int (i32.const 0))))))
-  #@(call $array-new (array.new_fixed $digits 1 (local.get $length)) (i32.const 3)
-    (ref.null eq) (i32.const 0) (i32.const -1)))
+  #@(call $sequence-allocate-like-cl (local.get $source) (call $int (local.get $length))))
+
+(defun $reverse-array-sequence-cl ()
+  (runtime-function-definition '$reverse-array-sequence-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$reverse-array-sequence-cl 'miricl-runtime:reverse-vector-value))))
 
 (define-runtime-function $reverse-array-sequence (($source :nullable-object) ($write i32)) (:nullable-object)
-  (:locals ($length i32) ($i i32) ($j i32) ($value :nullable-object) ($result :nullable-object))
-  #@(local.set $length (call $array-sequence-length (local.get $source)))
-  #@(local.set $result (local.get $source))
-  #@(if (i32.eqz (local.get $write))
-    (then (local.set $result (call $sequence-allocate-like (local.get $source) (local.get $length)))))
-  #@(local.set $j (local.get $length))
-  #@(block $done (loop $next
-    (br_if $done (i32.ge_u (local.get $i)
-      (if (result i32) (local.get $write) (then (i32.div_u (local.get $length) (i32.const 2))) (else (local.get $length)))))
-    (local.set $j (i32.sub (local.get $j) (i32.const 1)))
-    (local.set $value (call $array-raw-element (local.get $source) (local.get $i) (ref.null eq) (i32.const 0)))
-    (if (local.get $write)
-      (then (drop (call $array-raw-element (local.get $result) (local.get $i)
-        (call $array-raw-element (local.get $source) (local.get $j) (ref.null eq) (i32.const 0)) (i32.const 1)))))
-    (drop (call $array-raw-element (local.get $result) (local.get $j) (local.get $value) (i32.const 1)))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(local.get $result))
+  #@(drop (call $array-sequence-length (local.get $source)))
+  #@(call $reverse-array-sequence-cl (local.get $source) (call $bool (local.get $write))))
 
-(define-runtime-function $fill-array-region
-    (($array :nullable-object) ($first i32) ($count i32) ($value :nullable-object)) ()
-  (:locals ($data :digits) ($bit i32) ($bits i32) ($shift i32) ($mask i32) ($word i32))
-  #@(block $resolved (loop $resolve
-    (br_if $resolved (i32.ne (call $tag (local.get $array)) (i32.const 35)))
-    (if (i32.eq (call $array-kind (local.get $array)) (i32.const 3))
-      (then (call $type-fail (local.get $value) (ref.null eq) (i32.const ,(runtime-error-code :expected-designator)))))
-    (local.set $first (i32.add (local.get $first) (struct.get $array $offset (ref.cast (ref $array) (local.get $array)))))
-    (local.set $array (struct.get $obj $a (ref.cast (ref $obj) (local.get $array)))) (br $resolve)))
-  #@(if (i32.eq (call $tag (local.get $array)) (i32.const 34))
-    (then (array.fill $objects (call $vector-data (local.get $array)) (local.get $first) (local.get $value) (local.get $count)) (return)))
-  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $array)))))
-  #@(if (i32.eq (call $tag (local.get $array)) (i32.const 10))
-    (then (array.fill $digits (local.get $data) (local.get $first) (call $character-code (local.get $value)) (local.get $count)) (return)))
-  #@(local.set $bit (i32.sub (i32.const 0) (call $bit-value (local.get $value))))
-  #@(block $done (loop $fill (br_if $done (i32.eqz (local.get $count)))
-    (local.set $shift (i32.and (local.get $first) (i32.const 31)))
-    (local.set $bits (i32.sub (i32.const 32) (local.get $shift)))
-    (if (i32.lt_u (local.get $count) (local.get $bits)) (then (local.set $bits (local.get $count))))
-    (local.set $mask (if (result i32) (i32.eq (local.get $bits) (i32.const 32)) (then (i32.const -1))
-      (else (i32.shl (i32.shr_u (i32.const -1) (i32.sub (i32.const 32) (local.get $bits))) (local.get $shift)))))
-    (local.set $word (i32.shr_u (local.get $first) (i32.const 5)))
-    (array.set $digits (local.get $data) (local.get $word)
-      (i32.or (i32.and (array.get $digits (local.get $data) (local.get $word)) (i32.xor (local.get $mask) (i32.const -1)))
-              (i32.and (local.get $mask) (local.get $bit))))
-    (local.set $first (i32.add (local.get $first) (local.get $bits)))
-    (local.set $count (i32.sub (local.get $count) (local.get $bits))) (br $fill))))
+(defun $fill-array-region-cl ()
+  (runtime-function-definition '$fill-array-region-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$fill-array-region-cl 'miricl-runtime:fill-array-values))))
+
+(define-runtime-function $fill-array-region (($array :nullable-object) ($first i32) ($count i32) ($value :nullable-object)) ()
+  #@(drop (call $fill-array-region-cl (local.get $array) (call $int (local.get $first)) (call $int (local.get $count)) (local.get $value))))
 
 (define-runtime-function $index-error (($index :nullable-object) ($bound i32)) ()
   #@(call $type-fail (local.get $index)
@@ -651,14 +589,12 @@
     (then (call $list-type-error (local.get $string) (i32.const ,(runtime-symbol-id 'string)))))
   #@(call $array-element (local.get $string) (local.get $index) (local.get $value) (local.get $write)))
 
+(defun $array-bit-check-cl ()
+  (runtime-function-definition '$array-bit-check-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$array-bit-check-cl 'miricl-runtime:checked-bit-array-value))))
+
 (define-runtime-function $array-bit-check (($array :nullable-object) ($simple i32)) ()
-  #@(if (i32.or (i32.eqz (call $arrayp-native (local.get $array)))
-        (i32.or (i32.ne (call $array-kind (local.get $array)) (i32.const 2))
-          (i32.and (local.get $simple) (i32.eqz (call $array-simple-p (local.get $array))))))
-    (then (call $type-fail (local.get $array)
-      (call $cons (call $symbol (select (i32.const ,(runtime-symbol-id 'simple-array)) (i32.const ,(runtime-symbol-id 'array)) (local.get $simple)))
-        (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'bit))) (ref.null eq)))
-      (i32.const ,(runtime-error-code :expected-designator))))))
+  #@(drop (call $array-bit-check-cl (local.get $array) (call $bool (local.get $simple)))))
 
 (define-runtime-function $array-kind-type (($kind i32)) (:nullable-object)
   #@(if (i32.eq (local.get $kind) (i32.const 3)) (then (return (ref.null eq))))
@@ -818,9 +754,9 @@
   ($arrayp-native) ($array-shape) ($array-rank-value) ($vectorp-native) ($array-kind)
   ($array-simple-p) ($stringp-native) ($upgraded-array-kind)
   ($array-length) ($array-dimension-value) ($array-sequence-length)
-  ($bit-value) ($make-bit-vector) ($array-raw-element) ($array-element) ($sequence-value)
-  ($array-construction-apply) ($array-subscript-index) ($array-new) ($array-contents-length) ($array-initialize-contents) ($make-array-native)
-  ($index-error) ($elt-element) ($character-element) ($array-bit-check) ($array-kind-type)
+  ($bit-value-cl) ($bit-value) ($make-bit-vector) ($array-raw-element) ($array-element) ($sequence-value)
+  ($array-construction-apply) ($array-subscript-index-cl) ($array-subscript-index) ($array-new) ($array-contents-length-cl) ($array-contents-length) ($array-initialize-contents) ($make-array-native)
+  ($index-error) ($elt-element) ($character-element) ($array-bit-check-cl) ($array-bit-check) ($array-kind-type)
   ($array-equal-native) ($hash-array-code) ($string-contents)
-  ($require-fill-pointer) ($array-fill-pointer) ($array-apply) ($sequence-allocate-like) ($reverse-array-sequence) ($fill-array-region)
+  ($require-fill-pointer-cl) ($require-fill-pointer) ($array-fill-pointer) ($array-apply) ($sequence-allocate-like-cl) ($sequence-allocate-like) ($reverse-array-sequence-cl) ($reverse-array-sequence) ($fill-array-region-cl) ($fill-array-region)
   ($print-array-content) ($print-array) ($read-bit-vector) ($write-bit-vector) ($read-array) ($write-array))

@@ -2,90 +2,25 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defun $substitute-tree-values-cl ()
+  (runtime-function-definition '$substitute-tree-values-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$substitute-tree-values-cl 'miricl-runtime:substitute-tree-values))))
+
 (define-runtime-function $tree-substitute-native
     (($tree :nullable-object) ($item :nullable-object) ($new :nullable-object)
      ($key :nullable-object) ($function :nullable-object) ($mode i32) ($negate i32) ($write i32) ($alist i32)) (:nullable-object)
-  (:locals ($scan :nullable-object) ($entries :nullable-object) ($entry :nullable-object)
-           ($value :nullable-object) ($keyed :nullable-object) ($head :nullable-object)
-           ($tail :nullable-object) ($prefix :nullable-object) ($cell :nullable-object) ($terminal i32))
-  #@(local.set $scan (local.get $tree))
-  #@(loop $next
-    (local.set $terminal (i32.const 0))
-    (if (local.get $alist)
-      (then
-        (local.set $keyed (call $sequence-key-value (local.get $key) (local.get $scan)))
-        (local.set $entries (local.get $item))
-        (block $matched (loop $lookup (br_if $matched (ref.is_null (local.get $entries)))
-          (local.set $entry (call $car (local.get $entries)))
-          (if (i32.eqz (ref.is_null (local.get $entry)))
-            (then
-              ;; As with ASSOC, the keyed subtree is the first test argument.
-              (if (call $sequence-item-match (i32.const 0) (local.get $keyed) (call $car (local.get $entry))
-                    (ref.null eq) (local.get $function) (local.get $negate))
-                (then (local.set $value (call $cdr (local.get $entry)))
-                  (local.set $terminal (i32.const 1)) (br $matched)))))
-          (local.set $entries (call $cdr (local.get $entries))) (br $lookup))))
-      (else
-        (if (call $sequence-item-match (local.get $mode) (local.get $item) (local.get $scan)
-              (local.get $key) (local.get $function) (local.get $negate))
-          (then (local.set $value (local.get $new)) (local.set $terminal (i32.const 1))))))
-    (if (i32.eqz (local.get $terminal))
-      (then
-        (if (i32.ne (call $tag (local.get $scan)) (i32.const 7))
-          (then (local.set $value (local.get $scan)) (local.set $terminal (i32.const 1)))
-          (else (local.set $value (call $tree-substitute-native (call $car (local.get $scan))
-            (local.get $item) (local.get $new) (local.get $key) (local.get $function)
-            (local.get $mode) (local.get $negate) (local.get $write) (local.get $alist)))))))
-    (if (local.get $write)
-      (then
-        (if (local.get $terminal)
-          (then
-            (if (ref.is_null (local.get $tail)) (then (return (local.get $value))))
-            (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $value)) (return (local.get $tree))))
-        (struct.set $obj $a (ref.cast (ref $obj) (local.get $scan)) (local.get $value))
-        (local.set $tail (local.get $scan)))
-      (else
-        (if (i32.and (ref.is_null (local.get $tail))
-              (i32.eqz (ref.eq (local.get $value) (if (result (ref null eq)) (local.get $terminal)
-                (then (local.get $scan)) (else (call $car (local.get $scan)))))))
-          (then
-            (local.set $prefix (local.get $tree))
-            (block $copied (loop $copy (br_if $copied (ref.eq (local.get $prefix) (local.get $scan)))
-              (local.set $cell (call $cons (call $car (local.get $prefix)) (ref.null eq)))
-              (if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
-                (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-              (local.set $tail (local.get $cell)) (local.set $prefix (call $cdr (local.get $prefix))) (br $copy)))))
-        (if (local.get $terminal)
-          (then
-            (if (ref.is_null (local.get $tail))
-              (then (return (if (result (ref null eq)) (ref.eq (local.get $value) (local.get $scan))
-                (then (local.get $tree)) (else (local.get $value))))))
-            (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $value)) (return (local.get $head))))
-        (if (i32.or (i32.eqz (ref.is_null (local.get $tail)))
-              (i32.eqz (ref.eq (local.get $value) (call $car (local.get $scan)))))
-          (then
-            (local.set $cell (call $cons (local.get $value) (ref.null eq)))
-            (if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
-              (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-            (local.set $tail (local.get $cell))))))
-    (local.set $scan (call $cdr (local.get $scan))) (br $next))
-  #@(unreachable))
+  #@(call $substitute-tree-values-cl (local.get $tree) (local.get $item) (local.get $new)
+    (call $vector-new (array.new_fixed $objects 6 (local.get $key) (local.get $function)
+      (call $int (local.get $mode)) (call $bool (local.get $negate))
+      (call $bool (local.get $write)) (call $bool (local.get $alist))))))
 
-(define-runtime-function $tree-equal-native
-    (($a :nullable-object) ($b :nullable-object) ($function :nullable-object) ($negate i32)) (i32)
-  #@(loop $tail
-    (if (i32.ne (call $tag (local.get $a)) (i32.const 7))
-      (then
-        (if (i32.eq (call $tag (local.get $b)) (i32.const 7)) (then (return (i32.const 0))))
-        (return (call $sequence-item-match (i32.const 0) (local.get $a) (local.get $b)
-          (ref.null eq) (local.get $function) (local.get $negate)))))
-    (if (i32.ne (call $tag (local.get $b)) (i32.const 7)) (then (return (i32.const 0))))
-    (if (i32.eqz (call $tree-equal-native (call $car (local.get $a)) (call $car (local.get $b))
-          (local.get $function) (local.get $negate))) (then (return (i32.const 0))))
-    (local.set $a (call $cdr (local.get $a))) (local.set $b (call $cdr (local.get $b))) (br $tail))
-  #@(unreachable))
+(defun $tree-equal-native-cl ()
+  (runtime-function-definition '$tree-equal-native-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$tree-equal-native-cl 'miricl-runtime:tree-value-equal-p :result :truth))))
 
-;; Opcodes: SUBST family 0..5, SUBLIS/NSUBLIS 6/7, TREE-EQUAL 8.
+(define-runtime-function $tree-equal-native (($a :nullable-object) ($b :nullable-object) ($function :nullable-object) ($negate i32)) (i32)
+  #@(call $tree-equal-native-cl (local.get $a) (local.get $b) (local.get $function) (call $bool (local.get $negate))))
+
 (define-runtime-function $tree-operation-apply (($args :nullable-object) ($op i32)) (:nullable-object)
   (:locals ($new :nullable-object) ($item :nullable-object) ($tree :nullable-object) ($key :nullable-object)
            ($test :nullable-object) ($test-not :nullable-object) ($function :nullable-object)
@@ -143,4 +78,4 @@
   #@(call $clear-values) #@(local.get $result))
 
 (define-runtime-section tree-operations-runtime-wat ()
-  ($tree-substitute-native) ($tree-equal-native) ($tree-operation-apply))
+  ($substitute-tree-values-cl) ($tree-substitute-native) ($tree-equal-native-cl) ($tree-equal-native) ($tree-operation-apply))

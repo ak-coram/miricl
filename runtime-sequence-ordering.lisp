@@ -2,83 +2,45 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defun $ordering-predicate ()
+  (runtime-function-definition '$ordering-predicate
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$ordering-predicate 'miricl-runtime:ordering-predicate :result :truth))))
+
 (define-runtime-function $ordering-less
     (($a :nullable-object) ($b :nullable-object) ($key :nullable-object)
      ($function :nullable-object) ($id i32)) (i32)
-  (:locals ($x i32) ($y i32))
-  #@(local.set $a (call $sequence-key-value (local.get $key) (local.get $a)))
-  #@(local.set $b (call $sequence-key-value (local.get $key) (local.get $b)))
-  (wat-symbol-case #@(local.get $id)
-    (< #@(return (i32.lt_s (call $compare (local.get $a) (local.get $b)) (i32.const 0))))
-    (> #@(return (i32.gt_s (call $compare (local.get $a) (local.get $b)) (i32.const 0))))
-    ((char< char> char-lessp char-greaterp)
-      #@(local.set $x (call $character-code (local.get $a)))
-      #@(local.set $y (call $character-code (local.get $b)))
-      #@(if (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'char-lessp)))
-                     (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'char-greaterp))))
-        (then (local.set $x (call $string-upcase-code (local.get $x)))
-          (local.set $y (call $string-upcase-code (local.get $y)))))
-      #@(return (if (result i32)
-        (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'char>)))
-                (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'char-greaterp))))
-        (then (i32.gt_u (local.get $x) (local.get $y)))
-        (else (i32.lt_u (local.get $x) (local.get $y)))))))
-  #@(i32.eqz (ref.is_null (call $apply (local.get $function)
-    (call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq)))))))
+  #@(call $ordering-predicate (local.get $a) (local.get $b) (local.get $key) (local.get $function)))
 
 ;; Take the right element only when it is strictly before the left. Equal
 ;; elements consequently retain input order, including across MERGE inputs.
-(define-runtime-function $ordering-merge-runs
-    (($input (ref $objects)) ($output (ref $objects)) ($first i32) ($middle i32) ($stop i32)
-     ($cells i32) ($key :nullable-object) ($function :nullable-object) ($id i32)) ()
-  (:locals ($i i32) ($j i32) ($out i32) ($right i32) ($a :nullable-object) ($b :nullable-object))
-  #@(local.set $i (local.get $first)) #@(local.set $j (local.get $middle))
-  #@(local.set $out (local.get $first))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $out) (local.get $stop)))
-    (local.set $right (i32.eq (local.get $i) (local.get $middle)))
-    (if (i32.and (i32.lt_u (local.get $i) (local.get $middle)) (i32.lt_u (local.get $j) (local.get $stop)))
-      (then
-        (local.set $a (array.get $objects (local.get $input) (local.get $j)))
-        (local.set $b (array.get $objects (local.get $input) (local.get $i)))
-        (if (local.get $cells)
-          (then (local.set $a (call $car (local.get $a))) (local.set $b (call $car (local.get $b)))))
-        (local.set $right (call $ordering-less (local.get $a) (local.get $b)
-          (local.get $key) (local.get $function) (local.get $id)))))
-    (array.set $objects (local.get $output) (local.get $out)
-      (array.get $objects (local.get $input) (select (local.get $j) (local.get $i) (local.get $right))))
-    (if (local.get $right) (then (local.set $j (i32.add (local.get $j) (i32.const 1))))
-      (else (local.set $i (i32.add (local.get $i) (i32.const 1)))))
-    (local.set $out (i32.add (local.get $out) (i32.const 1))) (br $next))))
+(defun $ordering-merge-runs-cl ()
+  (runtime-function-definition '$ordering-merge-runs-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$ordering-merge-runs-cl 'miricl-runtime:merge-ordering-buffers))))
 
-(define-runtime-function $ordering-read
-    (($sequence :nullable-object) ($buffer (ref $objects)) ($offset i32) ($count i32) ($cells i32)) ()
-  (:locals ($i i32) ($list i32))
-  #@(local.set $list (i32.eq (call $tag (local.get $sequence)) (i32.const 7)))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $count)))
-    (array.set $objects (local.get $buffer) (i32.add (local.get $offset) (local.get $i))
-      (if (result (ref null eq)) (local.get $cells) (then (local.get $sequence))
-        (else (call $sequence-value (local.get $sequence) (local.get $i)))))
-    (if (local.get $list) (then (local.set $sequence (call $cdr (local.get $sequence)))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next))))
+(define-runtime-function $ordering-merge-runs (($input (ref $objects)) ($output (ref $objects)) ($first i32) ($middle i32) ($stop i32) ($cells i32) ($key :nullable-object) ($function :nullable-object) ($id i32)) ()
+  #@(drop (call $ordering-merge-runs-cl (call $vector-new (local.get $input)) (call $vector-new (local.get $output))
+    (call $cons (call $int (local.get $first)) (call $cons (call $int (local.get $middle))
+      (call $cons (call $int (local.get $stop)) (call $cons (call $bool (local.get $cells))
+        (call $cons (local.get $key) (call $cons (local.get $function) (ref.null eq))))))))))
+
+(defun $ordering-read-cl ()
+  (runtime-function-definition '$ordering-read-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$ordering-read-cl 'miricl-runtime:read-ordering-buffer))))
+
+(define-runtime-function $ordering-read (($sequence :nullable-object) ($buffer (ref $objects)) ($offset i32) ($count i32) ($cells i32)) ()
+  #@(drop (call $ordering-read-cl (local.get $sequence) (call $vector-new (local.get $buffer))
+    (call $cons (call $int (local.get $offset)) (call $cons (call $int (local.get $count)) (call $cons (call $bool (local.get $cells)) (ref.null eq)))))))
+
+(defun $merge-list-runs ()
+  (runtime-function-definition '$merge-list-runs
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$merge-list-runs 'miricl-runtime:merge-list-runs))))
 
 (define-runtime-function $merge-lists-native
     (($a :nullable-object) ($b :nullable-object) ($key :nullable-object) ($function :nullable-object)) (:nullable-object)
-  (:locals ($head :nullable-object) ($tail :nullable-object) ($cell :nullable-object) ($id i32))
-  #@(local.set $id (i32.sub (call $value-n (local.get $function)) (i32.const 1)))
-  #@(block $done (loop $next
-    (br_if $done (i32.or (ref.is_null (local.get $a)) (ref.is_null (local.get $b))))
-    (if (call $ordering-less (call $car (local.get $b)) (call $car (local.get $a))
-          (local.get $key) (local.get $function) (local.get $id))
-      (then (local.set $cell (local.get $b)) (local.set $b (call $cdr (local.get $b))))
-      (else (local.set $cell (local.get $a)) (local.set $a (call $cdr (local.get $a)))))
-    (if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
-      (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-    (local.set $tail (local.get $cell)) (br $next)))
-  #@(local.set $cell (if (result (ref null eq)) (ref.is_null (local.get $a))
-    (then (local.get $b)) (else (local.get $a))))
-  #@(if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
-    (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-  #@(call $clear-values) #@(local.get $head))
+  (:locals ($result :nullable-object))
+  #@(local.set $result (call $merge-list-runs (local.get $a) (local.get $b) (local.get $key) (local.get $function)))
+  #@(call $clear-values)
+  #@(local.get $result))
 
 (define-runtime-function $ordering-native
     (($sequence :nullable-object) ($other :nullable-object) ($type :nullable-object)
@@ -197,4 +159,4 @@
     (local.get $key) (local.get $function) (local.get $merge)))
 
 (define-runtime-section sequence-ordering-runtime-wat ()
-  ($ordering-less) ($ordering-merge-runs) ($ordering-read) ($merge-lists-native) ($ordering-native) ($ordering-apply))
+  ($ordering-predicate) ($ordering-less) ($ordering-merge-runs-cl) ($ordering-merge-runs) ($ordering-read-cl) ($ordering-read) ($merge-list-runs) ($merge-lists-native) ($ordering-native) ($ordering-apply))

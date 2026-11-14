@@ -35,17 +35,35 @@ const groups = {
       .map(name => test(name, wasm)),
     ['--expose-gc', ...test('weak-hash-tables', precompiled)],
     test('mop', wasm),
+    ...['runtime-character-kernels', 'runtime-reader-kernels', 'runtime-string-case-kernels',
+      'runtime-integer-field-kernels', 'runtime-reduce-kernels', 'runtime-sequence-edit-kernels',
+      'runtime-count-kernels', 'runtime-string-case-loop-kernels', 'runtime-search-kernels',
+      'runtime-mismatch-kernels', 'runtime-character-sequence-kernels', 'runtime-set-kernels',
+      'runtime-package-kernels', 'runtime-set-tree-kernels']
+      .map(name => test(name, image('miricl-interpreter.wasm'))),
     test('ansi-report-check'),
   ],
   compiler: [
     test('hir-interpreter', precompiled, image('miricl-interpreter.wasm')),
-    test('compiler-runtime', wasm), test('compiler-runtime', precompiled, '--precompiled'),
+    // Each cold case performs a complete interpreted compiler bootstrap. Keep
+    // their individual timeout budgets instead of accumulating three bootstraps
+    // in one child process, while retaining both adapters and concurrent use.
+    ...['async', 'sync', 'concurrent'].map(mode => test('compiler-runtime', wasm, `--mode=${mode}`)),
+    test('compiler-runtime', precompiled, '--precompiled'),
     test('compiler-input', precompiled),
     test('compiler-statistics', precompiled),
     test('evaluation-policy', wasm, precompiled, repl),
     test('core-image', precompiled),
     test('native-arguments', precompiled),
+    test('compiler-unboxed', precompiled),
+    test('compiler-shifts', precompiled),
     test('block-compilation', precompiled),
+    ...['compiler-character-access', 'compiler-nary-comparison', 'compiler-vector-predicate',
+      'compiler-reader-predicates', 'compiler-symbol-predicate', 'compiler-vector-allocation', 'compiler-list-length', 'compiler-character-fusion', 'compiler-integer-primitives',
+      'compiler-sequence-element-reads', 'compiler-symbol-primitives', 'compiler-callback-predicates',
+      'compiler-row-major-writes',
+      'compiler-character-callbacks']
+      .map(name => test(name, precompiled)),
     test('debugger', precompiled),
     ...['compilation', 'hir', 'hir-optimization', 'compiler-loops', 'compiler-predicate-reuse', 'compiler-licm', 'whole-program', 'class-reachability', 'generic-dispatch', 'compiler-generic-calls',
       'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-input', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-integer-predicates', 'compiler-modules', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',

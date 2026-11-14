@@ -65,25 +65,9 @@
       (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
       (global.set $backtrace-depth (local.get $backtrace-depth)))))
 
-(define-runtime-function $spread-arguments (($args :nullable-object)) (:nullable-object)
-  (:locals ($scan :nullable-object) ($head :nullable-object)
-           ($tail :nullable-object) ($cell :nullable-object) ($last :nullable-object))
-  (wat-arity 2 2147483647)
-  #@(local.set $scan (call $cdr (local.get $args)))
-  #@(block $done (loop $prefix
-    (br_if $done (ref.is_null (call $cdr (local.get $scan))))
-    (local.set $cell (call $cons (call $car (local.get $scan)) (ref.null eq)))
-    (if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
-      (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-    (local.set $tail (local.get $cell))
-    (local.set $scan (call $cdr (local.get $scan))) (br $prefix)))
-  #@(local.set $last (call $car (local.get $scan)))
-  #@(if (ref.is_null (call $list-length-native (local.get $last)))
-    (then (call $type-fail (local.get $last) (call $symbol-value ,(clos-library-reference '%proper-list-type))
-      (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $last)))
-    (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $last))))
-  #@(local.get $head))
+(defun $spread-arguments ()
+  (runtime-function-definition '$spread-arguments
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$spread-arguments 'miricl-runtime:spread-call-arguments))))
 
 (define-runtime-function $apply-spread (($args :nullable-object)) (:nullable-object)
   (:locals ($spread :nullable-object))

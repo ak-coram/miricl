@@ -94,7 +94,9 @@
            (#x50 . "i64.eqz") (#x51 . "i64.eq") (#x52 . "i64.ne")
            (#x53 . "i64.lt_s") (#x55 . "i64.gt_s") (#x57 . "i64.le_s") (#x59 . "i64.ge_s")
            (#x71 . "i32.and") (#x7c . "i64.add") (#x7d . "i64.sub") (#x7e . "i64.mul")
+           (#x80 . "i64.div_u") (#x82 . "i64.rem_u")
            (#x83 . "i64.and") (#x84 . "i64.or") (#x85 . "i64.xor")
+           (#x86 . "i64.shl") (#x87 . "i64.shr_s")
            (#xa7 . "i32.wrap_i64") (#xac . "i64.extend_i32_s") (#xd1 . "ref.is_null") (#xd3 . "ref.eq")))))
          (indexed (cdr (assoc code '((#x08 . "throw") (#x0c . "br") (#x0d . "br_if")
            (#x20 . "local.get") (#x21 . "local.set") (#x22 . "local.tee") (#x41 . "i32.const") (#x42 . "i64.const"))))))
@@ -157,7 +159,7 @@
           (setq type (aref body position)) (incf position)
           (when (plusp count)
             (format t "  ;; locals ~D..~D: ~D x ~A~%" local (+ local count -1) count
-              (case type (#x7f "i32") (#x6f "externref"))))
+              (case type (#x7f "i32") (#x7e "i64") (#x6f "externref"))))
           (incf local count)))
       (loop for op across ops for code = (native-op-code op) do
         (when (member code '(#x05 #x0b)) (decf depth))

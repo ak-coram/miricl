@@ -31,11 +31,12 @@
   #@(block $done (loop $next (br_if $done (i32.ge_u (global.get $source-position) (local.get $position)))
     (br_if $done (i32.eq (call $source-take) (i32.const -1))) (br $next))))
 
-(define-runtime-function $white
-    (($c i32))
-    (i32)
-  #@(i32.or (i32.eq (local.get $c) (i32.const 32))
-    (i32.and (i32.ge_u (local.get $c) (i32.const 9)) (i32.le_u (local.get $c) (i32.const 13)))))
+(defun $white-cl ()
+  (runtime-function-definition '$white-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$white-cl 'miricl-runtime:ascii-white-p :result :truth))))
+
+(define-runtime-function $white (($c i32)) (i32)
+  #@(call $white-cl (call $int (local.get $c))))
 
 (define-runtime-function $delimiter
     (($c i32))
@@ -52,11 +53,12 @@
       (i32.and (i32.ne (local.get $syntax) (i32.const 35))
         (i32.and (i32.ne (local.get $syntax) (i32.const 129)) (i32.ne (local.get $syntax) (i32.const 131)))))))
 
-(define-runtime-function $upper
-    (($c i32))
-    (i32)
-  #@(if (result i32) (i32.and (i32.ge_u (local.get $c) (i32.const 97)) (i32.le_u (local.get $c) (i32.const 122)))
-      (then (i32.sub (local.get $c) (i32.const 32))) (else (local.get $c))))
+(defun $upper-cl ()
+  (runtime-function-definition '$upper-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$upper-cl 'miricl-runtime:ascii-upper-code))))
+
+(define-runtime-function $upper (($c i32)) (i32)
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $upper-cl (call $int (local.get $c)))))))
 
 (define-runtime-function $slice
     (($a :digits) ($start i32) ($length i32))
@@ -182,9 +184,9 @@
   ($source-at) ($source-advance)
   ($source-peek)
   ($source-take)
-  ($white)
+  ($white-cl) ($white)
   ($delimiter)
-  ($upper)
+  ($upper-cl) ($upper)
   ($slice)
   ($decode-text) ($decode-source)
   ($emit-byte)

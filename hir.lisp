@@ -269,6 +269,27 @@
           (push (cons key (hir-intersect-types (if previous (cdr previous) t) (cdr entry)))
                 environment))))))
 
+(defun hir-declared-argument-types (function variables types)
+  "Retain bounded integer entry contracts on immutable argument values.
+Use binding identities at the body boundary, excluding shadowed parameters
+and outer free declarations. Arithmetic still needs its own overflow proof."
+  (declare (type simple-vector function) (type list variables types))
+  ;; The same frontend serves the compiler-free HIR interpreter. Entry
+  ;; enrichment is optional there; keep the proof engine out of that image.
+  (when (and (zerop *hir-safety-level*) (fboundp 'hir-integer-bounds))
+    (dolist (binding (hir-function-bindings function))
+      (let* ((entry (assoc binding types)) (cell (hir-binding-cell binding))
+             (producer (and cell (hir-value-producer cell)))
+             (initial (and producer (eq (hir-instruction-opcode producer) :cell-new)
+                           (first (hir-instruction-inputs producer))))
+             (argument (and initial (hir-value-producer initial))))
+        (when (and entry (eq (hir-binding-owner binding) function)
+                   (eq (cdr (assoc (hir-binding-name binding) variables)) binding)
+                   (%hir-instruction-p argument) (eq (hir-instruction-opcode argument) :argument)
+                   (nth-value 2 (hir-integer-bounds (cdr entry))))
+          (compiler-statistic :inference/declared-argument)
+          (setf (hir-value-type initial) (hir-intersect-types (hir-value-type initial) (cdr entry))))))))
+
 (defun hir-function-result-type (type)
   (cond ((and (consp type) (eq (car type) 'function)) (if (cddr type) (third type) t))
         ((and (consp type) (eq (car type) 'and))
@@ -1449,7 +1470,8 @@
         (setq local (hir-shadow-specials local specials))
         (let* ((*hir-types* (hir-type-environment local types))
                (*hir-inline-policy* (hir-inline-environment functions policy))
-               (value (hir-body body local functions targets)))
+               (value (progn (hir-declared-argument-types *hir-function* local *hir-types*)
+                             (hir-body body local functions targets))))
           (unless (hir-block-terminator *hir-block*)
             (hir-terminate :return (list (hir-multiple value)) nil))))))
     (dolist (block (hir-function-blocks *hir-function*))

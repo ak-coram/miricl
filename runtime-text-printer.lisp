@@ -451,13 +451,15 @@
         (call $cons (call $symbol (i32.const ,(runtime-symbol-id :object))) (call $cons (local.get $x) (ref.null eq))))))
       (unreachable))))
 
+(defun $print-limit-cl ()
+  (runtime-function-definition '$print-limit-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$print-limit-cl 'miricl-runtime:printer-limit-value))))
+
 (define-runtime-function $print-limit (($id i32)) (i32)
-  (:locals ($value :nullable-object))
-  #@(if (i32.eqz (ref.is_null (call $symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*print-readably*))))))
-    (then (return (i32.const 2147483647))))
-  #@(local.set $value (call $symbol-value (call $symbol (local.get $id))))
-  #@(if (ref.is_null (local.get $value)) (then (return (i32.const 2147483647))))
-  #@(call $natural-count (local.get $value)))
+  (:locals ($readably :nullable-object) ($value :nullable-object))
+  #@(local.set $readably (call $symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*print-readably*)))))
+  #@(if (ref.is_null (local.get $readably)) (then (local.set $value (call $symbol-value (call $symbol (local.get $id))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $print-limit-cl (local.get $readably) (local.get $value) (call $int (i32.const 2147483647)))))))
 
 (define-runtime-function $print-list (($x :nullable-object) ($depth i32) ($aesthetic i32)) ()
   (:locals ($left i32))
@@ -766,7 +768,7 @@
   ($print-float)
   ($print-name-characters) ($print-array-suppressed) ($print-name)
   ($print-symbol)
-  ($print-limit) ($print-list) ($print-pretty-object) ($print-object) ($print-default-object) ($require-printable-readably)
+  ($print-limit-cl) ($print-limit) ($print-list) ($print-pretty-object) ($print-object) ($print-default-object) ($require-printable-readably)
   ($source-run)
   ($evaluate-source)
   ($record-repl-history)

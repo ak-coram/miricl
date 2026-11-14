@@ -2,41 +2,28 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-(define-runtime-function $digit-value
-    (($c i32))
-    (i32)
-  #@(if (i32.and (i32.ge_u (local.get $c) (i32.const 48)) (i32.le_u (local.get $c) (i32.const 57)))
-      (then (return (i32.sub (local.get $c) (i32.const 48)))))
-  #@(local.set $c (call $upper (local.get $c)))
-  #@(if (i32.and (i32.ge_u (local.get $c) (i32.const 65)) (i32.le_u (local.get $c) (i32.const 90)))
-      (then (return (i32.sub (local.get $c) (i32.const 55)))))
-  #@(i32.const 99))
+(defun $digit-value-cl ()
+  (runtime-function-definition '$digit-value-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$digit-value-cl 'miricl-runtime:ascii-digit-value))))
 
-(define-runtime-function $power
-    (($base i32) ($n i32))
-    (:object)
-  (:locals ($a :object)
-           ($b :object))
-  #@(local.set $a (call $int (i32.const 1)))
-  #@(local.set $b (call $int (local.get $base)))
-  #@(block $done (loop $next (br_if $done (i32.eqz (local.get $n)))
-    (if (i32.and (local.get $n) (i32.const 1)) (then (local.set $a (call $imul (local.get $a) (local.get $b)))))
-    (local.set $n (i32.shr_u (local.get $n) (i32.const 1)))
-    (if (local.get $n) (then (local.set $b (call $imul (local.get $b) (local.get $b))))) (br $next)))
-  #@(local.get $a))
+(define-runtime-function $digit-value (($c i32)) (i32)
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $digit-value-cl (call $int (local.get $c)))))))
+
+(defun $power-cl ()
+  (runtime-function-definition '$power-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$power-cl 'miricl-runtime:integer-power))))
+
+(define-runtime-function $power (($base i32) ($n i32)) (:object)
+  #@(ref.as_non_null (call $power-cl (call $int (local.get $base)) (call $int (local.get $n)))))
+
+(defun $reader-float-kind-cl ()
+  (runtime-function-definition '$reader-float-kind-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$reader-float-kind-cl 'miricl-runtime:reader-float-format-code))))
 
 (define-runtime-function $reader-float-kind () (i32)
-  (:locals ($format :nullable-object))
-  #@(local.set $format (call $symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*read-default-float-format*)))))
-  (wat-symbol-case #@(call $id (local.get $format))
-    ((short-float single-float) #@(return (i32.const 3)))
-    ((double-float long-float) #@(return (i32.const 4))))
-  #@(call $type-fail (local.get $format)
-    (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'member)))
-      ,(reduce (lambda (name tail) `(call $cons (call $symbol (i32.const ,(runtime-symbol-id name))) ,tail))
-        '(short-float single-float double-float long-float) :from-end t :initial-value '(ref.null eq)))
-    (i32.const ,(runtime-error-code :expected-designator)))
-  #@(i32.const 3))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $reader-float-kind-cl (call $symbol-value
+      (call $symbol (i32.const ,(runtime-symbol-id '*read-default-float-format*)))))))))
 
 (define-runtime-function $read-token-number (($a :digits) ($n i32) ($base i32)) (:nullable-object)
   (:locals ($radix i32) ($value :nullable-object) ($setting :nullable-object))
@@ -63,30 +50,15 @@
       (return (ref.null eq))))
   #@(local.get $value))
 
+(defun $small-reader-integer-cl ()
+  (runtime-function-definition '$small-reader-integer-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$small-reader-integer-cl 'miricl-runtime:small-reader-integer-value))))
+
 (define-runtime-function $try-small-reader-integer (($a :digits) ($n i32) ($base i32)) (:nullable-object)
-  (:locals ($i i32) ($first i32) ($code i32) ($digit i32) ($negative i32) ($magnitude i64))
-  #@(if (i32.eqz (local.get $n)) (then (return (ref.null eq))))
-  #@(local.set $code (array.get $digits (local.get $a) (i32.const 0)))
-  #@(if (i32.or (i32.eq (local.get $code) (i32.const 43)) (i32.eq (local.get $code) (i32.const 45)))
-    (then (local.set $i (i32.const 1)) (local.set $negative (i32.eq (local.get $code) (i32.const 45)))))
-  #@(local.set $first (local.get $i))
-  #@(if (i32.eq (local.get $i) (local.get $n)) (then (return (ref.null eq))))
-  #@(block $done (loop $next
-    (br_if $done (i32.eq (local.get $i) (local.get $n)))
-    (local.set $code (array.get $digits (local.get $a) (local.get $i)))
-    (if (i32.and (i32.eq (local.get $base) (i32.const 10))
-        (i32.and (i32.eq (local.get $code) (i32.const 46))
-          (i32.and (i32.gt_u (local.get $i) (local.get $first))
-            (i32.eq (i32.add (local.get $i) (i32.const 1)) (local.get $n))))) (then (br $done)))
-    (local.set $digit (call $digit-value (local.get $code)))
-    (if (i32.ge_u (local.get $digit) (local.get $base)) (then (return (ref.null eq))))
-    (local.set $magnitude (i64.add (i64.mul (local.get $magnitude) (i64.extend_i32_u (local.get $base)))
-      (i64.extend_i32_u (local.get $digit))))
-    (if (i64.gt_u (local.get $magnitude) (i64.add (i64.const 2147483647) (i64.extend_i32_u (local.get $negative))))
-      (then (return (ref.null eq))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(call $int (if (result i32) (local.get $negative)
-    (then (i32.sub (i32.const 0) (i32.wrap_i64 (local.get $magnitude)))) (else (i32.wrap_i64 (local.get $magnitude))))))
+  ;; The native adapter supplies a string view without copying token storage.
+  ;; The CL worker checks its bounds before entering the scalar parsing loop.
+  #@(call $small-reader-integer-cl (call $text (local.get $a))
+    (call $int (local.get $n)) (call $int (local.get $base))))
 
 ;; The standard syntax path can recognize ordinary small integers directly in
 ;; the source, avoiding a temporary token buffer and string. On any uncertainty
@@ -220,13 +192,16 @@
   #@(if (result (ref eq)) (i32.lt_s (local.get $sign) (i32.const 0))
       (then (call $negative (local.get $value))) (else (local.get $value))))
 
+(defun $parse-integer-region-cl ()
+  (runtime-function-definition '$parse-integer-region-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$parse-integer-region-cl 'miricl-runtime:parse-integer-region-value))))
+
 (define-runtime-function $parse-integer-apply (($args :nullable-object)) (:nullable-object)
   (:locals ($string :nullable-object) ($scan :nullable-object) ($value :nullable-object)
            ($start :nullable-object) ($end :nullable-object) ($radix :nullable-object)
-           ($junk :nullable-object) ($data :digits) ($integer :object)
+           ($junk :nullable-object) ($data :digits)
            ($id i32) ($seen i32) ($unknown i32) ($allow i32) ($base i32)
-           ($i i32) ($stop i32) ($first i32) ($negative i32) ($code i32) ($digit i32)
-           ($chunk i32) ($scale i32) ($threshold i32))
+           ($i i32) ($stop i32))
   (wat-fail-when #@(ref.is_null (local.get $args)) :wrong-arity)
   #@(local.set $string (call $string-contents (call $car (local.get $args))))
   #@(local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $string)))))
@@ -268,47 +243,13 @@
           (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
             (call $cons (call $int (i32.const 2)) (call $cons (call $int (i32.const 36)) (ref.null eq))))
           (i32.const ,(runtime-error-code :expected-designator)))))))
-  #@(block $nonwhite (loop $white
-    (br_if $nonwhite (i32.eq (local.get $i) (local.get $stop)))
-    (br_if $nonwhite (i32.eqz (call $white (array.get $digits (local.get $data) (local.get $i)))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $white)))
-  #@(if (i32.lt_u (local.get $i) (local.get $stop))
-    (then
-      (local.set $code (array.get $digits (local.get $data) (local.get $i)))
-      (if (i32.or (i32.eq (local.get $code) (i32.const 43)) (i32.eq (local.get $code) (i32.const 45)))
-        (then (local.set $negative (i32.eq (local.get $code) (i32.const 45)))
-          (local.set $i (i32.add (local.get $i) (i32.const 1)))))))
-  #@(local.set $first (local.get $i))
-  #@(local.set $scale (i32.const 1))
-  #@(local.set $threshold (i32.div_u (i32.const 1073741823) (local.get $base)))
-  #@(local.set $integer (call $int (i32.const 0)))
-  #@(block $digits-done (loop $digits
-    (br_if $digits-done (i32.eq (local.get $i) (local.get $stop)))
-    (local.set $digit (call $character-digit-weight (array.get $digits (local.get $data) (local.get $i))))
-    (br_if $digits-done (i32.ge_u (local.get $digit) (local.get $base)))
-    ;; Keep common short integers unboxed until complete; big integers need
-    ;; just one multiply/add per radix-dependent chunk rather than per digit.
-    (if (i32.gt_u (local.get $scale) (local.get $threshold))
-      (then
-        (local.set $integer (call $iadd (call $imul (local.get $integer) (call $int (local.get $scale)))
-          (call $int (local.get $chunk))))
-        (local.set $chunk (i32.const 0)) (local.set $scale (i32.const 1))))
-    (local.set $chunk (i32.add (i32.mul (local.get $chunk) (local.get $base)) (local.get $digit)))
-    (local.set $scale (i32.mul (local.get $scale) (local.get $base)))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $digits)))
-  #@(local.set $value (if (result (ref null eq)) (i32.ne (local.get $i) (local.get $first))
-    (then
-      (if (result (ref eq)) (i32.eqz (call $value-n (local.get $integer)))
-        (then (call $int (local.get $chunk)))
-        (else (call $iadd (call $imul (local.get $integer) (call $int (local.get $scale)))
-          (call $int (local.get $chunk))))))
-    (else (ref.null eq))))
+  #@(local.set $scan (call $parse-integer-region-cl (local.get $string)
+    (call $int (local.get $i)) (call $int (local.get $stop))
+    (call $cons (call $int (local.get $base)) (local.get $junk))))
+  #@(local.set $value (call $car (local.get $scan)))
+  #@(local.set $i (call $natural-count (call $cdr (local.get $scan))))
   #@(if (ref.is_null (local.get $junk))
     (then
-      (block $trailing-done (loop $trailing
-        (br_if $trailing-done (i32.eq (local.get $i) (local.get $stop)))
-        (br_if $trailing-done (i32.eqz (call $white (array.get $digits (local.get $data) (local.get $i)))))
-        (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $trailing)))
       (if (i32.or (ref.is_null (local.get $value)) (i32.ne (local.get $i) (local.get $stop)))
         (then
           (local.set $value (call $make-condition
@@ -316,12 +257,10 @@
           (struct.set $obj $n (ref.cast (ref $obj) (local.get $value)) (i32.const ,(runtime-error-code :reader-syntax)))
           (call $signal-condition (local.get $value))
           (call $debug-condition (local.get $value))))))
-  #@(if (i32.and (local.get $negative) (i32.eqz (ref.is_null (local.get $value))))
-    (then (local.set $value (call $negative (ref.as_non_null (local.get $value))))))
   #@(call $two-values (local.get $value) (call $int (local.get $i))))
 
 (define-runtime-section text-number-wat ()
-  ($digit-value)
-  ($power)
-  ($reader-float-kind) ($read-token-number)
-  ($try-small-reader-integer) ($source-small-integer) ($parse-number) ($parse-integer-apply))
+  ($digit-value-cl) ($digit-value)
+  ($power-cl) ($power)
+  ($reader-float-kind-cl) ($reader-float-kind) ($read-token-number)
+  ($small-reader-integer-cl) ($try-small-reader-integer) ($source-small-integer) ($parse-number) ($parse-integer-region-cl) ($parse-integer-apply))

@@ -28,7 +28,11 @@
 
 (defun write-runtime-rewrite-progress (output)
   (let ((definitions nil) (handwritten 0) (compiled 0) (generators 0))
-    (dolist (file (sort (directory (merge-pathnames "runtime-*.lisp" *rewrite-root*)) #'string< :key #'namestring))
+    (dolist (file (sort (remove-if
+                        (lambda (file)
+                          (uiop:string-suffix-p (pathname-name file) "-test"))
+                        (directory (merge-pathnames "runtime-*.lisp" *rewrite-root*)))
+                       #'string< :key #'namestring))
       (let* ((*package* (find-package :miricl)) (*read-eval* nil)
              (*readtable* (named-readtables:find-readtable :miricl-wat))
              (source (uiop:read-file-string file :external-format :utf-8)))

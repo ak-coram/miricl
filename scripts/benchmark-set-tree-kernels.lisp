@@ -1,0 +1,10 @@
+(in-package :cl-user)
+(setf miricl-port-bench:*cases*
+      '(("tree/subst-nochange" substitute-tree-values (list '(1 2 3 4) :absent :new (vector nil #'eql 0 nil nil nil)) :calls 20000)
+        ("tree/subst-change" substitute-tree-values (list '(1 (2 1) . 1) 1 :new (vector nil #'eql 0 nil nil nil)) :calls 20000)
+        ("tree/subst-early" substitute-tree-values (let ((tree (list 1 2 3))) (list tree tree :new (vector nil #'eq 0 nil nil nil))) :calls 100000)
+        ("tree/subst-predicate" substitute-tree-values (list '(1 (2 3) nil a) nil :new (vector nil #'numberp 1 nil nil nil)) :calls 20000)
+        ("tree/subst-negated" substitute-tree-values (list '(1 (2 3) nil a) nil :new (vector nil #'consp 2 nil nil nil)) :calls 20000)
+        ("tree/sublis" substitute-tree-values (list '(1 (2 1) . a) '((1 . :new) (a . :letter)) nil (vector nil #'eql 0 nil nil t)) :calls 20000)
+        ("tree/nsubst-nochange" substitute-tree-values (list (copy-tree '(1 (2 3) . a)) :absent :new (vector nil #'eql 0 nil t nil)) :calls 20000)
+        ("tree/nsublis-nochange" substitute-tree-values (list (copy-tree '(1 (2 3) . a)) '((:absent . :new)) nil (vector nil #'eql 0 nil t t)) :calls 20000)))

@@ -29,14 +29,9 @@
     (real #@(return (i32.const 7))))
   #@(i32.const 0))
 
-(define-runtime-function $complex-part-type (($type :nullable-object)) (:nullable-object)
-  (:locals ($args :nullable-object))
-  #@(if (i32.eq (call $tag (local.get $type)) (i32.const 7))
-    (then (local.set $args (call $cdr (local.get $type)))
-      (if (i32.eqz (ref.is_null (local.get $args)))
-        (then (if (i32.ne (call $id (call $car (local.get $args))) (i32.const ,(runtime-symbol-id '*)))
-          (then (return (call $car (local.get $args)))))))))
-  #@(call $symbol (i32.const ,(runtime-symbol-id 'real))))
+(defun $complex-part-type ()
+  (runtime-function-definition '$complex-part-type
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$complex-part-type 'miricl-runtime:complex-component-type))))
 
 (define-runtime-function $complex-subtypep
     (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (i32)

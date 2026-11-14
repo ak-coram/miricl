@@ -84,7 +84,7 @@
         (multiple-value-bind (count next) (native-read-uleb bytes position)
           (setq position next)
           (case (aref bytes position)
-            (#x7f (incf offset count))
+            ((#x7f #x7e) (incf offset count))
             (#x6f (incf locals count))
             (otherwise (error "Unexpected native local type.")))
           (incf position))))
@@ -130,7 +130,7 @@
                         (otherwise (error "Unexpected native GC instruction ~D." argument))))
              (multiple-value-bind (ignored next) (native-read-uleb bytes position)
                (declare (ignore ignored)) (setq position next))))
-          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xa7 #xac #xd1 #xd3)))
+          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd1 #xd3)))
            (error "Unexpected native instruction ~D." code)))
         (when (or (not references-only) (member code '(#x10 #x12 #xd2)))
           (push (make-native-op code argument start position) ops))))
@@ -301,7 +301,7 @@
       ((#x21 #x1a) (values 1 0))
       ((#x22 #x45 #x50 #xa7 #xac #xd1) (values 1 1))
       (#xfb (if (= (native-op-argument op) 5) (values 2 0) (values 1 1)))
-      ((#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xd3) (values 2 1))
+      ((#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3) (values 2 1))
       ((#x10 #x12)
        (when (and *native-call-stack-effects* (< (native-op-argument op) (length *native-call-stack-effects*)))
          (let ((effect (svref *native-call-stack-effects* (native-op-argument op))))
@@ -314,9 +314,11 @@
 (defun native-stackify-ops (ops &optional exceptions types total)
   (declare (type simple-vector ops) (type (or null simple-vector) types)
            (type (or null (unsigned-byte 32)) total))
-  ;; The native emitter has defaultable locals and a fixed calling convention.
-  ;; Arbitrary core modules retain the general, typed implementation below.
-  (when (and (null types) (null *native-module-stack-effects*))
+  ;; The fast pass needs stack counts and defaultable locals, rather than a
+  ;; particular numeric representation. Typed i64 locals can use it too.
+  ;; Arbitrary module effects and non-defaultable refs retain the Lisp pass.
+  (when (and (null *native-module-stack-effects*)
+             (or (null types) (every (lambda (type) (not (eql (car type) #x64))) types)))
     (unless total
       (setq total (loop for op across ops
                     when (member (native-op-code op) '(#x20 #x21 #x22))

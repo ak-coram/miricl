@@ -36,41 +36,51 @@
 (defparameter *string-case-ranges* (string-case-ranges #'char-upcase))
 (defparameter *string-downcase-ranges* (string-case-ranges #'char-downcase))
 
+(defun string-case-table-values (ranges)
+  "Validate generated case records, then encode every field as a code point."
+  ;; These host-generated tables are the checked boundary for the private CL
+  ;; search. The native view shares the encoded array, without per-query copies.
+  (let ((count (list-length ranges)) (previous -1) (values nil))
+    (unless count (error "Circular character case table; expected finite four-field records."))
+    (unless (<= count #x1ffffffe)
+      (error "Character case table exceeds the target's array-size limit: ~D fields." count))
+    (unless (zerop (mod count 4))
+      (error "Malformed character case table: ~D fields cannot form four-field records." count))
+    (loop for (start end delta flags) on ranges by #'cddddr do
+      (unless (and (integerp start) (integerp end) (integerp delta) (integerp flags)
+                   (<= 128 start end #x10ffff) (> start previous) (<= 0 flags 3)
+                   (<= 0 (+ start delta) (+ end delta) #x10ffff))
+        (error "Malformed character case record: ~A"
+               (let ((*print-circle* t)) (prin1-to-string (list start end delta flags)))))
+      (let ((encoded (if (minusp delta) (1- (* -2 delta)) (* 2 delta))))
+        (unless (<= 0 encoded #x10ffff)
+          (error "Character case delta cannot fit the packed code-point table: ~S" delta))
+        (push start values) (push end values) (push encoded values) (push flags values))
+      (setf previous end))
+    (nreverse values)))
+
+(defun $character-case-code-cl ()
+  (runtime-function-definition '$character-case-code-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$character-case-code-cl 'miricl-runtime:character-case-code-value))))
+
+(define-runtime-function $initialize-string-case-tables () ()
+  ;; Some reader paths use case conversion before character-property startup.
+  ;; Construct both immutable string views together on their first use.
+  #@(if (ref.is_null (global.get $string-case-table))
+    (then (global.set $string-case-table (call $text (global.get $string-case-ranges)))
+          (global.set $string-downcase-table (call $text (global.get $string-downcase-ranges))))))
+
 (defun string-case-code-wat (ansi)
-  (let* ((parity (wat-fragment #@(i32.eqz (i32.and (i32.sub (local.get $c) (local.get $start))
-                     (i32.and (local.get $flags) (i32.const 1))))))
-         (eligible (if ansi (wat-fragment #@(i32.and ,parity
-           (i32.eqz (i32.and (local.get $flags) (i32.const 2))))) parity)))
-    (runtime-wat-sequence
-  #@(if (i32.lt_u (local.get $c) (i32.const 128))
-    (then
-      (if (i32.eqz (local.get $down)) (then (return (call $upper (local.get $c)))))
-      (return (i32.add (local.get $c) (select (i32.const 32) (i32.const 0)
-        (i32.and (i32.ge_u (local.get $c) (i32.const 65)) (i32.le_u (local.get $c) (i32.const 90))))))))
-  #@(local.set $ranges (if (result (ref $digits)) (local.get $down)
-    (then (global.get $string-downcase-ranges)) (else (global.get $string-case-ranges))))
-  #@(local.set $high (i32.shr_u (array.len (local.get $ranges)) (i32.const 2)))
-  #@(block $done (loop $search (br_if $done (i32.ge_u (local.get $low) (local.get $high)))
-    (local.set $mid (i32.shr_u (i32.add (local.get $low) (local.get $high)) (i32.const 1)))
-    (local.set $offset (i32.mul (local.get $mid) (i32.const 4)))
-    (local.set $start (array.get $digits (local.get $ranges) (local.get $offset)))
-    (local.set $end (array.get $digits (local.get $ranges) (i32.add (local.get $offset) (i32.const 1))))
-    (if (i32.lt_u (local.get $c) (local.get $start))
-      (then (local.set $high (local.get $mid)))
-      (else (if (i32.gt_u (local.get $c) (local.get $end))
-        (then (local.set $low (i32.add (local.get $mid) (i32.const 1))))
-        (else
-          (local.set $flags (array.get $digits (local.get $ranges) (i32.add (local.get $offset) (i32.const 3))))
-          (if ,eligible
-            (then (return (i32.add (local.get $c)
-              (array.get $digits (local.get $ranges) (i32.add (local.get $offset) (i32.const 2)))))))
-          (br $done))))) (br $search)))
-  #@(local.get $c))))
+  (runtime-wat-sequence
+   #@(call $initialize-string-case-tables)
+   #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+       (call $character-case-code-cl (call $int (local.get $c)) (call $bool (local.get $down))
+         (if (result (ref null eq)) (local.get $down)
+           (then (global.get $string-downcase-table)) (else (global.get $string-case-table)))
+         (call $bool (i32.const ,(if ansi 1 0)))))))))
 
 (defmacro define-runtime-case-code (name ansi)
   `(define-runtime-function ,name (($c i32) ($down i32)) (i32)
-     (:locals ($low i32) ($high i32) ($mid i32) ($offset i32) ($start i32) ($end i32) ($flags i32)
-              ($ranges (ref $digits)))
      (string-case-code-wat ,ansi)))
 (define-runtime-case-code $string-case-code t)
 (define-runtime-case-code $unicode-case-code nil)
@@ -85,54 +95,43 @@
   (wat-new-object :string
                   :digits #@(local.get $characters)))
 
-(define-runtime-function $string-equal
-    (($a :nullable-object) ($b :nullable-object))
-    (i32)
-  (:locals ($i i32)
-           ($n i32))
-  (wat-fail-when #@(i32.or (i32.ne (call $tag (local.get $a)) (i32.const 10))
-              (i32.ne (call $tag (local.get $b)) (i32.const 10))) :expected-designator)
-  #@(if (ref.eq (local.get $a) (local.get $b)) (then (return (i32.const 1))))
-  #@(local.set $n (array.len (struct.get $obj $digits (ref.cast (ref $obj) (local.get $a)))))
-  #@(if (i32.ne (local.get $n) (array.len (struct.get $obj $digits (ref.cast (ref $obj) (local.get $b))))) (then (return (i32.const 0))))
-  #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-    (if (i32.ne (array.get $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $a))) (local.get $i))
-                 (array.get $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $b))) (local.get $i)))
-        (then (return (i32.const 0))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(i32.const 1))
+;; The primitive-only CL comparison also works before function installation.
+(defun $bootstrap-string-equal ()
+  (runtime-function-definition '$bootstrap-string-equal
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$bootstrap-string-equal 'miricl-runtime:bootstrap-text-equal-p :result :truth))))
+
+(defun $string-equal-cl ()
+  (runtime-function-definition '$string-equal-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$string-equal-cl 'miricl-runtime:text-equal-p :result :truth))))
+
+(define-runtime-function $string-equal (($a :nullable-object) ($b :nullable-object)) (i32)
+  #@(if (i32.eqz (global.get $cl-kernel-functions-ready))
+    (then (return (call $bootstrap-string-equal (local.get $a) (local.get $b)))))
+  #@(if (i32.ne (call $tag (local.get $a)) (i32.const 10))
+    (then (call $list-type-error (local.get $a) (i32.const ,(runtime-symbol-id 'string)))))
+  #@(if (i32.ne (call $tag (local.get $b)) (i32.const 10))
+    (then (call $list-type-error (local.get $b) (i32.const ,(runtime-symbol-id 'string)))))
+  #@(call $string-equal-cl (local.get $a) (local.get $b)))
+
+(defun $string-fold-equal-cl ()
+  (runtime-function-definition '$string-fold-equal-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$string-fold-equal-cl 'miricl-runtime:text-fold-equal-p :result :truth))))
 
 (define-runtime-function $string-fold-equal (($a :nullable-object) ($b :nullable-object)) (i32)
-  (:locals ($n i32) ($i i32) ($c1 i32) ($c2 i32) ($data-a :digits) ($data-b :digits))
-  #@(if (ref.eq (local.get $a) (local.get $b)) (then (return (i32.const 1))))
-  #@(local.set $data-a (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $a)))))
-  #@(local.set $data-b (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $b)))))
-  #@(local.set $n (array.len (local.get $data-a)))
-  #@(if (i32.ne (local.get $n) (array.len (local.get $data-b)))
-    (then (return (i32.const 0))))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $n)))
-    (local.set $c1 (array.get $digits (local.get $data-a) (local.get $i)))
-    (local.set $c2 (array.get $digits (local.get $data-b) (local.get $i)))
-    (if (i32.ne (local.get $c1) (local.get $c2))
-      (then (if (i32.ne (call $string-upcase-code (local.get $c1)) (call $string-upcase-code (local.get $c2)))
-        (then (return (i32.const 0))))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(i32.const 1))
+  #@(if (i32.ne (call $tag (local.get $a)) (i32.const 10))
+    (then (call $list-type-error (local.get $a) (i32.const ,(runtime-symbol-id 'string)))))
+  #@(if (i32.ne (call $tag (local.get $b)) (i32.const 10))
+    (then (call $list-type-error (local.get $b) (i32.const ,(runtime-symbol-id 'string)))))
+  #@(call $string-fold-equal-cl (local.get $a) (local.get $b)))
 
-(define-runtime-function $string-designator
-    (($x :nullable-object))
-    (:nullable-object)
+(defun $string-designator-cl ()
+  (runtime-function-definition '$string-designator-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$string-designator-cl 'miricl-runtime:text-designator))))
+
+(define-runtime-function $string-designator (($x :nullable-object)) (:nullable-object)
+  ;; Package creation precedes installation of ordinary Lisp function bindings.
   #@(if (call $stringp-native (local.get $x)) (then (return (local.get $x))))
-  #@(if (i32.eq (call $tag (local.get $x)) (i32.const 16))
-      (then (return (call $text (array.new_fixed $digits 1 (call $value-n (local.get $x)))))))
-  #@(if (i32.eqz (call $symbolp (local.get $x)))
-    (then (call $type-fail (local.get $x)
-      (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'or)))
-        (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'string)))
-          (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'symbol)))
-            (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'character))) (ref.null eq)))))
-      (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(call $symbol-name (local.get $x)))
+  #@(call $string-designator-cl (local.get $x)))
 
 (define-runtime-function $string-element
     (($string :nullable-object) ($index :nullable-object) ($value :nullable-object) ($mutate i32)) (:nullable-object)
@@ -168,7 +167,8 @@
            ($start2 :nullable-object) ($end2 :nullable-object)
            ($seen i32) ($bit i32) ($key-index i32) ($unknown i32) ($allow i32)
            ($i i32) ($j i32) ($stop1 i32) ($stop2 i32) ($length1 i32) ($length2 i32)
-           ($c1 i32) ($c2 i32) ($fold i32) ($cmp i32) ($match i32))
+           ($c1 i32) ($c2 i32) ($fold i32) ($cmp i32) ($match i32)
+           ($saved-extra :nullable-object) ($saved-count i32) ($result :nullable-object))
   ;; Bind keywords directly: no rest closure, environment, or per-character
   ;; Lisp calls. SEEN preserves the leftmost occurrence, including NIL bounds
   ;; and :ALLOW-OTHER-KEYS. Validate the whole plist before comparing strings.
@@ -228,89 +228,59 @@
         (i32.and (i32.eq (local.get $stop1) (local.get $length1))
                  (i32.eq (local.get $stop2) (local.get $length2)))))
     (then (return (call $bool (call $string-equal (local.get $a) (local.get $b))))))
-  #@(block $different
-    (if (i32.and (ref.eq (local.get $a) (local.get $b))
-          (i32.and (i32.eq (local.get $i) (local.get $j)) (i32.eq (local.get $stop1) (local.get $stop2))))
-      (then (local.set $i (local.get $stop1)) (br $different)))
-    (loop $next
-    (if (i32.or (i32.eq (local.get $i) (local.get $stop1)) (i32.eq (local.get $j) (local.get $stop2)))
-      (then
-        (local.set $cmp (i32.sub (i32.lt_u (local.get $i) (local.get $stop1))
-          (i32.lt_u (local.get $j) (local.get $stop2))))
-        (br $different)))
-    (local.set $c1 (array.get $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $a))) (local.get $i)))
-    (local.set $c2 (array.get $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $b))) (local.get $j)))
-    (if (i32.and (local.get $fold) (i32.ne (local.get $c1) (local.get $c2)))
-      (then (local.set $c1 (call $string-upcase-code (local.get $c1)))
-        (local.set $c2 (call $string-upcase-code (local.get $c2)))))
-    (if (i32.ne (local.get $c1) (local.get $c2))
-      (then (local.set $cmp (select (i32.const -1) (i32.const 1)
-        (i32.lt_u (local.get $c1) (local.get $c2)))) (br $different)))
-    (local.set $i (i32.add (local.get $i) (i32.const 1)))
-    (local.set $j (i32.add (local.get $j) (i32.const 1))) (br $next)))
-  #@(if (i32.eqz (local.get $op)) (then (return (call $bool (i32.eqz (local.get $cmp))))))
-  (runtime-wat-forms
-    (loop for comparison in '(i32.ne i32.lt_s i32.gt_s i32.le_s i32.ge_s) for op from 1 collect
-      `(if (i32.eq (local.get $op) (i32.const ,op))
-        (then (local.set $match (,comparison (local.get $cmp) (i32.const 0)))))))
-  #@(if (local.get $match) (then (return (call $int (local.get $i)))))
-  #@(ref.null eq))
+  #@(local.set $saved-extra (global.get $extra-values))
+  #@(local.set $saved-count (global.get $value-count))
+  #@(local.set $result (call $compare-character-regions-cl (local.get $a) (local.get $b)
+    (call $vector-new (array.new_fixed $objects 6
+      (call $int (local.get $i)) (call $int (local.get $stop1))
+      (call $int (local.get $j)) (call $int (local.get $stop2)) (call $int (local.get $op))
+      (call $sequence-character-fold-function (local.get $fold))))))
+  #@(global.set $extra-values (local.get $saved-extra))
+  #@(global.set $value-count (local.get $saved-count))
+  #@(local.get $result))
+
+(defun $compare-character-regions-cl ()
+  (runtime-function-definition '$compare-character-regions-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$compare-character-regions-cl 'miricl-runtime:compare-character-regions))))
+
+(defun $character-bag-contains-cl ()
+  (runtime-function-definition '$character-bag-contains-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$character-bag-contains-cl 'miricl-runtime:character-bag-member-p :result :truth))))
 
 (define-runtime-function $character-bag-contains (($bag :digits) ($code i32)) (i32)
-  (:locals ($i i32))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (array.len (local.get $bag))))
-    (if (i32.eq (local.get $code) (array.get $digits (local.get $bag) (local.get $i)))
-      (then (return (i32.const 1))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(i32.const 0))
+  #@(call $character-bag-contains-cl (call $text (local.get $bag))
+    (call $node (i32.const 16) (local.get $code) (ref.null eq) (ref.null eq) (ref.null eq))))
 
-(define-runtime-function $string-trim-native
-    (($bag :nullable-object) ($string :nullable-object) ($mode i32)) (:nullable-object)
-  (:locals ($data :digits) ($characters :digits) ($i i32) ($start i32) ($end i32) ($length i32)
-           ($value :nullable-object) ($cursor :nullable-object) ($vector i32))
-  #@(local.set $string (call $string-contents (call $string-designator (local.get $string))))
-  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $string)))))
-  #@(local.set $characters (if (result (ref $digits)) (call $stringp-native (local.get $bag))
-    (then (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (call $string-contents (local.get $bag))))))
-    (else
-      (local.set $length (call $proper-sequence-length (local.get $bag)))
-      (local.set $characters (array.new_default $digits (local.get $length)))
-      (local.set $cursor (local.get $bag))
-      (local.set $vector (call $vectorp-native (local.get $bag)))
-      (block $copied (loop $copy (br_if $copied (i32.eq (local.get $i) (local.get $length)))
-        (local.set $value (if (result (ref null eq)) (local.get $vector)
-          (then (call $sequence-value (local.get $bag) (local.get $i)))
-          (else (call $car (local.get $cursor)))))
-        (array.set $digits (local.get $characters) (local.get $i) (call $character-code (local.get $value)))
-        (if (i32.eqz (local.get $vector)) (then (local.set $cursor (call $cdr (local.get $cursor)))))
-        (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $copy)))
-      (local.get $characters))))
-  #@(local.set $end (array.len (local.get $data)))
-  #@(if (i32.ne (local.get $mode) (i32.const 2))
-    (then (block $left-done (loop $left
-      (br_if $left-done (i32.eq (local.get $start) (local.get $end)))
-      (br_if $left-done (i32.eqz (call $character-bag-contains (local.get $characters)
-        (array.get $digits (local.get $data) (local.get $start)))))
-      (local.set $start (i32.add (local.get $start) (i32.const 1))) (br $left)))))
-  #@(if (i32.ne (local.get $mode) (i32.const 1))
-    (then (block $right-done (loop $right
-      (br_if $right-done (i32.eq (local.get $start) (local.get $end)))
-      (br_if $right-done (i32.eqz (call $character-bag-contains (local.get $characters)
-        (array.get $digits (local.get $data) (i32.sub (local.get $end) (i32.const 1))))))
-      (local.set $end (i32.sub (local.get $end) (i32.const 1))) (br $right)))))
-  #@(if (i32.and (i32.eqz (local.get $start)) (i32.eq (local.get $end) (array.len (local.get $data))))
-    (then (return (local.get $string))))
-  #@(call $slice (local.get $data) (local.get $start) (i32.sub (local.get $end) (local.get $start))))
+(defun $string-trim-native-cl ()
+  (runtime-function-definition '$string-trim-native-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$string-trim-native-cl 'miricl-runtime:trim-text-value))))
+
+(define-runtime-function $string-trim-native (($bag :nullable-object) ($string :nullable-object) ($mode i32)) (:nullable-object)
+  (:locals ($result :nullable-object))
+  #@(local.set $string (call $string-designator (local.get $string)))
+  #@(drop (call $proper-sequence-length (local.get $bag)))
+  #@(local.set $result (call $string-trim-native-cl (local.get $bag) (local.get $string) (call $int (local.get $mode))))
+  ;; The target accepts empty NIL-element vectors as string designators.
+  ;; TRIM may return a fresh string: supply an ordinary character-string view
+  ;; rather than leaking the impossible element type through an unchanged tail.
+  #@(if (i32.eq (call $array-kind (local.get $result)) (i32.const 3))
+    (then (return (call $text (array.new_default $digits (i32.const 0))))))
+  #@(local.get $result))
 
 (define-runtime-section string-runtime-wat ()
+  #@(global $cl-kernel-functions-ready (mut i32) (i32.const 0))
+  ($bootstrap-string-equal)
   #@(global $string-case-ranges (ref $digits)
     (array.new_fixed $digits ,(length *string-case-ranges*)
-      ,(runtime-wat-forms (loop for value in *string-case-ranges* collect `(i32.const ,value)))))
+      ,(runtime-wat-forms (loop for value in (string-case-table-values *string-case-ranges*) collect `(i32.const ,value)))))
   #@(global $string-downcase-ranges (ref $digits)
     (array.new_fixed $digits ,(length *string-downcase-ranges*)
-      ,(runtime-wat-forms (loop for value in *string-downcase-ranges* collect `(i32.const ,value)))))
-  ($string-case-code) ($unicode-case-code) ($string-upcase-code) ($string-fold-equal)
+      ,(runtime-wat-forms (loop for value in (string-case-table-values *string-downcase-ranges*) collect `(i32.const ,value)))))
+  #@(global $string-case-table (mut (ref null eq)) (ref.null eq))
+  #@(global $string-downcase-table (mut (ref null eq)) (ref.null eq))
+  ($character-case-code-cl) ($initialize-string-case-tables)
+  ($string-case-code) ($unicode-case-code) ($string-upcase-code) ($string-fold-equal-cl) ($string-fold-equal)
   ($text)
-  ($string-equal)
-  ($string-designator) ($string-element) ($string-comparison)
-  ($character-bag-contains) ($string-trim-native))
+  ($string-equal-cl) ($string-equal)
+  ($string-designator-cl) ($string-designator) ($string-element) ($compare-character-regions-cl) ($string-comparison)
+  ($character-bag-contains-cl) ($character-bag-contains) ($string-trim-native-cl) ($string-trim-native))

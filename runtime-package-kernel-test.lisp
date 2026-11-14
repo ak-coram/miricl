@@ -1,0 +1,142 @@
+;;;; Checked name and option boundaries, and target Unicode APROPOS workers.
+(in-package #:miricl-test)
+(in-suite :miricl)
+
+(test package-name-list-kernel
+  (let* ((input (list "ONE" :two #\3))
+         (result (miricl-runtime:package-name-list input)))
+    (is (equal '("ONE" "TWO" "3") result))
+    (is (not (eq input result)))
+    (is (not (eq (cdr input) (cdr result)))))
+  (is (null (miricl-runtime:package-name-list nil)))
+  (let* ((backing (copy-seq "xxVIEW-NICKyy"))
+         (view (make-array 9 :element-type 'character :displaced-to backing :displaced-index-offset 2))
+         (normalized (car (miricl-runtime:package-name-list (list view)))))
+    (setf (char backing 2) #\X)
+    (is (string= "VIEW-NICK" normalized))
+    (is (typep normalized 'simple-string)))
+  (dolist (input '(42 ("ONE" . :bad) (42)))
+    (signals type-error (miricl-runtime:package-name-list input)))
+  (let ((cycle (list "ONE" "TWO")))
+    (setf (cddr cycle) cycle)
+    (signals type-error (miricl-runtime:package-name-list cycle)))
+  (is (equal '("RECOVERY") (miricl-runtime:package-name-list '("RECOVERY")))))
+
+(test package-options-kernel
+  (dolist (options '(nil ((:use :cl) (:shadow a b) (:export a b))
+                     ((:intern a b) (:size 0) (:documentation "Doc"))
+                     ((:import-from :cl car) (:export car))
+                     ((:local-nicknames ("LOCAL" :cl)))
+                     ((:shadow a) (:shadow a))))
+    (is (null (miricl-runtime:check-package-options options))))
+  (dolist (options '(((:shadow a) (:intern a)) ((:intern a) (:export a))
+                     ((:export a) (:intern a)) ((:import-from :cl car) (:shadow car))
+                     ((:size 1) (:size 2)) ((:documentation "A") (:documentation "B"))
+                     ((:size)) ((:documentation "A" "B")) ((:import-from))
+                     ((:not-an-option)) (nil)))
+    (signals program-error (miricl-runtime:check-package-options options)))
+  (dolist (options '(42 ((:size -1)) ((:size :bad)) ((:documentation 42))
+                     ((:intern 42)) ((:shadow a) . :bad) ((:shadow . :bad))))
+    (signals type-error (miricl-runtime:check-package-options options)))
+  (let ((cycle (list '(:shadow a))))
+    (setf (cdr cycle) cycle)
+    (signals type-error (miricl-runtime:check-package-options cycle)))
+  (let ((clause (list :shadow 'a)))
+    (setf (cddr clause) clause)
+    (signals type-error (miricl-runtime:check-package-options (list clause))))
+  (is (null (miricl-runtime:check-package-options '((:intern recovery))))))
+
+(test package-name-search-kernel
+  (dolist (name '("" "alphabetical" "Αλφαβητικός" "micro-µ" "emoji-🙂"))
+    (let ((pattern (string-upcase name)))
+      (is (string= pattern (miricl-runtime:package-fold-name name #'char-upcase)))
+      (is (miricl-runtime:package-name-contains-folded-p pattern name #'char-upcase))
+      (is (miricl-runtime:package-name-contains-folded-p "" name #'char-upcase))))
+  (is (miricl-runtime:package-name-contains-folded-p "PHAB" "alphabetical" #'char-upcase))
+  (is (not (miricl-runtime:package-name-contains-folded-p "ZZ" "alphabetical" #'char-upcase)))
+  (is (not (miricl-runtime:package-name-contains-folded-p "LONGER" "short" #'char-upcase)))
+  (let* ((a (make-symbol "ALPHA")) (b (make-symbol "BETA"))
+         (c (make-symbol "ALPHABET")) (input (list a b c))
+         (last (cddr input)) (result (miricl-runtime:filter-apropos-symbols "ALPHA" input #'char-upcase)))
+    (is (equal (list c a) result))
+    (is (eq last result))
+    (is (eq input (cdr result)))))
+
+(test package-enumeration-kernel
+  (let ((a (make-package (symbol-name (gensym "PACKAGE-KERNEL-A")) :use nil))
+        (b (make-package (symbol-name (gensym "PACKAGE-KERNEL-B")) :use nil))
+        (deleted (make-package (symbol-name (gensym "PACKAGE-KERNEL-DELETED")) :use nil)))
+    (unwind-protect
+         (progn
+           (use-package a b)
+           (delete-package deleted)
+           (is (equal (list b) (miricl-runtime:collect-package-users a (list a b deleted) #'package-use-list)))
+           (is (equal (list b a) (miricl-runtime:collect-live-packages (list a deleted b) #'package-name))))
+      (delete-package b) (delete-package a))))
+
+(test package-lookup-kernels
+  (let ((a (make-package (symbol-name (gensym "PACKAGE-LOOKUP-A")) :use nil
+                         :nicknames (list (symbol-name (gensym "PACKAGE-NICK-A")))))
+        (b (make-package (symbol-name (gensym "PACKAGE-LOOKUP-B")) :use nil))
+        (deleted (make-package (symbol-name (gensym "PACKAGE-LOOKUP-DELETED")) :use nil)))
+    (unwind-protect
+         (progn
+           (delete-package deleted)
+           (let ((registry (list deleted b a)))
+             (dolist (name (cons (package-name a) (package-nicknames a)))
+               (is (eq a (miricl-runtime:find-global-package-name name registry #'package-name #'package-nicknames))))
+             (is (eq b (miricl-runtime:find-global-package-name (package-name b) registry #'package-name #'package-nicknames)))
+             (is (null (miricl-runtime:find-global-package-name "PACKAGE-MISSING" registry #'package-name #'package-nicknames))))
+           (let ((names (list (cons "LOCAL-A" a) (cons "LOCAL-B" b))))
+             (is (eq a (miricl-runtime:find-local-package-name "LOCAL-A" names)))
+             (is (eq b (miricl-runtime:find-local-package-name "LOCAL-B" names)))
+             (is (null (miricl-runtime:find-local-package-name "local-a" names)))
+             (is (null (miricl-runtime:find-local-package-name "MISSING" names))))
+           (import (list nil) a)
+           (let* ((symbol (intern "SHARED" a))
+                  (state (vector #'package-name #'find-symbol)))
+             (import symbol b)
+             (is (equal (list symbol) (miricl-runtime:find-all-package-symbols "SHARED" (list a b deleted) state)))
+             (is (equal '(nil) (miricl-runtime:find-all-package-symbols "NIL" (list a b deleted) state)))
+             (is (null (miricl-runtime:find-all-package-symbols "MISSING" (list a b deleted) state)))
+             (export (intern "INHERITED-ONLY" a) a)
+             (use-package a b)
+             (is (null (miricl-runtime:find-all-package-symbols "INHERITED-ONLY" (list b deleted) state)))))
+      (delete-package b) (delete-package a))))
+
+(test package-raw-multiple-value-contract
+  ;; Public single-valued calls can hide a raw helper clobbering a caller's
+  ;; pending packet. Exercise those helper boundaries directly instead.
+  (let ((original (fdefinition 'miricl::package-runtime-wat)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'miricl::package-runtime-wat)
+                 (lambda ()
+                   (miricl::runtime-wat-sequence
+                    (funcall original)
+                    (miricl::wat-fragment
+                     (format nil
+                      "(func (export ~S) (param $mode i32) (result i32)
+                         (local $saved (ref null eq))
+                         (global.set $extra-values (call $cons (call $int (i32.const 42)) (ref.null eq)))
+                         (local.set $saved (global.get $extra-values))
+                         (if (i32.eq (local.get $mode) (i32.const 0))
+                           (then (drop (call $find-global-package ~A))))
+                         (if (i32.eq (local.get $mode) (i32.const 1))
+                           (then (drop (call $used-by (global.get $cl-package)))))
+                         (if (i32.eq (local.get $mode) (i32.const 2))
+                           (then (drop (call $name-list (call $cons ~A (ref.null eq))))))
+                         (if (i32.eq (local.get $mode) (i32.const 3))
+                           (then (call $check-defpackage (ref.null eq))))
+                         (ref.eq (local.get $saved) (global.get $extra-values)))"
+                      "package-values-preserved"
+                      (miricl::wat-string (miricl::wat-text-literal "COMMON-LISP"))
+                      (miricl::wat-string (miricl::wat-text-literal "NICKNAME")))))))
+           (let* ((miricl::*interpreter-only-wasm* nil)
+                  (miricl::*interpreter-wasm* (m:interpreter-wasm :compiler nil)))
+             (m:with-interpreter (vm)
+               (dolist (mode '(0 1 2 3))
+                 (is (= 1 (wt:instance-call (miricl::interpreter-context vm)
+                                            (miricl::interpreter-instance vm)
+                                            "package-values-preserved" mode)))))))
+      (setf (fdefinition 'miricl::package-runtime-wat) original))))

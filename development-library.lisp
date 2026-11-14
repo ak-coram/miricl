@@ -188,18 +188,22 @@
            (let ((upgraded (upgraded-array-element-type (cadr type))))
              (cond ((eq upgraded 'character) 1) ((eq upgraded 'bit) 3) ((null upgraded) 4) (t 2))))
           (t 2))))
+(let ((%sequence-default-character (code-char 0)))
+;; The unspecified initial contents retain the target's chosen NUL character.
+;; Capture it at library initialization so later CODE-CHAR redefinition cannot
+;; alter allocation performed inside MAP or the sealed compiler.
 (defun make-sequence (result-type size &key (initial-element nil supplied-p))
   (let* ((kind (%sequence-result-kind result-type))
          (result (cond ((eql kind 0) (make-list size :initial-element initial-element))
                        ((eql kind 1) (make-string size :initial-element
-                                      (if supplied-p initial-element (code-char 0))))
+                                      (if supplied-p initial-element %sequence-default-character)))
                        ((eql kind 3) (make-array size :element-type 'bit :initial-element
                                       (if supplied-p initial-element 0)))
                        ((eql kind 4) (if supplied-p (make-array size :element-type nil :initial-element initial-element)
                                                        (make-array size :element-type nil)))
                        (t (%%sequence-construction 6 size initial-element)))))
     (unless (typep result result-type)
-      (error 'type-error :datum result :expected-type result-type)) result))
+      (error 'type-error :datum result :expected-type result-type)) result)))
 (defun %upgraded-complex-part-type (type environment)
   (setq type (%%derived-type 2 type environment nil))
   (when (%classp type) (setq type (class-name type)))

@@ -14,15 +14,12 @@
     (i32.and (i32.ne (call $value-n (local.get $x)) (i32.const 0))
       (i32.ne (call $value-n (local.get $x)) (i32.const 2147483645)))))
 
+(defun $integer-power-of-two-p-cl ()
+  (runtime-function-definition '$integer-power-of-two-p-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$integer-power-of-two-p-cl 'miricl-runtime:integer-power-of-two-p :result :truth))))
+
 (define-runtime-function $integer-power-of-two-p (($x :object)) (i32)
-  (:locals ($i i32) ($bits i32))
-  #@(if (call $scalar-integer-p (local.get $x))
-    (then (return (i64.eq (i64.popcnt (call $magnitude64 (local.get $x))) (i64.const 1)))))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (call $integer-length (local.get $x))))
-    (local.set $bits (i32.add (local.get $bits) (i32.popcnt (call $digit (local.get $x) (local.get $i)))))
-    (if (i32.gt_u (local.get $bits) (i32.const 1)) (then (return (i32.const 0))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(i32.eq (local.get $bits) (i32.const 1)))
+  #@(call $integer-power-of-two-p-cl (local.get $x)))
 
 (define-runtime-function $upgraded-complex-part-type (($type :nullable-object) ($env :nullable-object)) (:nullable-object)
   (:locals ($expanded :nullable-object) ($class :nullable-object) ($name :nullable-object) ($result :nullable-object))
@@ -419,5 +416,5 @@
   #@(global.set $extra-values (local.get $extra)))
 
 (define-runtime-section type-runtime-wat ()
-  ($compiled-function-p) ($integer-power-of-two-p) ($upgraded-complex-part-type) ($typep) ($array-typep)
+  ($compiled-function-p) ($integer-power-of-two-p-cl) ($integer-power-of-two-p) ($upgraded-complex-part-type) ($typep) ($array-typep)
   ($check-type) ($check-value-types))

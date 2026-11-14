@@ -411,34 +411,27 @@
     #@(drop (call $eval (call $car (local.get $scan)) (ref.null eq))))
   #@(call $clear-values))
 
+(defun $loop-word-p-cl ()
+  (runtime-function-definition '$loop-word-p-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$loop-word-p-cl 'miricl-runtime:loop-word-value-p :result :truth))))
+
 (define-runtime-function $loop-word-p (($word :nullable-object) ($text :nullable-object)) (i32)
-  #@(if (i32.eqz (call $symbolp (local.get $word))) (then (return (i32.const 0))))
-  #@(call $string-equal (call $symbol-name (local.get $word)) (local.get $text)))
+  #@(call $loop-word-p-cl (local.get $word) (local.get $text)))
 
-;; Bound both retention and snapshot recursion. The expansion depends on the
-;; source syntax, while lexical bindings are resolved each time it is evaluated.
+(defun $loop-source-copy-cl ()
+  (runtime-function-definition '$loop-source-copy-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$loop-source-copy-cl 'miricl-runtime:copy-loop-syntax))))
+
 (define-runtime-function $loop-source-copy (($source :nullable-object) ($budget i32)) (:nullable-object i32)
-  (:locals ($a :nullable-object) ($b :nullable-object))
-  #@(if (i32.ne (call $tag (local.get $source)) (i32.const 7))
-    (then (return (local.get $source) (local.get $budget))))
-  #@(if (i32.eqz (local.get $budget)) (then (return (ref.null eq) (i32.const -1))))
-  #@(call $loop-source-copy (call $car (local.get $source)) (i32.sub (local.get $budget) (i32.const 1)))
-  #@(local.set $budget) #@(local.set $a)
-  #@(if (i32.lt_s (local.get $budget) (i32.const 0)) (then (return (ref.null eq) (local.get $budget))))
-  #@(call $loop-source-copy (call $cdr (local.get $source)) (local.get $budget))
-  #@(local.set $budget) #@(local.set $b)
-  #@(if (i32.lt_s (local.get $budget) (i32.const 0)) (then (return (ref.null eq) (local.get $budget))))
-  #@(call $cons (local.get $a) (local.get $b)) #@(local.get $budget))
+  (:locals ($result :nullable-object))
+  #@(if (i32.lt_s (local.get $budget) (i32.const 0)) (then (return (ref.null eq) (i32.const -1))))
+  #@(local.set $result (call $loop-source-copy-cl (local.get $source) (call $int (local.get $budget))))
+  #@(call $car (local.get $result))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $cdr (local.get $result))))))
 
-(define-runtime-function $loop-source-equal (($a :nullable-object) ($b :nullable-object)) (i32)
-  #@(loop $tail
-    (if (ref.eq (local.get $a) (local.get $b)) (then (return (i32.const 1))))
-    (if (i32.or (i32.ne (call $tag (local.get $a)) (i32.const 7)) (i32.ne (call $tag (local.get $b)) (i32.const 7)))
-      (then (return (i32.const 0))))
-    (if (i32.eqz (call $loop-source-equal (call $car (local.get $a)) (call $car (local.get $b))))
-      (then (return (i32.const 0))))
-    (local.set $a (call $cdr (local.get $a))) (local.set $b (call $cdr (local.get $b))) (br $tail))
-  #@(unreachable))
+(defun $loop-source-equal ()
+  (runtime-function-definition '$loop-source-equal
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$loop-source-equal 'miricl-runtime:loop-syntax-equal-p :result :truth))))
 
 (define-runtime-function $cached-loop-expansion (($args :nullable-object)) (:nullable-object)
   (:locals ($i i32) ($budget i32) ($entry :nullable-object) ($snapshot :nullable-object) ($expanded :nullable-object))
@@ -719,5 +712,5 @@
   #@(global $loop-library-symbols (mut (ref $objects)) (array.new_default $objects (i32.const 0)))
   #@(global $loop-expansions (ref $objects) (array.new_default $objects (i32.const 32)))
   #@(global $loop-expansion-slot (mut i32) (i32.const 0))
-  ($initialize-loop) ($loop-word-p) ($loop-source-copy) ($loop-source-equal) ($cached-loop-expansion)
+  ($initialize-loop) ($loop-word-p-cl) ($loop-word-p) ($loop-source-copy-cl) ($loop-source-copy) ($loop-source-equal) ($cached-loop-expansion)
   ($eval-arithmetic-step) ($eval-list-test) ($eval-list-accumulate) ($eval-numeric-collect) ($loop-expansion) ($eval-loop))

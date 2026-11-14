@@ -82,6 +82,36 @@ Keep the default precompiled browser image below 1 MiB (1,048,576 raw bytes). Tr
 and compressed sizes separately; download compression does not replace this
 size budget. Preserve the compiler-free image for lightweight scripting.
 
+Design optimization policy around compact browser deployment by default:
+`(optimize (space 3) (speed 1))`. Give users local control over measured hot
+paths, for example `(optimize (speed 3) (space 1))`. When SPACE exceeds SPEED,
+favor shared helpers, conservative inlining and little code duplication. When
+SPEED exceeds SPACE, allow larger inlining budgets, specialization and code
+duplication where they plausibly reduce execution time. At equal priorities,
+prefer changes improving both and resolve uncertain tradeoffs toward smaller
+code. Keep sound optimizations that improve both size and speed available at
+every policy level, including proof-based removal of checks, dead code and
+redundant boxing.
+
+Inlining growth follows the caller's policy, while preserving the callee's
+semantic contracts. INLINE strongly encourages expansion within bounded work
+and growth limits; NOTINLINE vetoes it. Estimate growth after simplification
+and account for complete emitted modules, including imports, literals and
+retained shared helpers, rather than relying only on source-form counts.
+COMPILATION-SPEED independently controls analysis effort. SPEED and SPACE must
+not implicitly lower SAFETY or DEBUG, change redefinition/visibility contracts,
+or imply STRIP. The 1 MiB budget applies to the default shipped image; it does
+not forbid users from deliberately trading space for speed in their programs.
+Keep the shipped interpreter/compiler compact and annotate measured hot paths
+selectively. This is the intended policy; distinguish it from heuristics that
+do not yet implement these controls.
+
+During the runtime migration, prioritize completing ports. Compare generated
+code and performance with equivalent SBCL code; optimize further during a port
+only when generated code is substantially slower. Record other speed and size
+candidates in compiler.org with affected functions, evidence and tradeoffs, so
+later work can prioritize mechanisms benefiting many functions.
+
 The long-term runtime direction is ordinary Common Lisp cross-compiled on the
 bootstrap host by MIRICL, above a small native substrate for representation and platform
 operations. Migrate measured runtime slices incrementally, preserving target
@@ -94,6 +124,12 @@ private helper inlining. Keep checked boundaries before SAFETY 0 internals.
 The host compiler path is bootstrap tooling; development and application
 compilation belong in the compiler running inside Wasm. Share compiler sources
 and passes rather than building an independent host application compiler.
+Retain the full Wasm bootstrap path: build the interpreter, run the compiler
+interpreted inside it, then compile that compiler to native Wasm. This remains
+a required benchmark of interpreter performance and correctness; do not replace
+it with host compilation of the full compiler to bypass the interpreted stage.
+Host cross-compilation remains useful for runtime kernels and fast iteration.
+Measure interpreted bootstrap separately from native compiler throughput.
 Keep a persistent SBCL REPL for the host cross-compiler too. After loading
 MIRICL, use MIRICL-CROSS:COMPILE-LAMBDA or COMPILE-MODULE to emit target code
 directly, reload edited backend definitions, and compare the actual Wasm worker
@@ -116,6 +152,11 @@ Precompiled compiler modules can retain sealed internal function bindings, so
 redefining one global function there may not update its callers. Use the source
 compiler for this loop. Runtime WAT/import changes require rebuilding a matching
 cold image, and representation/bootstrap changes may require a fresh session.
+The source compiler itself uses live Lisp definitions. Tests that temporarily
+replace primitives used by the compiler must run against the sealed native
+image, or isolate their planner queries: replacing those dependencies can also
+break the source compiler during the test. Preserve the redefinition regression;
+do not weaken it to accommodate the REPL workflow.
 When rebuilding runtime code in a persistent host REPL, clear the matching
 image cache explicitly: `*interpreter-wasm*` / `*interpreter-wasm-compact*`,
 `*interpreter-only-wasm*`, or `*interpreter-native-compiler-wasm*` in MIRICL.
@@ -130,6 +171,12 @@ fresh compiled image before changing their tests.
 Confirm promising changes with the precompiled compiler and application checks
 before relying on them; interpreter compilation timings are not native compiler
 performance measurements.
+For JIT measurements, warm every candidate and representative branch before
+collecting samples. A shared benchmark dispatcher can make candidates compete
+for the same inlining budget; use equivalent separate drivers when that would
+distort the comparison. Alternating sample order alone does not remove warmup
+or feedback bias. Inspect generated code or JIT traces when tiny-case results
+contradict the emitted operations.
 Do full compiler builds at meaningful checkpoints and full application rebuilds
 less frequently. Reuse an existing native application bundle for runtime-only
 experiments, and rebuild the application after measured changes justify it.

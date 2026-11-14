@@ -1,0 +1,11 @@
+(in-package :cl-user)
+(setf miricl-port-bench:*cases*
+      '(("mark-sequence/list-match" mark-sequence-values (list 2 '(1 2 1 3 2) (make-array 5 :element-type 'bit :initial-element 0) (vector 0 nil #'eql nil 0 5 nil 5 0 0 nil)) :calls 100000)
+        ("mark-sequence/list-predicate" mark-sequence-values (list nil '(1 2 1 3 2) (make-array 5 :element-type 'bit :initial-element 0) (vector 1 nil #'oddp nil 0 5 nil 5 0 0 nil)) :calls 100000)
+        ("mark-sequence/reverse-limited" mark-sequence-values (list 2 '(1 2 1 3 2) (make-array 5 :element-type 'bit :initial-element 0) (vector 0 nil #'eql nil 0 5 t 1 0 0 nil)) :calls 100000)
+        ("mark-sequence/vector" mark-sequence-values (list 2 #(1 2 1 3 2) (make-array 5 :element-type 'bit :initial-element 0) (vector 0 nil #'eql nil 0 5 nil 5 0 0 nil)) :calls 100000)
+        ("mark-sequence/key" mark-sequence-values (list 2 '((1) (2) (1) (3) (2)) (make-array 5 :element-type 'bit :initial-element 0) (vector 0 #'car #'eql nil 0 5 nil 5 0 0 nil)) :calls 100000)
+        ("mark-sequence/string" mark-sequence-values (list #\a "aλ🙂aa" (make-array 5 :element-type 'bit :initial-element 0) (vector 0 nil #'eql nil 0 5 nil 5 2 97 nil)) :calls 100000)
+        ("mark-sequence/folded" mark-sequence-values (list #\a "aAλΛa" (make-array 5 :element-type 'bit :initial-element 0) (vector 0 nil #'char-equal nil 0 5 nil 5 3 65 #'char-upcase)) :calls 100000)
+        ("mark-sequence/negated" mark-sequence-values (list 2 '(1 2 1 3 2) (make-array 5 :element-type 'bit :initial-element 0) (vector 0 nil #'/= t 0 5 nil 5 0 0 nil)) :calls 100000)
+        ("mark-sequence/predicate-not" mark-sequence-values (list nil '(1 2 1 3 2) (make-array 5 :element-type 'bit :initial-element 0) (vector 2 nil #'oddp nil 0 5 nil 5 0 0 nil)) :calls 100000)))

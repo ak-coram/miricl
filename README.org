@@ -21,6 +21,7 @@ Miricl is a Common Lisp implementation for browsers, Node.js and
 Wasmtime, with an interactive interpreter, a self-hosted native Wasm
 compiler, and a whole-program optimizer. Try the [[https://ak-coram.github.io/miricl/][browser REPL]], [[https://ak-coram.github.io/miricl/game-of-life/][Game of
 Life]], [[https://ak-coram.github.io/miricl/maxima/][Maxima]], [[https://ak-coram.github.io/miricl/fricas/][FriCAS]], [[https://ak-coram.github.io/miricl/acl2/][ACL2]], [[https://ak-coram.github.io/miricl/coalton/][Coalton]] or [[https://ak-coram.github.io/miricl/mcclim/][McCLIM demonstrations]].
+[[https://ak-coram.github.io/miricl/compiler-statistics.html][Compiler and prover statistics]] cover the CI build and self-compilation.
 
 The runtime implements CLOS, conditions and restarts, packages,
 streams, ASDF/UIOP integration, JavaScript interop and cooperative

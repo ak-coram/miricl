@@ -63,6 +63,10 @@
   #@(struct.set $obj $c (ref.cast (ref $obj) (local.get $entry)) (local.get $buffer))
   #@(local.get $buffer))
 
+(defun $compiled-file-p-cl ()
+  (runtime-function-definition '$compiled-file-p-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$compiled-file-p-cl 'miricl-runtime:compiled-byte-header-p :result :truth))))
+
 (define-runtime-function $compiled-file-p (($entry :nullable-object)) (i32)
   (:locals ($buffer (ref $text-stream)) ($data :digits) ($length i32) ($source :nullable-object))
   #@(local.set $source (struct.get $obj $b (ref.cast (ref $obj) (local.get $entry))))
@@ -72,11 +76,7 @@
       (struct.get $text-stream $data (local.get $buffer)))
     (else (local.set $length (array.len (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $source))))))
       (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $source)))))))
-  #@(if (i32.lt_u (local.get $length) (i32.const 8)) (then (return (i32.const 0))))
-  #@(i32.and (i32.eqz (array.get $digits (local.get $data) (i32.const 0)))
-    (i32.and (i32.eq (array.get $digits (local.get $data) (i32.const 1)) (i32.const 97))
-      (i32.and (i32.eq (array.get $digits (local.get $data) (i32.const 2)) (i32.const 115))
-        (i32.eq (array.get $digits (local.get $data) (i32.const 3)) (i32.const 109))))))
+  #@(call $compiled-file-p-cl (call $text (local.get $data)) (call $int (local.get $length))))
 
 (define-runtime-function $compiled-source (($stream :nullable-object) ($start :nullable-object) ($end :nullable-object)) (:nullable-object)
   (:locals ($buffer (ref $text-stream)) ($data :digits) ($first i32) ($last i32) ($size i32) ($i i32))
@@ -153,18 +153,12 @@
 
 ;; Explicit empty directories are separate from files; mounted file paths also
 ;; imply their parents. No directory objects or new GC layouts are required.
+(defun $source-path-prefix-cl ()
+  (runtime-function-definition '$source-path-prefix-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$source-path-prefix-cl 'miricl-runtime:path-prefix-value-p :result :truth))))
+
 (define-runtime-function $source-path-prefix (($path :nullable-object) ($candidate :nullable-object)) (i32)
-  (:locals ($a :digits) ($b :digits) ($i i32) ($length i32))
-  #@(local.set $a (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $path)))))
-  #@(local.set $b (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $candidate)))))
-  #@(local.set $length (array.len (local.get $a)))
-  #@(if (i32.le_u (array.len (local.get $b)) (local.get $length)) (then (return (i32.const 0))))
-  #@(if (i32.ne (array.get $digits (local.get $b) (local.get $length)) (i32.const 47)) (then (return (i32.const 0))))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $length)))
-    (if (i32.ne (array.get $digits (local.get $a) (local.get $i)) (array.get $digits (local.get $b) (local.get $i)))
-      (then (return (i32.const 0))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(i32.const 1))
+  #@(call $source-path-prefix-cl (local.get $path) (local.get $candidate)))
 
 (define-runtime-function $source-directory-p (($path :nullable-object)) (i32)
   (:locals ($scan :nullable-object) ($candidate :nullable-object))
@@ -463,6 +457,10 @@
     (local.set $ahead (i32.sub (local.get $ahead) (i32.const 1))) (br $character))
   #@(unreachable))
 
+(defun $file-column-cl ()
+  (runtime-function-definition '$file-column-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$file-column-cl 'miricl-runtime:text-position-column))))
+
 (define-runtime-function $file-column (($stream :nullable-object)) (i32)
   (:locals ($buffer (ref $text-stream)) ($data :digits) ($length i32) ($position i32) ($count i32) ($i i32) ($c i32))
   #@(local.set $count (array.get $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $stream))) (i32.const 4)))
@@ -471,16 +469,8 @@
   #@(local.set $length (struct.get $text-stream $length (local.get $buffer)))
   #@(local.set $position (call $value-n (local.get $stream)))
   #@(local.set $data (struct.get $text-stream $data (local.get $buffer)))
-  #@(local.set $i (local.get $position))
-  #@(local.set $count (i32.const 0))
-  #@(if (i32.gt_u (local.get $i) (local.get $length))
-        (then (local.set $count (i32.sub (local.get $i) (local.get $length))) (local.set $i (local.get $length))))
-  #@(block $line (loop $previous (br_if $line (i32.eqz (local.get $i)))
-        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
-        (local.set $c (array.get $digits (local.get $data) (local.get $i)))
-        (br_if $line (i32.eq (local.get $c) (i32.const 10)))
-        (local.set $count (i32.add (local.get $count) (i32.ne (i32.and (local.get $c) (i32.const 192)) (i32.const 128))))
-        (br $previous)))
+  #@(local.set $count (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $file-column-cl (call $text (local.get $data)) (call $int (local.get $length)) (call $int (local.get $position)))))))
   #@(array.set $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $stream))) (i32.const 4) (local.get $count))
   #@(local.get $count))
 
@@ -562,9 +552,9 @@
   #@(global $source-directories (mut (ref null eq)) (ref.null eq))
   #@(global $source-deleted (mut (ref null eq)) (ref.null eq))
   ($source-deleted-p)
-  ($source-path-prefix) ($source-directory-p) ($source-directory-delete)
+  ($source-path-prefix-cl) ($source-path-prefix) ($source-directory-p) ($source-directory-delete)
   ($make-logical-path) ($print-pathname) ($pathname-metadata) ($pathname-parts) ($pathname-match-native)
   ($file-time) ($new-source-file) ($touch-source-file) ($flush-source-file)
-  ($file-type-error) ($file-error) ($file-buffer) ($compiled-file-p) ($compiled-source) ($file-source) ($file-grow) ($file-unlink)
+  ($file-type-error) ($file-error) ($file-buffer) ($compiled-file-p-cl) ($compiled-file-p) ($compiled-source) ($file-source) ($file-grow) ($file-unlink)
   ($filesystem-native) ($open-file-native) ($close-file-native)
-  ($file-column) ($file-write-text) ($file-byte) ($file-character) ($file-query))
+  ($file-column-cl) ($file-column) ($file-write-text) ($file-byte) ($file-character) ($file-query))

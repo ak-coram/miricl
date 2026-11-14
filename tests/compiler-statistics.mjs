@@ -28,6 +28,12 @@ try {
   assert.ok(count('lowering/wasm-output-bytes', '') > 0);
   check(`(and (eql (funcall *statistics-test-function* '(17)) 17)
     (null (funcall *statistics-test-function* 7)))`);
+  vm.evaluate(`(emit-native-module (compile-to-hir
+    '(lambda (x y) (declare (optimize (safety 3) (debug 0)) (inline cons car))
+       (car (cons x y))))) (values)`);
+  const forwarding = await readCompilationStatistics(vm);
+  assert.ok(forwarding.some(row => row.rule === 'planning/cons-field-forward' && row.count > 0));
+  assert.ok(forwarding.some(row => row.rule === 'optimization/value-forward' && row.count > 0));
   disableCompilationStatistics(vm);
   check('(null (compilation-statistics-report))');
   check(`(and (equal (multiple-value-list (with-compilation-statistics (counts) (values 11 :extra))) '(11 :extra))

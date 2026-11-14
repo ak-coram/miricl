@@ -2,17 +2,13 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-(define-runtime-function $integer-all-ones-p (($x :object)) (i32)
-  (:locals ($i i32) ($last i32) ($value i32))
-  #@(local.set $last (i32.sub (call $integer-length (local.get $x)) (i32.const 1)))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $last)))
-    (if (i32.ne (call $digit (local.get $x) (local.get $i)) (i32.const 32767)) (then (return (i32.const 0))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(local.set $value (call $digit (local.get $x) (local.get $last)))
-  #@(i32.eqz (i32.and (local.get $value) (i32.add (local.get $value) (i32.const 1)))))
+(defun $integer-all-ones-p-cl ()
+  (runtime-function-definition '$integer-all-ones-p-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$integer-all-ones-p-cl 'miricl-runtime:integer-all-ones-p :result :truth))))
 
-;; Internal endpoint: N sign, A exponent, B true for 2^exponent-1. These are
-;; never exposed as Lisp integers and need no enormous digit arrays.
+(define-runtime-function $integer-all-ones-p (($x :object)) (i32)
+  #@(call $integer-all-ones-p-cl (local.get $x)))
+
 (define-runtime-function $integer-power-endpoint (($exponent :object) ($sign i32) ($ones i32)) (:object)
   #@(if (i32.eqz (call $value-n (local.get $exponent)))
     (then (return (call $int (select (i32.const 0) (local.get $sign) (local.get $ones))))))
@@ -48,27 +44,13 @@
   #@(i32.mul (local.get $sign) (local.get $cmp)))
 
 ;; Normalize real interval designators to the integer points they contain.
-(define-runtime-function $integer-interval-bound (($bound :nullable-object) ($lower i32)) (:nullable-object)
-  (:locals ($exclusive i32) ($sign i32) ($number :object) ($quotient :object) ($remainder :object))
-  #@(if (i32.eq (call $id (local.get $bound)) (i32.const ,(runtime-symbol-id '*))) (then (return (ref.null eq))))
-  #@(if (i32.eq (call $tag (local.get $bound)) (i32.const 7))
-    (then (call $arity (local.get $bound) (i32.const 1) (i32.const 1))
-      (local.set $bound (call $car (local.get $bound))) (local.set $exclusive (i32.const 1))))
-  #@(local.set $number (call $rational (call $real (local.get $bound))))
-  #@(if (i32.eq (call $tag (local.get $number)) (i32.const 1))
-    (then (if (i32.eqz (local.get $exclusive)) (then (return (local.get $number))))
-      (return (call $iadd (local.get $number) (call $int (select (i32.const 1) (i32.const -1) (local.get $lower)))))))
-  #@(local.set $sign (call $value-n (call $numerator (local.get $number))))
-  #@(call $idiv (call $iabs (call $numerator (local.get $number))) (call $denominator (local.get $number)))
-  #@(local.set $remainder) #@(local.set $quotient)
-  #@(if (i32.lt_s (local.get $sign) (i32.const 0)) (then (local.set $quotient (call $negative (local.get $quotient)))))
-  #@(if (if (result i32) (call $value-n (local.get $remainder))
-      (then (i32.eq (local.get $lower) (i32.gt_s (local.get $sign) (i32.const 0)))) (else (local.get $exclusive)))
-    (then (local.set $quotient (call $iadd (local.get $quotient) (call $int (select (i32.const 1) (i32.const -1) (local.get $lower)))))))
-  #@(local.get $quotient))
+(defun $integer-interval-bound-cl ()
+  (runtime-function-definition '$integer-interval-bound-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$integer-interval-bound-cl 'miricl-runtime:integer-interval-bound-value))))
 
-;; Kind 1 is an integer interval; kind 2 is NIL; kind 0 is outside this
-;; kernel. COVERAGE permits a target real/rational interval's integer points.
+(define-runtime-function $integer-interval-bound (($bound :nullable-object) ($lower i32)) (:nullable-object)
+  #@(call $integer-interval-bound-cl (local.get $bound) (call $bool (local.get $lower))))
+
 (define-runtime-function $integer-type-interval
     (($type :nullable-object) ($coverage i32) ($env :nullable-object)) (:nullable-object :nullable-object i32)
   (:locals ($name :nullable-object) ($args :nullable-object) ($width :nullable-object)
@@ -221,5 +203,5 @@
   #@(call $two-values (call $symbol (i32.const 1)) (call $symbol (i32.const 1))))
 
 (define-runtime-section integer-type-runtime-wat ()
-  ($integer-all-ones-p) ($integer-power-endpoint) ($integer-endpoint-width) ($integer-endpoint-compare)
-  ($integer-interval-bound) ($integer-type-interval) ($integer-subtypep))
+  ($integer-all-ones-p-cl) ($integer-all-ones-p) ($integer-power-endpoint) ($integer-endpoint-width) ($integer-endpoint-compare)
+  ($integer-interval-bound-cl) ($integer-interval-bound) ($integer-type-interval) ($integer-subtypep))

@@ -188,26 +188,16 @@
       (then (return (local.get $type))))))
   #@(ref.null eq))
 
-(define-runtime-function $cons-type-parts
-    (($type :nullable-object)) (:nullable-object :nullable-object i32)
-  (:locals ($args :nullable-object) ($car :nullable-object) ($cdr :nullable-object))
-  #@(if (i32.ne (call $id (local.get $type)) (i32.const ,(runtime-symbol-id 'cons)))
-    (then
-      (if (i32.ne (call $operator (local.get $type)) (i32.const ,(runtime-symbol-id 'cons)))
-        (then (return (ref.null eq) (ref.null eq) (i32.const 0))))
-      (local.set $args (call $cdr (local.get $type)))
-      (call $arity (local.get $args) (i32.const 0) (i32.const 2))))
-  #@(local.set $car (call $symbol (i32.const 1)))
-  #@(local.set $cdr (local.get $car))
-  #@(if (i32.eqz (ref.is_null (local.get $args)))
-    (then
-      (if (i32.ne (call $id (call $car (local.get $args))) (i32.const ,(runtime-symbol-id '*)))
-        (then (local.set $car (call $car (local.get $args)))))
-      (local.set $args (call $cdr (local.get $args)))
-      (if (i32.eqz (ref.is_null (local.get $args)))
-        (then (if (i32.ne (call $id (call $car (local.get $args))) (i32.const ,(runtime-symbol-id '*)))
-          (then (local.set $cdr (call $car (local.get $args)))))))))
-  #@(local.get $car) #@(local.get $cdr) #@(i32.const 1))
+(defun $cons-type-parts-cl ()
+  (runtime-function-definition '$cons-type-parts-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$cons-type-parts-cl 'miricl-runtime:cons-type-components))))
+
+(define-runtime-function $cons-type-parts (($type :nullable-object)) (:nullable-object :nullable-object i32)
+  (:locals ($parts :nullable-object))
+  #@(if (i32.eq (call $tag (local.get $type)) (i32.const 7)) (then (call $check-apply-list (local.get $type))))
+  #@(local.set $parts (call $cons-type-parts-cl (local.get $type)))
+  #@(if (ref.is_null (local.get $parts)) (then (return (ref.null eq) (ref.null eq) (i32.const 0))))
+  #@(call $car (local.get $parts)) #@(call $cdr (local.get $parts)) #@(i32.const 1))
 
 (define-runtime-function $cons-positive-subtypep
     (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (i32)
@@ -330,5 +320,5 @@
 
 (define-runtime-section real-type-runtime-wat ()
   ($real-type-interval) ($adjacent-float) ($float-interval-bound) ($real-subtypep) ($numeric-subtypep)
-  ($subtype-class) ($cons-type-parts) ($cons-positive-subtypep) ($finite-subtype-target-p) ($finite-subtypep)
+  ($subtype-class) ($cons-type-parts-cl) ($cons-type-parts) ($cons-positive-subtypep) ($finite-subtype-target-p) ($finite-subtypep)
   ($subtypep-native))

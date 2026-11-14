@@ -29,6 +29,29 @@ assert.equal(vm.evaluate('(+ 20 22)').output, '42\n');
 assert.equal((await vm.evaluateAsync('(miricl-threads:join-thread *background-worker*)')).output, '17\n');
 console.log('PASS synchronous evaluation alongside a background thread');
 
+// Application builders transfer compiled files after async LOAD finishes.
+// Let the host clock advance beyond that evaluation's time slice, then make
+// transfers large enough to visit cooperative runtime loops. A direct host
+// export must not try to suspend through its ordinary JavaScript entry.
+const originalHostService = vm.hostService.bind(vm);
+let clockAdvance = 0;
+vm.hostService = (operation, argument) => originalHostService(operation, argument)
+  + (operation === 1 ? clockAdvance : 0);
+const transferPath = '/thread-transfer.bin';
+const transferBytes = Uint8Array.from({length: 4096}, (_, index) => index % 256);
+await vm.evaluateAsync('(progn (miricl-threads:thread-yield) (values))');
+clockAdvance += 1000;
+vm.mountFile(transferPath, transferBytes);
+for (const _ of transferBytes) assert.deepEqual(await vm.readFile(transferPath), transferBytes);
+await vm.evaluateAsync(`(defparameter *transfer-worker*
+  (miricl-threads:make-thread (lambda () (sleep 0.01) 42))) (values)`);
+clockAdvance += 1000;
+assert.deepEqual(await vm.readFile(transferPath), transferBytes);
+assert.equal((await vm.evaluateAsync('(miricl-threads:join-thread *transfer-worker*)')).output, '42\n');
+clockAdvance += 1000;
+assert.deepEqual(await vm.readFile(transferPath), transferBytes);
+console.log('PASS file transfers after async evaluation and background work');
+
 // A DOM-style callback can arrive while the last active Lisp thread is
 // sleeping in UNWIND-PROTECT cleanup, with a pending nonlocal transfer.
 await vm.evaluateAsync(`
@@ -53,6 +76,8 @@ while (!callbackFixture.cleanupEntered) {
   assert.ok(performance.now() < callbackDeadline, 'Worker did not enter cleanup.');
   await new Promise(resolve => setTimeout(resolve, 1));
 }
+clockAdvance += 1000;
+for (const _ of transferBytes) assert.deepEqual(await vm.readFile(transferPath), transferBytes);
 assert.equal(callbackFixture.good(40), 42);
 assert.throws(() => callbackFixture.bad(), /External callback failure/);
 assert.equal(callbackFixture.good(41), 43);

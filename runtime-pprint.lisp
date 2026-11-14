@@ -186,16 +186,14 @@
   #@(if (global.get $circle-phase) (then (global.set $circle-stream (local.get $stream))))
   #@(local.get $stream))
 
+(defun $pretty-tab-size-cl ()
+  (runtime-function-definition '$pretty-tab-size-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$pretty-tab-size-cl 'miricl-runtime:pretty-tab-distance))))
+
 (define-runtime-function $pretty-tab-size (($column i32) ($section i32) ($kind i32) ($n i32) ($inc i32)) (i32)
-  #@(if (i32.or (i32.eq (local.get $kind) (i32.const 8)) (i32.eq (local.get $kind) (i32.const 10)))
-    (then (local.set $column (i32.sub (local.get $column) (local.get $section)))))
-  #@(if (i32.ge_u (local.get $kind) (i32.const 9))
-    (then (if (local.get $inc) (then (local.set $n (i32.add (local.get $n)
-      (i32.rem_u (i32.sub (local.get $inc) (i32.rem_u (i32.add (local.get $column) (local.get $n)) (local.get $inc))) (local.get $inc))))))
-      (return (local.get $n))))
-  #@(if (i32.lt_s (local.get $column) (local.get $n)) (then (return (i32.sub (local.get $n) (local.get $column)))))
-  #@(if (i32.eqz (local.get $inc)) (then (return (i32.const 0))))
-  #@(i32.sub (local.get $inc) (i32.rem_u (i32.sub (local.get $column) (local.get $n)) (local.get $inc))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $pretty-tab-size-cl (call $int (local.get $column)) (call $int (local.get $section)) (call $int (local.get $kind))
+      (call $cons (call $int (local.get $n)) (call $cons (call $int (local.get $inc)) (ref.null eq))))))))
 
 (define-runtime-function $pretty-event
     (($stream :nullable-object) ($kind i32) ($n :nullable-object) ($inc :nullable-object)) (:nullable-object)
@@ -439,5 +437,5 @@
 
 (define-runtime-section pprint-runtime-wat ()
   ($pretty-pop) ($pretty-next) ($pretty-list-body) ($pretty-list-pass) ($pretty-action) ($pretty-list-apply) ($require-pprint-table) ($pprint-initial-table) ($pprint-entry) ($pprint-apply)
-  ($pretty-context) ($pretty-add) ($pretty-start) ($pretty-tab-size) ($pretty-event)
+  ($pretty-context) ($pretty-add) ($pretty-start) ($pretty-tab-size-cl) ($pretty-tab-size) ($pretty-event)
   ($pretty-flat-width) ($pretty-line) ($pretty-render) ($pretty-finish) ($pretty-reference) ($pretty-call) ($object-identity))

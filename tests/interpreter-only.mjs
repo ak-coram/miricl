@@ -13,12 +13,22 @@ const noCompiler = `(and (not (fboundp 'miricl-compiler::ensure-compiler))
   (not (fboundp 'miricl-compiler:compile-native))
   (fboundp 'miricl-compiler:compile-to-hir)
   (not (fboundp 'miricl-compiler::optimize-hir-checked))
+  (not (fboundp 'miricl-compiler::hir-integer-bounds))
   (not (fboundp 'miricl-compiler::hir-code-to-unit))
   (not (fboundp 'miricl-compiler:emit-native-module))
   (fboundp (miricl-compiler::compiler-primitive 10 1 "%COMPILE-CLOSURE"))
   (not (find-class 'miricl-compiler::hir-constant nil)))`;
 try {
   check(noCompiler);
+  // COMPILE still lowers declared SAFETY 0 functions to HIR without the
+  // optional native compiler's type-proof helpers.
+  for (const debug of [0, 2]) check(`(let ((fn (compile nil '(lambda (n)
+      (declare (type (integer 0 1000) n) (optimize (safety 0) (debug ${debug})))
+      (values (1+ n) n)))))
+    (and (compiled-function-p fn) (equal (multiple-value-list (funcall fn 7)) '(8 7))))`);
+  check(`(let ((fn (compile nil '(lambda (x)
+      (declare (type single-float x) (optimize (safety 0) (debug 0))) (+ 0.0 x)))))
+    (and (compiled-function-p fn) (= (funcall fn -0.0) 0.0)))`);
   check(`(let* ((x 40) (fn (lambda () (incf x))) (values (multiple-value-list (compile nil fn))))
     (and (= (length values) 3) (not (second values)) (not (third values))
       (compiled-function-p (first values)) (not (compiled-function-p fn))

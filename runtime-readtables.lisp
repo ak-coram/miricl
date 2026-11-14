@@ -2,10 +2,17 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-(define-runtime-function $require-readtable (($table :nullable-object)) (:object)
-  #@(if (i32.ne (call $tag (local.get $table)) (i32.const 37))
-    (then (call $list-type-error (local.get $table) (i32.const ,(runtime-symbol-id 'readtable)))))
-  #@(ref.as_non_null (local.get $table)))
+(defun $require-readtable-cl ()
+  (runtime-function-definition '$require-readtable-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$require-readtable-cl 'miricl-runtime:checked-readtable-value))))
+
+(define-runtime-function $require-readtable (($x :nullable-object)) (:object)
+  ;; Before function installation, bootstrap constants use the native type boundary.
+  #@(if (global.get $cl-kernel-functions-ready)
+    (then (return (ref.as_non_null (call $require-readtable-cl (local.get $x))))))
+  #@(if (i32.ne (call $tag (local.get $x)) (i32.const 37))
+    (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'readtable)))))
+  #@(ref.as_non_null (local.get $x)))
 
 (define-runtime-function $readtable-mode () (i32)
   #@(call $value-n (call $require-readtable (call $symbol-value
@@ -14,13 +21,12 @@
 ;; Syntax is a small native opcode: 0 constituent, 1 whitespace, 2 single
 ;; escape, 3 multiple escape; built-in macros use their original ASCII code.
 ;; A copied macro retains its behavior, not its original invocation character.
+(defun $standard-reader-syntax-cl ()
+  (runtime-function-definition '$standard-reader-syntax-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$standard-reader-syntax-cl 'miricl-runtime:standard-syntax-code))))
+
 (define-runtime-function $standard-reader-syntax (($code i32)) (i32)
-  #@(if (call $white (local.get $code)) (then (return (i32.const 1))))
-  #@(if (i32.eq (local.get $code) (i32.const 92)) (then (return (i32.const 2))))
-  #@(if (i32.eq (local.get $code) (i32.const 124)) (then (return (i32.const 3))))
-  (runtime-wat-forms (loop for code in '(34 35 39 40 41 44 59 96) collect
-    `(if (i32.eq (local.get $code) (i32.const ,code)) (then (return (local.get $code))))))
-  #@(i32.const 0))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $standard-reader-syntax-cl (call $int (local.get $code)))))))
 
 (define-runtime-function $readtable-syntax (($table :nullable-object) ($code i32)) (i32)
   (:locals ($cell :nullable-object))
@@ -347,8 +353,8 @@
   #@(global $reader-readtable (mut (ref null eq)) (ref.null eq))
   #@(global $reader-object-present (mut i32) (i32.const 1))
   #@(global $standard-dispatch-functions (mut (ref null eq)) (ref.null eq))
-  ($standard-reader-syntax) ($readtable-syntax) ($reader-syntax) ($reader-white) ($refresh-reader-readtable)
+  ($standard-reader-syntax-cl) ($standard-reader-syntax) ($readtable-syntax) ($reader-syntax) ($reader-white) ($refresh-reader-readtable)
   ($copy-reader-entries) ($copy-reader-entry) ($set-reader-syntax) ($set-syntax-from-char)
   ($readtable-entry) ($macro-character-apply) ($dispatch-character-apply) ($standard-dispatch-function)
   ($readtable-macro-characters)
-  ($require-readtable) ($readtable-mode) ($readtable-case-access) ($readtable-apply))
+  ($require-readtable-cl) ($require-readtable) ($readtable-mode) ($readtable-case-access) ($readtable-apply))
