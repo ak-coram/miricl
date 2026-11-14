@@ -18,7 +18,7 @@ assert.ok(adaptedStart > 0);
 assert.throws(() => portAcl2Source('defuns.lisp', Buffer.from(source.replace(
   '(defun all-fnnames1-invariant-risk (flg x i wrld acc)',
   '(defun all-fnnames1-invariant-risk (flg x i wrld acc)\n; changed upstream'))), /source changed/);
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 const evaluate = async text => (await vm.evaluateAsync(text, {eof: true})).output;
 try {
   await evaluate(`

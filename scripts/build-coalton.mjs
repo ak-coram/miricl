@@ -7,7 +7,7 @@ import {gzipSync} from 'node:zlib';
 import {examples} from '../coalton/examples.mjs';
 import {versionAssets} from './version-assets.mjs';
 const root = path.resolve(import.meta.dirname, '..');
-const [imagePath = 'miricl-precompiled.wasm', corePath = 'build/coalton/coalton.wasm',
+const [imagePath = 'miricl.wasm', corePath = 'build/coalton/coalton.wasm',
   output = 'build/coalton/site', ...options] = process.argv.slice(2);
 const initialized = options.length === 3 && options[0] === '--initialized-image';
 if (options.length && !initialized) throw new Error('Expected --initialized-image IMAGE TEST-REPORT.');
@@ -32,7 +32,7 @@ if (initialized) {
       || snapshotReport.snapshotSha256 !== sha256(checkpoint))
     throw new Error('Expected a Coalton image that passed restored-session validation.');
 }
-const dataAssets = checkpoint ? ['coalton-image.wasm.gz'] : ['miricl.wasm', 'coalton.wasm'];
+const dataAssets = checkpoint ? ['coalton-image.wasm.gz'] : ['miricl.wasm.gz', 'coalton.wasm.gz'];
 const replacements = {'@@REVISION@@': revision};
 await fs.mkdir(output, {recursive: true});
 await Promise.all([
@@ -50,12 +50,13 @@ await Promise.all([
   fs.copyFile(path.join(root, 'vendor/coalton/LICENSE.txt'), path.join(output, 'LICENSE.txt')),
   fs.copyFile(path.join(root, 'LICENSE'), path.join(output, 'MIRICL-LICENSE')),
 ]);
-for (const name of ['miricl.wasm', 'coalton.wasm', 'coalton-image.wasm.gz']) {
+for (const name of ['miricl.wasm.gz', 'coalton.wasm.gz', 'coalton-image.wasm.gz']) {
   const data = name === 'coalton-image.wasm.gz' ? (checkpoint && gzipSync(checkpoint, {level: 9}))
-    : checkpoint ? null : name === 'miricl.wasm' ? image : core;
+    : checkpoint ? null : gzipSync(name === 'miricl.wasm.gz' ? image : core, {level: 9});
   if (data) await fs.writeFile(path.join(output, name), data);
   else await fs.rm(path.join(output, name), {force: true});
 }
+await Promise.all(['miricl.wasm', 'coalton.wasm'].map(name => fs.rm(path.join(output, name), {force: true})));
 const dependencies = JSON.parse(await fs.readFile(path.join(root, 'coalton/dependencies.json'), 'utf8'));
 const notices = [];
 for (const dependency of dependencies) {

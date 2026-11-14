@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
 try {
   vm.evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
@@ -268,12 +268,12 @@ try {
     check(`(equal (multiple-value-list (funcall *inline-function* ${args})) '(${expected}))`);
   }
   for (const [operator, entry, trueInputs, falseInputs] of [
-    ['consp', 'native-consp-inline', ["'(1 . 2)", "'(nil)"], ['nil', 't', '17', '#(1)', '"x"']],
+    ['consp', null, ["'(1 . 2)", "'(nil)"], ['nil', 't', '17', '#(1)', '"x"']],
     ['simple-vector-p', 'native-simple-vector-p-inline', ['#()', '#(1 2)', '(make-array 3)'],
       ['nil', '17', "'(1 2)", '"x"', '(make-array 3 :fill-pointer 1)', '(make-array 3 :adjustable t)']],
   ]) {
     const result = await compile(`(lambda (x) (declare (inline ${operator})) (${operator} x))`);
-    assert.ok(result.imports.includes(entry), operator);
+    if (entry) assert.ok(result.imports.includes(entry), operator);
     assert.ok(!result.imports.includes('native-function-reference'), operator);
     for (const input of trueInputs)
       check(`(equal (multiple-value-list (funcall *inline-function* ${input})) '(t))`);
@@ -312,10 +312,67 @@ try {
   const inferredCons = await compile(`(lambda (x y)
     (declare (optimize (safety 0)) (inline cons cdr))
     (let ((cell (cons x y))) (cdr cell)))`);
-  assert.ok(inferredCons.imports.includes('native-cdr-list-inline'));
+  assert.ok(!inferredCons.imports.includes('native-cdr-checked'));
   assert.ok(!inferredCons.imports.includes('native-function-reference'));
   check(`(and (eq (funcall *inline-function* 17 :tail) :tail)
     (null (funcall *inline-function* 17 nil)))`);
+  for (const expression of [
+    '(if (consp x) (car x) :atom)',
+    '(if (not (consp x)) :atom (car x))',
+    '(let ((valid (consp x))) (if valid (car x) :atom))',
+  ]) {
+    const guarded = await compile(`(lambda (x)
+      (declare (optimize (safety 0) (debug 0)) (inline consp not car)) ${expression})`);
+    assert.ok(!guarded.imports.some(name => name.startsWith('native-car-')), 'CONSP proves the dominated read is a cons');
+    check(`(and (eq (funcall *inline-function* '(:head . :tail)) :head)
+      (eq (funcall *inline-function* nil) :atom) (eq (funcall *inline-function* 7) :atom))`);
+  }
+  const guardedVector = await compile(`(lambda (x)
+    (declare (optimize (safety 0) (debug 0)) (inline simple-vector-p svref))
+    (if (simple-vector-p x) (svref x 0) :other))`);
+  assert.ok(!guardedVector.imports.includes('native-function-reference'), 'A vector predicate proves the private representation');
+  check(`(and (eq (funcall *inline-function* #(:first)) :first)
+    (eq (funcall *inline-function* "text") :other) (eq (funcall *inline-function* nil) :other))`);
+  for (const body of [
+    '(if (consp x) (progn (setq x 7) (car x)) (car x))',
+    '(let ((change (lambda () (setq x 7)))) (if (consp x) (progn (funcall change) (car x)) (car x)))',
+    '(let ((valid (consp x))) (setq valid t) (if valid (car x) nil))',
+    '(flet ((consp (ignored) (declare (ignore ignored)) t)) (if (consp x) (car x) nil))',
+  ]) {
+    const mutable = await compile(`(lambda (x)
+      (declare (optimize (safety 0) (debug 0)) (inline consp car)) ${body})`);
+    assert.ok(mutable.imports.includes('native-car-inline-checked'), 'Mutation, capture and shadowing cannot certify a cons read');
+    check(`(handler-case (progn (funcall *inline-function* 7) nil)
+      (type-error (condition) (eql (type-error-datum condition) 7)))`);
+    if (!body.startsWith('(flet') && !body.includes('setq valid'))
+      check(`(handler-case (progn (funcall *inline-function* (list 1)) nil)
+        (type-error (condition) (eql (type-error-datum condition) 7)))`);
+  }
+  const unpromisedPredicate = await compile(`(lambda (x)
+    (declare (optimize (safety 0) (debug 0)) (inline car) (notinline consp))
+    (if (consp x) (car x) :other))`);
+  assert.ok(unpromisedPredicate.imports.includes('native-car-inline-checked'), 'NOTINLINE predicates do not provide definition proofs');
+  for (const exposeHelper of [false, true]) {
+    vm.evaluate(`(multiple-value-bind (entries bytes)
+      (compile-native-module
+        '((defun read-guarded-cons (x)
+            (declare (optimize (safety 0) (debug 0)) (inline car)) (car x))
+          (defun guarded-cons-entry (x)
+            (declare (optimize (safety 0) (debug 0)) (inline consp))
+            (if (consp x) (read-guarded-cons x) :other)))
+        :entry-points '(guarded-cons-entry ${exposeHelper ? 'read-guarded-cons' : ''}) :inline nil)
+      (defparameter *guarded-cons-entries* entries)
+      (with-open-file (out "/guarded-cons-module.wasm" :direction :output :if-exists :supersede
+        :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
+    const imports = WebAssembly.Module.imports(await WebAssembly.compile(await vm.readFile('/guarded-cons-module.wasm')));
+    assert.equal(imports.some(entry => entry.name === 'native-car-inline-checked'), exposeHelper,
+      'Only a private helper can inherit every caller\'s CONSP proof');
+    check(`(let ((entry (cdr (assoc 'guarded-cons-entry *guarded-cons-entries*))))
+      (and (eq (funcall entry '(:head)) :head) (eq (funcall entry 7) :other)))`);
+    if (exposeHelper) check(`(let ((entry (cdr (assoc 'read-guarded-cons *guarded-cons-entries*))))
+      (and (null (funcall entry nil))
+        (handler-case (progn (funcall entry 7) nil) (type-error () t))))`);
+  }
   for (const defaultArgument of ['', ' default']) {
     const lookup = await compile(`(lambda (key table default)
       (declare (inline gethash)) (gethash key table${defaultArgument}))`);
@@ -475,5 +532,115 @@ try {
             (let ((new (compiler-primitive 17 bytes literals nil)))
               (and (= (funcall *inline-function* #(42)) 42) (eq (funcall new #(42)) :replacement)))))
         (setf (symbol-function 'row-major-aref) original))))`);
-  console.log('Inline types: canonical definitions, no dynamic lookup, narrow/wide indices, result counts, operand effects, bound/free declaration scope, local shadowing, NOTINLINE, first-class references and fresh emission facts pass.');
+  for (const [operator, accessor] of [['rplaca', 'car'], ['rplacd', 'cdr']]) {
+    const emitted = await compile(`(lambda (cell value)
+      (declare (type cons cell) (optimize (safety 0) (debug 2))
+        (inline ${operator} ${accessor}))
+      (${operator} cell value)
+      (values cell (${accessor} cell)))`);
+    assert.ok(!emitted.imports.includes('native-function-reference'),
+      `A proven inline ${operator} must use a direct field store`);
+    check(`(let* ((cell (list :before)) (value (list :after))
+                  (results (multiple-value-list (funcall *inline-function* cell value))))
+      (and (= (length results) 2) (eq (first results) cell)
+        (eq (second results) value) (eq (${accessor} cell) value)))`);
+    check(`(let ((cell (list :before)))
+      (funcall *inline-function* cell nil) (null (${accessor} cell)))`);
+    await compile(`(lambda (cell value)
+      (declare (optimize (safety 3)) (inline ${operator}))
+      (${operator} cell value))`);
+    check(`(every (lambda (bad)
+      (handler-case (progn (funcall *inline-function* bad 42) nil)
+        (type-error (condition) (eql (type-error-datum condition) bad)))) '(nil 7 :bad))`);
+    await compile(`(lambda (cell value)
+      (declare (type cons cell) (optimize (safety 0)) (notinline ${operator}))
+      (${operator} cell value))`);
+    check(`(let ((original (symbol-function '${operator})))
+      (unwind-protect
+        (progn
+          (setf (symbol-function '${operator})
+            (lambda (cell value) (declare (ignore cell value)) (values :replacement :extra)))
+          (equal (multiple-value-list (funcall *inline-function* (list :cell) 42))
+            '(:replacement :extra)))
+        (setf (symbol-function '${operator}) original)))`);
+  }
+  const eqlBranch = await compile(`(lambda (x y)
+    (declare (optimize (debug 0)) (inline eql))
+    (if (eql x y) :same :different))`);
+  assert.ok(eqlBranch.imports.includes('native-eql-test'), 'A branch-only EQL needs no boxed Lisp boolean');
+  check(`(every (lambda (pair)
+    (eq (funcall *inline-function* (first pair) (second pair))
+      (if (eql (first pair) (second pair)) :same :different)))
+    (list (list (ash 1 90) (ash 1 90)) (list 1 1.0d0) (list 1.0d0 1.0d0)
+      (list #\\a #\\b) (list :same :same) (list nil nil) (list (list 1) (list 1))))`);
+  const observedEql = await compile(`(lambda (x y)
+    (declare (optimize (debug 0)) (inline eql))
+    (let ((answer (eql x y))) (values answer (if answer :same :different))))`);
+  assert.ok(observedEql.imports.includes('native-eql-inline'), 'An observed boolean must retain its Lisp value');
+  check(`(equal (multiple-value-list (funcall *inline-function* 7 7)) '(t :same))`);
+  for (const operator of ['eql', '<']) for (const exposeHelper of [false, true]) {
+    vm.evaluate(`(multiple-value-bind (entries bytes)
+      (compile-native-module
+        '((defun equality-helper (x)
+            (declare (optimize (safety 0) (debug 0)) (inline ${operator})) (${operator} x 1000))
+          (defun equality-entry ()
+            (declare (optimize (safety 0) (debug 0))) (equality-helper 30)))
+        :entry-points '(equality-entry ${exposeHelper ? 'equality-helper' : ''}) :inline nil)
+      (defparameter *equality-entries* entries)
+      (with-open-file (out "/equality-module.wasm" :direction :output :if-exists :supersede
+        :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
+    const imports = WebAssembly.Module.imports(await WebAssembly.compile(await vm.readFile('/equality-module.wasm')));
+    // The factory itself calls LIST/CONS, so its generic call imports cannot
+    // identify a comparison. EQL has its own distinct runtime entry.
+    if (operator === 'eql') assert.equal(imports.some(entry => /^native-eql-(inline|test)$/.test(entry.name)), exposeHelper,
+      'Private call facts can remove equality; an exported helper must accept outside callers');
+    const invoke = `(funcall (cdr (assoc 'equality-entry *equality-entries*)))`;
+    check(operator === 'eql' ? `(null ${invoke})` : invoke);
+    if (exposeHelper) {
+      const invokeHelper = `(funcall (cdr (assoc 'equality-helper *equality-entries*)) 1000)`;
+      check(operator === 'eql' ? invokeHelper : `(null ${invokeHelper})`);
+    }
+  }
+  check(`(and
+    (equal (hir-integer-comparison-type 'eql '(integer 7 7) '(integer 7 7)) '(eql t))
+    (eq (hir-integer-comparison-type 'eq '(integer 7 7) '(integer 7 7)) 'boolean)
+    (eq (hir-integer-comparison-type 'eql '(integer 0 9) '(integer 10 *)) 'null)
+    (eq (hir-integer-comparison-type 'eql '(integer 0 *) '(integer 7 7)) 'boolean)
+    (eq (hir-integer-comparison-type 'eql '(satisfies opaque-predicate) 'integer) 'boolean))`);
+  // Interval comparisons must work beyond the scalar representation, preserve
+  // operand effects/value contexts, and retain calls when ranges overlap.
+  for (const [operator, left, right, x, y, expected] of [
+    ['<', '(integer * -10)', '(integer 0 *)', -(1n << 100n), 1n << 100n, true],
+    ['<', '(integer 10 *)', '(integer * 10)', 10n, 10n, false],
+    ['<=', '(integer * 10)', '(integer 10 *)', 10n, 10n, true],
+    ['<=', '(integer 11 *)', '(integer * 10)', 11n, 10n, false],
+    ['>', '(integer 11 *)', '(integer * 10)', 1n << 100n, -(1n << 100n), true],
+    ['>', '(integer * 10)', '(integer 10 *)', 10n, 10n, false],
+    ['>=', '(integer 10 *)', '(integer * 10)', 10n, 10n, true],
+    ['>=', '(integer * 9)', '(integer 10 *)', 9n, 10n, false],
+    ['=', '(integer 7 7)', '(integer 7 7)', 7n, 7n, true],
+    ['=', '(integer * -1)', '(integer 0 *)', -1n, 0n, false],
+    ['/=', '(integer * -1)', '(integer 0 *)', -1n, 0n, true],
+    ['/=', '(integer 7 7)', '(integer 7 7)', 7n, 7n, false],
+  ]) {
+    const result = await compile(`(lambda (x y)
+      (declare (optimize (safety 0) (debug 0)) (inline ${operator})
+        (type ${left} x) (type ${right} y)) (${operator} x y))`);
+    assert.ok(!result.imports.includes('native-function-reference'), `${operator}: proven comparison`);
+    check(`(equal (multiple-value-list (funcall *inline-function* ${x} ${y})) '(${expected ? 't' : 'nil'}))`);
+    await compile(`(lambda (x y)
+      (declare (optimize (safety 0) (debug 0)) (inline ${operator})
+        (type ${left} x) (type ${right} y))
+      (let ((events nil))
+        (values (${operator} (progn (push :left events) (values x :extra))
+                            (progn (push :right events) (values y :extra)))
+                (reverse events))))`);
+    check(`(equal (multiple-value-list (funcall *inline-function* ${x} ${y}))
+      '(${expected ? 't' : 'nil'} (:left :right)))`);
+  }
+  const overlapping = await compile(`(lambda (x y)
+    (declare (optimize (safety 0) (debug 0)) (inline <) (type integer x y)) (< x y))`);
+  assert.ok(overlapping.imports.includes('native-function-reference'), 'Overlapping unbounded ranges retain the comparison');
+  check(`(and (funcall *inline-function* -1 0) (not (funcall *inline-function* 0 0)))`);
+  console.log('Inline types: canonical definitions, cons mutation and identity, branch-only/observed EQL, no dynamic lookup, narrow/wide indices, result counts, operand effects, bound/free declaration scope, local shadowing, NOTINLINE, first-class references and fresh emission facts pass.');
 } finally {vm.close();}

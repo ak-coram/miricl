@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createCoalton} from '../scripts/coalton.mjs';
 import {examples} from '../coalton/examples.mjs';
 
-const session = await createCoalton(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'),
+const session = await createCoalton(await fs.readFile(process.argv[2] ?? 'miricl.wasm'),
   process.argv.includes('--snapshot') ? null : await fs.readFile(process.argv[3] ?? 'build/coalton/coalton.wasm'), {
     replPackage: 'COMMON-LISP-USER', progress: message => console.log(`Coalton REPL session: ${message}`)});
 try {

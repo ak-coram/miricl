@@ -147,16 +147,21 @@ try {
   const core = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
   const repl = Buffer.concat([core, Buffer.from([0, 2, 1, 120])]);
   fs.writeFileSync(binary, core);
-  assert.equal(measureWasmImages(binary).length, 1, 'A WASI image is optional');
+  assert.ok(measureWasmImages(binary).some(image => image.file === binary),
+    'Measure the requested image without requiring a WASI companion');
   fs.writeFileSync(companion, repl);
   const imageSizes = measureWasmImages(binary);
-  assert.deepEqual(imageSizes, [core, repl].map((bytes, index) => ({
-    file: index ? companion : binary, rawBytes: bytes.length,
-    gzipBytes: gzipSync(bytes, {level: 9}).length,
-    brotliBytes: brotliCompressSync(bytes,
-      {params: {[constants.BROTLI_PARAM_QUALITY]: 11}}).length,
-  })));
-  assert.equal(measureWasmImages(companion).length, 1, 'Do not duplicate the tested image');
+  for (const [file, bytes] of [[binary, core], [companion, repl]]) {
+    const image = imageSizes.find(image => image.file === file);
+    assert.ok(image, `Missing measurements for ${file}`);
+    const expected = {rawBytes: bytes.length, downloadBytes: bytes.length,
+      gzipBytes: gzipSync(bytes, {level: 9}).length,
+      brotliBytes: brotliCompressSync(bytes,
+        {params: {[constants.BROTLI_PARAM_QUALITY]: 11}}).length};
+    for (const [key, value] of Object.entries(expected)) assert.equal(image[key], value, `${file}: ${key}`);
+  }
+  assert.equal(measureWasmImages(companion).filter(image => image.file === companion).length, 1,
+    'Do not duplicate measurements for the requested image');
   fs.unlinkSync(binary);
   fs.unlinkSync(companion);
   assert.match(renderAnsiReport(JSON.parse(JSON.stringify({...report, imageSizes}))),

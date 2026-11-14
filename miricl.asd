@@ -1,16 +1,37 @@
 ;;;; miricl.asd
 
+(asdf:defsystem #:miricl/cross
+  :description "Host cross-compilation to MIRICL Wasm, without Wasmtime or a guest bootstrap"
+  :serial t
+  :depends-on (#:alexandria #:named-readtables)
+  :components ((:file "package")
+               (:file "miricl-readtables")
+               (:file "runtime-bootstrap")
+               (:file "fasl-utilities")
+               (:file "hir-code")
+               (:file "fasl-format")
+               (:file "whole-program")
+               (:file "compiler-input")
+               (:file "compiler-statistics")
+               (:file "hir")
+               (:file "hir-interpreter")
+               (:file "hir-reconstruction")
+               (:file "hir-types")
+               (:file "hir-optimize")
+               (:file "wasm-compiler")
+               (:file "wasm-optimizer")
+               (:file "wasm-disassembly")
+               (:file "wasm-module-optimizer")
+               (:file "runtime-kernel-library")
+               (:file "cross-compiler")))
+
 (asdf:defsystem #:miricl
   :author "Ákos Kiss <ak@coram.pub>"
   :license "LGPL-3.0-or-later"
   :serial t
-  :depends-on (#:alexandria
-               #:cffi
-               #:named-readtables)
-  :components ((:file "package")
-               (:file "wasmtime")
-               (:file "miricl-readtables")
-               (:file "runtime-bootstrap")
+  :depends-on (#:miricl/cross
+               #:cffi)
+  :components ((:file "wasmtime")
                (:file "runtime-dsl")
                (:file "runtime-library")
                (:file "runtime-objects")
@@ -60,20 +81,6 @@
                (:static-file "file-compiler-library.lisp")
                (:static-file "evaluation-library.lisp")
                (:static-file "interpreter-library.lisp")
-               (:file "fasl-utilities")
-               (:file "hir-code")
-               (:file "fasl-format")
-               (:file "whole-program")
-               (:file "compiler-input")
-               (:file "hir")
-               (:file "hir-interpreter")
-               (:file "hir-reconstruction")
-               (:file "hir-types")
-               (:file "hir-optimize")
-               (:file "wasm-compiler")
-               (:file "wasm-optimizer")
-               (:file "wasm-disassembly")
-               (:file "wasm-module-optimizer")
                (:static-file "environment-library.lisp")
                (:static-file "pretty-library.lisp")
                (:static-file "javascript-library.lisp")
@@ -141,7 +148,7 @@
   :serial t
   :depends-on (#:miricl
                #:fiveam)
-  :components ((:file "miricl-test") (:file "wasm-optimizer-test") (:file "float-properties-test") (:file "transcendental-test") (:file "derived-type-test") (:file "package-test") (:file "symbol-test")
+  :components ((:file "miricl-test") (:file "wasm-optimizer-test") (:file "cross-compiler-test") (:file "float-properties-test") (:file "transcendental-test") (:file "derived-type-test") (:file "package-test") (:file "symbol-test")
                (:file "condition-test") (:file "format-loop-test") (:file "clos-test")
                (:file "development-test") (:file "sequence-test") (:file "character-test")
                (:file "equality-test") (:file "integer-bit-test") (:file "hash-test")

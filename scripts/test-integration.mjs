@@ -6,9 +6,9 @@ import {spawn} from 'node:child_process';
 
 const [group = 'all', directory = '.', ...options] = process.argv.slice(2);
 const image = name => path.join(directory, name);
-const wasm = image('miricl.wasm');
+const wasm = image('miricl-cold.wasm');
 const repl = image('miricl-repl.wasm');
-const precompiled = image('miricl-precompiled.wasm');
+const precompiled = image('miricl.wasm');
 const asdf = image('build/asdf/asdf.lisp');
 const test = (name, ...args) => [`tests/${name}.mjs`, ...args];
 // Compile the backend test bodies with the ready image. Cold bootstrap remains
@@ -41,6 +41,7 @@ const groups = {
     test('hir-interpreter', precompiled, image('miricl-interpreter.wasm')),
     test('compiler-runtime', wasm), test('compiler-runtime', precompiled, '--precompiled'),
     test('compiler-input', precompiled),
+    test('compiler-statistics', precompiled),
     test('evaluation-policy', wasm, precompiled, repl),
     test('core-image', precompiled),
     test('native-arguments', precompiled),
@@ -61,7 +62,7 @@ const groups = {
     test('browser-compiler', wasm, image('miricl.js')),
     test('browser-compiler', precompiled, image('miricl.js'), '--precompiled'),
     test('browser-dev-repl', wasm, repl, asdf),
-    test('ansi-html'), test('filesystem-archive'), test('size-html')],
+    test('ansi-html'), test('filesystem-archive'), test('size-html'), test('compiler-report')],
 };
 if (!['all', ...Object.keys(groups)].includes(group) || options.some(option => option !== '--list')) {
   throw new Error('Usage: node scripts/test-integration.mjs [all|runtime|compiler|asdf|browser] [build-directory] [--list]');

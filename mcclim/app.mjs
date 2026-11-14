@@ -9,7 +9,7 @@ const fail = error => {
 };
 document.getElementById('restart').addEventListener('click', () => location.reload());
 try {
-  const response = await fetch('./miricl-mcclim.wasm');
+  const response = await fetch('./miricl-mcclim.wasm.gz');
   if (!response.ok) throw new Error(`Cannot load McCLIM (${response.status}).`);
   const app = await Miricl.instantiate(await response.arrayBuffer(), {
     onOutput: text => console.log(text), onThreadError: fail,

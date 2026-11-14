@@ -78,9 +78,32 @@ Add regression coverage for malformed input and recovery after rejection.
 
 # Performance
 
+Keep the default precompiled browser image below 1 MiB (1,048,576 raw bytes). Track raw
+and compressed sizes separately; download compression does not replace this
+size budget. Preserve the compiler-free image for lightweight scripting.
+
+The long-term runtime direction is ordinary Common Lisp cross-compiled on the
+bootstrap host by MIRICL, above a small native substrate for representation and platform
+operations. Migrate measured runtime slices incrementally, preserving target
+semantics and comparing emitted code with SBCL. Host macro expansion, type
+relationships and object representations are not target contracts. Measure
+raw and compressed image size alongside performance; host tooling must not
+become a dependency of the shipped interpreter or application images.
+Compile migrated runtime code as sealed modules with block compilation and
+private helper inlining. Keep checked boundaries before SAFETY 0 internals.
+The host compiler path is bootstrap tooling; development and application
+compilation belong in the compiler running inside Wasm. Share compiler sources
+and passes rather than building an independent host application compiler.
+Keep a persistent SBCL REPL for the host cross-compiler too. After loading
+MIRICL, use MIRICL-CROSS:COMPILE-LAMBDA or COMPILE-MODULE to emit target code
+directly, reload edited backend definitions, and compare the actual Wasm worker
+with SBCL DISASSEMBLE on the equivalent CL. This loop needs no guest compiler
+bootstrap or image rebuild. Supply target macro/load-time adapters explicitly;
+an accepted host expansion is not evidence that its dependencies exist in Wasm.
+
 For compiler and Lisp runtime experiments, prefer a persistent Wasm REPL with
 the source compiler over rebuilding images for each edit. Start the ordinary
-cold compiler image with `node scripts/repl.mjs miricl.wasm --directory .`, set
+cold compiler image with `node scripts/repl.mjs miricl-cold.wasm --directory .`, set
 `miricl-compiler:*compile-evaluations*` to NIL and
 `miricl-compiler::*compiler-state*` to `:interpreted`, then LOAD the affected
 compiler source (for example, `/wasm-compiler.lisp`). Explicit COMPILE-NATIVE
@@ -93,6 +116,12 @@ Precompiled compiler modules can retain sealed internal function bindings, so
 redefining one global function there may not update its callers. Use the source
 compiler for this loop. Runtime WAT/import changes require rebuilding a matching
 cold image, and representation/bootstrap changes may require a fresh session.
+When rebuilding runtime code in a persistent host REPL, clear the matching
+image cache explicitly: `*interpreter-wasm*` / `*interpreter-wasm-compact*`,
+`*interpreter-only-wasm*`, or `*interpreter-native-compiler-wasm*` in MIRICL.
+The native image cache keys its compiler payload, so reloading a runtime WAT
+generator alone does not invalidate it. Keep the compiled payload to avoid
+repeating compiler bootstrap for runtime-only changes.
 When a source file also defines record layouts or registration tables, reload
 the affected definitions while preserving the target's existing private symbol
 identities. Successful small emissions do not establish that linker and

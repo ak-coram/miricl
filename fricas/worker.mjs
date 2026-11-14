@@ -1,3 +1,4 @@
+import {Miricl} from './miricl.mjs';
 import {decodeFilesystem} from './filesystem-archive.mjs';
 import {createFriCAS} from './fricas.mjs';
 
@@ -7,23 +8,16 @@ const resource = async name => {
   if (!response.ok) throw new Error(`Unable to load ${name}: ${response.status}`);
   return response;
 };
-const bytes = async name => (await resource(name)).arrayBuffer();
-const image = async () => {
-  const response = await resource('miricl.wasm');
-  return WebAssembly.compileStreaming && response.headers.get('Content-Type')?.split(';')[0].trim() === 'application/wasm'
-    ? WebAssembly.compileStreaming(response) : WebAssembly.compile(await response.arrayBuffer());
-};
+const bytes = async name => Miricl.decompress(await (await resource(name)).arrayBuffer());
+const image = () => bytes('miricl.wasm.gz');
 const filesystem = async () => {
-  const encoded = await bytes('filesystem.bin.gz');
-  const decoded = await new Response(new Blob([encoded]).stream()
-    .pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
-  return decodeFilesystem(decoded);
+  return decodeFilesystem(await bytes('filesystem.bin.gz'));
 };
 onmessage = async ({data}) => {
   try {
     if (data.type === 'start') {
       const [module, core, files] = await Promise.all([
-        image(), bytes('fricas.wasm'), filesystem(),
+        image(), bytes('fricas.wasm.gz'), filesystem(),
       ]);
       session = await createFriCAS(module, core, files, {
         lazyFiles: true,

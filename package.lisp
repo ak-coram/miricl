@@ -1,4 +1,12 @@
 ;;;; package.lisp
+(defpackage #:miricl-cross
+  (:use #:cl)
+  (:export #:compile-lambda #:compile-module #:runtime-kernel-wat))
+
+(defpackage #:miricl-runtime
+  (:use #:cl)
+  (:export #:property-cell #:member-eq #:list-eq))
+
 (defpackage #:miricl-debugger
   (:use #:cl)
   (:export #:frames #:frame-name #:frame-form #:frame-locals #:eval-in-frame
@@ -46,6 +54,7 @@
   (:export #:analyze-file #:shake-file #:optimize-system
            #:*block-compile-default* #:start-block #:end-block
            #:*compile-evaluations*
+           #:with-compilation-statistics #:compilation-statistics-report
            #:compile-to-hir #:verify-hir #:infer-hir-types #:hir-unit #:hir-unit-functions
            #:emit-native-module #:compile-native #:compile-native-bundle
            #:compile-module-to-hir #:compile-native-module
@@ -55,7 +64,7 @@
            #:ir-node-references #:ir-node-reason #:ir-node-retained-p))
 
 (defpackage #:wasmtime
-  (:use #:cl #:cffi)
+  (:use #:cl)
   (:export #:with-engine #:with-store #:with-byte-vec #:with-module
            #:wat-to-wasm #:compile-module #:with-instance #:instantiate
            #:callback-func #:with-callback-func #:func-instance #:instance-call

@@ -658,6 +658,10 @@
   #@(if (i32.ne (call $value-n (local.get $function)) (i32.const 2147483645)) (then (return (i32.const 0))))
   #@(if (i32.eqz (call $generic-cache-permitted-p (local.get $function)))
     (then (return (i32.const 0))))
+  #@(local.set $methods (call $generic-property (local.get $function) ,(clos-library-reference :method-combination-name)))
+  #@(if (i32.eqz (ref.eq (call $car (local.get $methods)) ,(clos-library-reference 'standard)))
+    (then (return (i32.const 0))))
+  #@(if (i32.eqz (ref.is_null (call $cdr (local.get $methods)))) (then (return (i32.const 0))))
   #@(local.set $methods (call $generic-property (local.get $function) ,(clos-library-reference :methods)))
   #@(if (i32.eqz (ref.eq (call $car (local.get $methods)) (local.get $method))) (then (return (i32.const 0))))
   #@(if (i32.eqz (ref.is_null (call $cdr (local.get $methods)))) (then (return (i32.const 0))))
@@ -698,7 +702,7 @@
   #@(call $clear-values)
   #@(local.get $found))
 
-(define-runtime-function $instance-slot-operation
+(define-runtime-function $instance-slot-operation-general
     (($mode i32) ($object :nullable-object) ($name :nullable-object) ($value :nullable-object)) (:nullable-object)
   (:locals ($storage :nullable-object) ($class :nullable-object) ($slot :nullable-object)
            ($function :nullable-object) ($args :nullable-object) ($result :nullable-object))
@@ -798,8 +802,8 @@
   #@(if (result (ref null eq)) (local.get $probe) (then (ref.null eq)) (else (local.get $function))))
 
 (define-runtime-function $ensure-instance-layout (($object :nullable-object)) (:nullable-object)
-  (:locals ($class :nullable-object) ($function :nullable-object) ($methods :nullable-object)
-           ($discriminator :nullable-object) ($layout :nullable-object) ($expected :nullable-object))
+  (:locals ($class :nullable-object) ($function :nullable-object)
+           ($layout :nullable-object) ($expected :nullable-object))
   #@(if (i32.ne (call $tag (local.get $object)) (i32.const 23)) (then (return (local.get $object))))
   ;; The default CLASS-SLOTS method reads finalized class metadata. Comparing
   ;; the existing layout directly avoids an interpreted method call per slot
@@ -810,20 +814,8 @@
     (br_if $general (ref.is_null (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $class)))
       ,(clos-library-reference :finalized)))))
     (local.set $function (call $fdefinition (call $symbol (i32.const ,(runtime-symbol-id 'class-slots)))))
-    (br_if $general (i32.ne (call $tag (local.get $function)) (i32.const 8)))
-    (br_if $general (i32.ne (call $value-n (local.get $function)) (i32.const 2147483645)))
-    (br_if $general (i32.eqz (call $generic-cache-permitted-p (local.get $function))))
-    (local.set $methods (call $generic-property (local.get $function) ,(clos-library-reference :methods)))
-    (br_if $general (i32.eqz (ref.eq (call $car (local.get $methods))
+    (br_if $general (i32.eqz (call $standard-property-generic-p (local.get $function)
       (call $symbol-value ,(clos-library-reference '%standard-class-slots-method)))))
-    (br_if $general (i32.eqz (ref.is_null (call $cdr (local.get $methods)))))
-    (local.set $discriminator (call $generic-property (local.get $function) ,(clos-library-reference :discriminating-function)))
-    (if (i32.eqz (ref.is_null (local.get $discriminator)))
-      (then
-        (br_if $general (i32.eqz (ref.test (ref $generic-discriminator) (local.get $discriminator))))
-        (br_if $general (i32.eqz (ref.eq
-          (struct.get $generic-discriminator $owner (ref.cast (ref $generic-discriminator) (local.get $discriminator)))
-          (local.get $function))))))
     (local.set $layout (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $object))) ,(clos-library-reference '%layout)))
     (br_if $general (ref.is_null (local.get $layout)))
     (local.set $expected (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $class))) ,(clos-library-reference :slots))))
@@ -866,4 +858,4 @@
     (field $args (ref null eq)) (field $next (ref null eq)))))
   ($dispatch-eql-key) ($generic-discriminator) ($generic-property) ($invoke-method) ($method-context-element) ($dispatch-class-known) ($dispatch-class) ($generic-key-match) ($generic-fixed-arity-p) ($generic-recent-call) ($generic-cache-permitted-p) ($generic-cache-row) ($generic-apply)
   ($make-generic-call-plan) ($generic-call-plan-function)
-  ($standard-property-generic-p) ($find-instance-slot) ($instance-slot-operation) ($restore-saved-slots) ($property-effective) ($ensure-instance-layout))
+  ($standard-property-generic-p) ($find-instance-slot) ($instance-slot-operation-general) ($restore-saved-slots) ($property-effective) ($ensure-instance-layout))

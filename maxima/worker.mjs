@@ -1,3 +1,4 @@
+import {Miricl} from './miricl.mjs';
 import {createMaxima} from './maxima.mjs';
 
 let session;
@@ -6,17 +7,13 @@ const resource = async name => {
   if (!response.ok) throw new Error(`Unable to load ${name}: ${response.status}`);
   return response;
 };
-const bytes = async name => (await resource(name)).arrayBuffer();
-const image = async () => {
-  const response = await resource('miricl.wasm');
-  return WebAssembly.compileStreaming && response.headers.get('Content-Type')?.split(';')[0].trim() === 'application/wasm'
-    ? WebAssembly.compileStreaming(response) : WebAssembly.compile(await response.arrayBuffer());
-};
+const bytes = async name => Miricl.decompress(await (await resource(name)).arrayBuffer());
+const image = () => bytes('miricl.wasm.gz');
 onmessage = async ({data}) => {
   try {
     if (data.type === 'start') {
       const [module, core] = await Promise.all([
-        image(), bytes('maxima.core'),
+        image(), bytes('maxima.core.gz'),
       ]);
       session = await createMaxima(module, core, {
         progress: message => postMessage({type: 'status', message}),

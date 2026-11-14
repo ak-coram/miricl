@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 import {createAcl2} from '../scripts/acl2.mjs';
 
-const image = fs.readFileSync(process.argv[2] ?? 'miricl-precompiled.wasm');
+const image = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
 const init = Buffer.from(`(defpackage :acl2 (:use :cl)) (in-package :acl2)
   (defvar *acl2-readtable* (copy-readtable nil))
   (defvar *the-live-state* :fixture-state)

@@ -3,18 +3,21 @@
 import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {Miricl} from './miricl.mjs';
+import {collectCompilationStatistics} from './compilation-statistics.mjs';
 
 const [bootstrap, output] = process.argv.slice(2);
 if (!bootstrap || !output) throw new Error('Usage: node prepare-compiler-image.mjs BOOTSTRAP OUTPUT-PREFIX');
 const vm = await Miricl.instantiate(await fs.readFile(bootstrap));
 try {
-  vm.evaluate(`(in-package :miricl-compiler)
+  await collectCompilationStatistics(vm, {workload: 'compiler-bootstrap', phase: 'bootstrap native functions'}, () => vm.evaluate(`(in-package :miricl-compiler)
     (setq *compiler-bootstrapping* t)
     (defparameter *image-sources* (mapcar (lambda (name)
       (list name (compiler-source-policy (function-lambda-expression (symbol-function name))))) *native-compiler-seeds*))
     (multiple-value-bind (installed unsupported) (compile-compiler)
       (unless (and (= (length installed) (length *image-sources*)) (null unsupported))
         (error "Compiler bootstrap failed: ~S" unsupported)))
+    (values)`, {eof: true}));
+  await collectCompilationStatistics(vm, {workload: 'compiler-bootstrap', phase: 'sealed compiler module'}, () => vm.evaluate(`
     (progv (mapcar (lambda (name) (compiler-primitive 10 1 name))
         '("%FASL-RECORDS" "%FASL-SEEN" "%FILE-LOAD-VALUES"))
       (list (make-array 32 :adjustable t :fill-pointer 0) (make-hash-table :test 'eq) nil)
@@ -44,7 +47,7 @@ try {
           (let ((*print-readably* t) (*print-pretty* nil) (*print-circle* t) (*print-base* 10) (*print-radix* nil))
             (write (list (nreverse names) (nreverse codes) (nreverse roots)
               (coerce (symbol-value (compiler-primitive 10 1 "%FASL-RECORDS")) 'list)) :stream out)))))
-    (values)`, {eof: true});
+    (values)`, {eof: true}));
   const image = await vm.readFile('/compiler-image.lisp');
   // A JSON copy of the code vectors avoids implementing a Lisp reader in JS.
   const codeOutput = vm.evaluate(`(progn
@@ -143,6 +146,7 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
             }
             case 0x12: instructions.push(`return_call ${functionName(unsigned())}`); break;
             case 0x1a: instructions.push('drop'); break;
+            case 0xd3: instructions.push('ref.eq'); break;
             case 0x20: instructions.push(`local.get ${unsigned()}`); break;
             case 0x21: instructions.push(`local.set ${unsigned()}`); break;
             case 0x22: instructions.push(`local.tee ${unsigned()}`); break;
@@ -175,10 +179,21 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
             case 0xd2: instructions.push(`ref.func ${functionName(unsigned())}`); break;
             case 0xfb: {
               const gc = unsigned();
-              if (gc === 2) {assert.equal(unsigned(), 1); instructions.push(`struct.get $obj ${unsigned()}`);}
-              else if (gc === 0x17) {assert.equal(unsigned(), 1); instructions.push('ref.cast (ref null $obj)');}
+              if (gc === 2 || gc === 5) {
+                assert.equal(unsigned(), 1);
+                instructions.push(`struct.${gc === 5 ? 'set' : 'get'} $obj ${unsigned()}`);
+              }
+              else if (gc === 0x17) {
+                const type = unsigned();
+                assert.ok(type === 1 || type === 0x6d, `Unsupported nullable native heap type ${type}`);
+                instructions.push(`ref.cast (ref null ${type === 1 ? '$obj' : 'eq'})`);
+              }
               else if (gc === 0x14) {assert.equal(unsigned(), 1); instructions.push('ref.test (ref $obj)');}
-              else if (gc === 0x16) {assert.equal(unsigned(), 0x6c); instructions.push('ref.cast (ref i31)');}
+              else if (gc === 0x16) {
+                const type = unsigned();
+                assert.ok(type === 1 || type === 0x6c, `Unsupported native heap type ${type}`);
+                instructions.push(`ref.cast (ref ${type === 1 ? '$obj' : 'i31'})`);
+              }
               else if (gc === 0x1a) instructions.push('any.convert_extern');
               else if (gc === 0x1b) instructions.push('extern.convert_any');
               else if (gc === 0x1c) instructions.push('ref.i31');

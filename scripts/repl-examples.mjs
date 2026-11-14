@@ -43,14 +43,15 @@ const exampleSources = {
 (format t "Recovered total: ~A~%" (debug-order 3))`,
   arithmetic: '(+ 1/3 2/3)\n(expt 2 100)\n(values "hello λ 🙂" #c(1 2))',
   function: '(defun factorial (n)\n  (if (zerop n)\n      1\n      (* n (factorial (1- n)))))\n\n(factorial 30)',
-  compilation: `;; Press Restart first to measure a cold compiler. Reruns reuse it.
-;; One form keeps progress output streaming while compilation is running.
-(progn
+  compilation: `;; The shipped compiler is ready at startup. Compare two compilations.
+;; Define interpreted functions first so their Lisp bodies can be inspected.
+(let ((miricl-compiler:*compile-evaluations* nil))
+  (eval '(progn
 ;; DEBUG 2 keeps optimized Wasm bytes for DISASSEMBLE.
 (defun square (x)
   (declare (optimize (debug 2)))
   (* x x))
-;; DEBUG 1 is the default; it retains no disassembly data.
+;; DEBUG 1 is the default; native instruction listings require DEBUG 2.
 (defun sum-of-squares (x y)
   (declare (optimize (debug 1)))
   (+ (* x x) (* y y)))
@@ -59,14 +60,13 @@ const exampleSources = {
 (disassemble #'square)
 (disassemble #'sum-of-squares)
 
-;; The first native compilation also bootstraps the compiler with itself.
-(format t "First compilation (includes compiler bootstrap):~%")
+(format t "First compilation:~%")
 (time
   (setf (symbol-function 'square)
     (miricl-compiler:compile-native
       (function-lambda-expression #'square) :name 'square)))
 
-(format t "Second compilation (compiler already bootstrapped):~%")
+(format t "Second compilation:~%")
 (time
   (setf (symbol-function 'sum-of-squares)
     (miricl-compiler:compile-native
@@ -76,7 +76,7 @@ const exampleSources = {
 ;; SQUARE also shows its Wasm instructions, enabled by DEBUG 2.
 (disassemble #'square)
 (disassemble #'sum-of-squares)
-(values (square 12) (sum-of-squares 3 4)))`,
+(values (square 12) (sum-of-squares 3 4)))))`,
   loop: '(loop for n from 1 to 5\n      do (format t "~D squared is ~D~%" n (* n n))\n      collect (* n n))',
   environment: `;; Open your browser's developer console to inspect the logged object.
 (let* ((navigator (js:global "navigator"))

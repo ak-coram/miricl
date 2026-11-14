@@ -8,7 +8,7 @@ import {encodeFilesystem} from './filesystem-archive.mjs';
 import {prepareFriCASLibraries} from './prepare-fricas-libraries.mjs';
 import {versionAssets} from './version-assets.mjs';
 const root = path.resolve(import.meta.dirname, '..');
-const [imagePath = 'miricl-precompiled.wasm', corePath = 'build/fricas/fricas-optimized.wasm',
+const [imagePath = 'miricl.wasm', corePath = 'build/fricas/fricas-optimized.wasm',
   native = 'build/fricas/native', output = 'build/fricas/site'] = process.argv.slice(2);
 const [image, core] = await Promise.all([fs.readFile(imagePath), fs.readFile(corePath)]);
 const {files} = fricasFiles(path.resolve(native));
@@ -18,7 +18,7 @@ const shipped = [...files.filter(([name]) => (name.startsWith('/fricas/algebra/'
   ...libraries];
 await fs.mkdir(output, {recursive: true});
 await Promise.all([
-  fs.writeFile(path.join(output, 'miricl.wasm'), image), fs.writeFile(path.join(output, 'fricas.wasm'), core),
+  fs.writeFile(path.join(output, 'miricl.wasm.gz'), gzipSync(image, {level: 9})), fs.writeFile(path.join(output, 'fricas.wasm.gz'), gzipSync(core, {level: 9})),
   fs.writeFile(path.join(output, 'filesystem.bin.gz'), gzipSync(encodeFilesystem(shipped), {level: 9})),
   ...['miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs'].map(name => fs.copyFile(path.join(root, 'scripts', name), path.join(output, name))),
   ...['index.html', 'worker.mjs', 'examples.mjs'].map(name => fs.copyFile(path.join(root, 'fricas', name), path.join(output, name))),
@@ -28,8 +28,9 @@ await Promise.all([
   fs.copyFile(path.join(root, 'LICENSE'), path.join(output, 'MIRICL-LICENSE')),
 ]);
 await fs.rm(path.join(output, 'files.json.gz'), {force: true});
+await Promise.all(['miricl.wasm', 'fricas.wasm'].map(name => fs.rm(path.join(output, name), {force: true})));
 const assetVersion = await versionAssets(output, ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs',
-  'worker.mjs', 'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz']);
+  'worker.mjs', 'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm.gz', 'fricas.wasm.gz', 'filesystem.bin.gz']);
 await fs.writeFile(path.join(output, 'build.json'), JSON.stringify({revision: fricasRevision(), assetVersion,
   imageSha256: createHash('sha256').update(image).digest('hex'), coreSha256: createHash('sha256').update(core).digest('hex'),
   algebraFiles: libraries.length, algebraFormat: 'native-wasm', algebraOptimizer: 'shake-file :strip nil + compile-native-bundle',

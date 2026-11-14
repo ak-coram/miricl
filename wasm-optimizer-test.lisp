@@ -231,3 +231,28 @@
                 (make-list depth :initial-element "end "))))
     (dolist (index '(0 1 127))
       (check-module-optimization wat '(42) (list index)))))
+
+(test module-optimizer-copy-back-locals
+  (dolist (input '(-3 0 21))
+    (check-module-optimization
+      "(module (func (export \"answer\") (param i32) (result i32) (local i32)
+         local.get 0 local.tee 1 local.set 0
+         local.get 1 i32.const 2 i32.mul))" (list (* input 2)) (list input)))
+  (dolist (input '(-3 0 21))
+    (check-module-optimization
+      "(module (func (export \"answer\") (param i32) (result i32) (local i32)
+         local.get 0 local.tee 1 local.tee 0 drop
+         local.get 0 local.get 1 i32.add))" (list (* input 2)) (list input))
+    (check-module-optimization
+      "(module (func (export \"answer\") (param i32) (result i32)
+         local.get 0 local.tee 0))" (list input) (list input)))
+  ;; A call between the copies can change the value assigned back to A.
+  (check-module-optimization
+    "(module
+       (func $increment (param i32) (result i32) local.get 0 i32.const 1 i32.add)
+       (func (export \"answer\") (param i32) (result i32) (local i32)
+         local.get 0 local.tee 1 call $increment local.set 0
+         local.get 0 local.get 1 i32.add))" '(41) '(20))
+  (check-module-optimization
+    "(module (func (export \"answer\") (param i32) (result i32)
+       local.get 0 local.tee 0 local.set 0 local.get 0))" '(42) '(42)))

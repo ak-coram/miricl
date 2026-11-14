@@ -4,8 +4,9 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {Miricl} from './miricl.mjs';
 import {measureWasm} from './wasm-size.mjs';
+import {collectCompilationStatistics, writeCompilationStatistics} from './compilation-statistics.mjs';
 
-const [image = 'miricl-precompiled.wasm', input = 'build/maxima/maxima.wasm',
+const [image = 'miricl.wasm', input = 'build/maxima/maxima.wasm',
   output = 'build/maxima/maxima-optimized.wasm'] = process.argv.slice(2);
 const original = await fs.readFile(input);
 const compilerImage = await fs.readFile(image);
@@ -17,7 +18,8 @@ const vm = await Miricl.instantiate(compilerImage, {imports: {build: {
 async function phase(name, source) {
   const cpu = process.cpuUsage();
   const start = performance.now();
-  await vm.evaluateAsync(`(progn ${source} (values))`, {eof: true});
+  await collectCompilationStatistics(vm, {workload: 'maxima', phase: name},
+    () => vm.evaluateAsync(`(progn ${source} (values))`, {eof: true}));
   const milliseconds = Math.round(performance.now() - start);
   const elapsed = process.cpuUsage(cpu);
   stages.push({name, milliseconds, cpuMilliseconds: (elapsed.user + elapsed.system) / 1000});
@@ -53,5 +55,6 @@ try {
     retainedInterface: 'complete dynamic Maxima environment',
     optimizer: 'miricl-compiler:shake-file + compile-native-bundle', backend: 'native-wasm', strip: false,
   }, null, 2) + '\n');
+  await writeCompilationStatistics({workload: 'maxima', phase: 'native output', status: 'complete', recordType: 'measurement', counters: [], runtimeBytes: compilerImage.length, inputBytes: original.length, outputBytes: bytes.length});
   console.log(`Optimized Maxima: ${original.length} → ${bytes.length} bytes (${output}).`);
 } finally {vm.close();}

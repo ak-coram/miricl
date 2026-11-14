@@ -20,7 +20,7 @@ const execDefinitions = execAdapted.slice(execPortStart,
 assert.ok(portStart > 0);
 assert.throws(() => portAcl2Source('translate.lisp', Buffer.from(source.replace(
   '(defun all-fnnames1 (flg x acc)', '(defun all-fnnames1 (flg x acc)\n; changed'))), /source changed/);
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const evaluate = async text => vm.evaluateAsync(text, {eof: true});
 try {
   await evaluate(`

@@ -87,8 +87,8 @@ try {
   console.log(`Coalton REPL browser startup: ${startupMilliseconds} ms`);
   if (build.initializedImage) {
     assert.ok(requested.has(`${prefix}/coalton-image.wasm.gz`));
-    assert.ok(!requested.has(`${prefix}/coalton.wasm`), 'Snapshot startup must not replay the native bundle.');
-    assert.ok(!requested.has(`${prefix}/miricl.wasm`), 'The snapshot includes its matching runtime.');
+    assert.ok(!requested.has(`${prefix}/coalton.wasm.gz`), 'Snapshot startup must not replay the native bundle.');
+    assert.ok(!requested.has(`${prefix}/miricl.wasm.gz`), 'The snapshot includes its matching runtime.');
   }
   assert.equal(await js('document.querySelectorAll("#examples .example").length'), 6);
   assert.equal(await js('document.querySelectorAll("#source").length'), 1);

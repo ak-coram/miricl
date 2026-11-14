@@ -1,4 +1,4 @@
-// node scripts/probe-maxima.mjs [miricl-precompiled.wasm] [output.json] [source|upstream|compile|suite|share] [test names...]
+// node scripts/probe-maxima.mjs [miricl.wasm] [output.json] [source|upstream|compile|suite|share] [test names...]
 // Run in a worker so a stuck Lisp computation can be stopped from the host.
 // Suite files use separate workers; MIRICL_MAXIMA_TIMEOUT_MS bounds the run
 // and MIRICL_MAXIMA_PROBLEM_TIMEOUT_MS bounds an individual problem.
@@ -62,7 +62,7 @@ if (!isMainThread) {
       }});
   parentPort.postMessage({report});
 } else if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const image = path.resolve(process.argv[2] ?? path.join(root, 'miricl-precompiled.wasm'));
+  const image = path.resolve(process.argv[2] ?? path.join(root, 'miricl.wasm'));
   const output = path.resolve(process.argv[3] ?? path.join(root, 'build/maxima/probe.json'));
   const mode = process.argv[4] ?? 'source';
   if (!['source', 'upstream', 'compile', 'suite', 'share'].includes(mode)) throw new Error(`Unknown probe mode: ${mode}`);

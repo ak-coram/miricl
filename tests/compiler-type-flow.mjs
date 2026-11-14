@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
 try {
   vm.evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
@@ -46,6 +46,21 @@ try {
           (loop for x from -5 to 8 always
             (and (or (not (or (typep x a) (typep x b))) (typep x join))
                  (or (not (and (typep x a) (typep x b))) (typep x meet)))))) types)) types))`);
+  // Check proven comparisons against actual CL results, including holes,
+  // open-ended intervals and values outside Wasm's scalar integer range.
+  check(`(let ((types '((integer * -1) (integer 0 *) (integer -1 1)
+                       (eql 0) (member -2 2) (integer 1267650600228229401496703205376 *)))
+               (samples '(-2 -1 0 1 2 1267650600228229401496703205376 1267650600228229401496703205377)))
+    (every (lambda (name)
+      (every (lambda (a)
+        (every (lambda (b)
+          (let ((proof (hir-integer-comparison-type name a b)))
+            (every (lambda (x)
+              (every (lambda (y)
+                (or (not (and (typep x a) (typep y b)))
+                    (eq proof 'boolean)
+                    (if (eq proof 'null) (not (funcall name x y)) (funcall name x y)))) samples)) samples))) types)) types))
+      '(eq eql = /= < <= > >=)))`);
   check(`(let ((a (list :cycle)) (b (list :cycle)))
     (setf (cdr a) a (cdr b) b)
     (and (not (hir-type-equal-p (list 'member a) (list 'member b)))

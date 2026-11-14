@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {Miricl} from '../scripts/miricl.mjs';
 import {portAcl2Source} from '../acl2/host.mjs';
-const [imagePath = 'miricl-precompiled.wasm', corePath = 'build/acl2/acl2-native.wasm',
+const [imagePath = 'miricl.wasm', corePath = 'build/acl2/acl2-native.wasm',
   reportPath = 'build/acl2/native-load.json'] = process.argv.slice(2);
 const report = {passed: false, validation: 'native-core-load', initializedWorld: false};
 let vm;

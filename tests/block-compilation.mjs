@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
-const bytes = await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm');
+const bytes = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
 const builder = await Miricl.instantiate(bytes), target = await Miricl.instantiate(bytes);
 const interpreted = process.argv.includes('--interpreted');
 async function evaluate(vm, form) {return (await vm.evaluateAsync(form, {eof: true})).output.trim();}

@@ -85,9 +85,9 @@
   ;; GENSYM still creates distinct symbols throughout this library read.
   (let ((*gensym-counter* 0))
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
     unless (if compiler (equal file "interpreter-library.lisp")
-               (member file '("whole-program.lisp" "hir-reconstruction.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp"
+               (member file '("whole-program.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp"
                               "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp") :test #'equal)) append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let* ((*package* (find-package :miricl))
@@ -117,7 +117,7 @@
                       form)))))
         ;; Establish the native package and symbol identities before DEFSTRUCT
         ;; generates accessors. Public exports are declared in PACKAGE.LISP.
-        (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp") :test #'equal)
+        (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp") :test #'equal)
           (let* ((package (find-package (cond ((equal file "thread-library.lisp") :miricl-threads)
                                             ((equal file "debugger-library.lisp") :miricl-debugger)
                                             ((equal file "bundle-library.lisp") :miricl-bundle)

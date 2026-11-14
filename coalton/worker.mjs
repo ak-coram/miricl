@@ -1,3 +1,4 @@
+import {Miricl} from './miricl.mjs';
 import {createCoalton} from './coalton.mjs';
 let session, busy = false;
 const debuggerStops = new Map();
@@ -6,7 +7,7 @@ const resource = async (name, options) => {
   if (!response.ok) throw new Error(`Unable to load ${name}: ${response.status}`);
   return response;
 };
-const bytes = async name => (await resource(name)).arrayBuffer();
+const bytes = async name => Miricl.decompress(await (await resource(name)).arrayBuffer());
 onmessage = async ({data}) => {
   // Evaluation is suspended while a stop is open. Debugger commands must pass
   // through even though the ordinary evaluation request is still busy.
@@ -28,10 +29,9 @@ onmessage = async ({data}) => {
       let image, core = null;
       if (build.initializedImage) {
         postMessage({type: 'status', message: 'Loading Coalton snapshot'});
-        const response = await resource(`coalton-image.wasm.gz?v=${build.snapshotSha256}`);
-        image = await new Response(response.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+        image = await bytes(`coalton-image.wasm.gz?v=${build.snapshotSha256}`);
       } else {
-        [image, core] = await Promise.all([bytes('miricl.wasm'), bytes('coalton.wasm')]);
+        [image, core] = await Promise.all([bytes('miricl.wasm.gz'), bytes('coalton.wasm.gz')]);
       }
       session = await createCoalton(image, core, {
         replPackage: 'COMMON-LISP-USER',

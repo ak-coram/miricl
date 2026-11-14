@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
+import {gzipSync} from 'node:zlib';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const runtime = await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm');
+const runtime = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
 const source = await Miricl.instantiate(runtime);
 let saved;
 try {
@@ -182,7 +183,12 @@ for (;;) {
   if (packed) cursor += length;
   else for (let i = 0; i < length; i++) skipField(signature);
 }
-const recovered = await Miricl.instantiate(saved, options);
+const compressed = gzipSync(saved, {level: 9});
+await assert.rejects(Miricl.instantiate(compressed.subarray(0, -4)));
+// Exercise gzip snapshots, including a byte view with a nonzero buffer offset.
+const padded = new Uint8Array(compressed.length + 2);
+padded.set(compressed, 1);
+const recovered = await Miricl.instantiate(padded.subarray(1, -1), options);
 try {
   assert.equal(recovered.evaluate('(values (funcall (first *hir-counters*)) (funcall (second *hir-counters*)))').output,
     '41\n41\n');

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {createCoalton, coaltonInput} from '../scripts/coalton.mjs';
-const image = await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm');
+const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
 const snapshot = process.argv.includes('--snapshot');
 const core = snapshot ? null : await fs.readFile(process.argv[3] ?? 'build/coalton/coalton.wasm');
 assert.throws(() => coaltonInput('42', 'invalid'), /mode/);

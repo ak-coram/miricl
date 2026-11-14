@@ -76,7 +76,7 @@ if (!isMainThread) {
   } catch (error) {report.failure = {message: error.message, output: error.output, backtrace: error.backtrace};}
   finally {vm?.close(); parentPort.postMessage({report});}
 } else if (process.argv[1] && path.resolve(process.argv[1]) === import.meta.filename) {
-  const [image = 'miricl-precompiled.wasm', native = 'build/fricas/native', output = 'build/fricas/compile.json'] = process.argv.slice(2);
+  const [image = 'miricl.wasm', native = 'build/fricas/native', output = 'build/fricas/compile.json'] = process.argv.slice(2);
   const core = path.join(path.dirname(path.resolve(output)), 'fricas.wasm');
   const worker = new Worker(new URL(import.meta.url), {workerData: {image: path.resolve(image), native: path.resolve(native), core, buildOnly: process.argv.includes('--build-only')}});
   const timeout = Number(process.env.MIRICL_FRICAS_TIMEOUT_MS ?? 900000);

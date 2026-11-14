@@ -13,7 +13,7 @@ try {
   const output = path.join(temporary, 'distribution');
   const dependency = path.join(temporary, 'fset sources');
   await Promise.all([fs.mkdir(app), fs.mkdir(path.join(output, 'runtime'), {recursive: true}), fs.mkdir(dependency)]);
-  for (const name of ['miricl.wasm', 'miricl-precompiled.wasm', 'miricl-repl.wasm', 'miricl-asdf.wasm'])
+  for (const name of ['miricl-cold.wasm', 'miricl.wasm', 'miricl-repl.wasm', 'miricl-asdf.wasm'])
     await fs.writeFile(path.join(output, name), new Uint8Array());
   await fs.copyFile(path.join(root, 'game-of-life/justfile'), path.join(app, 'justfile'));
   execFileSync(process.execPath, [path.join(root, 'scripts/setup-application.mjs'),

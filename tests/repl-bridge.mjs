@@ -8,7 +8,7 @@ import {connectTerminal, createWebapp, startHost, testPorts, waitFor} from './re
 
 const binary = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
-const browserImage = path.resolve(process.argv[4] ?? path.join(path.dirname(binary), 'miricl-precompiled.wasm'));
+const browserImage = path.resolve(process.argv[4] ?? path.join(path.dirname(binary), 'miricl.wasm'));
 const bytes = await fs.readFile(browserImage);
 const [relay] = WebAssembly.Module.customSections(await WebAssembly.compile(bytes), 'miricl.repl-bridge');
 assert.ok(relay, 'The runtime must provide its terminal relay.');

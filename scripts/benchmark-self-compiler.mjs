@@ -8,14 +8,16 @@ import {createHash} from 'node:crypto';
 import {Miricl} from './miricl.mjs';
 import {measureWasm} from './wasm-size.mjs';
 import {startWasmProfile} from './wasm-profile.mjs';
+import {enableCompilationStatistics, disableCompilationStatistics, readCompilationStatistics, writeCompilationStatistics} from './compilation-statistics.mjs';
 
 const moduleMode = process.argv.includes('--module');
 const extractOnly = process.argv.includes('--extract');
 const profileEnabled = process.argv.includes('--profile');
 const synchronous = process.argv.includes('--sync');
 const individualBootstrap = process.argv.includes('--individual-bootstrap');
+const statisticsEnabled = process.argv.includes('--statistics');
 for (const option of process.argv.slice(2).filter(arg => arg.startsWith('--')))
-  if (!['--module', '--extract', '--profile', '--sync', '--individual-bootstrap'].includes(option))
+  if (!['--module', '--extract', '--profile', '--sync', '--individual-bootstrap', '--statistics'].includes(option))
     throw new Error(`Unknown benchmark option: ${option}`);
 const warmupRounds = Number(process.env.MIRICL_BENCHMARK_WARMUPS ?? 1);
 const rounds = Number(process.env.MIRICL_BENCHMARK_ROUNDS ?? 3);
@@ -137,6 +139,26 @@ benchmark: try {
       try {timed(source);} finally {hotFrames[stage] = await finish();}
     }
   }
+  let statistics;
+  if (statisticsEnabled) {
+    statistics = {};
+    // Collect in separate repetitions. Counter bookkeeping must not pollute
+    // the ordinary timing samples above or be presented as native throughput.
+    for (const [stage, source] of [['frontend', frontend], ['emission', emission]]) {
+      enableCompilationStatistics(vm);
+      try {
+        const measurement = timed(source);
+        statistics[stage] = await readCompilationStatistics(vm);
+        await writeCompilationStatistics({workload: 'compiler-corpus', phase: stage, status: 'complete',
+          counters: statistics[stage], elapsedMs: measurement.wallMs, timingIncludesCollection: true,
+          sourceSha256: createHash('sha256').update(corpus).digest('hex')});
+      }
+      finally {disableCompilationStatistics(vm);}
+    }
+    // Validate/instantiate this output too, without installing a compiler.
+    timed(installation);
+    await fs.writeFile(path.join(output, 'statistics.json'), JSON.stringify(statistics, null, 2) + '\n');
+  }
   vm.evaluate(`(with-open-file (out "/self-module.wasm" :direction :output :if-exists :supersede
                  :element-type '(unsigned-byte 8))
     (write-sequence (first (first *self-benchmark-modules*)) out)) (values)`);
@@ -156,7 +178,7 @@ benchmark: try {
     compilerPreparationMode, bootstrapBlocks: !individualBootstrap, count, moduleBytes,
     node: process.version, execArgv: process.execArgv, synchronous,
     platform: process.platform, architecture: process.arch, warmupRounds, rounds,
-    image: measureWasm(imagePath), bootstrap, compilerModule, samples, medians, hotFrames, emittedModuleVerified: true};
+    image: measureWasm(imagePath), bootstrap, compilerModule, samples, medians, hotFrames, statistics, emittedModuleVerified: true};
   await fs.writeFile(path.join(output, 'results.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(`${count} compiler functions; ${moduleBytes} emitted module bytes; output module verified.`);
 } finally {vm.close();}

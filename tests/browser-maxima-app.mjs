@@ -79,7 +79,7 @@ try {
   await command('Page.navigate', {url: `http://127.0.0.1:${server.address().port}/`});
   await waitFor('document.querySelector("#evaluate")?.disabled === false');
   console.log(`Browser maxima startup: ${Math.round(performance.now() - startupStarted)} ms`);
-  assert.ok(requested.has('/maxima.core'));
+  assert.ok(requested.has('/maxima.core.gz'));
   assert.ok(![...requested].some(name => /filesystem|files\.json|\.lisp$/.test(name)), 'Startup must only load the compiled core.');
   for (const name of ['filesystem.bin.gz', 'filesystem-archive.mjs', 'maxima.wasm', 'doc'])
     await assert.rejects(fs.access(path.join(root, name)), {code: 'ENOENT'});

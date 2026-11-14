@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {createCompilerTestVM} from './compiler-test-vm.mjs';
 
-const image = await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm');
+const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
 const definitions = `(defpackage :saved-slot-test (:use :cl)) (in-package :saved-slot-test)
   (defvar *initforms* 0) (defvar *creations* 0) (defvar *restorations* 0)
   (defclass plain () ((value :initarg :value) (next) (unbound)

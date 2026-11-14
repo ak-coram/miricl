@@ -5,11 +5,16 @@
   (asdf:load-asd (merge-pathnames "miricl.asd" root))
   (if (find-package :ql) (uiop:symbol-call :ql :quickload :miricl) (asdf:load-system :miricl))
   (ensure-directories-exist output)
-  (dolist (entry '(("miricl.wasm") ("miricl-interpreter.wasm" :compiler nil)
-                  ("miricl-precompiled.wasm" :native-compiler t)
+  (dolist (entry '(("miricl-cold.wasm") ("miricl-interpreter.wasm" :compiler nil)
+                  ("miricl.wasm" :native-compiler t)
                   ("miricl-repl.wasm" :wasi t)))
     (let ((path (merge-pathnames (first entry) output)))
       (apply #'uiop:symbol-call :miricl :write-interpreter-wasm path (rest entry))
+      (when (getf (rest entry) :native-compiler)
+        (with-open-file (in path :element-type '(unsigned-byte 8))
+          (unless (< (file-length in) 1048576)
+            (error "Precompiled image exceeds the 1 MiB raw size budget: ~D bytes."
+                   (file-length in)))))
       (format t "Wrote ~A~%" path))))
 
 ;; The runtime distribution consists of ordinary files, never embedded assets.
@@ -21,4 +26,6 @@
     (namestring (merge-pathnames "scripts/build-adapter.mjs" root))
     (namestring (merge-pathnames "miricl.js" output))) :output *standard-output* :error-output *error-output*)
   (uiop:copy-file (merge-pathnames "miricl.js" output) (merge-pathnames "miricl.js" runtime))
-  (uiop:copy-file (merge-pathnames "scripts/version-assets.mjs" root) (merge-pathnames "version-assets.mjs" runtime)))
+  (dolist (name '("version-assets.mjs" "compress-images.mjs"))
+    (uiop:copy-file (merge-pathnames (concatenate 'string "scripts/" name) root)
+                    (merge-pathnames name runtime))))

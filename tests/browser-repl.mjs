@@ -115,28 +115,20 @@ try {
   await command('Page.navigate', {url: pathToFileURL(html).href});
   await waitFor(`document.getElementById('evaluate') && ${ready}`);
   assert.equal(await input('(+ 1 2)'), '3\n');
-  assert.equal(await input('miricl-compiler::*compiler-state*'), ':COLD\n');
+  assert.equal(await input('miricl-compiler::*compiler-state*'), ':READY\n');
   await js("document.querySelector('[data-example=compilation]').click(); document.getElementById('evaluate').click()");
   await waitFor(`Array.from(document.querySelectorAll('#history pre:not(.input)')).some(p =>
-    p.textContent.includes('First compilation (includes compiler bootstrap):'))`, 60000);
-  assert.equal(await js("document.getElementById('stop').disabled"), false,
-    'The compilation progress label must reach the page while compilation is still running.');
-  // Cold self-compilation runs in an inspected worker and can exceed a minute
-  // on CI. Match the dedicated browser compiler test's bootstrap budget.
-  const bootstrapStarted = performance.now();
-  const heartbeat = setInterval(() => console.log(
-    `Browser REPL compiler bootstrap: ${Math.round((performance.now() - bootstrapStarted) / 1000)}s`), 30000);
-  try { await waitFor(completed, 480000); }
-  finally { clearInterval(heartbeat); }
+    p.textContent.includes('First compilation:'))`, 60000);
+  await waitFor(completed, 60000);
   const compilation = await output();
   assert.equal((compilation.match(/Packed Lisp code: [1-9][0-9]* bytes/g) ?? []).length, 2);
   assert.equal((compilation.match(/Wasm module: [1-9][0-9]* bytes/g) ?? []).length, 2);
   assert.equal((compilation.match(/Wasm instructions for function/g) ?? []).length, 1);
   assert.match(compilation, /local\.get/);
   assert.equal((compilation.match(/\d+ ms real time, \d+ ms run time/g) ?? []).length, 2);
-  assert.match(compilation, /First compilation \(includes compiler bootstrap\):[\s\S]*Second compilation \(compiler already bootstrapped\):/);
+  assert.match(compilation, /First compilation:[\s\S]*Second compilation:/);
   assert.match(compilation, /144\n25\n$/);
-  assert.equal(await input('miricl-compiler::*compiler-origin*'), ':FIRST-USE\n');
+  assert.equal(await input('miricl-compiler::*compiler-origin*'), ':IMAGE\n');
   for (const [name, source] of threadCases)
     assert.equal(await input(source), 'T\n', `Browser green threads: ${name}`);
   assert.match(await input('(progn (miricl-threads:make-thread (lambda () (sleep 0.02) (format t "background-thread-output~%"))) (values))'), /^(?:background-thread-output\n)?$/);

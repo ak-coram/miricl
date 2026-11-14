@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = (name, source) => {
   assert.equal(vm.evaluate(source, {eof: true}).output.trim(), 'T', name);
   console.log(`PASS ${name}`);
@@ -182,7 +182,9 @@ try {
       (if (eq name 'empty) (values) (values 1 2 3)))
     (let ((object (make-instance 'indexed-unbound)))
       (and (equal (multiple-value-list (indexed-empty object)) '(nil))
-           (equal (multiple-value-list (indexed-many object)) '(1)))))`);
+           (equal (multiple-value-list (indexed-many object)) '(1))
+           (equal (multiple-value-list (slot-value object 'empty)) '(nil))
+           (equal (multiple-value-list (slot-value object 'many)) '(1)))))`);
   check('slot type predicates run once when they redefine the class', `(progn
     (defparameter *indexed-type-calls* 0) (defparameter *indexed-redefine* nil)
     (defun indexed-type-p (value)
@@ -199,6 +201,75 @@ try {
       (setq *indexed-type-calls* 0 *indexed-redefine* t)
       (and (= (setf (indexed-typed-value object) 42) 42)
            (= *indexed-type-calls* 1) (= (indexed-typed-value object) 42))))`);
+  check('ordinary slot reads preserve receiver-specific methods and mutable cells', `(progn
+    (defclass cached-read-object () ((value :initarg :value) (empty)))
+    (defparameter *cached-read-a* (make-instance 'cached-read-object :value 17))
+    (defparameter *cached-read-b* (make-instance 'cached-read-object :value 42))
+    (dotimes (i 3) (slot-value *cached-read-a* 'value) (slot-value *cached-read-b* 'value))
+    (let ((method nil))
+      (unwind-protect
+          (progn
+            (setq method (defmethod mop:slot-value-using-class :around
+              ((class standard-class) (object (eql *cached-read-b*)) slot)
+              (+ 100 (call-next-method))))
+            (and (= (slot-value *cached-read-a* 'value) 17)
+                 (= (slot-value *cached-read-b* 'value) 142)
+                 (= (setf (slot-value *cached-read-a* 'value) 19) 19)
+                 (= (slot-value *cached-read-a* 'value) 19)))
+        (when method (remove-method #'mop:slot-value-using-class method)))))`);
+  check('ordinary slot caches follow class redefinition', `(progn
+    (defclass cached-read-object () ((pad :initform 9) (value :initarg :value) (empty)))
+    (and (= (slot-value *cached-read-a* 'value) 19)
+         (= (slot-value *cached-read-b* 'value) 42)
+         (= (slot-value *cached-read-a* 'pad) 9)))`);
+  check('read probing does not require an unused type getter', `(let
+      ((original (fdefinition 'mop:slot-definition-type)))
+    (unwind-protect
+        (progn (fmakunbound 'mop:slot-definition-type)
+          (= (slot-value *cached-read-a* 'value) 19))
+      (setf (fdefinition 'mop:slot-definition-type) original)))`);
+  check('metadata method combinations invalidate direct slot assumptions', `(progn
+    (defmethod slot-missing ((class standard-class) (object cached-read-object) name operation &optional value)
+      (declare (ignore name operation value)) :metadata-missing)
+    (define-method-combination cached-name-constant () ((methods () :required t))
+      (declare (ignore methods)) (list 'quote :renamed))
+    (let* ((get (symbol-function (miricl-compiler::compiler-primitive 10 1 "%GET")))
+           (original (funcall get #'mop:slot-definition-name :method-combination-name)))
+      (unwind-protect
+          (progn
+            (ensure-generic-function 'mop:slot-definition-name :method-combination '(cached-name-constant))
+            (eq (slot-value *cached-read-a* 'value) :metadata-missing))
+        (ensure-generic-function 'mop:slot-definition-name :method-combination original))))`);
+  check('cold slot probing does not repeat custom metadata getter effects', `(let
+      ((calls 0) (method nil))
+    (unwind-protect
+        (progn
+          (setq method (defmethod mop:slot-definition-name :around
+            ((slot mop:standard-effective-slot-definition))
+            (incf calls) (call-next-method)))
+          (let ((value (slot-value *cached-read-a* 'value)) (first-calls calls))
+            (setq calls 0)
+            (and (= value 19) (plusp first-calls)
+                 (= (slot-value *cached-read-a* 'value) 19) (= first-calls calls))))
+      (when method (remove-method #'mop:slot-definition-name method))))`);
+  // A populated cache must preserve each class/name pair, including collisions.
+  // Expectations come from the fixture's slots, not the cache's capacity.
+  const cacheSlots = Array.from({length: 128}, (_, index) => [`cache-slot-${index}`, index]);
+  const cacheClasses = Array.from({length: 12}, (_, index) => `cache-key-class-${index}`);
+  for (const name of cacheClasses)
+    vm.evaluate(`(defclass ${name} () (${cacheSlots.map(([slot, value]) =>
+      `(${slot} :initform ${value})`).join(' ')}))
+      (defparameter *${name}* (make-instance '${name})) (values)`);
+  for (let round = 0; round < 2; round++)
+    for (const name of cacheClasses)
+      check('ordinary slot reads preserve distinct keys: ' + name,
+        `(and ${cacheSlots.map(([slot, value]) => `(= (slot-value *${name}* '${slot}) ${value})`).join(' ')})`);
+  const restored = await Miricl.instantiate(vm.saveImage());
+  try {
+    assert.equal(restored.evaluate(`(and (= (slot-value *cached-read-a* 'value) 19)
+      (= (slot-value *cached-read-b* 'value) 42))`).output.trim(), 'T',
+      'Slot caches rebuild after image restore');
+  } finally {restored.close();}
   check('specialized lambda-list extraction preserves defaults and opaque specializers', `(let
       ((parameters '(x (y (eql :key)) &optional (z 42 supplied) &rest tail &key ((:size size) 17))))
     (and (equal (mop:extract-lambda-list parameters)

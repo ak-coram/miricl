@@ -199,6 +199,9 @@ try {
     }
   });
   report.exceptions = exceptions;
+  report.recentText = await js('mcclimProfile.labels.slice(-24).map(entry => entry.text)');
+  const screenshot = await command('Page.captureScreenshot', {format: 'png'});
+  await fs.writeFile(`${output}.png`, Buffer.from(screenshot.data, 'base64'));
   await fs.writeFile(`${output}.json`, JSON.stringify(report, null, 2) + '\n');
 } finally {
   fail(new Error('Profiling ended')); browser.kill(); await stopped;

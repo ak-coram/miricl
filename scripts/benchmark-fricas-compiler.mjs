@@ -14,7 +14,7 @@ const core = await fs.readFile(process.env.MIRICL_FRICAS_CORE ?? 'build/fricas/f
 // Small, medium and large generated sources, all using the ordinary compiler.
 const libraries = ['A1AGG-', 'SMP', 'RDEEFX'];
 const variants = [];
-for (const file of process.argv.slice(2).length ? process.argv.slice(2) : ['miricl-precompiled.wasm']) {
+for (const file of process.argv.slice(2).length ? process.argv.slice(2) : ['miricl.wasm']) {
   const image = await fs.readFile(file);
   variants.push({file, image, imageSha256: createHash('sha256').update(image).digest('hex'), imageBytes: image.length,
     imageGzipBytes: gzipSync(image, {level: 9}).length,

@@ -6,38 +6,38 @@ import {pathToFileURL} from 'node:url';
 import {measureFile, measureWasm} from './wasm-size.mjs';
 
 const artifacts = [
-  {file: 'miricl.wasm', description: 'Import-free Common Lisp interpreter and compiler', kind: 'wasm'},
+  {file: 'miricl-cold.wasm', description: 'Cold interpreter and compiler for bootstrapping', kind: 'wasm'},
   {file: 'miricl-interpreter.wasm', description: 'Import-free interpreter with the compact HIR compiler', kind: 'wasm'},
-  {file: 'miricl-precompiled.wasm', description: 'Import-free interpreter with bootstrapped native compiler', kind: 'wasm'},
+  {file: 'miricl.wasm', description: 'Import-free interpreter with bootstrapped native compiler', kind: 'wasm'},
   {file: 'miricl-repl.wasm', description: 'Terminal REPL and precompiled compiler for Node and WASI', kind: 'wasm'},
   {file: 'miricl-asdf.wasm', description: 'Optional ASDF and UIOP library', kind: 'wasm'},
   {file: 'miricl.html', description: 'Complete browser REPL page', kind: 'html'},
   {file: 'todo.html', description: 'Complete Common Lisp + CLOS TODO page', kind: 'html'},
-  {file: 'game-of-life/', description: 'Game of Life — total HTML, adapter, interpreter and application (4 files)',
+  {file: 'game-of-life/', description: 'Game of Life — total HTML, adapter, interpreter and application',
     kind: 'application', files: ['game-of-life/build/index.html', 'game-of-life/build/miricl.js',
-      'game-of-life/build/miricl.wasm', 'game-of-life/build/game-of-life.wasm']},
-  {file: 'game-of-life/build/game-of-life.wasm', description: 'Game of Life — Lisp payload only (included in total above)', kind: 'wasm'},
-  {file: 'maxima/', description: 'Maxima — HTML, scripts, interpreter and optimized core (9 files)',
+      'game-of-life/build/miricl.wasm.gz', 'game-of-life/build/game-of-life.wasm.gz']},
+  {file: 'game-of-life/build/game-of-life.wasm.gz', description: 'Game of Life — Lisp payload only (included in total above)', kind: 'wasm'},
+  {file: 'maxima/', description: 'Maxima — HTML, scripts, interpreter and optimized core',
     kind: 'application', files: ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-      'miricl.mjs', 'maxima.mjs', 'miricl.wasm', 'maxima.core'].map(file => `build/maxima/site/${file}`)},
-  {file: 'build/maxima/site/maxima.core', description: 'Maxima — optimized Lisp core (included in total above)', kind: 'wasm'},
-  {file: 'fricas/', description: 'FriCAS — initial HTML, scripts, interpreter, optimized image and algebra filesystem (12 files)',
+      'miricl.mjs', 'maxima.mjs', 'miricl.wasm.gz', 'maxima.core.gz'].map(file => `build/maxima/site/${file}`)},
+  {file: 'build/maxima/site/maxima.core.gz', description: 'Maxima — optimized Lisp core (included in total above)', kind: 'wasm'},
+  {file: 'fricas/', description: 'FriCAS — initial HTML, scripts, interpreter, optimized image and algebra filesystem',
     kind: 'application', files: ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-      'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm', 'fricas.wasm', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`)},
-  {file: 'build/fricas/site/fricas.wasm', description: 'FriCAS — optimized Lisp payload (included in total above)', kind: 'wasm'},
+      'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm.gz', 'fricas.wasm.gz', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`)},
+  {file: 'build/fricas/site/fricas.wasm.gz', description: 'FriCAS — optimized Lisp payload (included in total above)', kind: 'wasm'},
 ];
 const acl2Scripts = ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
   'miricl.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs'];
 const acl2Preview = [
-  {file: 'acl2/', description: 'ACL2 — HTML, scripts, interpreter, native compiled core and system sources (13 files; bootstrap unverified)',
+  {file: 'acl2/', description: 'ACL2 — HTML, scripts, interpreter, native compiled core and system sources (bootstrap unverified)',
     kind: 'application', files: [...acl2Scripts,
-      'miricl.wasm', 'acl2.wasm', 'filesystem.bin.gz'].map(file => `build/acl2/site/${file}`)},
-  {file: 'build/acl2/site/acl2.wasm', description: 'ACL2 — native compiled prover payload (included in total above; no initialized world)', kind: 'wasm'},
+      'miricl.wasm.gz', 'acl2.wasm.gz', 'filesystem.bin.gz'].map(file => `build/acl2/site/${file}`)},
+  {file: 'build/acl2/site/acl2.wasm.gz', description: 'ACL2 — native compiled prover payload (included in total above; no initialized world)', kind: 'wasm'},
   {file: 'build/acl2/site/filesystem.bin.gz', description: 'ACL2 — compressed system sources (included in total above)', kind: 'data'},
 ];
 const acl2ImageFile = 'acl2-image.wasm.gz';
 const acl2Image = [
-  {file: 'acl2/', description: 'ACL2 — HTML, scripts and initialized native prover image (11 files)',
+  {file: 'acl2/', description: 'ACL2 — HTML, scripts and initialized native prover image',
     kind: 'application', files: [...acl2Scripts, acl2ImageFile].map(file => `build/acl2/site/${file}`)},
   {file: `build/acl2/site/${acl2ImageFile}`, description: 'ACL2 — compressed initialized world and runtime (included in total above)', kind: 'data'},
 ];
@@ -47,8 +47,8 @@ const coaltonScripts = ['index.html', 'client.mjs', 'repl-debugger.mjs', 'app.mj
   'miricl.mjs', 'build.json'];
 const coaltonArtifacts = [
   {file: 'coalton/', description: 'Lisp and Coalton REPL — scripts, examples, interpreter and native compiler and standard library',
-    kind: 'application', files: [...coaltonScripts, 'miricl.wasm', 'coalton.wasm'].map(file => `build/coalton/site/${file}`)},
-  {file: 'build/coalton/site/coalton.wasm', description: 'Coalton — native compiled compiler and standard library (included in total above)', kind: 'wasm'},
+    kind: 'application', files: [...coaltonScripts, 'miricl.wasm.gz', 'coalton.wasm.gz'].map(file => `build/coalton/site/${file}`)},
+  {file: 'build/coalton/site/coalton.wasm.gz', description: 'Coalton — native compiled compiler and standard library (included in total above)', kind: 'wasm'},
 ];
 const coaltonImageFile = 'coalton-image.wasm.gz';
 const coaltonImage = [
@@ -58,9 +58,9 @@ const coaltonImage = [
 ];
 const mcclimArtifacts = [
   {file: 'mcclim/', description: 'McCLIM — demonstrations page, scripts and reusable native Lisp image',
-    kind: 'application', files: ['index.html', 'app.mjs', 'startup.lisp', 'miricl.js', 'miricl-mcclim.wasm']
+    kind: 'application', files: ['index.html', 'app.mjs', 'startup.lisp', 'miricl.js', 'miricl-mcclim.wasm.gz']
       .map(file => `build/mcclim/site/${file}`)},
-  {file: 'build/mcclim/site/miricl-mcclim.wasm', description: 'McCLIM — native compiled library, demonstrations, resources and ready compiler (included in total above)', kind: 'wasm'},
+  {file: 'build/mcclim/site/miricl-mcclim.wasm.gz', description: 'McCLIM — native compiled library, demonstrations, resources and ready compiler (included in total above)', kind: 'wasm'},
 ];
 const artifactDefinitions = [...artifacts, ...acl2Preview, ...acl2Image, booksArtifact,
   ...coaltonArtifacts, ...coaltonImage, ...mcclimArtifacts];
@@ -125,11 +125,11 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
       ...acl2Artifacts,
       ...(fs.existsSync(path.join(acl2BooksDirectory, 'manifest.json')) ? [booksArtifact] : []),
       ...selectedCoalton,
-      ...(fs.existsSync(path.join(mcclimDirectory, 'miricl-mcclim.wasm')) ? mcclimArtifacts : []),
+      ...(fs.existsSync(path.join(mcclimDirectory, 'miricl-mcclim.wasm.gz')) ? mcclimArtifacts : []),
     ].map(({files: names, ...artifact}) => {
       if (!names) return {...measure(artifact.file, artifact.kind), ...artifact};
       const files = names.map(name => measure(name));
-      const totals = Object.fromEntries(['rawBytes', 'gzipBytes', 'brotliBytes'].map(key =>
+      const totals = Object.fromEntries(['rawBytes', 'gzipBytes', 'brotliBytes', 'downloadBytes'].map(key =>
         [key, files.reduce((sum, file) => sum + file[key], 0)]));
       return {...artifact, ...totals, files};
     })};
@@ -140,7 +140,8 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
     || artifacts.some(required => !report.artifacts.some(artifact => artifact.file === required.file)))
     throw new Error('Expected measurements for the required build artifacts.');
   for (const artifact of report.artifacts) {
-    for (const key of ['rawBytes', 'gzipBytes', 'brotliBytes']) {
+    for (const key of ['rawBytes', 'gzipBytes', 'brotliBytes',
+      ...(artifact.downloadBytes === undefined ? [] : ['downloadBytes'])]) {
       if (!Number.isSafeInteger(artifact[key]) || artifact[key] < 0) throw new Error(`Invalid ${key}.`);
       if (artifact.kind === 'application' && (!Array.isArray(artifact.files)
         || artifact.files.some(file => !Number.isSafeInteger(file[key]) || file[key] < 0)
@@ -154,6 +155,7 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
   const row = artifact => `<tr data-artifact="${escape(artifact.file)}">
     <th scope="row"><code>${escape(artifact.file)}</code><small>${escape(artifact.description)}</small></th>
     <td data-size="rawBytes">${size(artifact.rawBytes)}</td>
+    <td data-size="downloadBytes">${size(artifact.downloadBytes ?? artifact.rawBytes)}</td>
     <td data-size="gzipBytes">${size(artifact.gzipBytes)}</td>
     <td data-size="brotliBytes">${size(artifact.brotliBytes)}</td>
   </tr>`;
@@ -167,7 +169,7 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
     [initializedAcl2 ? 'ACL2' : 'ACL2 (development preview)', artifact => artifact.file === 'acl2/' || artifact.file.startsWith('build/acl2/')],
     ['Coalton', artifact => artifact.file === 'coalton/' || artifact.file.startsWith('build/coalton/')],
     ['McCLIM', artifact => artifact.file === 'mcclim/' || artifact.file.startsWith('build/mcclim/')],
-  ].filter(([, matches]) => report.artifacts.some(matches)).map(([title, matches]) => `<tbody><tr class="group"><th colspan="4" scope="rowgroup">${title}</th></tr>\n` +
+  ].filter(([, matches]) => report.artifacts.some(matches)).map(([title, matches]) => `<tbody><tr class="group"><th colspan="5" scope="rowgroup">${title}</th></tr>\n` +
     report.artifacts.filter(matches).map(row).join('\n') + '</tbody>').join('\n');
   const sections = report.artifacts.filter(artifact => artifact.kind === 'wasm').map(artifact => {
     if (!Array.isArray(artifact.sections) || artifact.sections.some(section =>

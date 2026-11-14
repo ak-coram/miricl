@@ -62,12 +62,12 @@
     console.error(error);
   };
   try {
-    const image = await fetch("./miricl.wasm");
+    const image = await fetch("./miricl.wasm.gz");
     const lisp = globalThis.miriclInterpreter = await Miricl.instantiate(await image.arrayBuffer(), {
       onThreadError: report
     });
-    const application = await fetch("./game-of-life.wasm");
-    lisp.mountFile("/application.wasm", await application.arrayBuffer());
+    const application = await fetch("./game-of-life.wasm.gz");
+    lisp.mountFile("/application.wasm", await Miricl.decompress(await application.arrayBuffer()));
     await lisp.evaluateAsync('(load "/application.wasm") (life:start)', {eof: true});
   } catch (error) { report(error); }
 </script>

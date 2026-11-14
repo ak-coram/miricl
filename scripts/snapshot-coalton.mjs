@@ -7,7 +7,7 @@ import {createHash} from 'node:crypto';
 import {gzipSync} from 'node:zlib';
 import {createCoalton} from './coalton.mjs';
 
-const [runtimePath = 'miricl-precompiled.wasm', corePath = 'build/coalton/coalton.wasm',
+const [runtimePath = 'miricl.wasm', corePath = 'build/coalton/coalton.wasm',
   output = 'build/coalton/coalton-image.wasm'] = process.argv.slice(2);
 const [runtime, core, optimization] = await Promise.all([
   fs.readFile(runtimePath), fs.readFile(corePath),

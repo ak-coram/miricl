@@ -6,7 +6,7 @@ import path from 'node:path';
 import {Miricl} from '../scripts/miricl.mjs';
 import {mcclimFiles} from './files.mjs';
 const [library = 'mcclim/build/mcclim-demo-native.wasm',
-  output = 'mcclim/build/miricl-mcclim.wasm', runtime = 'miricl-precompiled.wasm'] = process.argv.slice(2);
+  output = 'mcclim/build/miricl-mcclim.wasm', runtime = 'miricl.wasm'] = process.argv.slice(2);
 const vm = await Miricl.instantiate(await fs.readFile(runtime),
   {onOutput: text => process.stdout.write(text)});
 try {

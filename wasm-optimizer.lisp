@@ -5,20 +5,10 @@
 ;; The module adapter supplies exact stack effects for arbitrary core-module
 ;; instructions. Native emission uses its cheaper, fixed ABI description.
 (defvar *native-module-stack-effects* nil)
-(defvar *native-import-stack-effects* nil)
 
 ;; These compiler-private records use simple vectors. Macro accessors expand
 ;; into SVREF in both hosts, including SETF places, so the self-compiled pass
 ;; never invokes interpreted DEFSTRUCT accessor/constructor closures per op.
-(defmacro native-op-code (op) (list 'svref (list 'the 'simple-vector op) 0))
-(defmacro native-op-argument (op) (list 'svref (list 'the 'simple-vector op) 1))
-(defmacro native-op-start (op) (list 'svref (list 'the 'simple-vector op) 2))
-(defmacro native-op-end (op) (list 'svref (list 'the 'simple-vector op) 3))
-(defmacro native-op-successors (op) (list 'svref (list 'the 'simple-vector op) 4))
-(defmacro native-op-live-in (op) (list 'svref (list 'the 'simple-vector op) 5))
-(defmacro native-op-live-out (op) (list 'svref (list 'the 'simple-vector op) 6))
-(defmacro native-op-uses (op) (list 'svref (list 'the 'simple-vector op) 7))
-(defmacro native-op-definitions (op) (list 'svref (list 'the 'simple-vector op) 8))
 (defmacro native-flow-start (block) (list 'svref (list 'the 'simple-vector block) 0))
 (defmacro native-flow-end (block) (list 'svref (list 'the 'simple-vector block) 1))
 (defmacro native-flow-successors (block) (list 'svref (list 'the 'simple-vector block) 2))
@@ -136,11 +126,11 @@
                  (multiple-value-setq (ignored position) (native-read-uleb bytes position))))))
           ((= code #xfb)
            (multiple-value-setq (argument position) (native-read-uleb bytes position))
-           (dotimes (i (case argument (2 2) ((#x14 #x16 #x17) 1) ((#x1a #x1b #x1c #x1d) 0)
+           (dotimes (i (case argument ((2 5) 2) ((#x14 #x16 #x17) 1) ((#x1a #x1b #x1c #x1d) 0)
                         (otherwise (error "Unexpected native GC instruction ~D." argument))))
              (multiple-value-bind (ignored next) (native-read-uleb bytes position)
                (declare (ignore ignored)) (setq position next))))
-          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xa7 #xac #xd1)))
+          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xa7 #xac #xd1 #xd3)))
            (error "Unexpected native instruction ~D." code)))
         (when (or (not references-only) (member code '(#x10 #x12 #xd2)))
           (push (make-native-op code argument start position) ops))))
@@ -309,9 +299,14 @@
     (case code
       ((#x20 #x41 #x42 #xd0 #xd2) (values 0 1))
       ((#x21 #x1a) (values 1 0))
-      ((#x22 #x45 #x50 #xa7 #xac #xd1 #xfb) (values 1 1))
-      ((#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85) (values 2 1))
-      ((#x10 #x12) (let ((import (nth (native-op-argument op) *native-imports*)))
+      ((#x22 #x45 #x50 #xa7 #xac #xd1) (values 1 1))
+      (#xfb (if (= (native-op-argument op) 5) (values 2 0) (values 1 1)))
+      ((#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xd3) (values 2 1))
+      ((#x10 #x12)
+       (when (and *native-call-stack-effects* (< (native-op-argument op) (length *native-call-stack-effects*)))
+         (let ((effect (svref *native-call-stack-effects* (native-op-argument op))))
+           (return-from native-op-stack (values (ash effect -1) (if (= code #x10) (logand effect 1) 0)))))
+       (let ((import (nth (native-op-argument op) *native-imports*)))
                (if import (values (length (second import)) (if (and (= code #x10) (third import)) 1 0))
                    (values 2 (if (= code #x10) 1 0)))))
       (otherwise (values 0 0)))))
@@ -327,13 +322,13 @@
                     when (member (native-op-code op) '(#x20 #x21 #x22))
                       maximize (1+ (native-op-argument op)) into count
                     finally (return (or count 0)))))
-    (unless (and *native-import-stack-effects*
-                 (eq (car *native-import-stack-effects*) *native-imports*))
+    (unless (or *native-call-stack-effects*
+                (and *native-import-stack-effects* (eq (car *native-import-stack-effects*) *native-imports*)))
       (setq *native-import-stack-effects*
         (cons *native-imports*
           (map 'simple-vector (lambda (import)
             (+ (* 2 (length (second import))) (if (third import) 1 0))) *native-imports*))))
-    (when (compiler-primitive 39 ops (vector exceptions (cdr *native-import-stack-effects*)) total)
+    (when (compiler-primitive 39 ops (vector exceptions (or *native-call-stack-effects* (cdr *native-import-stack-effects*))) total)
       (return-from native-stackify-ops ops)))
   (native-stackify-ops-lisp ops exceptions types total))
 
@@ -469,23 +464,39 @@
     (loop for op across ops do
       (when (member (native-op-code op) '(#x20 #x21 #x22))
         (setf (native-op-argument op) (aref mapping (native-op-argument op)))))
+    (when (< (- next offset) count)
+      (compiler-statistic :optimization/local-slots-removed nil (- count (- next offset))))
     (values (- next offset) (when types (subseq color-types 0 next))
             mapping)))
 
 (defun native-fold-locals (ops)
   (declare (type simple-vector ops))
-  (let ((previous nil))
+  (let ((previous nil) (prior nil))
     (loop for op across ops for code = (native-op-code op) do
       (when code
         (cond
+          ;; Copying A to B and immediately back to A preserves A. Keep the
+          ;; assignment to B, including when these locals have different
+          ;; compatible reference types; do not move anything across effects.
+          ((and prior previous (member code '(#x21 #x22))
+                (eql (native-op-code previous) #x22) (eql (native-op-code prior) #x20)
+                (eql (native-op-argument prior) (native-op-argument op)))
+           (compiler-statistic :optimization/local-copy-back)
+           (when (= code #x21) (setf (native-op-code previous) #x21))
+           (setf (native-op-code op) nil))
+          ((and previous (= code #x22) (eql (native-op-code previous) #x20)
+                (eql (native-op-argument op) (native-op-argument previous)))
+           (compiler-statistic :optimization/local-self-tee)
+           (setf (native-op-code op) nil))
           ((and previous (member code '(#x20 #x21))
                 (eql (native-op-argument op) (native-op-argument previous))
                 (or (and (= code #x21) (eql (native-op-code previous) #x20))
                     (and (= code #x20) (eql (native-op-code previous) #x21))))
+           (compiler-statistic :optimization/local-copy-fold code)
            (setf (native-op-code previous) (if (= code #x20) #x22 nil)
                  (native-op-code op) nil)
-           (when (= code #x21) (setq previous nil)))
-          (t (setq previous op))))))
+           (when (= code #x21) (setq previous nil prior nil)))
+          (t (setq prior previous previous op))))))
   ops)
 
 (defun native-i32 (value)
@@ -736,4 +747,6 @@
                                do (wasm-byte (aref bytes i))))))))))
         (when *wasm-function-relocations*
           (setf (gethash *wasm-current-function* *wasm-function-relocations*) new-relocations))
+        (compiler-statistic :lowering/wasm-input-bytes nil (length bytes))
+        (compiler-statistic :lowering/wasm-output-bytes nil (length result))
         (values result mapping)))))

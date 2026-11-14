@@ -2,6 +2,7 @@
 (in-package :miricl-compiler)
 
 (defvar *hir-load-time-recipes* nil)
+(defvar *hir-load-time-evaluator* nil)
 
 ;; Internal records have fixed, named vector layouts on both hosts. Keep the
 ;; ordinary constructor, copier and predicate functions available, while hot
@@ -1206,7 +1207,9 @@
           ;; COMPILE evaluates this form in the null lexical environment and
           ;; retains only its primary value. Bundle emission can also retain
           ;; factories introduced by macros during HIR lowering.
-          (let ((value (eval (second form))))
+          (let ((value (if *hir-load-time-evaluator*
+                           (funcall *hir-load-time-evaluator* (second form))
+                           (eval (second form)))))
             (when (and *hir-load-time-recipes*
                        (not (or (numberp value) (characterp value)
                                 (and (symbolp value) (symbol-package value)))))

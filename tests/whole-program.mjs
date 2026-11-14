@@ -54,6 +54,20 @@ try {
              (references '(flet ((proclaim (x) x)) (proclaim '(inline unused)))) :test #'equal)
       (member '(:function ("EFFECT" "COMMON-LISP-USER"))
              (references '(proclaim '(inline unused) (effect))) :test #'equal) t))`);
+  check(builder, `(flet ((barriers (form) (nth-value 1 (miricl-compiler::form-references form))))
+    (and
+      (null (barriers '(let ((function (lambda (x) (known-target x))))
+                         (lambda (arguments) (apply function arguments)))))
+      (barriers '(let ((function (lambda () :known)))
+                   (setq function callback) (funcall function)))
+      (barriers '(let ((function (lambda () :known)))
+                   (let ((function callback)) (funcall function))))
+      (barriers '(let ((function (lambda () :known)))
+                   (lambda (function) (funcall function))))
+      (barriers '(let ((function (lambda () :known)))
+                   (flet ((invoke (function) (funcall function))) (invoke callback))))
+      (barriers '(let ((function (lambda () :known)))
+                   (declare (special function)) (funcall function))) t))`);
   builder.mountFile('/definitions.lisp', `
     (defpackage :whole-program-test (:use :cl) (:export :start :unused))
     (in-package :whole-program-test)

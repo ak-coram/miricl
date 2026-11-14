@@ -6,7 +6,7 @@ import {Miricl} from '../scripts/miricl.mjs';
 import {mcclimFiles, root} from './files.mjs';
 const mode = process.argv[2] ?? 'core';
 if (!['silex', 'core', 'browser', 'demo'].includes(mode)) throw new Error('Expected silex, core, browser or demo.');
-const runtime = await fs.readFile(process.argv[3] ?? path.join(root, '../miricl-precompiled.wasm'));
+const runtime = await fs.readFile(process.argv[3] ?? path.join(root, '../miricl.wasm'));
 const files = await mcclimFiles();
 const hash = createHash('sha256').update(runtime);
 for (const [name, bytes] of [...files].sort(([a], [b]) => a.localeCompare(b))) hash.update(name).update(bytes);

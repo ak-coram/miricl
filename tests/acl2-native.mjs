@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {createAcl2} from '../scripts/acl2.mjs';
 import {portAcl2Source} from '../acl2/host.mjs';
-const [imagePath = 'miricl-precompiled.wasm', corePath = 'build/acl2/acl2-native.wasm',
+const [imagePath = 'miricl.wasm', corePath = 'build/acl2/acl2-native.wasm',
   reportPath = 'build/acl2/native-tests.json', checkpointPath] = process.argv.slice(2);
 const report = {passed: false, stages: []};
 let session, checkpoint, stage = 'inputs';

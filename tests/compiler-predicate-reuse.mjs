@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const cases = [
   ['integer comparison', `(lambda (x y) (declare (fixnum x y) (inline <) (optimize (safety 0)))
     (values (< x y) (< x y)))`, [['1 2', '(T T)'], ['2 1', '(NIL NIL)']], true],

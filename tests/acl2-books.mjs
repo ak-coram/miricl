@@ -52,7 +52,7 @@ globalThis.fetch = async url => {
   await new Promise(resolve => setTimeout(resolve, 5));
   return new Response(source);
 };
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 const books = new Acl2Books(vm, new URL('https://example.test/books/filesystem.bin.gz'));
 try {
   assert.equal(downloads, 0);

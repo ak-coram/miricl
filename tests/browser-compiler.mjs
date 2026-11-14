@@ -5,19 +5,22 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import {spawn} from 'node:child_process';
+import {gzipSync} from 'node:zlib';
 import {compilerSmokeCases} from './compiler-cases.mjs';
 
-const image = path.resolve(process.argv[2] ?? 'miricl.wasm');
+const image = path.resolve(process.argv[2] ?? 'miricl-cold.wasm');
 const adapter = path.resolve(process.argv[3] ?? path.join(path.dirname(image), 'miricl.js'));
 const precompiled = process.argv.includes('--precompiled');
+const imageURL = precompiled ? '/miricl.wasm.gz' : '/miricl.wasm';
 const assets = new Map(await Promise.all([
-  ['/miricl.wasm', image], ['/miricl.js', adapter],
-].map(async ([url, file]) => [url, await fs.readFile(file)])));
+  [imageURL, image], ['/miricl.js', adapter],
+].map(async ([url, file]) => [url, precompiled && file === image
+  ? gzipSync(await fs.readFile(file), {level: 9}) : await fs.readFile(file)])));
 const html = `<!doctype html><button id="compiled">Native callback</button><script type="module">
 import {Miricl} from './miricl.js';
 globalThis.Miricl = Miricl;
 try {
-  globalThis.image = await (await fetch('./miricl.wasm')).arrayBuffer();
+  globalThis.image = await (await fetch(${JSON.stringify('.' + imageURL)})).arrayBuffer();
   globalThis.app = await Miricl.instantiate(image);
   globalThis.ready = true;
 } catch (error) {globalThis.failure = String(error);}

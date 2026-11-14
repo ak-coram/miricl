@@ -208,24 +208,9 @@
   #@(local.set $found) #@(local.set $result)
   #@(call $two-values (local.get $result) (call $bool (local.get $found))))
 
-(define-runtime-function $property-cell (($plist :nullable-object) ($key :nullable-object)) (:nullable-object)
-  (:locals ($pair (ref null $obj)) ($tail :nullable-object))
-  ;; Internal keyword binding must diagnose an odd argument list as a program
-  ;; error itself; GETF validates property-list cells in its separate loop.
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $plist)))
-    ;; Validate each cons once, then read its fields directly. CLOS metadata
-    ;; lookups otherwise repeat public CAR/CDR checks for the same cells.
-    (if (i32.ne (call $tag (local.get $plist)) (i32.const 7))
-      (then (return (call $car (local.get $plist)))))
-    (local.set $pair (ref.cast (ref $obj) (local.get $plist)))
-    (if (ref.eq (struct.get $obj $a (local.get $pair)) (local.get $key))
-      (then (return (struct.get $obj $b (local.get $pair)))))
-    (local.set $tail (struct.get $obj $b (local.get $pair)))
-    (br_if $done (ref.is_null (local.get $tail)))
-    (if (i32.ne (call $tag (local.get $tail)) (i32.const 7))
-      (then (return (call $cdr (local.get $tail)))))
-    (local.set $plist (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail)))) (br $next)))
-  #@(ref.null eq))
+(defun $property-cell ()
+  (runtime-function-definition '$property-cell
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$property-cell 'miricl-runtime:property-cell))))
 
 (define-runtime-function $put-property (($x :nullable-object) ($key :nullable-object) ($value :nullable-object)) (:nullable-object)
   (:locals ($cell :nullable-object))

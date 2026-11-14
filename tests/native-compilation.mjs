@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl, MiriclError} from '../scripts/miricl.mjs';
 
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-cold.wasm'));
 const check = source => assert.equal(vm.evaluate(source, {eof: true}).output, 'T\n', source);
 try {
   check("(fboundp 'miricl-compiler:compile-native)");

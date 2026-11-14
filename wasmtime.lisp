@@ -1,6 +1,9 @@
 ;;;; Wasmtime 50 C API. Keep store-owned handles within their originating store.
 (in-package #:wasmtime)
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (use-package :cffi :wasmtime))
+
 (define-foreign-library libwasmtime
   (:darwin "libwasmtime.dylib") (:unix "libwasmtime.so")
   (:windows "wasmtime.dll") (t (:default "libwasmtime")))

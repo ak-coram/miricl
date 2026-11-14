@@ -10,7 +10,7 @@ import {installCompiler, compiledTest, compilerCounters, compilerPhase, summariz
 
 const args = process.argv.slice(2);
 const binary = args[0] && !args[0].startsWith('--') ? args.shift()
-  : args.includes('--compiler') ? 'miricl-precompiled.wasm' : 'miricl-interpreter.wasm';
+  : args.includes('--compiler') ? 'miricl.wasm' : 'miricl-interpreter.wasm';
 if (args.includes('--full')) {
   const {main} = await import('./ansi-full.mjs');
   await main(binary, args.filter(arg => arg !== '--full'));

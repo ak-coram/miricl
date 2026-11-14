@@ -99,13 +99,9 @@
   ($length)
   ($arity) ($arity0) ($arity1) ($arity2) ($arity3) ($list-accessor-code) ($list-accessor))
 
-(define-runtime-function $member-eq
-    (($x :nullable-object) ($list :nullable-object))
-    (i32)
-  (wat-list-loop ($list)
-    #@(if (ref.eq (local.get $x) (call $car (local.get $list)))
-        (then (return (i32.const 1)))))
-  #@(i32.const 0))
+(defun $member-eq ()
+  (runtime-function-definition '$member-eq
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$member-eq 'miricl-runtime:member-eq :result :truth))))
 
 (define-runtime-function $remove-eq
     (($x :nullable-object) ($list :nullable-object))

@@ -279,7 +279,7 @@ if (wasiBinary) {
   assert.equal(await runInProcess(compilerProbe), 'miricl> T\nmiricl> ');
   if (!inProcess) {
     const nodeCompiler = spawnSync(process.execPath,
-      [repl, path.join(path.dirname(binary), 'miricl-precompiled.wasm')], {input: compilerProbe, encoding: 'utf8'});
+      [repl, path.join(path.dirname(binary), 'miricl.wasm')], {input: compilerProbe, encoding: 'utf8'});
     assert.ifError(nodeCompiler.error);
     assert.equal(nodeCompiler.status, 0, nodeCompiler.stderr);
     assert.equal(nodeCompiler.stdout, 'T\n', 'The Node REPL must use the explicitly selected precompiled image.');

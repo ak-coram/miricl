@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
 try {
   vm.evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
@@ -161,7 +161,7 @@ try {
   // Native bundles omit per-function disassembly metadata. The emitted module
   // still records its runtime imports, including the proven unchecked access.
   assert.ok(Buffer.from(await vm.readFile('/safety-native.wasm')).includes(Buffer.from('native-vector-ref-trusted')));
-  const fresh = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+  const fresh = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
   try {
     fresh.mountFile('/safety-file.wasm', await vm.readFile('/safety-file.wasm'));
     assert.equal(fresh.evaluate(`(progn (setq miricl-compiler:*compile-evaluations* nil)

@@ -9,7 +9,7 @@ import {encodeFilesystem} from './filesystem-archive.mjs';
 import {versionAssets} from './version-assets.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
-const [imagePath = 'miricl-precompiled.wasm', corePath = 'build/acl2/acl2-native.wasm',
+const [imagePath = 'miricl.wasm', corePath = 'build/acl2/acl2-native.wasm',
   output = 'build/acl2/site', ...options] = process.argv.slice(2);
 const preview = options.length === 1 && options[0] === '--frontend-only';
 const initialized = options.length === 3 && options[0] === '--initialized-image';
@@ -51,12 +51,12 @@ const assets = ['index.html', 'examples.mjs', 'worker.mjs', 'app.mjs', 'session-
   'miricl.mjs', 'acl2.mjs', 'filesystem-archive.mjs'];
 assets.push('acl2-books.mjs', 'dev-filesystem.mjs');
 const data = checkpoint ? {'acl2-image.wasm.gz': gzipSync(checkpoint, {level: 9})} : {
-  'miricl.wasm': image, 'filesystem.bin.gz': gzipSync(encodeFilesystem(files), {level: 9}),
-  ...(core ? {'acl2.wasm': core} : {}),
+  'miricl.wasm.gz': gzipSync(image, {level: 9}), 'filesystem.bin.gz': gzipSync(encodeFilesystem(files), {level: 9}),
+  ...(core ? {'acl2.wasm.gz': gzipSync(core, {level: 9})} : {}),
 };
 assets.push(...Object.keys(data));
 await Promise.all([
-  ...['miricl.wasm', 'filesystem.bin.gz', 'acl2.wasm', 'acl2-image.wasm.gz'].map(name =>
+  ...['miricl.wasm', 'acl2.wasm', 'miricl.wasm.gz', 'filesystem.bin.gz', 'acl2.wasm.gz', 'acl2-image.wasm.gz'].map(name =>
     data[name] ? fs.writeFile(path.join(output, name), data[name]) : fs.rm(path.join(output, name), {force: true})),
   ...['index.html', 'examples.mjs', 'worker.mjs'].map(name => fs.copyFile(path.join(root, 'acl2', name), path.join(output, name))),
   ...['app.mjs', 'session-store.mjs'].map(name => fs.copyFile(path.join(root, 'app-common', name), path.join(output, name))),

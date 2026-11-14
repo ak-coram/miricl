@@ -1184,12 +1184,22 @@ export class Miricl {
     }
   }
 
+  // Accept both raw and level-9 gzip distribution files. Detect the bytes,
+  // since HTTP Content-Encoding may already have decompressed a response.
+  static async decompress(bytes) {
+    const view = ArrayBuffer.isView(bytes)
+      ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : new Uint8Array(bytes);
+    if (view[0] !== 0x1f || view[1] !== 0x8b) return view;
+    return new Uint8Array(await new Response(new Blob([view]).stream()
+      .pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+  }
+
   static async instantiate(bytes, options) {
     const isModule = Object.prototype.toString.call(bytes) === '[object WebAssembly.Module]';
     const sections = isModule ? WebAssembly.Module.customSections(bytes, 'miricl.core') : [];
     if (sections.length > 1) throw new Error('Duplicate Miricl image sections.');
-    const {base, payload} = isModule ? {base: bytes, payload: sections[0]} : coreImageParts(
-        ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : new Uint8Array(bytes));
+    const {base, payload} = isModule ? {base: bytes, payload: sections[0]}
+      : coreImageParts(await Miricl.decompress(bytes));
     const result = await WebAssembly.instantiate(base);
     const interpreter = new Miricl(result.instance ?? result, options, payload);
     if (!isModule && interpreter.vm['core-object-type']) interpreter.imageBase = base;

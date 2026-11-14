@@ -3,6 +3,7 @@
 // Usage: node scripts/benchmark-cas-browser-startup.mjs BEFORE.wasm AFTER.wasm [ROOT]
 import fs from 'node:fs';
 import path from 'node:path';
+import {gzipSync} from 'node:zlib';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
@@ -26,8 +27,9 @@ for (const [name, image] of [['before', before], ['after', after]]) {
     const coreName = app === 'maxima' ? 'maxima.core' : 'fricas.wasm';
     const core = path.join(directory, coreName);
     assert.ok(fs.statSync(core).size > 0, `Missing optimized ${core}`);
-    copy(image, path.join(directory, 'miricl.wasm'));
-    const assets = ['miricl.wasm', coreName];
+    fs.writeFileSync(path.join(directory, 'miricl.wasm.gz'), gzipSync(fs.readFileSync(image), {level: 9}));
+    fs.writeFileSync(core + '.gz', gzipSync(fs.readFileSync(core), {level: 9}));
+    const assets = ['miricl.wasm.gz', coreName + '.gz'];
     for (const asset of ['index.html', 'worker.mjs', 'examples.mjs']) {
       copy(path.join(app, asset), path.join(directory, asset)); assets.push(asset);
     }

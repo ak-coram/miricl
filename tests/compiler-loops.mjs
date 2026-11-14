@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const cases = [
   ['typed sum', `(lambda (n) (declare (type (unsigned-byte 32) n) (optimize (safety 0)) (inline < + 1+))
     (let ((sum 0)) (declare (type (unsigned-byte 64) sum))

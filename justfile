@@ -9,8 +9,9 @@ wasmtime := env('WASMTIME', 'wasmtime')
 quicklisp := env('QUICKLISP_SETUP', home_directory() / 'quicklisp/setup.lisp')
 build_dir := env('MIRICL_BUILD_DIR', '.')
 interpreter := build_dir / 'miricl.wasm'
+cold := build_dir / 'miricl-cold.wasm'
 wasi_repl := build_dir / 'miricl-repl.wasm'
-precompiled := build_dir / 'miricl-precompiled.wasm'
+precompiled := build_dir / 'miricl.wasm'
 interpreter_only := build_dir / 'miricl-interpreter.wasm'
 
 # List available commands.
@@ -31,11 +32,15 @@ build:
 
 # Report raw, gzip, Brotli, and per-section sizes for all runtime images.
 size: build
-    {{ quote(node) }} scripts/wasm-size.mjs {{ quote(interpreter) }} {{ quote(interpreter_only) }} {{ quote(precompiled) }} {{ quote(wasi_repl) }}
+    {{ quote(node) }} scripts/wasm-size.mjs {{ quote(cold) }} {{ quote(interpreter_only) }} {{ quote(precompiled) }} {{ quote(wasi_repl) }}
+
+# Inventory migrated CL kernels and remaining runtime WAT source definitions.
+runtime-rewrite-progress output='build/runtime-rewrite-progress.json':
+    {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/runtime-rewrite-progress.lisp {{ quote(output) }}
 
 # Compile the compiler once, then measure it compiling the original source.
 benchmark-self-compiler output='build/compiler-benchmark': build
-    {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'corpus') }} {{ quote(interpreter) }} --extract
+    {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'corpus') }} {{ quote(cold) }} --extract
     {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'native') }} {{ quote(precompiled) }} {{ quote(output / 'corpus/sources.lisp') }} --module
 
 # Build a self-contained browser REPL (miricl.html), including the interpreter.
@@ -416,5 +421,5 @@ test-bundle: build build-asdf
 
 # Compile and execute Lisp in Chromium using the built-in compiler.
 test-browser-compiler: build
-    {{ quote(node) }} tests/browser-compiler.mjs {{ quote(interpreter) }} {{ quote(build_dir / "miricl.js") }}
+    {{ quote(node) }} tests/browser-compiler.mjs {{ quote(cold) }} {{ quote(build_dir / "miricl.js") }}
     {{ quote(node) }} tests/browser-compiler.mjs {{ quote(precompiled) }} {{ quote(build_dir / "miricl.js") }} --precompiled

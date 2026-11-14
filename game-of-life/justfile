@@ -27,4 +27,5 @@ dev http='8000' websocket='4006' *options:
 build:
     {{ quote(node) }} runtime/miricl.js miricl-repl.wasm --optimize game-of-life --native --entry LIFE:START --output build/game-of-life.wasm --report build/retention.txt
     cp index.html runtime/miricl.js images/miricl.wasm build/
-    {{ quote(node) }} runtime/version-assets.mjs build index.html miricl.js miricl.wasm game-of-life.wasm
+    {{ quote(node) }} runtime/compress-images.mjs build/miricl.wasm build/game-of-life.wasm
+    {{ quote(node) }} runtime/version-assets.mjs build index.html miricl.js miricl.wasm.gz game-of-life.wasm.gz

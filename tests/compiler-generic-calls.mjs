@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {createCompilerTestVM} from './compiler-test-vm.mjs';
 
-const vm = await createCompilerTestVM(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await createCompilerTestVM(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = form => assert.equal(vm.evaluate(form, {eof: true}).output, 'T\n', form);
 async function compile(source, name = '*guarded*') {
   vm.evaluate(`(in-package :cl-user)
@@ -175,7 +175,7 @@ try {
   vm.evaluate(`(compile-file "/guarded-file.lisp") (load "/guarded-file.wasm")
     (miricl-compiler:compile-native-bundle "/guarded-file.wasm" "/guarded-native.wasm")
     (values)`, {eof: true});
-  const fresh = await createCompilerTestVM(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+  const fresh = await createCompilerTestVM(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
   try {
     fresh.mountFile('/guarded-native.wasm', await vm.readFile('/guarded-native.wasm'));
     fresh.evaluate(`(setq miricl-compiler::*compiler-state* :cold)

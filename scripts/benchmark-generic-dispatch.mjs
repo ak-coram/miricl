@@ -9,7 +9,7 @@ import {spawnSync} from 'node:child_process';
 
 const compareSBCL = process.argv.includes('--sbcl');
 const paths = process.argv.slice(2).filter(argument => argument !== '--sbcl');
-if (!paths.length) paths.push('miricl-precompiled.wasm');
+if (!paths.length) paths.push('miricl.wasm');
 const variants = await Promise.all(paths.map(async file => ({file,
   image: await fs.readFile(file), measurements: []})));
 const cases = ['loop-only', 'direct-constant', 'direct-slots', 'single-primary', 'primary-chain',

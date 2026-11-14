@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {createMaxima} from '../scripts/maxima.mjs';
 import {examples} from '../maxima/examples.mjs';
-const image = process.argv[2] ?? 'miricl-precompiled.wasm';
+const image = process.argv[2] ?? 'miricl.wasm';
 const core = process.argv[3] ?? 'build/maxima/maxima-optimized.wasm';
 const session = await createMaxima(fs.readFileSync(image), fs.readFileSync(core));
 try {

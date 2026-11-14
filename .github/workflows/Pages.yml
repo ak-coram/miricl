@@ -48,7 +48,16 @@ jobs:
               return;
             }
             core.setOutput('run-id', String(run.id));
+            core.setOutput('commit', run.head_sha);
             core.info(`Publishing artifacts from CI ${run.id}, commit ${run.head_sha}`);
+      - uses: actions/checkout@v4
+        if: steps.ci.outputs.run-id != ''
+        with:
+          ref: ${{ steps.ci.outputs.commit }}
+      - uses: actions/setup-node@v4
+        if: steps.ci.outputs.run-id != ''
+        with:
+          node-version: '26'
       - uses: actions/download-artifact@v4
         if: steps.ci.outputs.run-id != ''
         with:
@@ -68,6 +77,27 @@ jobs:
         run: |
           cp _ansi/ansi-results.html _ansi/ansi-compiler-results.html _site/
           cp _ansi/ansi-full-results.json _ansi/ansi-compiler-results.json _site/
+      - uses: actions/download-artifact@v4
+        if: steps.ci.outputs.run-id != ''
+        with:
+          name: compiler-statistics
+          path: _compiler
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.ci.outputs.run-id }}
+      - name: Add final CI outcomes to the compiler report
+        if: steps.ci.outputs.run-id != ''
+        uses: actions/github-script@v7
+        env:
+          SOURCE_RUN_ID: ${{ steps.ci.outputs.run-id }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              ...context.repo, run_id: Number(process.env.SOURCE_RUN_ID), per_page: 100});
+            fs.writeFileSync('_compiler/jobs.json', JSON.stringify({jobs}));
+      - name: Publish the whole-run compiler report
+        if: steps.ci.outputs.run-id != ''
+        run: node scripts/build-compiler-report.mjs _compiler/compiler-statistics.json _site/compiler-statistics.html _compiler/jobs.json
       - uses: actions/upload-pages-artifact@v4
         if: steps.ci.outputs.run-id != ''
         with:
@@ -76,7 +106,7 @@ jobs:
       run-id: ${{ steps.ci.outputs.run-id }}
 
   deploy:
-    name: Deploy browser examples, sizes and ANSI results
+    name: Deploy browser examples, sizes, ANSI and compiler reports
     needs: build
     if: needs.build.outputs.run-id != ''
     runs-on: ubuntu-24.04

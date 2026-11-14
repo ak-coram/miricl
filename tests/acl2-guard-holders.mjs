@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {portAcl2Source} from '../acl2/host.mjs';
 import {iterativeGuardHolders, iterativeGuardHolderLists} from '../acl2/guard-holders.mjs';
 import {loadAcl2TestCore} from './acl2-test-core.mjs';
-const imagePath = process.argv[2] ?? 'miricl-precompiled.wasm';
+const imagePath = process.argv[2] ?? 'miricl.wasm';
 const corePath = process.argv[3] ?? 'build/acl2/acl2-native.wasm';
 const original = await fs.readFile('vendor/acl2/translate.lisp', 'utf8');
 const start = original.indexOf('(mutual-recursion\n\n(defun remove-guard-holders1 (');

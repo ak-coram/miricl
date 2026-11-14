@@ -3,7 +3,7 @@
 import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const image = await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm');
+const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
 const vm = await Miricl.instantiate(image);
 const check = (vm, source) => assert.equal(vm.evaluate(source, {eof: true}).output, 'T\n', source);
 try {

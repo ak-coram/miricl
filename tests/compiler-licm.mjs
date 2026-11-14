@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
 
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const entryBody = bytes => {
   let position = 8, entry, worker;
   const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes))
@@ -17,7 +17,7 @@ const entryBody = bytes => {
         position += length;
         const kind = bytes[position++], index = word();
         if (kind === 0 && name === 'entry') entry = index;
-        if (kind === 0 && /^direct-entry-\d+$/.test(name)) worker = index;
+        if (kind === 0 && /^direct-entry(?:\d+)?-\d+$/.test(name)) worker = index;
       }
     }
     if (id === 10) {
@@ -37,7 +37,8 @@ const loop = condition => `(let ((sum 0)) (declare (type (unsigned-byte 32) sum)
 const policy = '(declare (type (unsigned-byte 32) n) (optimize (safety 0)) (inline + - * 1+ 1- logand logior logxor < consp null eq minusp zerop oddp >= <=))';
 const cases = [
   ['stable tag', `(lambda (x n) ${policy} ${loop('(consp x)')})`,
-    [['nil 0', '(0)'], ['nil 5', '(0)'], ['(list 1) 5', '(5)']], true],
+    [['nil 0', '(0)'], ['nil 5', '(0)'], ['(list 1) 5', '(5)'],
+     ['17 5', '(0)'], ['(expt 2 100) 5', '(0)'], ['"cons" 5', '(0)']], true],
   ['literal identity', `(lambda (x n) ${policy} ${loop('(eq x :marker)')})`,
     [[':marker 0', '(0)'], [':marker 5', '(5)'], [':other 5', '(0)']], true],
   ['null condition', `(lambda (x n) ${policy} ${loop('(null x)')})`,
@@ -120,6 +121,13 @@ const cases = [
     (let ((out nil)) (dotimes (i n) (push (cons x nil) out))
       (values (length out) (and (cdr out) (eq (car out) (cadr out))))))`,
     [[':x 0', '(0 NIL)'], [':x 2', '(2 NIL)']], false],
+  ['captured mutable cell', `(lambda (x n) ${policy}
+    (flet ((run (count) (declare (type (unsigned-byte 32) count))
+      (let ((sum 0)) (declare (type (unsigned-byte 32) sum))
+        (dotimes (i count sum) (declare (type (unsigned-byte 32) i))
+          (when (consp x) (incf sum)) (setq x nil)))))
+      (declare (notinline run)) (run n)))`,
+    [['nil 0', '(0)'], ['(list 1) 0', '(0)'], ['(list 1) 5', '(1)']]],
 ];
 try {
   vm.evaluate(`(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler)
@@ -134,21 +142,23 @@ try {
           (with-open-file (out "/licm.wasm" :direction :output :if-exists :supersede
               :element-type '(unsigned-byte 8)) (write-sequence bytes out)))) (values)`);
       const bytes = Buffer.from(await vm.readFile('/licm.wasm')); assert.ok(WebAssembly.validate(bytes), name); variants.push(bytes);
-      if (name === 'entry type proof' || name === 'two cached branch tests')
+      if (['entry type proof', 'two cached branch tests', 'stable tag', 'literal identity'].includes(name))
         assert.ok(!WebAssembly.Module.imports(new WebAssembly.Module(bytes))
           .some(entry => entry.name === 'native-boolean'), `${name}: branch-only results stay unboxed`);
       if (name === 'stable tag') {
         const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes)).filter(entry => entry.kind === 'function');
-        const index = imports.findIndex(entry => entry.name === 'native-consp-inline'); assert.ok(index >= 0);
+        const index = imports.findIndex(entry => entry.name === 'native-consp-test');
         vm.mountFile('/licm-body.bin', entryBody(bytes));
         assert.equal(vm.evaluate(`(with-open-file (in "/licm-body.bin" :element-type '(unsigned-byte 8))
           (let ((body (make-array (file-length in) :element-type '(unsigned-byte 8))))
             (read-sequence body in)
             (let* ((ops (native-read-ops body))
-                   (call (position-if (lambda (op) (and (= (native-op-code op) #x10)
-                             (eql (native-op-argument op) ${index}))) ops))
+                   (test (position-if (lambda (op)
+                           (or (and (= (native-op-code op) #xfb) (= (native-op-argument op) #x14))
+                               (and (= (native-op-code op) #x10)
+                                    (eql (native-op-argument op) ${index})))) ops))
                    (loop (position #x03 ops :key (lambda (op) (native-op-code op)))))
-              (and call loop (< call loop)))))`).output, 'T\n', 'Predicate placement relative to LOOP');
+              (and test loop (< test loop)))))`).output, 'T\n', 'Predicate placement relative to LOOP');
       }
       for (const [args, expected] of calls)
         assert.equal(vm.evaluate(`(multiple-value-list (funcall *licm-function* ${args}))`).output,
@@ -156,5 +166,50 @@ try {
     }
     console.log(`LICM ${name}: ${variants[0].length} bytes`);
   }
+  // The address of a capture is stable even when its contents change. Inspect
+  // the captured function's actual worker, allowing unrelated functions and
+  // prologue code: capture-slot reads must lie outside every Wasm loop.
+  vm.evaluate(`(defparameter *capture-unit* (compile-to-hir
+    '(lambda (x)
+       (lambda (n) ${policy}
+         (let ((sum 0)) (declare (type (unsigned-byte 32) sum))
+           (dotimes (i n sum) (declare (type (unsigned-byte 32) i))
+             (when (consp x) (incf sum)) (setq x nil)))))))
+    (multiple-value-bind (bytes literals) (emit-native-module *capture-unit*)
+      (defparameter *capture-factory* (compiler-primitive 17 bytes literals nil))) (values)`);
+  assert.equal(vm.evaluate(`(let ((function (funcall *capture-factory* (list 1))))
+    (and (= (funcall function 0) 0) (= (funcall function 5) 1) (= (funcall function 3) 0)))`).output, 'T\n');
+  vm.evaluate(`(let ((captured (find-if (lambda (function) (hir-function-captures function))
+                                      (hir-unit-functions *capture-unit*))))
+    (multiple-value-bind (bytes literals) (emit-native-module *capture-unit* :entries (list captured))
+      (declare (ignore literals))
+      (with-open-file (out "/capture.wasm" :direction :output :if-exists :supersede
+          :element-type '(unsigned-byte 8)) (write-sequence bytes out)))) (values)`);
+  const capturedBytes = await vm.readFile('/capture.wasm');
+  assert.ok(WebAssembly.validate(capturedBytes));
+  const captureImport = WebAssembly.Module.imports(new WebAssembly.Module(capturedBytes))
+    .filter(entry => entry.kind === 'function').findIndex(entry => entry.name === 'native-capture');
+  assert.ok(captureImport >= 0, 'Fixture retains a capture-slot read');
+  vm.mountFile('/capture-body.bin', entryBody(capturedBytes));
+  assert.equal(vm.evaluate(`(with-open-file (in "/capture-body.bin" :element-type '(unsigned-byte 8))
+    (let ((body (make-array (file-length in) :element-type '(unsigned-byte 8)))
+          (scopes nil) (loops 0) (saw-loop nil) (saw-capture nil) (valid t))
+      (read-sequence body in)
+      (loop for op across (native-read-ops body) do
+        (case (native-op-code op)
+          ((#x02 #x04 #x1f) (push nil scopes))
+          (#x03 (push t scopes) (incf loops) (setq saw-loop t))
+          (#x0b (when (pop scopes) (decf loops)))
+          (#x10 (when (= (native-op-argument op) ${captureImport})
+                   (setq saw-capture t) (when (plusp loops) (setq valid nil))))))
+      (and valid saw-loop saw-capture)))`).output, 'T\n', 'Capture addresses are loaded outside loops');
+  assert.equal(vm.evaluate(`(let ((function (compile-native
+    '(lambda (n)
+       (let ((later (block expired
+                      (lambda () (dotimes (i n :done) (return-from expired :invalid))))))
+         (funcall later))))))
+    (and (eq (funcall function 0) :done)
+         (handler-case (progn (funcall function 1) nil) (control-error () t))
+         (eq (funcall function 0) :done)))`).output, 'T\n', 'Reading an expired exit token does not activate it');
   console.log('LICM: predicates, raw branch caches, observed booleans, nonallocating arithmetic, dominance, scoped proofs, zero iterations, effects, mutable state, full values and allocation identity pass.');
 } finally {vm.close();}

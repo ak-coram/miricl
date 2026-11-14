@@ -180,7 +180,7 @@ if (!isMainThread) {
       failure: {message: error.message, output: error.output, backtrace: error.backtrace}}});
   } finally {vm?.close();}
 } else if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const image = path.resolve(process.argv[2] ?? path.join(root, 'miricl-precompiled.wasm'));
+  const image = path.resolve(process.argv[2] ?? path.join(root, 'miricl.wasm'));
   const output = path.resolve(process.argv[3] ?? path.join(root, 'build/acl2/probe.json'));
   const mode = process.argv[4] ?? 'upstream';
   if (!['upstream', 'port', 'fasl'].includes(mode)) throw new Error(`Unknown ACL2 probe mode: ${mode}`);

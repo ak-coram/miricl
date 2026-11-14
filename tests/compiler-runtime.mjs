@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
 import {compilerSmokeCases} from './compiler-cases.mjs';
 
-const bytes = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
+const bytes = await fs.readFile(process.argv[2] ?? 'miricl-cold.wasm');
 const precompiled = process.argv.includes('--precompiled');
 const module = await WebAssembly.compile(bytes);
 assert.deepEqual(WebAssembly.Module.imports(module), []);

@@ -1,5 +1,23 @@
 // These forms run unchanged in Node and in the browser's Lisp environment.
 export const compilerCases = [
+  ['inline cons tag checks', `(let ((function (miricl-compiler:compile-native
+      '(lambda (object) (declare (optimize (safety 3)) (inline consp))
+         (values (consp object) (if (consp object) :cons :other))))))
+    (and (equal (multiple-value-list (funcall function '(1 . 2))) '(t :cons))
+         (every (lambda (object)
+                  (equal (multiple-value-list (funcall function object)) '(nil :other)))
+                (list nil 17 (expt 2 100) 1/2 #\\A "cons" #(1 2) #'car (make-hash-table)))))`],
+  ['checked inline list access', `(let ((function (miricl-compiler:compile-native
+      '(lambda (object) (declare (optimize (safety 3)) (inline car cdr))
+         (values (car object) (cdr object))))))
+    (and (equal (multiple-value-list (funcall function nil)) '(nil nil))
+         (equal (multiple-value-list (funcall function '(1 . 2))) '(1 2))
+         (let ((object (list :cycle))) (setf (cdr object) object)
+           (multiple-value-bind (first rest) (funcall function object)
+             (and (eq first :cycle) (eq rest object))))
+         (handler-case (progn (funcall function 42) nil)
+           (type-error (condition) (= (type-error-datum condition) 42)))
+         (equal (multiple-value-list (funcall function '(3 . 4))) '(3 4))))`],
   ['literal membership conditions', `(let ((function (miricl-compiler:compile-native
       '(lambda (key) (let ((events nil))
          (values (if (member (progn (push :key events) (values key :extra)) '(nil 1 :target #\\A))

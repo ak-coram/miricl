@@ -7,7 +7,7 @@ import {createHash} from 'node:crypto';
 import {Miricl} from './miricl.mjs';
 import {measureWasm} from './wasm-size.mjs';
 
-const [output, imagePath = 'miricl.wasm', sourcesPath, nativePath] = process.argv.slice(2);
+const [output, imagePath = 'miricl-cold.wasm', sourcesPath, nativePath] = process.argv.slice(2);
 if (!output) throw new Error('Expected OUTPUT [IMAGE] [SOURCES.lisp] [PRECOMPILED-IMAGE]');
 await fs.mkdir(output, {recursive: true});
 const image = await fs.readFile(imagePath);

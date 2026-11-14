@@ -12,7 +12,7 @@ const portStart = adapted.lastIndexOf('#+(and miricl (not acl2-loop-only))',
   adapted.indexOf('(defun miricl-max-level-no-work'));
 assert.throws(() => portAcl2Source('simplify.lisp', Buffer.from(source.replace(
   '(defun max-level-no (term wrld)', '(defun max-level-no (term wrld)\n; changed'))), /source changed/u);
-const {vm} = await loadAcl2TestCore(process.argv[2] ?? 'miricl-precompiled.wasm',
+const {vm} = await loadAcl2TestCore(process.argv[2] ?? 'miricl.wasm',
   process.argv[3] ?? 'build/acl2/acl2-native.wasm');
 const evaluate = source => vm.evaluateAsync(source, {eof: true});
 try {

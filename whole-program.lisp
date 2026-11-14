@@ -124,10 +124,41 @@
         ((:class :structure) :class) ((:variable :constant) :variable)
         (otherwise kind)))
 
+(defun form-written-variables (form)
+  ;; A coarse, bounded proof for lexical function values. Shadowed writes may
+  ;; invalidate extra candidates; uncertainty must never erase a call barrier.
+  (let ((written (make-hash-table :test 'eq)) (seen (make-hash-table :test 'eq))
+        (work (list form)) (unknown nil) (fuel 65536))
+    (loop while work do
+      (when (minusp (decf fuel)) (setq unknown t) (return))
+      (let ((value (pop work)))
+        (when (and (consp value) (not (gethash value seen)))
+          (setf (gethash value seen) t)
+          (compiler-list-length value "reachability form")
+          (case (car value)
+            (quote nil)
+            (declare
+             (when (assoc 'special (cdr value)) (setq unknown t)))
+            (setq
+             (loop for pairs on (cdr value) by #'cddr do
+               (setf (gethash (car pairs) written) t)
+               (push (second pairs) work)))
+            (otherwise
+             (when (or (member (car value) '(setf psetf psetq rotatef shiftf incf decf push pop
+                                             macrolet symbol-macrolet progv miricl::%%parallel-place-form))
+                       (and (symbolp (car value)) (not (eq (car value) 'lambda))
+                            (macro-function (car value))))
+               (setq unknown t))
+             ;; The checked spine is finite. SEEN bounds shared subtrees,
+             ;; without interpreting quoted data as assignments.
+             (dolist (child (cdr value)) (push child work)))))))
+    (values written unknown)))
+
 (defun form-references (form &optional load-values)
   ;; Syntax is walked without evaluating it. Constants are scanned separately:
   ;; a quoted symbol may be a function/class designator, but a quoted list must
   ;; never be mistaken for an executable call (notably a quoted EVAL).
+  (multiple-value-bind (written unknown-values) (form-written-variables form)
   (let ((references nil) (barriers nil) (work (list (list form :code nil)))
         (functions nil)
         (seen-code (make-hash-table :test 'eq))
@@ -230,22 +261,39 @@
                          (go nil)
                          (tagbody (dolist (child args) (when (consp child) (queue child :code))))
                          ((let let*)
-                          (dolist (binding (car args))
-                            (when (consp binding) (queue (second binding) :code)))
-                          (body (cdr args)))
+                          (let ((outer functions) (inner functions))
+                            (dolist (binding (car args))
+                              (setq functions (if (eq operator 'let*) inner outer))
+                              (let* ((name (if (consp binding) (car binding) binding))
+                                     (init (and (consp binding) (second binding)))
+                                     (lambda (if (and (consp init) (eq (car init) 'function)) (second init) init)))
+                                (queue init :code)
+                                (push (list (list :value name)
+                                        (and (not unknown-values) (not (gethash name written))
+                                             (not (compiler-primitive 18 name))
+                                             (consp lambda) (eq (car lambda) 'lambda))) inner)))
+                            (setq functions inner) (body (cdr args)) (setq functions outer)))
                          ((flet labels)
                           ;; Closure construction does not execute its body.
                           ;; Visit local definitions only when called or taken
                           ;; as function values, including mutual recursion.
                           (let* ((outer functions)
                                  (bindings (mapcar (lambda (definition)
-                                             (list (car definition) (cddr definition) nil)) (car args)))
+                                             (list (car definition) (list (cons 'lambda (cdr definition))) nil)) (car args)))
                                  (inner (append bindings outer)))
                             (dolist (binding bindings)
                               (setf (third binding) (if (eq operator 'labels) inner outer)))
                             (setq functions inner) (body (cdr args))
                             (setq functions outer)))
-                         (lambda (body (cdr args)))
+                         (lambda
+                          (let ((outer functions) (parameters (list (car args))))
+                            ;; Mask value facts at parameter bindings, including
+                            ;; optional/key/aux names; extra masks are harmless.
+                            (loop while parameters do
+                              (let ((parameter (pop parameters)))
+                                (cond ((symbolp parameter) (push (list (list :value parameter) nil) functions))
+                                      ((consp parameter) (push (car parameter) parameters) (push (cdr parameter) parameters)))))
+                            (body (cdr args)) (setq functions outer)))
                          (function
                           (if (symbolp (car args))
                               (function-reference (car args) t)
@@ -299,8 +347,10 @@
                               (when (and (consp (car args)) (eq (caar args) 'quote)
                                          (symbolp (cadar args)))
                                 (function-reference (cadar args) t))
-                              (unless (and (consp (car args))
-                                           (member (caar args) '(function quote lambda)))
+                              (unless (or (and (consp (car args))
+                                               (member (caar args) '(function quote lambda)))
+                                          (and (symbolp (car args))
+                                               (second (assoc (list :value (car args)) functions :test #'equal))))
                                 (pushnew (list :indirect-call (symbol-name operator)) barriers :test #'equal)))
                             (when (member operator '(symbol-function fdefinition macro-function find-class))
                               (when (and (member operator '(symbol-function fdefinition))
@@ -316,7 +366,7 @@
                               (unless (and (consp (car args)) (eq (caar args) 'quote))
                                 (pushnew (symbol-name operator) barriers :test #'equal))))
                           (body args)))))))))))
-      (values references barriers))))
+      (values references barriers)))))
 
 (defun read-units (file &key (records t))
   (let ((file (truename file)) (units nil))
@@ -840,7 +890,7 @@ With STRIP NIL, retain every definition and compact only the representation."
         (ordinary (make-hash-table :test 'eq)) (seen (make-hash-table :test 'eq))
         (*hir-load-time-recipes* (make-hash-table :test 'eq)))
     (declare (type list functions entries recipes) (type (unsigned-byte 32) initializer-count)
-             (type hash-table ordinary seen *hir-load-time-recipes*))
+             (type (or null hash-table) ordinary seen *hir-load-time-recipes*))
     (let* ((miricl::%fasl-records (coerce (read-unit-records unit) 'vector))
            (miricl::%fasl-values (make-array (length miricl::%fasl-records)))
            (miricl::%fasl-states (make-array (length miricl::%fasl-records) :initial-element 0))

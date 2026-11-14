@@ -193,6 +193,16 @@ export const threadCases = [
       (miricl-threads:wait-on-semaphore ready)
       (miricl-threads:interrupt-thread worker (lambda () (setq interrupted (eq worker (miricl-threads:current-thread)))))
       (and (eq (miricl-threads:join-thread worker) :done) interrupted)))`],
+  ['interrupt internal list comparison', `(let ((ready (miricl-threads:make-semaphore)))
+    (let ((worker (miricl-threads:make-thread (lambda ()
+        (catch 'comparison-exit
+          (let ((left (list :same)) (right (list :same)))
+            (setf (cdr left) left (cdr right) right)
+            (miricl-threads:signal-semaphore ready)
+            (funcall (symbol-function (miricl-compiler::compiler-primitive 10 1 "%LIST-EQ")) left right)))))))
+      (miricl-threads:wait-on-semaphore ready)
+      (miricl-threads:interrupt-thread worker (lambda () (throw 'comparison-exit :interrupted)))
+      (eq (miricl-threads:join-thread worker) :interrupted)))`],
   ['destroy before startup', `(let ((ran nil))
     (let ((worker (miricl-threads:make-thread (lambda () (setq ran t)))))
       (miricl-threads:destroy-thread worker)

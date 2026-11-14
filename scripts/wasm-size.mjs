@@ -4,27 +4,29 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import assert from 'node:assert/strict';
-import {gzipSync, brotliCompressSync, constants} from 'node:zlib';
+import {gzipSync, gunzipSync, brotliCompressSync, constants} from 'node:zlib';
 
 const sectionNames = ['custom', 'type', 'import', 'function', 'table', 'memory',
   'global', 'export', 'start', 'element', 'code', 'data', 'data-count', 'tag'];
 const componentSectionNames = ['custom', 'core-module', 'core-instance', 'core-type',
   'component', 'component-instance', 'alias', 'type', 'canonical', 'start', 'import', 'export'];
 
-function measureBytes(file, bytes) {
-  return {file, rawBytes: bytes.length,
-    gzipBytes: gzipSync(bytes, {level: 9}).length,
+function measureBytes(file, bytes, download = bytes) {
+  return {file, rawBytes: bytes.length, downloadBytes: download.length,
+    gzipBytes: file.endsWith('.gz') ? download.length : gzipSync(bytes, {level: 9}).length,
     brotliBytes: brotliCompressSync(bytes,
       {params: {[constants.BROTLI_PARAM_QUALITY]: 11}}).length};
 }
 
 // HTML pages are measured as complete files, including embedded Wasm and JS.
 export function measureFile(file) {
-  return measureBytes(file, fs.readFileSync(file));
+  const download = fs.readFileSync(file);
+  return measureBytes(file, file.endsWith('.gz') ? gunzipSync(download) : download, download);
 }
 
 export function measureWasm(file) {
-  const bytes = fs.readFileSync(file);
+  const download = fs.readFileSync(file);
+  const bytes = file.endsWith('.gz') ? gunzipSync(download) : download;
   const component = bytes.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 13, 0, 1, 0]));
   assert.ok(component || bytes.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])),
     `${file}: expected a WASM module or component`);
@@ -59,7 +61,7 @@ export function measureWasm(file) {
     sections.set(name, section);
     position = end;
   }
-  return {...measureBytes(file, bytes), sections: [...sections.values()]};
+  return {...measureBytes(file, bytes, download), sections: [...sections.values()]};
 }
 
 // Preserve distribution measurements with results, independently of the images.

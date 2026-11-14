@@ -48,7 +48,7 @@ export async function prepareFriCASLibraries(image, core, native, output) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === import.meta.filename) {
-  const [image = 'miricl-precompiled.wasm', core = 'build/fricas/fricas-optimized.wasm',
+  const [image = 'miricl.wasm', core = 'build/fricas/fricas-optimized.wasm',
     native = 'build/fricas/native', output = 'build/fricas/algebra'] = process.argv.slice(2);
   const files = await prepareFriCASLibraries(await fs.readFile(image), await fs.readFile(core), native, output);
   console.log(`Prepared ${files.length} FriCAS algebra libraries in ${output}.`);

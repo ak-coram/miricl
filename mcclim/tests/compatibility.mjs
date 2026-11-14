@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../../scripts/miricl.mjs';
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? new URL('../../miricl-precompiled.wasm', import.meta.url)));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? new URL('../../miricl.wasm', import.meta.url)));
 async function check(name, form) {
   const {output} = await vm.evaluateAsync(form, {eof: true});
   assert.equal(output.trim(), 'T', `${name}: ${output}`);

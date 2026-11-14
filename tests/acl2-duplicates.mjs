@@ -15,7 +15,7 @@ const definitions = adapted.slice(portStart,
   adapted.indexOf('\n#+non-standard-analysis\n(defun non-standard-induction-vars', portStart));
 assert.throws(() => portAcl2Source('induct.lisp', Buffer.from(source.replace(
   '(defun remove-adjacent-duplicates (x)', '(defun remove-adjacent-duplicates (x)\n; changed'))), /source changed/u);
-const image = await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm');
+const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
 let vm = await Miricl.instantiate(image);
 const evaluate = source => vm.evaluateAsync(source, {eof: true});
 try {

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {createCompilerTestVM} from './compiler-test-vm.mjs';
 
-const vm = await createCompilerTestVM(fs.readFileSync(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await createCompilerTestVM(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
 const evaluate = source => vm.evaluate(source, {eof: true}).output;
 const check = source => assert.equal(evaluate(source), 'T\n', source);
 const define = (name, source) => evaluate(`(setf (symbol-function '${name})

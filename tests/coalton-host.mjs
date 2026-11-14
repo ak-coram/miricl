@@ -9,7 +9,7 @@ assert.match(contents.get('/coalton/src/source.lisp').toString(), /make-string-i
 assert.match(contents.get('/quicklisp/trivial-garbage/trivial-garbage.lisp').toString(), /WasmGC finalizers are unavailable/);
 assert.equal(contents.get('/quicklisp/closer-mop/closer-mop.asd').toString(),
   '(asdf:defsystem "closer-mop" :components ((:file "closer-miricl")))');
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 try {
   vm.mountFile('/closer-miricl.lisp', contents.get('/quicklisp/closer-mop/closer-miricl.lisp'));
   assert.equal((await vm.evaluateAsync('(progn (load "/closer-miricl.lisp") (values))', {eof: true})).output, '');

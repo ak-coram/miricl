@@ -4,7 +4,8 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {Miricl} from './miricl.mjs';
-const [image = 'miricl-precompiled.wasm', input = 'build/coalton/coalton-portable.wasm',
+import {collectCompilationStatistics, writeCompilationStatistics} from './compilation-statistics.mjs';
+const [image = 'miricl.wasm', input = 'build/coalton/coalton-portable.wasm',
   output = 'build/coalton/coalton.wasm'] = process.argv.slice(2);
 const scope = process.env.MIRICL_COALTON_SCOPE ?? 'full';
 if (!['full', 'compiler'].includes(scope)) throw new Error('Expected full or compiler scope.');
@@ -45,7 +46,8 @@ const heartbeat = setInterval(() => {
 async function evaluatePhase(name, source) {
   phase = name;
   phaseStart = performance.now();
-  await vm.evaluateAsync(source, {eof: true});
+  await collectCompilationStatistics(vm, {workload: 'coalton', phase: `${scope}: ${name}`},
+    () => vm.evaluateAsync(source, {eof: true}));
   const milliseconds = Math.round(performance.now() - phaseStart);
   timings[name] = milliseconds;
   console.log(`Coalton ${name}: ${milliseconds} ms`);
@@ -108,6 +110,7 @@ try {
     retainedInterface: scope === 'compiler' ? 'Coalton compiler and dependencies' : 'complete interactive Coalton compiler and standard library',
     optimizer: 'miricl-compiler:shake-file + compile-native-bundle', backend: 'native-wasm', strip: false,
   }, null, 2) + '\n');
+  await writeCompilationStatistics({workload: 'coalton', phase: scope + ': native output', status: 'complete', recordType: 'measurement', counters: [], runtimeBytes: runtime.length, inputBytes, outputBytes: native.length});
   console.log(`Native Coalton: ${inputBytes} → ${native.length} bytes (${output}).`);
 } catch (error) {
   await fs.mkdir(path.dirname(output), {recursive: true});

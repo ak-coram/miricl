@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import readline from 'node:readline';
 import path from 'node:path';
 import {Miricl} from './miricl.mjs';
+import {collectCompilationStatistics, writeCompilationStatistics} from './compilation-statistics.mjs';
 
 const options = {devServer: false, tcpBridge: false, entryPoints: [], keep: []};
 let image;
@@ -103,9 +104,13 @@ if (help) {
           (options.report ? ` :report ${lispString(options.report)}` : '')
         : '';
       const operation = options.optimize ? 'miricl-compiler:optimize-system' : 'miricl-bundle:dump-system';
-      const result = await interpreter.evaluateAsync(`(${operation} ${system}${output}${optimization})`, {eof: true});
+      const result = await collectCompilationStatistics(interpreter,
+        {workload: options.optimize ?? options.bundle, phase: operation},
+        () => interpreter.evaluateAsync(`(${operation} ${system}${output}${optimization})`, {eof: true}));
       if (result.output) process.stdout.write(result.output);
       await filesystem.publish();
+      if (options.output && process.env.MIRICL_COMPILER_STATISTICS_DIRECTORY)
+        await writeCompilationStatistics({workload: options.optimize ?? options.bundle, phase: 'application output', status: 'complete', recordType: 'measurement', counters: [], runtimeBytes: compilerImage?.length ?? (await fs.stat(selectedImage)).size, outputBytes: (await fs.stat(filesystem.resolve(options.output))).size});
     } catch (error) { report(error); process.exitCode = 1; }
     finally { filesystem.close(); interpreter.close(); }
   } else {

@@ -12,7 +12,7 @@ const cache = process.env.MIRICL_COALTON_CACHE_DIRECTORY ?? 'build/coalton/cache
 const report = {mode, stages: [], compilations: [], loads: [], fileTimings: []};
 const activeFiles = [];
 let stage;
-const image = await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm');
+const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
 const sources = await coaltonFiles();
 const cacheHash = createHash('sha256').update(image);
 if (bootstrap) {

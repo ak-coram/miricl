@@ -42,7 +42,7 @@ Build the production application:
 just build
 #+end_src
 
-Development loads =miricl-precompiled.wasm= in the browser. The shipped WASI
+Development loads =miricl.wasm= in the browser. The shipped WASI
 command serves files and forwards REPL forms; the browser selects compilation
 or interpretation using =miricl-compiler:*compile-evaluations*=, initially =t=.
 Production builds run the precompiled compiler image in Node.

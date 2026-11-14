@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 import {portAcl2Source} from '../acl2/host.mjs';
 
-const image = fs.readFileSync(process.argv[2] ?? 'miricl-precompiled.wasm');
+const image = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
 const source = portAcl2Source('axioms.lisp', fs.readFileSync('vendor/acl2/axioms.lisp'));
 const start = source.indexOf('(defconstant *ev-fncall-w-guard1-cache-init*');
 const end = source.indexOf('(defvar *ev-fncall-w-guard1-cache*', start);

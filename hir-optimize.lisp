@@ -78,6 +78,7 @@
   (declare (type simple-vector instruction value))
   ;; Keep the result identity and its scoped assertion. Moving its declaration
   ;; onto VALUE would incorrectly extend that declaration's lexical scope.
+  (compiler-statistic :optimization/hir-copy (hir-instruction-opcode instruction))
   (setf (hir-instruction-opcode instruction) :copy
         (hir-instruction-inputs instruction) (list value)
         (hir-instruction-attributes instruction) nil
@@ -262,6 +263,7 @@
                    (fact (and output (svref facts (the (unsigned-byte 32) (hir-value-id output))))))
               (when (and (consp fact) (eq (hir-value-kind output) :single)
                          (member (hir-instruction-opcode instruction) '(:copy :primary :truth :value-ref)))
+                (compiler-statistic :optimization/hir-constant)
                 (setf (hir-instruction-opcode instruction) :constant
                       (hir-instruction-inputs instruction) nil
                       (hir-instruction-attributes instruction) (list (car fact))
@@ -270,6 +272,7 @@
                  (fact (and (eq (hir-instruction-opcode end) :branch)
                             (svref facts (the (unsigned-byte 32) (hir-value-id (first (hir-instruction-inputs end))))))))
             (when (consp fact)
+              (compiler-statistic :optimization/hir-constant-branch)
               (setf (hir-instruction-attributes end)
                       (list (if (car fact) (first (hir-instruction-attributes end))
                                 (second (hir-instruction-attributes end))))
@@ -300,6 +303,7 @@
       ;; but remove the conditional edge; its fallthrough needs no label.
       (when (and (eq (hir-instruction-opcode end) :branch)
                  (eq (first (hir-instruction-attributes end)) (second (hir-instruction-attributes end))))
+        (compiler-statistic :optimization/hir-identical-arms)
         (setf (hir-instruction-opcode end) :jump
               (hir-instruction-inputs end) nil
               (hir-instruction-attributes end) (list (first (hir-instruction-attributes end))))))))

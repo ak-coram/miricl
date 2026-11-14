@@ -9,7 +9,7 @@ import {connectTerminal, createWebapp, startHost, testPorts, waitFor} from './re
 const binary = path.resolve(process.argv[2] ?? 'miricl.wasm');
 const wasi = process.argv[3] && path.resolve(process.argv[3]);
 const httpOrigin = `http://127.0.0.1:${testPorts.http}`;
-const browserImage = path.join(path.dirname(binary), 'miricl-precompiled.wasm');
+const browserImage = path.join(path.dirname(binary), 'miricl.wasm');
 const directory = await createWebapp(browserImage);
 await fs.copyFile(process.argv[4] ?? 'build/asdf/asdf.lisp', path.join(directory, 'asdf.lisp'));
 await fs.mkdir(path.join(directory, 'project/dependency'), {recursive: true});

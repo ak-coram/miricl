@@ -5,7 +5,7 @@ import {runUpstream} from './ansi-upstream.mjs';
 import {Miricl} from '../scripts/miricl.mjs';
 import {installCompiler} from './ansi-compiler.mjs';
 
-const binary = process.argv[2] ?? 'miricl-precompiled.wasm';
+const binary = process.argv[2] ?? 'miricl.wasm';
 const forms = [
   '(defpackage :cl-test (:use :cl :rt))',
   '(defparameter cl-test::*compiler-fallback-probe* 0)',

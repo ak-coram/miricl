@@ -1,6 +1,11 @@
 ;;;; Flow of primary-value types through HIR, independent of Wasm lowering.
 (in-package :miricl-compiler)
 
+(defvar *hir-inline-definitions* nil
+  "Canonical INLINE definitions selected for one analysis/emission.
+Share this snapshot with lowering so a cooperative redefinition cannot turn
+a proved type predicate back into an ordinary call with different semantics.")
+
 (defun hir-value-type-at (type index)
   (declare (type (unsigned-byte 32) index))
   ;; THE and FTYPE constrain values without imposing an exact value count.
@@ -50,9 +55,13 @@ arguments and literal objects are never recursively compared."
   "An integer interval containing TYPE, with NIL endpoints for infinity.
 The third value proves integer membership. Unknown types prove nothing."
   (declare (type (integer 0 32) depth) (type list fuel))
-  (when (zerop depth) (return-from hir-integer-interval (values nil nil nil)))
+  (when (zerop depth)
+    (compiler-statistic :proof/budget-exhausted :integer-interval)
+    (return-from hir-integer-interval (values nil nil nil)))
   (when fuel
-    (when (zerop (car fuel)) (return-from hir-integer-interval (values nil nil nil)))
+    (when (zerop (car fuel))
+      (compiler-statistic :proof/budget-exhausted :integer-interval)
+      (return-from hir-integer-interval (values nil nil nil)))
     (decf (car fuel)))
   (cond ((eq type 'bit) (values 0 1 t))
         ((eq type 'fixnum) (values -9223372036854775808 9223372036854775807 t))
@@ -120,12 +129,16 @@ The third value proves integer membership. Unknown types prove nothing."
   "True only when CL type relationships establish TYPE is within REQUIRED.
 NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
   (declare (type (integer 0 32) depth) (type list fuel))
-  (when (zerop depth) (return-from hir-type-proves-p nil))
+  (when (zerop depth)
+    (compiler-statistic :proof/budget-exhausted :subtype)
+    (return-from hir-type-proves-p nil))
   (when (or (and (consp type) (member (car type) '(and or member eql)))
             (and (consp required) (member (car required) '(and or))))
     (unless fuel (setq fuel (list 128))))
   (when fuel
-    (when (zerop (car fuel)) (return-from hir-type-proves-p nil))
+    (when (zerop (car fuel))
+      (compiler-statistic :proof/budget-exhausted :subtype)
+      (return-from hir-type-proves-p nil))
     (decf (car fuel)))
   (cond ((or (eq required t) (hir-type-equal-p type required)) t)
         ((and (consp type) (eq (car type) 'eql))
@@ -283,8 +296,9 @@ provide no candidate, and no DEFTYPE or SATISFIES code is executed here."
       (setq value (first (hir-instruction-inputs producer))))))
 
 (defun hir-type-truth-premise (test cache &optional cells)
-  "Recover a canonical NULL/NOT test through immutable predicate temporaries.
-CELLS records actual read-only cell uses, rather than client binding flags."
+  "Recover a truth or canonical type predicate through immutable temporaries.
+The third value is a type established by a positive predicate, or NIL for
+ordinary truth. CELLS records actual read-only uses, not client binding flags."
   (declare (type simple-vector test) (type hash-table cache))
   (let ((current test) (inverse nil) (predicate nil))
     (dotimes (depth 32)
@@ -296,11 +310,16 @@ CELLS records actual read-only cell uses, rather than client binding flags."
            (when predicate (return-from hir-type-truth-premise (values current inverse)))
            (setq current (first (hir-instruction-inputs producer))))
           (:call
-           (unless (and (= (length (hir-instruction-inputs producer)) 3)
-                        (member (hir-inline-primitive producer cache) '(null not)))
-             (return))
-           (setq predicate t inverse (not inverse)
-                 current (third (hir-instruction-inputs producer))))
+           (unless (= (length (hir-instruction-inputs producer)) 3) (return))
+           (case (hir-inline-primitive producer cache)
+             ((null not)
+              (setq predicate t inverse (not inverse)
+                    current (third (hir-instruction-inputs producer))))
+             ((consp simple-vector-p)
+              (return-from hir-type-truth-premise
+                (values (third (hir-instruction-inputs producer)) inverse
+                  (if (eq (hir-inline-primitive producer cache) 'consp) 'cons 'simple-vector))))
+             (otherwise (return))))
           (:cell-read
            (when predicate (return-from hir-type-truth-premise (values current inverse)))
            (let* ((cell (first (hir-instruction-inputs producer)))
@@ -323,7 +342,7 @@ A budget limits cost; stopping early only loses optimization opportunities."
   (declare (type hir-unit unit))
   (let ((cells (make-hash-table :test 'eq)) (guards (make-hash-table :test 'eq))
         (barriers (make-hash-table :test 'eq))
-        (primitives (make-hash-table :test 'eq))
+        (primitives (or *hir-inline-definitions* (make-hash-table :test 'equal)))
         (size 0))
     (dolist (function (hir-unit-functions unit))
       (incf size (hir-function-value-count function))
@@ -377,8 +396,13 @@ A budget limits cost; stopping early only loses optimization opportunities."
                   (incf serial)
                   ;; The initial edge must itself establish the premise.
                   ;; Subsequent joins need every predecessor inside this region.
-                  (let ((pending (when (= (aref incoming (the (unsigned-byte 32) (hir-block-id arm))) 1)
-                                   (list arm))))
+                  (let* ((positive (if (second premise) (not positive) positive))
+                         (restriction (third premise))
+                         ;; A false type predicate currently contributes no
+                         ;; complement fact. Plain truth keeps both branches.
+                         (pending (when (and (or (null restriction) positive)
+                                             (= (aref incoming (the (unsigned-byte 32) (hir-block-id arm))) 1))
+                                    (list arm))))
                     (loop while (and pending (plusp budget)) do
                       (let* ((current (pop pending)) (id (hir-block-id current)))
                         (declare (type (unsigned-byte 32) id))
@@ -393,7 +417,8 @@ A budget limits cost; stopping early only loses optimization opportunities."
                                            (eq (first (hir-instruction-inputs instruction)) cell))
                                       (and source (eq (hir-instruction-opcode instruction) :copy)
                                            (eq (hir-copy-source (hir-instruction-output instruction)) source)))
-                              (push (cons observed (if (second premise) (not positive) positive))
+                              (compiler-statistic :proof/branch-premise (or restriction positive))
+                              (push (cons observed (or restriction positive))
                                     (gethash (hir-instruction-output instruction) guards))))
                           (let ((terminator (hir-block-terminator current)) (previous nil))
                             (when (member (hir-instruction-opcode terminator) '(:jump :branch))
@@ -422,7 +447,7 @@ A budget limits cost; stopping early only loses optimization opportunities."
          (name (first attributes)))
     ;; INLINE is the contract that permits relying on the definition selected
     ;; at compilation. Ordinary calls retain their unrestricted result types.
-    (when (and (eq (second attributes) 'inline) (member name '(length cons consp simple-vector-p null not zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor ash)))
+    (when (and (eq (second attributes) 'inline) (member name '(length cons consp simple-vector-p null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor ash)))
       (multiple-value-bind (canonical found) (gethash name cache)
         (unless found
           (setq canonical
@@ -442,6 +467,8 @@ A budget limits cost; stopping early only loses optimization opportunities."
       ;; Prove both operands are integers, including unbounded bignums.
       ;; Numeric identities do not generally preserve floating-point or
       ;; complex contagion, and an unknown operand can require a type error.
+      (unless (and integer-a integer-b)
+        (compiler-statistic :proof/integer-identity-unknown name))
       (when (and integer-a integer-b)
         (let ((zero-a (and (eql a 0) (eql b 0)))
               (zero-b (and (eql c 0) (eql d 0)))
@@ -449,13 +476,15 @@ A budget limits cost; stopping early only loses optimization opportunities."
               (one-b (and (eql c 1) (eql d 1)))
               (minus-a (and (eql a -1) (eql b -1)))
               (minus-b (and (eql c -1) (eql d -1))))
-          (case name
+          (let ((result (case name
             ((+ logxor) (cond (zero-b :left) (zero-a :right)))
             (- (when zero-b :left))
             (* (cond (zero-a :left) (zero-b :right) (one-a :right) (one-b :left)))
             (logand (cond (zero-a :left) (zero-b :right) (minus-a :right) (minus-b :left)))
             (logior (cond (minus-a :left) (minus-b :right) (zero-b :left) (zero-a :right)))
-            (ash (when (or zero-a zero-b) :left))))))))
+            (ash (when (or zero-a zero-b) :left)))))
+            (compiler-statistic (if result :proof/integer-identity-known :proof/integer-identity-unknown) name)
+            result))))))
 
 (defun hir-integer-predicate-type (name type)
   (declare (type symbol name))
@@ -474,11 +503,43 @@ A budget limits cost; stopping early only loses optimization opportunities."
                    (let ((odd (multiple-value-bind (value native) (compiler-primitive 47 low)
                                 (if native value (oddp low)))))
                      (if (if (eq name 'evenp) (not odd) odd) :true :false))))))))
-      (case answer (:true '(eql t)) (:false 'null) (otherwise 'boolean)))))
+      (case answer
+        (:true (compiler-statistic :proof/integer-predicate-true name) '(eql t))
+        (:false (compiler-statistic :proof/integer-predicate-false name) 'null)
+        (otherwise (compiler-statistic :proof/integer-predicate-unknown name) 'boolean)))))
+
+(defun hir-integer-comparison-type (name left right)
+  "Prove comparison results from target integer intervals, otherwise BOOLEAN.
+Equal integer values suffice for EQL. EQ identity is not implied by equal
+numbers, including bignums, and is never proved true by this rule."
+  (declare (type symbol name))
+  (multiple-value-bind (a b integer-a) (hir-integer-interval left)
+    (multiple-value-bind (c d integer-b) (hir-integer-interval right)
+      (unless (and integer-a integer-b)
+        (compiler-statistic :proof/integer-comparison-unknown name)
+        (return-from hir-integer-comparison-type 'boolean))
+      (let ((answer
+        (case name
+          ((eq eql = /=)
+           (cond ((or (and b c (< b c)) (and d a (< d a)))
+                  (if (eq name '/=) :true :false))
+                 ((and (not (eq name 'eq)) a b c d (= a b c d))
+                  (if (eq name '/=) :false :true))))
+          (< (cond ((and b c (< b c)) :true) ((and a d (>= a d)) :false)))
+          (<= (cond ((and b c (<= b c)) :true) ((and a d (> a d)) :false)))
+          (> (cond ((and a d (> a d)) :true) ((and b c (<= b c)) :false)))
+          (>= (cond ((and a d (>= a d)) :true) ((and b c (< b c)) :false))))))
+        (case answer
+          (:true (compiler-statistic :proof/integer-comparison-true name) '(eql t))
+          (:false (compiler-statistic :proof/integer-comparison-false name) 'null)
+          (otherwise (compiler-statistic :proof/integer-comparison-unknown name) 'boolean))))))
 
 (defun hir-inline-result-type (name types)
   (declare (type symbol name) (type list types))
   (when (member nil types) (return-from hir-inline-result-type nil))
+  (when (and (member name '(eq eql = /= < <= > >=)) (= (length types) 2))
+    (return-from hir-inline-result-type
+      (hir-integer-comparison-type name (first types) (second types))))
   (when (and (= (length types) 1) (member name '(zerop minusp plusp evenp oddp)))
     (return-from hir-inline-result-type (hir-integer-predicate-type name (first types))))
   (when (and (= (length types) 1) (member name '(consp simple-vector-p null not)))
@@ -573,7 +634,8 @@ Captured cells and debug-enabled functions keep conservative inferred types."
     (unless (and (%hir-value-p root) (member (hir-value-owner root) (hir-unit-functions unit) :test #'eq)
                  (member root (hir-function-values (hir-value-owner root)) :test #'eq))
       (compiler-input-fail "type-inference root" root "value does not belong to this HIR unit")))
-  (infer-hir-types-checked unit roots rootsp entries))
+  (let ((*hir-inline-definitions* nil))
+    (infer-hir-types-checked unit roots rootsp entries)))
 
 (defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only)
   "Internal inference kernel; UNIT and ROOTS have passed the public boundary."
@@ -582,13 +644,14 @@ Captured cells and debug-enabled functions keep conservative inferred types."
   ;; Many initialization units contain no operations using inferred types.
   (when (and rootsp (null roots))
     (return-from infer-hir-types-checked (make-hash-table :test 'eq)))
-  (let ((facts (make-hash-table :test 'eq)) (sources (make-hash-table :test 'eq))
+  (let* ((*hir-inline-definitions* (or *hir-inline-definitions* (make-hash-table :test 'equal)))
+        (facts (make-hash-table :test 'eq)) (sources (make-hash-table :test 'eq))
         (users (make-hash-table :test 'eq)) (calls (make-hash-table :test 'eq))
         (references (make-hash-table :test 'eq)) (candidates (make-hash-table :test 'eq))
         (escaped (make-hash-table :test 'eq)) (sites (make-hash-table :test 'eq))
         (opaque (make-hash-table :test 'eq)) (queued (make-hash-table :test 'eq))
         (required (make-hash-table :test 'eq)) (growth (make-hash-table :test 'eq)) (work nil)
-        (primitives (make-hash-table :test 'eq)) (intrinsics (make-hash-table :test 'eq))
+        (primitives *hir-inline-definitions*) (intrinsics (make-hash-table :test 'eq))
         (guards (hir-type-branch-guards unit)))
     (declare (type hash-table facts sources users calls references candidates escaped
                    sites opaque queued required growth guards)
@@ -741,7 +804,10 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                  (progn
                    (dolist (premise (gethash value guards))
                      (setq refined (hir-type-restrict refined
-                       (if (cdr premise) (hir-type-without-null (gethash (car premise) facts)) 'null))))
+                       (case (cdr premise)
+                         ((t) (hir-type-without-null (gethash (car premise) facts)))
+                         ((nil) 'null)
+                         (otherwise (cdr premise))))))
                    (hir-type-join previous refined))))
           (remhash value queued)
           (unless (hir-type-equal-p previous next)
@@ -757,6 +823,7 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                     (let ((count (1+ (gethash value growth 0))))
                       (setf (gethash value growth) count)
                       (when (>= count 4)
+                        (compiler-statistic :proof/interval-widening)
                         (setq next (if (or function proven-only) t
                                        (hir-type-restrict t (hir-value-type value))))))))))
             (setf (gethash value facts) next)

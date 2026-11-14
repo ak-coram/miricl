@@ -53,7 +53,8 @@
     (let ((replacements
             (list (cons "@@MIRICL_ADAPTER@@" adapter)
                   (cons "@@MIRICL_WASM@@"
-                        (html-repl-base64 (uiop:symbol-call :miricl :interpreter-wasm :compiler compiler))))))
+                        (html-repl-base64 (uiop:symbol-call :miricl :interpreter-wasm
+                                                          :compiler compiler :native-compiler compiler))))))
       (dolist (replacement replacements)
         (let ((start (search (car replacement) template)))
           (unless (and start (not (search (car replacement) template :start2 (1+ start))))

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl-precompiled.wasm'));
+const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 try {
   const result = await vm.evaluateAsync(`
     (let ((*readtable* (copy-readtable nil)) (*features* nil) (observed nil))

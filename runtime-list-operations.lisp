@@ -22,14 +22,9 @@
   #@(struct.set $obj $a (ref.cast (ref $obj) (local.get $box)) (call $cdr (local.get $args)))
   #@(call $car (local.get $args)))
 
-(define-runtime-function $list-eq (($a :nullable-object) ($b :nullable-object)) (:nullable-object)
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $a)))
-    (if (i32.or (ref.is_null (local.get $b))
-        (i32.eqz (ref.eq (call $car (local.get $a)) (call $car (local.get $b)))))
-      (then (return (ref.null eq))))
-    (local.set $a (call $cdr (local.get $a))) (local.set $b (call $cdr (local.get $b)))
-    (call $thread-checkpoint) (br $next)))
-  #@(call $bool (ref.is_null (local.get $b))))
+(defun $list-eq ()
+  (runtime-function-definition '$list-eq
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$list-eq 'miricl-runtime:list-eq :interruptible t))))
 
 (define-runtime-function $find-method-list
     (($methods :nullable-object) ($qualifiers :nullable-object) ($specializers :nullable-object)) (:nullable-object)
@@ -116,16 +111,18 @@
   #@(if (i32.eqz (ref.is_null (local.get $tail))) (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $x))))
   #@(local.get $result))
 
+(defun $reverse-copy-onto ()
+  (runtime-function-definition '$reverse-copy-onto
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$reverse-copy-onto 'miricl-runtime:reverse-copy-onto))))
+
+(defun $reverse-mutate-onto ()
+  (runtime-function-definition '$reverse-mutate-onto
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$reverse-mutate-onto 'miricl-runtime:reverse-mutate-onto))))
+
 (define-runtime-function $reverse-onto (($x :nullable-object) ($tail :nullable-object) ($mutate i32)) (:nullable-object)
-  (:locals ($next :nullable-object) ($cell :nullable-object))
-  #@(block $done (loop $step (br_if $done (ref.is_null (local.get $x)))
-    (call $require-list (local.get $x))
-    (local.set $next (call $cdr (local.get $x)))
-    (if (local.get $mutate)
-      (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $x)) (local.get $tail)) (local.set $cell (local.get $x)))
-      (else (local.set $cell (call $cons (call $car (local.get $x)) (local.get $tail)))))
-    (local.set $tail (local.get $cell)) (local.set $x (local.get $next)) (br $step)))
-  #@(local.get $tail))
+  #@(if (result (ref null eq)) (local.get $mutate)
+    (then (call $reverse-mutate-onto (local.get $x) (local.get $tail)))
+    (else (call $reverse-copy-onto (local.get $x) (local.get $tail)))))
 
 (define-runtime-function $reverse-sequence (($x :nullable-object) ($mutate i32)) (:nullable-object)
   (:locals ($digits :digits) ($result :digits) ($i i32) ($j i32) ($n i32) ($value i32))
@@ -180,55 +177,44 @@
     (br $next)))
   #@(local.get $x))
 
+(defun $last-bounded ()
+  (runtime-function-definition '$last-bounded
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$last-bounded 'miricl-runtime:last-bounded))))
+
 (define-runtime-function $last-native (($x :nullable-object) ($count :nullable-object)) (:nullable-object)
-  (:locals ($ahead :nullable-object) ($n i32))
   #@(call $require-list (local.get $x))
-  #@(local.set $n (call $natural-count (local.get $count)))
-  #@(local.set $ahead (local.get $x))
-  #@(block $advanced (loop $advance
-    (br_if $advanced (i32.or (i32.eqz (local.get $n)) (i32.ne (call $tag (local.get $ahead)) (i32.const 7))))
-    (local.set $ahead (call $cdr (local.get $ahead)))
-    (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $advance)))
-  #@(block $done (loop $next (br_if $done (i32.ne (call $tag (local.get $ahead)) (i32.const 7)))
-    (local.set $ahead (call $cdr (local.get $ahead))) (local.set $x (call $cdr (local.get $x))) (br $next)))
-  #@(local.get $x))
+  ;; Preserve the existing saturation of large nonnegative counts. Keep
+  ;; validation ahead of the SAFETY 0 worker.
+  #@(call $last-bounded (local.get $x) (call $int (call $natural-count (local.get $count)))))
+
+(defun $copy-butlast-bounded ()
+  (runtime-function-definition '$copy-butlast-bounded
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$copy-butlast-bounded 'miricl-runtime:copy-butlast-bounded))))
+
+(defun $truncate-butlast-bounded ()
+  (runtime-function-definition '$truncate-butlast-bounded
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$truncate-butlast-bounded 'miricl-runtime:truncate-butlast-bounded))))
 
 (define-runtime-function $butlast-native (($x :nullable-object) ($count :nullable-object) ($mutate i32)) (:nullable-object)
-  (:locals ($ahead :nullable-object) ($scan :nullable-object) ($result :nullable-object)
-           ($tail :nullable-object) ($cell :nullable-object) ($n i32))
+  (:locals ($bounded :nullable-object))
   #@(call $require-list (local.get $x))
-  #@(local.set $n (call $natural-count (local.get $count)))
-  #@(local.set $ahead (local.get $x))
-  #@(block $advanced (loop $advance
-    (br_if $advanced (i32.or (i32.eqz (local.get $n)) (i32.ne (call $tag (local.get $ahead)) (i32.const 7))))
-    (local.set $ahead (call $cdr (local.get $ahead)))
-    (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $advance)))
-  #@(local.set $scan (local.get $x))
-  #@(block $done (loop $next (br_if $done (i32.ne (call $tag (local.get $ahead)) (i32.const 7)))
-    (local.set $cell (if (result (ref null eq)) (local.get $mutate)
-      (then (local.get $scan)) (else (call $cons (call $car (local.get $scan)) (ref.null eq)))))
-    (if (ref.is_null (local.get $tail)) (then (local.set $result (local.get $cell)))
-      (else (if (i32.eqz (local.get $mutate)) (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))))
-    (local.set $tail (local.get $cell))
-    (local.set $scan (call $cdr (local.get $scan))) (local.set $ahead (call $cdr (local.get $ahead))) (br $next)))
-  #@(if (i32.eqz (ref.is_null (local.get $tail))) (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (ref.null eq))))
-  #@(local.get $result))
+  #@(local.set $bounded (call $int (call $natural-count (local.get $count))))
+  #@(if (result (ref null eq)) (local.get $mutate)
+    (then (call $truncate-butlast-bounded (local.get $x) (local.get $bounded)))
+    (else (call $copy-butlast-bounded (local.get $x) (local.get $bounded)))))
+
+(defun $copy-before-tail ()
+  (runtime-function-definition '$copy-before-tail
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$copy-before-tail 'miricl-runtime:copy-before-tail))))
 
 (define-runtime-function $tail-difference (($x :nullable-object) ($object :nullable-object) ($copy i32)) (:nullable-object)
-  (:locals ($result :nullable-object) ($tail :nullable-object) ($cell :nullable-object))
   #@(call $require-list (local.get $x))
+  #@(if (local.get $copy)
+    (then (return (call $copy-before-tail (local.get $x) (local.get $object)))))
   #@(block $done (loop $next (br_if $done (call $eql (local.get $x) (local.get $object)))
     (br_if $done (i32.ne (call $tag (local.get $x)) (i32.const 7)))
-    (if (local.get $copy)
-      (then (local.set $cell (call $cons (call $car (local.get $x)) (ref.null eq)))
-        (if (ref.is_null (local.get $tail)) (then (local.set $result (local.get $cell)))
-          (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-        (local.set $tail (local.get $cell))))
     (local.set $x (call $cdr (local.get $x))) (br $next)))
-  #@(if (i32.eqz (local.get $copy)) (then (return (call $bool (call $eql (local.get $x) (local.get $object))))))
-  #@(if (i32.and (i32.eqz (ref.is_null (local.get $tail))) (i32.eqz (call $eql (local.get $x) (local.get $object))))
-    (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $x))))
-  #@(local.get $result))
+  #@(call $bool (call $eql (local.get $x) (local.get $object))))
 
 (define-runtime-function $list-length-native (($fast :nullable-object)) (:nullable-object)
   (:locals ($slow :nullable-object) ($n i32))
@@ -926,8 +912,11 @@
   ($check-apply-list) ($check-apply-arguments) ($pop-argument) ($list-eq) ($find-method-list)
   ($check-generic-arity)
   ($check-keywords-native)
-  ($list-type-error) ($require-list) ($natural-count) ($copy-spine) ($reverse-onto) ($reverse-sequence)
-  ($make-list-native) ($nthcdr-native) ($last-native) ($butlast-native) ($tail-difference)
+  ($list-type-error) ($require-list) ($natural-count) ($copy-spine)
+  ($reverse-copy-onto) ($reverse-mutate-onto) ($reverse-onto) ($reverse-sequence)
+  ($make-list-native) ($nthcdr-native) ($last-bounded) ($last-native)
+  ($copy-butlast-bounded) ($truncate-butlast-bounded) ($butlast-native)
+  ($copy-before-tail) ($tail-difference)
   ($list-length-native) ($pairlis-native) ($callable) ($mapping-argument) ($map-lists-native) ($map-sequences-native) ($map-into-apply) ($bounded-index)
   ($sequence-character-kind) ($sequence-character-needle) ($simple-predicate-value) ($sequence-key-value) ($sequence-item-match)
   ($search-list-native) ($list-exclusive-native) ($list-set-apply) ($list-set-native) ($count-sequence-native) ($list-primitive))

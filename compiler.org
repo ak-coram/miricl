@@ -6,7 +6,199 @@ into shared WASM modules. Interprocedural type inference, specialization of
 arbitrary calls, removal of runtime primitives and compiled development support
 for every defining form remain incomplete.
 
+** HIR and bytecode design decisions
+
+The default precompiled browser image has a design budget below 1 MiB
+(1,048,576 raw bytes). Measure the uncompressed Wasm, gzip download and retained snapshot sizes
+separately. Compression reduces transfer cost but does not relax the raw image
+budget. Keep a compiler-free interpreter image for lightweight scripting.
+
+The target is Common Lisp on Wasm. The HIR describes Common Lisp execution;
+its compact bytecode executes the same semantic operations. Design the
+lowering for WasmGC references, typed calls, structured control flow, exceptions
+and Wasm multiple results. SBCL is a bootstrap host, not another compilation
+target. Host execution of the compiler exists to bootstrap the Wasm runtime
+and compiler. Development and application compilation use the compiler running
+inside Wasm. Reuse the same compiler sources and passes for bootstrapping;
+do not develop a separate host application-compilation product or a portable
+backend framework.
+
+Preserve Common Lisp distinctions explicitly: zero/one/multiple values and
+primary-value contexts; lexical binding identity and shared mutable captures;
+special bindings and dynamic extent; lexical and dynamic nonlocal exits and
+UNWIND-PROTECT cleanup; function redefinition and extensible CLOS/MOP dispatch;
+literal identity and sharing; numeric promotion and contagion; scoped type
+assertions and Lisp conditions. Optimization and representation choices must
+follow these contracts, including operand effects and evaluation order.
+
+Use two storage forms for this semantic model. Compilation can use an editable
+graph with explicit control/data flow. Retained functions use compact executable
+bytecode, literal/capture references and only the metadata required by policy.
+Packing changes storage, not the language semantics. Share instruction contracts
+between construction, validation, interpretation, optimization and disassembly.
+Wasm-specific lowering data can be temporary; it need not become another
+representation retained in snapshots.
+
+Snapshots should retain executable functions and required Lisp state, including
+observable object and binding identities. Avoid retaining predecessor lists,
+producer back-links, proof tables, lowering plans or full source forms through
+each instruction. Rebuild derived compiler/runtime caches when needed. Measure
+raw and compressed snapshot size alongside execution and compilation time.
+
+*** Optimization and debugging policy
+
+DEBUG 1 remains the default. It should provide useful function/frame identity
+and compact source locations without the cost of full lexical inspection and
+stepping. DEBUG 0 is the explicit policy for more aggressive stripping, and
+final browser artifacts should be compiled under that policy. Higher DEBUG
+levels can retain more variable and execution information for development.
+SPEED, SPACE, COMPILATION-SPEED, SAFETY and DEBUG are scoped policy inputs;
+debugging policy does not replace safety checks or alter Common Lisp semantics.
+
+Build policy and interactive defaults are separate. Compiling shipped runtime,
+compiler and application code at DEBUG 0 can produce a small browser image
+whose newly compiled user code still defaults to DEBUG 1. Changing a global
+declaration immediately before saving cannot retroactively strip emitted code.
+Keep structural checks at public boundaries before SAFETY 0 internals.
+
+Compile the shipped interpreter and compiler as sealed modules with block
+compilation, SAFETY 0 and DEBUG 0. Sealing covers owned internal calls; public
+entry checks and extensible Common Lisp/MOP hooks retain their contracts.
+The compiler image already uses a sealed module; migrated CL runtime kernels
+use sealed groups above the native substrate. Extend this policy as the
+remaining handwritten interpreter is migrated, without changing user defaults.
+
+The bootstrap endpoint is a jointly compiled sealed CL interpreter/compiler
+module above the native representation/platform substrate. The current image
+already links their Wasm into one physical module; that alone does not expose
+separately lowered code to shared HIR analysis. Joint compilation can propagate
+types and values across internal calls, inline small private helpers, specialize
+internal representations/calling conventions and remove unused code. Preserve
+checked public entries, interactive redefinition contracts and extensible Lisp/MOP
+hooks. Migrate slices and measure code size/performance before broadening the
+sealed boundary; a combined build must still meet the 1 MiB image budget.
+
+Use the existing =strip= policy to select the retained endpoint surface.
+=:strip nil= preserves all supplied endpoints; =:strip t= roots explicit entry
+points and their reachable dependencies. Eventually apply the same policy to
+the jointly compiled application, CL runtime and compiler, so unreachable
+evaluation, compilation and loading facilities can disappear from fixed-purpose
+images. Interactive images retain these facilities where reachable; they can
+still share one compiled module. Compiler presence is not required merely
+because it was used to build the application. This is a link/reachability goal:
+current FASL stripping does not yet eliminate the native runtime substrate.
+Stripped application startup and browser callbacks must enter compiled exports
+directly: launching an application by reading/evaluating a Lisp string makes
+the reader/evaluator reachable again. Export roots, callback tables, retained
+function objects and ordered initialization effects participate in the same
+reachability graph. Visibility does not override public redefinition or MOP
+extension contracts; only owned internal calls may use the sealed boundary.
+
+*** Source information and disassembly
+
+Use compact origin identifiers with shared source-file/version and span tables.
+Origins identify source occurrences, including repeated symbols and literals,
+and should preserve macro-expansion and inlining provenance. Define one offset
+convention at the reader/compiler boundary. Source text can be retained once
+or supplied separately; a source location does not require retaining full forms
+or a source-text copy per function. DEBUG 0 may omit this metadata.
+
+Preserve binding identities and lexical scopes separately from physical storage.
+Richer debug metadata can describe an optimized variable as a value, capture,
+constant or unavailable, and relate inlined code to Lisp call contexts. It must
+not require keeping every binding in a heap cell at the default policy.
+
+DISASSEMBLE must support retained HIR/bytecode without requiring source forms
+or the optimizing compiler. Show executable Lisp operations, labeled control
+flow, value groups, literals, captures and available names/types. Add source
+locations when retained; stripped functions must still have structural listings.
+Native listings remain available when the image retains their instruction data.
+
+These are design constraints for the interpreter migration, not a claim that
+all debugging support is implemented. Packed HIR disassembly already exists.
+Full source spans, expanded lexical/debug information and compiled stepping
+still need implementation. The current DEBUG 3 source-evaluator fallback is
+a temporary compatibility path, not the intended long-term debugging design.
+
 ** Deployment and compiler bootstrap
+
+For bootstrapping, the host runs the HIR frontend, proof passes and Wasm emitter
+directly. This is build tooling for producing the Wasm system, rather than a
+second supported environment for application compilation.
+Loading =miricl/cross= needs neither CFFI nor Wasmtime. The full =miricl= system
+adds the Wasmtime host runner and the assembler still used for runtime WAT.
+=miricl-cross:compile-lambda= returns Wasm bytes, literals and debug metadata;
+=miricl-cross:compile-module= compiles a sealed DEFUN group with explicit entry
+points and adds the HIR unit as its fourth value. These functions emit code
+without instantiating a guest or installing function definitions. The initial
+host interface accepts core CL forms; macros require an explicit target
+=*macroexpand-hook*= adapter. It rejects host macro expansion by default,
+because even standard SETF places can expand into host-private functions.
+Keyword normalization and lexical macro environments still need host adapters.
+=LOAD-TIME-VALUE= likewise requires an explicit =:load-time-evaluator= adapter;
+cross-compilation never substitutes host EVAL for target evaluation.
+
+For example, in a bootstrap SBCL REPL after loading =miricl/cross=:
+
+#+begin_src lisp
+(miricl-cross:compile-module
+ '((defun checked-head (object) (declare (inline car)) (car object))
+   (defun entry (object) (checked-head object)))
+ :entry-points '(entry) :inline t)
+#+end_src
+
+This returns target code and metadata without defining either function in
+SBCL. Reloading the emitter and repeating the call is the fast bootstrap
+feedback loop; a full guest image build is a later validation step. The host
+interface and explicit expansion adapters serve trusted bootstrap sources;
+extending them into a general host application compiler is outside this scope.
+
+Runtime migration starts with =runtime-kernel-library.lisp=. Its ordinary CL
+property-cell lookup and checked helpers compile as a closed group; helper
+inlining leaves one worker. The host linker proves that the worker needs no
+closure, padded arguments or literals before changing its external-reference
+view to the core's raw reference ABI. It resolves a small set of representation
+primitives and links the worker directly as =$property-cell=. No Lisp function
+object, startup compilation, additional module loader or kernel source ships
+for that entry, including in the compiler-less image.
+
+
+*** Kernel lowering and measurements
+
+The identity-membership kernel uses the same pipeline with an i32 truth-result
+ABI. The adapter normalizes Lisp truth values and cancels adjacent boolean
+representation conversions on return. The compiler emits T through its scalar
+boolean primitive without a function-owned literal, while retaining repeated
+loop-literal caches. Backend reloads invalidate the host kernel cache using
+the actual compiler function definitions, so REPL experiments do not silently
+reuse code from an earlier emitter generation.
+
+These initial kernels have fixed arity up to four and return one value. Their
+raw callers own multiple-value state. The linker rejects unsupported
+dependencies and captures; it does not
+silently interpret them. Structural checks precede SAFETY 0 field access, and
+malformed storage keeps the checked primitive error path. Ordinary compiled
+Lisp loops retain their scheduler polls; only explicitly non-suspending kernels
+omit them. The pairwise identity-list comparison uses =:interruptible t= and
+retains the compiler's loop-backedge checkpoints. A circular comparison can
+still yield and receive a nonlocal interrupt. Extend the interface incrementally,
+measuring execution time and raw/compressed image size against each handwritten
+implementation before replacing it.
+
+Canonical inline operations also supply value-count facts. Single-valued
+primitive results stay scalar through full-value returns and joins, avoiding
+an allocated value-list packet. GETHASH retains its two-value path.
+
+For DEBUG 0, a bounded analysis permits direct non-tail calls to known lexical
+workers whose bodies require no dynamic cleanup or tail-frame replacement.
+The initial rule accepts local state and canonical primitive operations;
+unknown calls, dynamic bindings, captured exits and debugger entries keep the
+ordinary call path. Public function objects retain their checked entries.
+The analysis is rebuilt for every HIR emission. Its single-valued return facts
+also remove redundant value-state resets; other primary-only callers retain
+the reset after the call. Scheduler checkpoints remain. Both bytecode
+optimizers receive complete internal signatures, including five-argument
+workers, rather than assuming every internal call has two arguments.
 
 The browser interpreter includes compact compiler source. It does not compile
 anything at startup. The first compilation self-compiles the frontend and emitter
@@ -37,9 +229,12 @@ JavaScript callbacks. Node and browser adapters can instantiate generated Wasm;
 the WASI image runs the linked compiler and can emit code without an external
 compiler file, but still lacks dynamic Wasm instantiation.
 
-The import-free =miricl-precompiled.wasm= artifact includes the bootstrapped
+The import-free =miricl.wasm= artifact includes the bootstrapped
 native compiler, with compiler state =:ready= and origin =:image= at startup.
-It uses the same adapter and REPL bridge as =miricl.wasm= and works in browsers
+It is the default browser/Node image. =miricl-cold.wasm= retains the source
+compiler for bootstrap work; =miricl-interpreter.wasm= provides lightweight
+scripting without the optimizing compiler.
+It uses the same adapter and REPL bridge as =miricl-cold.wasm= and works in browsers
 and Node without companion images or experimental flags. Native compilation
 and the shared size passes run during the build rather than on first use.
 The build caches this core and also embeds it in the REPL component, without
@@ -48,8 +243,8 @@ that embedded core when =miricl-repl.wasm= is beside the interpreter; with only
 the ordinary interpreter available, its host compiler self-compiles on first use.
 
 =miricl-compiler:*compile-evaluations*= is a dynamically scoped evaluation
-policy. It defaults to =nil= in the ordinary image and WASI command, and =t=
-in the import-free precompiled image. The setting takes effect at public
+policy. It defaults to =nil= in =miricl-cold.wasm= and the WASI command, and =t=
+in the default =miricl.wasm= image. The setting takes effect at public
 evaluation boundaries: text REPL input, object requests, =eval=, and individual
 source forms read by =load=. Recursive interpreter calls keep their lexical
 environment rather than compiling each subexpression. Development REPL forms
@@ -88,7 +283,7 @@ or interpreted. Macro expansion, quoted objects, load-time values and execution
 all remain in that browser heap. Ordinary expressions, =defun= bodies and
 =defvar=/=defparameter= initializers use its native compiler when enabled;
 environment definitions retain their evaluator handling. Compiler errors remain
-visible. Game of Life's development page uses =miricl-precompiled.wasm= so its
+visible. Game of Life's development page uses =miricl.wasm= so its
 browser compiler is ready immediately. Synchronous and asynchronous evaluation
 share this policy.
 
@@ -251,6 +446,15 @@ floating-point and complex operands retain ordinary calls and their errors.
 The compiler kernels explicitly inline these predicates alongside arithmetic;
 application policy remains unchanged.
 
+Canonical =eq=/=eql= calls share the integer interval rules. Disjoint ranges
+prove either comparison false; equal singleton ranges prove =eql= true,
+including bignums. Equal numeric values never prove =eq= identity. These facts
+flow through private module arguments and returns, while exported or escaping
+helpers retain the possibilities supplied by outside callers. Safety-0 inline
+lowering can replace the comparison with its proven boolean, preserving both
+operand evaluations. Opaque types and overlapping intervals retain the ordinary
+comparison.
+
 Native branches can consume an adjacent canonical scalar predicate directly,
 without first boxing its boolean result. Only a single-use suffix of copies,
 truth normalization and scalar primary-value extraction participates. Operand
@@ -266,7 +470,7 @@ crossing regions are rejected. Topological checks validate every collapsed body
 and the surrounding graph before selecting the layout. Region count, storage,
 nesting and proof work are bounded. Captured landing entries, debug-visible
 functions, irreducible cycles and exhausted budgets retain dispatch. Transfers preserve block
-arguments and dynamic scopes, and backedges retain scheduling polls. Bind
+arguments and dynamic scopes, and backedges retain scheduling polls.
 Structured lowering is used whenever these proofs succeed.
 
 Within one basic block, canonical nontrapping predicates can reuse a previous
@@ -295,6 +499,10 @@ allocation as well as overflow; wider results retain ordinary placement.
 General calls, mutable heap reads, allocating operations and full value groups
 remain in place. Prefixes execute before the selected loop, while all operand
 effects keep their original positions. Cached results have dedicated locals.
+Immutable capture-slot addresses can also move before a loop at DEBUG below 2.
+Their mutable cell contents stay inside the loop; reading an exit-token address
+does not activate the exit. Scoped assertions on the capture result prevent
+speculation. This does not prefetch captures used only in unrelated branches.
 Single-use branch suffixes cache raw Wasm =i32= conditions; observed Lisp values
 retain their boxed representation. Work is bounded and entry
 blocks that are themselves loop headers cannot supply a prefix's operands.
@@ -333,7 +541,7 @@ omitting overflow checks also requires a result assertion that fits =i64=.
 Safety policy follows lexical scope, including deferred frontend work,
 initializers, closures and inline function definitions. =proclaim=/=declaim=
 can change the default for subsequent compilations. =compiler-source-policy=
-adds =safety 0= to compiler kernels during both first-use bootstrap and image
+adds =safety 0= and =debug 0= to compiler kernels during first-use bootstrap and image
 generation, without changing the application default. The compiler's source
 declares internal record/table representations, byte and index ranges, and
 lexical environments. Liveness bitmaps remain arbitrary nonnegative integers.
@@ -635,11 +843,11 @@ registers, bindings, captures, instructions and types without requiring a
 compiler in the receiving image. Closures share code and mutable lexical cells
 through ordinary runtime objects, also supported by application snapshots.
 
-The migration is still being integrated. Debug level 3 currently keeps the
-existing evaluator path while HIR stepping, lexical scopes and frame evaluation
-are implemented. This is a temporary rollout boundary, not a permanent choice
-of FASL formats. The default evaluator and file compiler will change after
-debugger parity and size/performance validation.
+The ordinary interpreter and file compiler use compact HIR. Debug level 3
+currently keeps the existing evaluator path while HIR stepping, lexical scopes
+and frame evaluation are implemented. This is a temporary compatibility path;
+retained code and richer debugging support should follow the design constraints
+above, with size and performance validation at each migration step.
 
 =node scripts/benchmark-hir-bootstrap.mjs OUTPUT IMAGE= compares cold source
 bootstrap with prepared HIR bootstrap, reporting preparation and installation
@@ -824,6 +1032,9 @@ calls still return and share the appropriate tail of their literal list.
 INLINE EQL uses identity comparison when either operand is a literal outside
 NUMBER and CHARACTER. The ordinary numeric/character comparison and canonical
 definition checks remain in place.
+An unobserved canonical EQL result consumed by a branch uses an i32 predicate,
+without constructing a Lisp boolean. Observed results retain their ordinary
+Lisp value and multiple-value behavior.
 Adjacent stores and loads become =local.tee=, and copies of a local to itself
 are omitted. Single-use constants are loaded at their use; NIL needs no local
 even when used repeatedly. Literal lookup preserves the original object's

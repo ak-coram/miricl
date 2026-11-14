@@ -12,11 +12,11 @@ Then run from the repository root:
 
 #+begin_src sh
 just build-fricas
-node scripts/repl.mjs miricl-precompiled.wasm --dev-server --directory=build/fricas/site
+node scripts/repl.mjs miricl.wasm --dev-server --directory=build/fricas/site
 just test-fricas
 #+end_src
 
-MIRICL build stages and the browser distribution use =miricl-precompiled.wasm=,
+MIRICL build stages and the browser distribution use =miricl.wasm=,
 with its bootstrapped native compiler ready at startup. This avoids repeating
 compiler bootstrapping when the build creates a fresh interpreter. The static
 site keeps the runtime filename =miricl.wasm=.

@@ -6,17 +6,19 @@ import os from 'node:os';
 import path from 'node:path';
 import {pathToFileURL, fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
-import {gzipSync, brotliCompressSync, constants} from 'node:zlib';
+import {gzipSync, gunzipSync, brotliCompressSync, constants} from 'node:zlib';
 import {collectImageSizes, renderImageSizes} from '../scripts/build-size-html.mjs';
 
 function checkMeasurements(report, directory) {
   for (const artifact of report.artifacts) {
     if (artifact.kind === 'application') {
       assert.ok(artifact.files.length, artifact.file + ': application payload must not be empty');
-      const sizes = {rawBytes: 0, gzipBytes: 0, brotliBytes: 0};
+      const sizes = {rawBytes: 0, gzipBytes: 0, brotliBytes: 0, downloadBytes: 0};
       for (const file of artifact.files) {
-        const bytes = fs.readFileSync(path.join(directory, file.file));
-        const measured = {rawBytes: bytes.length, gzipBytes: gzipSync(bytes, {level: 9}).length,
+        const download = fs.readFileSync(path.join(directory, file.file));
+        const bytes = file.file.endsWith('.gz') ? gunzipSync(download) : download;
+        const measured = {rawBytes: bytes.length, downloadBytes: download.length,
+          gzipBytes: file.file.endsWith('.gz') ? download.length : gzipSync(bytes, {level: 9}).length,
           brotliBytes: brotliCompressSync(bytes, {params: {[constants.BROTLI_PARAM_QUALITY]: 11}}).length};
         for (const key of Object.keys(sizes)) {
           assert.equal(file[key], measured[key], file.file);
@@ -26,9 +28,11 @@ function checkMeasurements(report, directory) {
       for (const key of Object.keys(sizes)) assert.equal(artifact[key], sizes[key]);
       continue;
     }
-    const bytes = fs.readFileSync(path.join(directory, artifact.file));
+    const download = fs.readFileSync(path.join(directory, artifact.file));
+    const bytes = artifact.file.endsWith('.gz') ? gunzipSync(download) : download;
     assert.equal(artifact.rawBytes, bytes.length, artifact.file);
-    assert.equal(artifact.gzipBytes, gzipSync(bytes, {level: 9}).length, artifact.file);
+    assert.equal(artifact.gzipBytes, artifact.file.endsWith('.gz') ? download.length : gzipSync(bytes, {level: 9}).length, artifact.file);
+    assert.equal(artifact.downloadBytes, download.length, artifact.file);
     assert.equal(artifact.brotliBytes, brotliCompressSync(bytes,
       {params: {[constants.BROTLI_PARAM_QUALITY]: 11}}).length, artifact.file);
     if (artifact.kind === 'wasm') {
@@ -75,11 +79,11 @@ function browserChecks(expected) {
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'miricl-size-html-'));
 try {
   const header = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
-  fs.writeFileSync(path.join(directory, 'miricl.wasm'), header);
+  fs.writeFileSync(path.join(directory, 'miricl-cold.wasm'), header);
   fs.writeFileSync(path.join(directory, 'miricl-interpreter.wasm'), header);
   const repeatedSections = Buffer.concat([header, Buffer.from([0, 2, 1, 120, 0, 2, 1, 120])]);
   fs.writeFileSync(path.join(directory, 'miricl-repl.wasm'), repeatedSections);
-  fs.writeFileSync(path.join(directory, 'miricl-precompiled.wasm'), repeatedSections);
+  fs.writeFileSync(path.join(directory, 'miricl.wasm'), repeatedSections);
   fs.writeFileSync(path.join(directory, 'miricl-asdf.wasm'), repeatedSections);
   fs.writeFileSync(path.join(directory, 'miricl.html'), '<!doctype html><p>Complete REPL λ🙂</p>'.repeat(100));
   fs.writeFileSync(path.join(directory, 'todo.html'), '<script type="text/x-common-lisp">(print "TODO λ🙂")</script>'.repeat(150));
@@ -118,6 +122,19 @@ try {
   for (const file of ['index.html', 'app.mjs', 'startup.lisp', 'miricl.js'])
     fs.writeFileSync(path.join(directory, 'build/mcclim/site', file), 'McCLIM fixture λ🙂');
   fs.writeFileSync(path.join(directory, 'build/mcclim/site/miricl-mcclim.wasm'), repeatedSections);
+  for (const app of ['game-of-life/build', 'build/maxima/site', 'build/fricas/site', 'build/acl2/site', 'build/coalton/site', 'build/mcclim/site']) {
+    for (const name of fs.readdirSync(path.join(directory, app))) {
+      if (name.endsWith('.gz')) {
+        const file = path.join(directory, app, name);
+        fs.writeFileSync(file, gzipSync(fs.readFileSync(file), {level: 9}));
+        continue;
+      }
+      if (!/\.(?:wasm|core)$/.test(name)) continue;
+      const file = path.join(directory, app, name);
+      fs.writeFileSync(file + '.gz', gzipSync(fs.readFileSync(file), {level: 9}));
+      fs.rmSync(file);
+    }
+  }
   const hostile = '</dd><script>globalThis.injected=true</script><img src=x onerror="globalThis.injected=true"> & λ🙂';
   const report = collectImageSizes(directory, {generatedAt: '2026-11-05T12:00:00.000Z',
     commit: hostile, runURL: 'https://example.com/run?a=1&b=2'});
@@ -144,7 +161,7 @@ try {
   assert.doesNotThrow(() => renderImageSizes(withoutAcl2), 'Existing CI builds can omit the development ACL2 artifacts');
   assert.doesNotThrow(() => renderImageSizes({...withoutAcl2,
     artifacts: withoutAcl2.artifacts.filter(a => a.file !== 'coalton/' && !a.file.startsWith('build/coalton/'))}));
-  const precompiled = report.artifacts.find(artifact => artifact.file === 'miricl-precompiled.wasm');
+  const precompiled = report.artifacts.find(artifact => artifact.file === 'miricl.wasm');
   assert.deepEqual(precompiled.sections.find(s => s.name === 'custom:x'),
     {name: 'custom:x', bytes: 8, count: 2});
   assert.match(precompiled.description, /bootstrapped native compiler/);

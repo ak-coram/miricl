@@ -858,6 +858,14 @@
   #@(extern.convert_any (struct.get $obj $a
     (ref.cast (ref $obj) ,(native-object '(local.get $list))))))
 
+(define-runtime-function $native-car-inline-checked (($list externref)) (externref)
+  (:export-raw "native-car-inline-checked")
+  #@(extern.convert_any (call $car ,(native-object '(local.get $list)))))
+
+(define-runtime-function $native-cdr-inline-checked (($list externref)) (externref)
+  (:export-raw "native-cdr-inline-checked")
+  #@(extern.convert_any (call $cdr ,(native-object '(local.get $list)))))
+
 (define-runtime-function $native-cdr-list-inline (($list externref)) (externref)
   (:export-raw "native-cdr-list-inline")
   #@(if (ref.is_null ,(native-object '(local.get $list))) (then (return (ref.null extern))))
@@ -875,6 +883,10 @@
 (define-runtime-function $native-eql-inline (($left externref) ($right externref)) (externref)
   (:export-raw "native-eql-inline")
   #@(extern.convert_any (call $bool (call $eql ,(native-object '(local.get $left)) ,(native-object '(local.get $right))))))
+
+(define-runtime-function $native-eql-test (($left externref) ($right externref)) (i32)
+  (:export-raw "native-eql-test")
+  #@(call $eql ,(native-object '(local.get $left)) ,(native-object '(local.get $right))))
 
 (define-runtime-function $native-length-inline (($sequence externref)) (externref)
   (:export-raw "native-length-inline")
@@ -1449,11 +1461,12 @@
   ($native-add-int64-checked) ($native-sub-int64-checked) ($native-mul-int64-checked)
   ($native-lt-int64) ($native-gt-int64) ($native-le-int64) ($native-ge-int64) ($native-eq-int64) ($native-ne-int64)
   ($native-vector-ref) ($native-boolean)
-  ($native-eq-inline) ($native-eql-inline) ($native-length-inline) ($native-vector-length-inline)
+  ($native-eq-inline) ($native-eql-inline) ($native-eql-test) ($native-length-inline) ($native-vector-length-inline)
   ($native-gethash-inline) ($native-gethash-primary-inline) ($native-puthash-inline)
   ($native-consp-inline) ($native-simple-vector-p-inline)
   ($native-vector-ref-trusted) ($native-car-list) ($native-cdr-list)
   ($native-car-checked) ($native-cdr-checked)
+  ($native-car-inline-checked) ($native-cdr-inline-checked)
   ($native-car-list-inline) ($native-cdr-list-inline)
   ($native-vector-ref-trusted64)
   ($native-vector-ref-inline)

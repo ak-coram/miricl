@@ -18,8 +18,8 @@ async function link(target, name) {
 await link(path.join(output, 'runtime'), 'runtime');
 await link(output, 'images');
 await link(path.join(output, 'miricl-asdf.wasm'), 'miricl-asdf.wasm');
+await link(path.join(output, 'miricl-cold.wasm'), 'miricl-cold.wasm');
 await link(path.join(output, 'miricl.wasm'), 'miricl.wasm');
-await link(path.join(output, 'miricl-precompiled.wasm'), 'miricl-precompiled.wasm');
 await link(path.join(output, 'miricl-repl.wasm'), 'miricl-repl.wasm');
 
 const string = value => `"${value.replace(/["\\]/g, '\\$&')}"`;

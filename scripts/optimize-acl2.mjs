@@ -6,7 +6,8 @@ import {Miricl} from './miricl.mjs';
 import {portAcl2Source} from '../acl2/host.mjs';
 import {execFileSync} from 'node:child_process';
 import {startWasmProfile} from './wasm-profile.mjs';
-const [imagePath = 'miricl-precompiled.wasm', input = 'build/acl2/acl2.wasm',
+import {collectCompilationStatistics, writeCompilationStatistics} from './compilation-statistics.mjs';
+const [imagePath = 'miricl.wasm', input = 'build/acl2/acl2.wasm',
   output = 'build/acl2/acl2-native.wasm'] = process.argv.slice(2);
 const upstream = path.resolve('vendor/acl2');
 const revision = execFileSync('git', ['-C', upstream, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
@@ -25,7 +26,8 @@ async function evaluate(name, source) {
     ? await startWasmProfile(vm, image,
       path.join(process.env.MIRICL_ACL2_PROFILE_DIRECTORY, name.replaceAll(/[^a-z0-9-]+/gi, '-'))) : null;
   let result, milliseconds;
-  try {result = await vm.evaluateAsync(source, {eof: true}); milliseconds = Math.round(performance.now() - start);}
+  try {result = await collectCompilationStatistics(vm, {workload: 'acl2', phase: name},
+    () => vm.evaluateAsync(source, {eof: true})); milliseconds = Math.round(performance.now() - start);}
   finally {if (profile) await profile();}
   stages.push({name, milliseconds});
   return result;
@@ -63,6 +65,7 @@ try {
     initializedWorld: false, retainedInterface: 'complete dynamic ACL2 prover',
     optimizer: 'miricl-compiler:shake-file + compile-native-bundle', strip: false,
   }, null, 2) + '\n');
+  await writeCompilationStatistics({workload: 'acl2', phase: 'native output', status: 'complete', recordType: 'measurement', counters: [], runtimeBytes: image.length, inputBytes: portable.length, outputBytes: native.length});
   console.log(`Native ACL2: ${native.length} bytes (${output}).`);
 } catch (error) {console.error(`ACL2 native failed during ${stage}:`, error.message, error.backtrace); throw error;}
 finally {clearInterval(heartbeat); vm.close();}

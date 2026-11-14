@@ -4,8 +4,8 @@ import fs from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import {Miricl} from '../scripts/miricl.mjs';
 
-for (const [file, compiled] of [[process.argv[2] ?? 'miricl.wasm', false],
-  [process.argv[3] ?? 'miricl-precompiled.wasm', true]]) {
+for (const [file, compiled] of [[process.argv[2] ?? 'miricl-cold.wasm', false],
+  [process.argv[3] ?? 'miricl.wasm', true]]) {
   const vm = await Miricl.instantiate(await fs.readFile(file));
   const output = source => vm.evaluate(source, {eof: true}).output;
   const check = source => assert.equal(output(source), 'T\n', `${file}: ${source}`);
@@ -180,7 +180,7 @@ for (const [file, compiled] of [[process.argv[2] ?? 'miricl.wasm', false],
 }
 
 if (process.argv[4]) {
-  const terminal = spawnSync(process.execPath, ['scripts/repl.mjs', process.argv[2] ?? 'miricl.wasm'], {
+  const terminal = spawnSync(process.execPath, ['scripts/repl.mjs', process.argv[2] ?? 'miricl-cold.wasm'], {
     input: 'miricl-compiler:*compile-evaluations*\n:quit\n', encoding: 'utf8', timeout: 30000,
   });
   assert.ifError(terminal.error);

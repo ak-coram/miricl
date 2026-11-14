@@ -466,7 +466,7 @@
       (then (local.set $value ,(clos-default-call 'slot-unbound
         (list (wat-fragment #@(array.get $objects (local.get $plan) (i32.const 1))) #@(local.get $object) #@(local.get $name))))))
     (call $clear-values) (return (local.get $value)))
-  #@(return_call $instance-slot-operation (local.get $writer) (local.get $object) (local.get $name) (local.get $value)))
+  #@(return_call $instance-slot-operation-general (local.get $writer) (local.get $object) (local.get $name) (local.get $value)))
 
 (define-runtime-function $raw-instance-access (($op i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($object :nullable-object) ($storage :nullable-object) ($location :nullable-object)
@@ -513,8 +513,114 @@
       (list #@(local.get $value) #@(local.get $object) #@(local.get $location))))))
   #@(return ,(clos-default-call '%raw-instance-access-general (list #@(local.get $object) #@(local.get $location)))))
 
+;; This bounded cache is derived process state, deliberately absent from the
+;; saved core roots. Only this runtime owns its array and entries. Epoch changes
+;; discard the complete table, so old layouts cannot accumulate without bound.
+(defparameter *slot-read-cache-size* 1024)
+
+(define-runtime-function $slot-read-probe-permitted () (i32)
+  (:locals ($scan :nullable-object) ($entry :nullable-object) ($name :nullable-object)
+           ($function :nullable-object))
+  #@(if (i32.eqz (call $boundp ,(clos-library-reference '%standard-slot-protocols)))
+    (then (return (i32.const 0))))
+  #@(local.set $scan (call $symbol-value ,(clos-library-reference '%standard-slot-protocols)))
+  #@(call $check-apply-list (local.get $scan))
+  (wat-list-loop ($scan)
+    #@(local.set $entry (call $car (local.get $scan)))
+    #@(local.set $name (call $car (local.get $entry)))
+    #@(local.set $function (call $function-binding (local.get $name)))
+    #@(if (ref.is_null (local.get $function)) (then (return (i32.const 0))))
+    #@(local.set $function (call $binding-value (local.get $function)))
+    #@(if (ref.is_null (local.get $function)) (then (return (i32.const 0))))
+    #@(if (i32.eqz (ref.eq (local.get $function) (call $car (call $cdr (local.get $entry)))))
+      (then (return (i32.const 0))))
+    (runtime-wat-forms
+      (loop for name in '(class-slots class-finalized-p slot-definition-name slot-definition-allocation slot-definition-type)
+            collect `(if (ref.eq (local.get $name) ,(clos-library-reference name))
+              (then (if (i32.eqz (call $standard-property-generic-p (local.get $function)
+                    (call $car (call $cdr (call $cdr (local.get $entry))))))
+                (then (return (i32.const 0)))))))))
+  #@(i32.const 1))
+
+(define-runtime-function $instance-slot-operation
+    (($mode i32) ($object :nullable-object) ($name :nullable-object) ($value :nullable-object)) (:nullable-object)
+  (:locals ($class :nullable-object) ($entry :nullable-object) ($function :nullable-object)
+           ($plan (ref null $objects)) ($index i32) ($cache (ref null $objects)) ($proof-token :nullable-object))
+  (progn
+    (assert (and (<= 1 *slot-read-cache-size* 4096)
+                 (zerop (logand *slot-read-cache-size* (1- *slot-read-cache-size*)))))
+    (wat-fragment ""))
+  #@(block $general
+    (br_if $general (local.get $mode))
+    (br_if $general (i32.ne (call $tag (local.get $object)) (i32.const 23)))
+    (br_if $general (i32.eqz (call $symbolp (local.get $name))))
+    (local.set $class (struct.get $obj $a (ref.cast (ref $obj) (local.get $object))))
+    (br_if $general (i32.and (i32.ne (call $tag (local.get $class)) (i32.const 17))
+      (i32.ne (call $tag (local.get $class)) (i32.const 23))))
+    (if (i32.or (ref.is_null (global.get $slot-read-cache))
+          (i32.eqz (ref.eq (global.get $slot-read-epoch) (global.get $slot-access-token))))
+      (then
+        (global.set $slot-read-cache (array.new_default $objects (i32.const ,*slot-read-cache-size*)))
+        (global.set $slot-read-epoch (global.get $slot-access-token))))
+    (local.set $cache (global.get $slot-read-cache))
+    (local.set $index (i32.and (i32.xor
+      (i32.shr_u (struct.get $obj $tag (ref.cast (ref $obj) (local.get $class))) (i32.const 6))
+      (call $id (local.get $name))) (i32.const ,(1- *slot-read-cache-size*))))
+    (local.set $entry (array.get $objects (local.get $cache) (local.get $index)))
+    (block $miss
+      (br_if $miss (i32.eqz (ref.test (ref $direct-function) (local.get $entry))))
+      (local.set $plan (ref.cast (ref $objects)
+        (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $entry)))))
+      (br_if $miss (i32.eqz (ref.eq (array.get $objects (local.get $plan) (i32.const 1)) (local.get $class))))
+      (br_if $miss (i32.eqz (ref.eq (array.get $objects (local.get $plan) (i32.const 3)) (local.get $name))))
+      (return (call $specialized-slot-operation (ref.cast (ref $direct-function) (local.get $entry))
+        (local.get $object) (local.get $value))))
+    (if (if (result i32) (i32.eq (call $tag (local.get $entry)) (i32.const 7))
+          (then (ref.eq (call $car (local.get $entry)) (local.get $class))) (else (i32.const 0)))
+      (then (br_if $general (ref.eq (call $cdr (local.get $entry)) (local.get $name)))))
+    ;; Cold probing cannot invoke overridden metadata getters and then repeat
+    ;; their effects on fallback. Validate those getters before consulting them.
+    (if (i32.or (i32.lt_s (global.get $slot-read-probe-allowed) (i32.const 0))
+          (i32.eqz (ref.eq (global.get $slot-read-probe-epoch) (global.get $slot-access-token))))
+      (then
+        (local.set $proof-token (global.get $slot-access-token))
+        (global.set $slot-read-probe-allowed (i32.const 0))
+        (global.set $slot-read-probe-epoch (local.get $proof-token))
+        (global.set $slot-read-probe-allowed (call $slot-read-probe-permitted))
+        (br_if $general (i32.eqz (ref.eq (local.get $proof-token) (global.get $slot-access-token))))
+        (global.set $slot-read-probe-epoch (local.get $proof-token))))
+    (if (i32.eqz (global.get $slot-read-probe-allowed))
+      (then (array.set $objects (local.get $cache) (local.get $index)
+        (call $cons (local.get $class) (local.get $name))) (br $general)))
+    ;; Mark a miss before calling Lisp: recursive or cooperative reads use the
+    ;; ordinary path until a complete, epoch-checked plan is available.
+    (array.set $objects (local.get $cache) (local.get $index)
+      (call $cons (local.get $class) (local.get $name)))
+    (local.set $function (call $closure (ref.null eq) (ref.null eq) (ref.null eq)))
+    (local.set $entry (call $specialize-accessor (local.get $function) (ref.null eq)
+      (ref.cast (ref $direct-function) (call $direct-function
+        (local.get $function) (ref.null eq) (local.get $name) (i32.const 11)))
+      (call $cons (local.get $object) (ref.null eq))))
+    (if (ref.is_null (local.get $entry))
+      (then (array.set $objects (local.get $cache) (local.get $index)
+        (call $cons (local.get $class) (local.get $name))) (br $general)))
+    ;; Shared value cells can be exposed through their owner's raw storage.
+    ;; Cache only owned instance locations, which are checked on every hit.
+    (br_if $general (i32.eqz (ref.is_null (array.get $objects
+      (ref.cast (ref $objects) (struct.get $direct-function $slot
+        (ref.cast (ref $direct-function) (local.get $entry)))) (i32.const 6)))))
+    (array.set $objects (local.get $cache) (local.get $index) (local.get $entry))
+    (return (call $specialized-slot-operation (ref.cast (ref $direct-function) (local.get $entry))
+      (local.get $object) (local.get $value))))
+  #@(return_call $instance-slot-operation-general (local.get $mode) (local.get $object) (local.get $name) (local.get $value)))
+
 (define-runtime-section clos-defaults-runtime-wat ()
   #@(global $slot-access-token (mut (ref null eq)) (ref.null eq))
+  #@(global $slot-read-cache (mut (ref null $objects)) (ref.null $objects))
+  #@(global $slot-read-epoch (mut (ref null eq)) (ref.null eq))
+  #@(global $slot-read-probe-epoch (mut (ref null eq)) (ref.null eq))
+  #@(global $slot-read-probe-allowed (mut i32) (i32.const -1))
+  ($slot-read-probe-permitted) ($instance-slot-operation)
   ($invalidate-slot-access) ($slot-protocols-standard-p) ($specialize-accessor) ($specialized-slot-call) ($specialized-slot-operation)
   ($raw-instance-access)
   ($clos-meta-value) ($standard-slot-cell) ($standard-slot-call)

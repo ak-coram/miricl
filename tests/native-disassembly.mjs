@@ -64,6 +64,11 @@ try {
       '(lambda (x) (declare (optimize (debug 0))) (+ x 1))))
     (declaim (optimize (debug 1)))`);
   check(`(and (miricl-compiler::compiler-primitive 32 #'global-debug) (null (miricl-compiler::compiler-primitive 32 #'local-override)))`);
+  check(`(let ((fn (miricl-compiler:compile-native '(lambda (x)
+      (declare (type (signed-byte 64) x) (optimize (safety 0) (debug 2)) (inline zerop))
+      (zerop x)))))
+    (and (search "i64.eqz" (with-output-to-string (*standard-output*) (disassemble fn)))
+      (funcall fn 0) (not (funcall fn 1))))`);
   for (const body of [
     '(locally (declare (optimize (debug 2))) (+ x 1))',
     '(let ((y x)) (declare (optimize (debug 2))) (+ y 1))',

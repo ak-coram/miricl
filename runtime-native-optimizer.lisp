@@ -129,7 +129,8 @@
             (local.set $argument (call $int64 (local.get $value)))
             (local.set $count (i32.const 0))
             (block $gc-operands
-              (if (i64.eq (local.get $value) (i64.const 2))
+              (if (i32.or (i64.eq (local.get $value) (i64.const 2))
+                          (i64.eq (local.get $value) (i64.const 5)))
                 (then (local.set $count (i32.const 2)) (br $gc-operands)))
               (if (i32.or (i64.eq (local.get $value) (i64.const 20))
                     (i32.or (i64.eq (local.get $value) (i64.const 22)) (i64.eq (local.get $value) (i64.const 23))))
@@ -141,7 +142,7 @@
               (local.set $count (i32.sub (local.get $count) (i32.const 1))) (br $gc-next)))
             (br $decoded)))
         (br_if $unsupported (i32.eqz ,(wat-native-op-member
-          '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xa7 #xac #xd1)))))
+          '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xa7 #xac #xd1 #xd3)))))
       (if (i32.or (ref.is_null (local.get $references))
                   ,(wat-native-op-member '(#x10 #x12 #xd2)))
         (then
@@ -251,9 +252,13 @@
           (then (local.set $produced (i32.const 1)) (br $effect-done)))
         (if ,(wat-native-op-member '(#x21 #x1a))
           (then (local.set $consumed (i32.const 1)) (br $effect-done)))
+        (if (i32.eq (local.get $code) (i32.const 251))
+          (then
+            (if (i32.eq (call $natural-count (array.get $objects (local.get $op) (i32.const 1))) (i32.const 5))
+              (then (local.set $consumed (i32.const 2)) (br $effect-done)))))
         (if ,(wat-native-op-member '(#x22 #x45 #x50 #xa7 #xac #xd1 #xfb))
           (then (local.set $consumed (i32.const 1)) (local.set $produced (i32.const 1)) (br $effect-done)))
-        (if ,(wat-native-op-member '(#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85))
+        (if ,(wat-native-op-member '(#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x83 #x84 #x85 #xd3))
           (then (local.set $consumed (i32.const 2)) (local.set $produced (i32.const 1)) (br $effect-done)))
         (if ,(wat-native-op-member '(#x10 #x12))
           (then

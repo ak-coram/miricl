@@ -6,7 +6,7 @@ import {createFriCAS} from '../scripts/fricas.mjs';
 import {fricasFiles} from '../scripts/fricas-files.mjs';
 import {prepareFriCASLibraries} from '../scripts/prepare-fricas-libraries.mjs';
 import {examples} from '../fricas/examples.mjs';
-const [image = 'miricl-precompiled.wasm', core = 'build/fricas/fricas-optimized.wasm', native = 'build/fricas/native',
+const [image = 'miricl.wasm', core = 'build/fricas/fricas-optimized.wasm', native = 'build/fricas/native',
   output = 'build/fricas/tests.json'] = process.argv.slice(2);
 const report = {passed: false, examples: [], upstream: []};
 const imageBytes = fs.readFileSync(image), coreBytes = fs.readFileSync(core);
