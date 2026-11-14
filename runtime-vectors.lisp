@@ -14,46 +14,34 @@
     (call $bounded-index (local.get $size) (i32.const 536870910)))))
 
 (define-runtime-function $vector-from-list (($list :nullable-object) ($length i32)) (:object)
-  (:locals ($data (ref $objects)) ($i i32) ($last :nullable-object))
   (wat-fail-when #@(i32.gt_u (local.get $length) (i32.const 536870910)) :allocation)
-  #@(local.set $data (array.new_default $objects (local.get $length)))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $length)))
-    (if (i32.eqz (ref.is_null (local.get $list)))
-      (then (local.set $last (call $car (local.get $list))) (local.set $list (call $cdr (local.get $list)))))
-    (array.set $objects (local.get $data) (local.get $i) (local.get $last))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(call $vector-new (local.get $data)))
+  #@(ref.as_non_null (call $fill-vector-from-list
+    (call $vector-new (array.new_default $objects (local.get $length))) (local.get $list))))
 
-(define-runtime-function $vector-list (($vector :nullable-object)) (:nullable-object)
-  (:locals ($data (ref $objects)) ($i i32) ($result :nullable-object))
-  #@(local.set $data (call $vector-data (local.get $vector)))
-  #@(local.set $i (array.len (local.get $data)))
-  #@(block $done (loop $next (br_if $done (i32.eqz (local.get $i)))
-    (local.set $i (i32.sub (local.get $i) (i32.const 1)))
-    (local.set $result (call $cons (array.get $objects (local.get $data) (local.get $i)) (local.get $result))) (br $next)))
-  #@(local.get $result))
+(defun $fill-vector-from-list ()
+  (runtime-function-definition '$fill-vector-from-list
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$fill-vector-from-list 'miricl-runtime:fill-vector-from-list))))
+
+(defun $vector-list ()
+  (runtime-function-definition '$vector-list
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$vector-list 'miricl-runtime:vector-list-copy))))
+
+(defun $vector-slice-cl ()
+  (runtime-function-definition '$vector-slice-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$vector-slice-cl 'miricl-runtime:slice-simple-vector))))
 
 (define-runtime-function $vector-slice (($vector :nullable-object) ($first i32) ($count i32)) (:object)
-  (:locals ($data (ref $objects)))
-  #@(local.set $data (array.new_default $objects (local.get $count)))
-  #@(array.copy $objects $objects (local.get $data) (i32.const 0)
-    (call $vector-data (local.get $vector)) (local.get $first) (local.get $count))
-  #@(call $vector-new (local.get $data)))
+  #@(ref.as_non_null (call $vector-slice-cl (local.get $vector) (call $int (local.get $first)) (call $int (local.get $count)))))
 
 (define-runtime-function $vector-reverse (($vector :nullable-object) ($write i32)) (:nullable-object)
-  (:locals ($data (ref $objects)) ($i i32) ($j i32) ($length i32) ($value :nullable-object))
-  #@(local.set $length (array.len (call $vector-data (local.get $vector))))
   #@(if (i32.eqz (local.get $write))
-    (then (local.set $vector (call $vector-slice (local.get $vector) (i32.const 0) (local.get $length)))))
-  #@(local.set $data (call $vector-data (local.get $vector)))
-  #@(local.set $j (local.get $length))
-  #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (i32.div_u (local.get $length) (i32.const 2))))
-    (local.set $j (i32.sub (local.get $j) (i32.const 1)))
-    (local.set $value (array.get $objects (local.get $data) (local.get $i)))
-    (array.set $objects (local.get $data) (local.get $i) (array.get $objects (local.get $data) (local.get $j)))
-    (array.set $objects (local.get $data) (local.get $j) (local.get $value))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(local.get $vector))
+    (then (local.set $vector (call $vector-slice (local.get $vector) (i32.const 0)
+      (array.len (call $vector-data (local.get $vector)))))))
+  #@(call $vector-reverse-in-place (local.get $vector)))
+
+(defun $vector-reverse-in-place ()
+  (runtime-function-definition '$vector-reverse-in-place
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$vector-reverse-in-place 'miricl-runtime:reverse-simple-vector-in-place))))
 
 (define-runtime-function $vector-element
     (($vector :nullable-object) ($index :nullable-object) ($value :nullable-object) ($write i32)) (:nullable-object)
@@ -74,27 +62,12 @@
     (then (array.set $objects (local.get $data) (local.get $n) (local.get $value)) (return (local.get $value))))
   #@(array.get $objects (local.get $data) (local.get $n)))
 
+(defun $vector-equalp-cl ()
+  (runtime-function-definition '$vector-equalp-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$vector-equalp-cl 'miricl-runtime:vector-elements-equalp :result :truth))))
+
 (define-runtime-function $vector-equalp (($a :nullable-object) ($b :nullable-object)) (i32)
-  (:locals ($left (ref $objects)) ($right (ref null $objects)) ($text (ref null $digits))
-           ($string i32) ($length i32) ($i i32) ($value :nullable-object))
-  #@(local.set $left (call $vector-data (local.get $a)))
-  #@(local.set $string (i32.eq (call $tag (local.get $b)) (i32.const 10)))
-  #@(if (local.get $string)
-    (then (local.set $text (struct.get $obj $digits (ref.cast (ref $obj) (local.get $b)))) (local.set $length (array.len (local.get $text))))
-    (else (local.set $right (call $vector-data (local.get $b))) (local.set $length (array.len (local.get $right)))))
-  #@(if (i32.ne (array.len (local.get $left)) (local.get $length)) (then (return (i32.const 0))))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $length)))
-    (local.set $value (array.get $objects (local.get $left) (local.get $i)))
-    (if (local.get $string)
-      (then
-        (if (i32.ne (call $tag (local.get $value)) (i32.const 16)) (then (return (i32.const 0))))
-        (if (i32.ne (call $string-upcase-code (call $value-n (local.get $value)))
-                     (call $string-upcase-code (array.get $digits (local.get $text) (local.get $i))))
-          (then (return (i32.const 0)))))
-      (else (if (i32.eqz (call $object-equalp (local.get $value) (array.get $objects (local.get $right) (local.get $i))))
-        (then (return (i32.const 0))))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(i32.const 1))
+  #@(call $vector-equalp-cl (local.get $a) (local.get $b)))
 
 (define-runtime-function $source-vector (($size :nullable-object)) (:nullable-object)
   (:locals ($items :nullable-object) ($scan :nullable-object) ($count i32) ($length i32))
@@ -149,6 +122,6 @@
   #@(call $emit-char (i32.const 41)))
 
 (define-runtime-section vector-runtime-wat ()
-  ($vector-data) ($vector-new) ($make-vector-native) ($vector-from-list) ($vector-list) ($vector-slice) ($vector-reverse)
-  ($vector-element) ($vector-equalp)
+  ($vector-data) ($vector-new) ($make-vector-native) ($fill-vector-from-list) ($vector-from-list) ($vector-list) ($vector-slice-cl) ($vector-slice) ($vector-reverse-in-place) ($vector-reverse)
+  ($vector-element) ($vector-equalp-cl) ($vector-equalp)
   ($source-vector) ($read-vector) ($write-vector) ($print-vector))

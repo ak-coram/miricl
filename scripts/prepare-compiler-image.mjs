@@ -9,6 +9,7 @@ const [bootstrap, output] = process.argv.slice(2);
 if (!bootstrap || !output) throw new Error('Usage: node prepare-compiler-image.mjs BOOTSTRAP OUTPUT-PREFIX');
 const vm = await Miricl.instantiate(await fs.readFile(bootstrap));
 try {
+  const bootstrapStarted = performance.now();
   await collectCompilationStatistics(vm, {workload: 'compiler-bootstrap', phase: 'bootstrap native functions'}, () => vm.evaluate(`(in-package :miricl-compiler)
     (setq *compiler-bootstrapping* t)
     (defparameter *image-sources* (mapcar (lambda (name)
@@ -17,6 +18,8 @@ try {
       (unless (and (= (length installed) (length *image-sources*)) (null unsupported))
         (error "Compiler bootstrap failed: ~S" unsupported)))
     (values)`, {eof: true}));
+  const interpretedBootstrapMs = performance.now() - bootstrapStarted;
+  const moduleStarted = performance.now();
   await collectCompilationStatistics(vm, {workload: 'compiler-bootstrap', phase: 'sealed compiler module'}, () => vm.evaluate(`
     (progv (mapcar (lambda (name) (compiler-primitive 10 1 name))
         '("%FASL-RECORDS" "%FASL-SEEN" "%FILE-LOAD-VALUES"))
@@ -48,6 +51,9 @@ try {
             (write (list (nreverse names) (nreverse codes) (nreverse roots)
               (coerce (symbol-value (compiler-primitive 10 1 "%FASL-RECORDS")) 'list)) :stream out)))))
     (values)`, {eof: true}));
+  const nativeModuleAndManifestMs = performance.now() - moduleStarted;
+  console.log(`Compiler phase times: ${JSON.stringify({interpretedBootstrapMs, nativeModuleAndManifestMs,
+    statisticsEnabled: Boolean(process.env.MIRICL_COMPILER_STATISTICS_DIRECTORY)})}`);
   const image = await vm.readFile('/compiler-image.lisp');
   // A JSON copy of the code vectors avoids implementing a Lisp reader in JS.
   const codeOutput = vm.evaluate(`(progn
@@ -169,9 +175,13 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
             case 0x7c: instructions.push('i64.add'); break;
             case 0x7d: instructions.push('i64.sub'); break;
             case 0x7e: instructions.push('i64.mul'); break;
+            case 0x80: instructions.push('i64.div_u'); break;
+            case 0x82: instructions.push('i64.rem_u'); break;
             case 0x83: instructions.push('i64.and'); break;
             case 0x84: instructions.push('i64.or'); break;
             case 0x85: instructions.push('i64.xor'); break;
+            case 0x86: instructions.push('i64.shl'); break;
+            case 0x87: instructions.push('i64.shr_s'); break;
             case 0xa7: instructions.push('i32.wrap_i64'); break;
             case 0xac: instructions.push('i64.extend_i32_s'); break;
             case 0xd0: assert.equal(byte(), 0x6f); instructions.push('ref.null extern'); break;

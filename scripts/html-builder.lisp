@@ -2,7 +2,7 @@
 (require :asdf)
 
 (defun html-repl-base64 (bytes)
-  "Encode the WASM octets without adding a build dependency."
+  "Encode image payload octets without adding a build dependency."
   (let ((alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"))
     (with-output-to-string (out)
       (loop for start from 0 below (length bytes) by 3
@@ -17,6 +17,25 @@
 
 (defparameter *browser-page-root*
   (uiop:pathname-parent-directory-pathname (uiop:pathname-directory-pathname *load-truename*)))
+
+(defun browser-compressed-image (bytes)
+  "Embed a level-9 gzip image; MIRICL.INSTANTIATE decompresses it in the browser."
+  (uiop:with-temporary-file (:stream out :pathname image :type "wasm"
+                                    :element-type '(unsigned-byte 8))
+    (write-sequence bytes out)
+    (finish-output out)
+    (let ((compressed (pathname (concatenate 'string (namestring image) ".gz"))))
+      (unwind-protect
+          (progn
+            (uiop:run-program
+              (list (or (uiop:getenv "NODE") "node")
+                    (namestring (merge-pathnames "scripts/compress-images.mjs" *browser-page-root*))
+                    (namestring image)))
+            (with-open-file (in compressed :element-type '(unsigned-byte 8))
+              (let ((payload (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                (read-sequence payload in)
+                (html-repl-base64 payload))))
+        (uiop:delete-file-if-exists compressed)))))
 
 (defun browser-inline-module (pathname)
   "Embed these project modules together, resolving their static imports locally."
@@ -53,8 +72,8 @@
     (let ((replacements
             (list (cons "@@MIRICL_ADAPTER@@" adapter)
                   (cons "@@MIRICL_WASM@@"
-                        (html-repl-base64 (uiop:symbol-call :miricl :interpreter-wasm
-                                                          :compiler compiler :native-compiler compiler))))))
+                        (browser-compressed-image (uiop:symbol-call :miricl :interpreter-wasm
+                                                                  :compiler compiler :native-compiler compiler))))))
       (dolist (replacement replacements)
         (let ((start (search (car replacement) template)))
           (unless (and start (not (search (car replacement) template :start2 (1+ start))))

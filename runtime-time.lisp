@@ -17,48 +17,35 @@
   #@(call $float (i32.const 4) (call $host-service (call $natural-count (local.get $operation))
     (call $coerce-float (call $real (local.get $argument)) (i32.const 4)))))
 
+(defun $calendar-part-cl ()
+  (runtime-function-definition '$calendar-part-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$calendar-part-cl 'miricl-runtime:calendar-part-value))))
+
 (define-runtime-function $calendar-part (($value :nullable-object) ($min i32) ($max i32)) (i32)
-  (:locals ($number i32))
-  #@(block $invalid
-    (br_if $invalid (i32.ne (call $tag (local.get $value)) (i32.const 1)))
-    (br_if $invalid (i32.or (i32.lt_s (call $value-n (local.get $value)) (i32.const 0))
-      (i32.gt_u (call $bitlength (ref.as_non_null (local.get $value))) (i32.const 31))))
-    (local.set $number (call $natural-count (local.get $value)))
-    (br_if $invalid (i32.or (i32.lt_s (local.get $number) (local.get $min))
-      (i32.gt_s (local.get $number) (local.get $max))))
-    (return (local.get $number)))
-  #@(call $type-fail (local.get $value)
-    (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
-      (call $cons (call $int (local.get $min)) (call $cons (call $int (local.get $max)) (ref.null eq))))
-    (i32.const ,(runtime-error-code :expected-designator)))
-  #@(unreachable))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $calendar-part-cl (local.get $value) (call $int (local.get $min)) (call $int (local.get $max)))))))
+
+(defun $calendar-year-days-cl ()
+  (runtime-function-definition '$calendar-year-days-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$calendar-year-days-cl 'miricl-runtime:calendar-days-before-year))))
 
 (define-runtime-function $calendar-year-days (($year i32)) (i64)
-  (:locals ($y i64))
-  #@(local.set $y (i64.extend_i32_s (i32.sub (local.get $year) (i32.const 1))))
-  #@(i64.add (i64.sub (i64.add (i64.mul (local.get $y) (i64.const 365))
-    (i64.div_s (local.get $y) (i64.const 4))) (i64.div_s (local.get $y) (i64.const 100)))
-    (i64.div_s (local.get $y) (i64.const 400))))
+  #@(call $scalar-integer-value (ref.as_non_null (call $calendar-year-days-cl (call $int (local.get $year))))))
+
+(defun $calendar-month-days-cl ()
+  (runtime-function-definition '$calendar-month-days-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$calendar-month-days-cl 'miricl-runtime:calendar-days-before-month))))
 
 (define-runtime-function $calendar-month-days (($year i32) ($month i32)) (i32)
-  #@(i32.add (array.get $digits (global.get $calendar-months) (i32.sub (local.get $month) (i32.const 1)))
-    (i32.and (i32.gt_u (local.get $month) (i32.const 2))
-      (i32.and (i32.eqz (i32.rem_u (local.get $year) (i32.const 4)))
-        (i32.or (i32.ne (i32.rem_u (local.get $year) (i32.const 100)) (i32.const 0))
-          (i32.eqz (i32.rem_u (local.get $year) (i32.const 400))))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $calendar-month-days-cl (call $int (local.get $year)) (call $int (local.get $month)))))))
+
+(defun $calendar-zone-cl ()
+  (runtime-function-definition '$calendar-zone-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$calendar-zone-cl 'miricl-runtime:calendar-zone-value))))
 
 (define-runtime-function $calendar-zone (($zone :nullable-object)) (i32)
-  (:locals ($seconds :object))
-  #@(block $invalid
-    (br_if $invalid (i32.or (i32.lt_u (call $tag (local.get $zone)) (i32.const 1))
-      (i32.gt_u (call $tag (local.get $zone)) (i32.const 2))))
-    (br_if $invalid (i32.or (i32.lt_s (call $compare (local.get $zone) (call $int (i32.const -24))) (i32.const 0))
-      (i32.gt_s (call $compare (local.get $zone) (call $int (i32.const 24))) (i32.const 0))))
-    (local.set $seconds (call $real-op (i32.const 2) (ref.as_non_null (local.get $zone)) (call $int (i32.const 3600))))
-    (br_if $invalid (i32.ne (call $tag (local.get $seconds)) (i32.const 1)))
-    (return (i32.trunc_f64_s (call $coerce-float (local.get $seconds) (i32.const 4)))))
-  #@(drop (call $apply ,(clos-library-reference '%time-zone-seconds) (call $cons (local.get $zone) (ref.null eq))))
-  #@(unreachable))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $calendar-zone-cl (local.get $zone))))))
 
 (define-runtime-function $calendar-native (($operation i32) ($value :nullable-object) ($zone :nullable-object)) (:nullable-object)
   (:locals ($offset i32) ($seconds i32) ($minutes i32) ($hours i32) ($date i32) ($month i32) ($year i32)
@@ -132,4 +119,4 @@
   #@(global $calendar-months (ref $digits) (array.new_fixed $digits 13
     (i32.const 0) (i32.const 31) (i32.const 59) (i32.const 90) (i32.const 120) (i32.const 151)
     (i32.const 181) (i32.const 212) (i32.const 243) (i32.const 273) (i32.const 304) (i32.const 334) (i32.const 365)))
-  ($host-service) ($host-service-object) ($calendar-part) ($calendar-year-days) ($calendar-month-days) ($calendar-zone) ($calendar-native))
+  ($host-service) ($host-service-object) ($calendar-part-cl) ($calendar-part) ($calendar-year-days-cl) ($calendar-year-days) ($calendar-month-days-cl) ($calendar-month-days) ($calendar-zone-cl) ($calendar-zone) ($calendar-native))

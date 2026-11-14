@@ -78,42 +78,57 @@
 
 ;; Continued fractions select a simple rational inside an exact rounding
 ;; interval. A null upper endpoint denotes positive infinity after inversion.
+(defun $rational-in-interval-cl ()
+  (runtime-function-definition '$rational-in-interval-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$rational-in-interval-cl 'miricl-runtime:rational-in-interval-value))))
+
+(define-runtime-function $rational-interval-operations () (:nullable-object)
+  #@(if (ref.is_null (global.get $rational-interval-functions))
+    (then (global.set $rational-interval-functions (call $vector-new
+      (array.new_fixed $objects 5
+        ,@(loop for name in '(+ - * / truncate) collect
+            `(call $node (i32.const 8) (i32.const ,(1+ (runtime-symbol-id name)))
+               (ref.null eq) (ref.null eq) (ref.null eq))))))))
+  #@(global.get $rational-interval-functions))
+
+(define-runtime-function $check-rational-interval
+    (($a :nullable-object) ($b :nullable-object) ($inclusive i32)) ()
+  ;; Numeric kind and interval validation precede the SAFETY 0 CL worker.
+  #@(if (i32.gt_u (i32.sub (call $tag (local.get $a)) (i32.const 1)) (i32.const 1))
+    (then (call $list-type-error (local.get $a) (i32.const ,(runtime-symbol-id 'rational)))))
+  #@(if (i32.lt_s (call $compare (local.get $a) (call $int (i32.const 0))) (i32.const 0))
+    (then (call $type-fail (local.get $a)
+      (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'rational)))
+        (call $cons (call $int (i32.const 0)) (ref.null eq)))
+      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(if (i32.eqz (ref.is_null (local.get $b)))
+    (then
+      (if (i32.gt_u (i32.sub (call $tag (local.get $b)) (i32.const 1)) (i32.const 1))
+        (then (call $list-type-error (local.get $b) (i32.const ,(runtime-symbol-id 'rational)))))
+      (if (if (result i32) (local.get $inclusive)
+            (then (i32.lt_s (call $compare (local.get $b) (local.get $a)) (i32.const 0)))
+            (else (i32.le_s (call $compare (local.get $b) (local.get $a)) (i32.const 0))))
+        (then (call $type-fail (local.get $b)
+          (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'rational)))
+            (call $cons (if (result (ref null eq)) (local.get $inclusive)
+              (then (local.get $a)) (else (call $cons (local.get $a) (ref.null eq)))) (ref.null eq)))
+          (i32.const ,(runtime-error-code :expected-designator))))))))
+
 (define-runtime-function $rational-in-interval
-    (($a :object) ($b :nullable-object) ($inclusive i32)) (:object)
-  (:locals ($p0 :object) ($p1 :object) ($q0 :object) ($q1 :object)
-           ($whole :object) ($remainder :object) ($candidate :object)
-           ($next-p :object) ($next-q :object) ($next-a :object) ($next-b :nullable-object) ($cmp i32))
-  #@(local.set $p0 (call $int (i32.const 0)))
-  #@(local.set $p1 (call $int (i32.const 1)))
-  #@(local.set $q0 (local.get $p1))
-  #@(local.set $q1 (local.get $p0))
-  #@(loop $fraction
-    (call $idiv (call $numerator (local.get $a)) (call $denominator (local.get $a)))
-    (local.set $remainder) (local.set $whole)
-    (local.set $candidate (local.get $whole))
-    (if (i32.or (i32.eqz (call $zero (local.get $remainder))) (i32.eqz (local.get $inclusive)))
-      (then (local.set $candidate (call $iadd (local.get $candidate) (call $int (i32.const 1))))))
-    (local.set $cmp (i32.const -1))
-    (if (i32.eqz (ref.is_null (local.get $b)))
-      (then (local.set $cmp (call $compare (local.get $candidate) (local.get $b)))))
-    (if (i32.or (i32.lt_s (local.get $cmp) (i32.const 0))
-                (i32.and (i32.eqz (local.get $cmp)) (local.get $inclusive)))
-      (then (return (call $ratio
-        (call $iadd (call $imul (local.get $p1) (local.get $candidate)) (local.get $p0))
-        (call $iadd (call $imul (local.get $q1) (local.get $candidate)) (local.get $q0))))))
-    (local.set $next-p (call $iadd (call $imul (local.get $p1) (local.get $whole)) (local.get $p0)))
-    (local.set $next-q (call $iadd (call $imul (local.get $q1) (local.get $whole)) (local.get $q0)))
-    (local.set $p0 (local.get $p1)) (local.set $p1 (local.get $next-p))
-    (local.set $q0 (local.get $q1)) (local.set $q1 (local.get $next-q))
-    (local.set $next-a (call $real-op (i32.const 3) (call $int (i32.const 1))
-      (call $real-op (i32.const 1) (ref.as_non_null (local.get $b)) (local.get $whole))))
-    (local.set $next-b (ref.null eq))
-    (if (i32.eqz (call $zero (local.get $remainder)))
-      (then (local.set $next-b (call $real-op (i32.const 3) (call $int (i32.const 1))
-        (call $real-op (i32.const 1) (local.get $a) (local.get $whole))))))
-    (local.set $a (local.get $next-a)) (local.set $b (local.get $next-b))
-    (br $fraction))
-  #@(unreachable))
+    (($a :nullable-object) ($b :nullable-object) ($inclusive i32)) (:object)
+  (:locals ($values :nullable-object) ($count i32) ($result :nullable-object))
+  #@(local.set $values (global.get $extra-values))
+  #@(local.set $count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (call $check-rational-interval (local.get $a) (local.get $b) (local.get $inclusive))
+    (local.set $result (call $rational-in-interval-cl (local.get $a) (local.get $b)
+      (call $bool (local.get $inclusive)) (call $rational-interval-operations)))
+    (global.set $extra-values (local.get $values))
+    (global.set $value-count (local.get $count))
+    (return (ref.as_non_null (local.get $result)))))
+  #@(global.set $extra-values (local.get $values))
+  #@(global.set $value-count (local.get $count))
+  #@(throw $transfer))
 
 (define-runtime-function $rationalize-native (($x :object)) (:object)
   (:locals ($value :object) ($unit :object) ($lower :object) ($upper :object)
@@ -150,4 +165,5 @@
     (else (local.get $value))))
 
 (define-runtime-section rounding-runtime-wat ()
-  ($rounding-native) ($rounding-apply) ($rational-in-interval) ($rationalize-native))
+  #@(global $rational-interval-functions (mut (ref null eq)) (ref.null eq))
+  ($rounding-native) ($rounding-apply) ($rational-interval-operations) ($rational-in-interval-cl) ($check-rational-interval) ($rational-in-interval) ($rationalize-native))

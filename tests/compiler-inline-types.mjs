@@ -79,6 +79,8 @@ try {
   assert.ok(!declaredIdentity.imports.includes('native-function-reference'));
   check(`(equal (multiple-value-list (funcall *inline-function* 1267650600228229401496703205376 0))
     '(1267650600228229401496703205376))`);
+  // Missing integer proofs must retain operand checks. A shared checked
+  // primitive is sufficient; dispatch through FDEFINITION is not required.
   for (const [operator, expression, declarations] of [
     ['+', '(+ x 0)', ''], ['*', '(* x 0)', ''],
     ['logand', '(logand x 0)', ''], ['logior', '(logior x -1)', ''],
@@ -86,14 +88,15 @@ try {
   ]) {
     const result = await compile(`(lambda (x) (declare (optimize (safety 0))
       (inline ${operator}) ${declarations}) ${expression})`);
-    assert.ok(result.imports.includes('native-function-reference'), expression);
+    const checkedEntry = {logand: 'native-logand-general-inline', ash: 'native-ash-general-inline'}[operator];
+    assert.ok(result.imports.includes(checkedEntry ?? 'native-function-reference'), expression);
     check(`(handler-case (progn (funcall *inline-function* :invalid) nil) (type-error () t))`);
   }
   await compile(`(lambda (x) (declare (optimize (safety 0)) (inline +) (type number x)) (+ x 0))`);
   check(`(typep (funcall *inline-function* 1.5) 'single-float)`);
   const safeIdentity = await compile(`(lambda (x) (declare (optimize (safety 3))
     (inline logand) (type integer x)) (logand x 0))`);
-  assert.ok(safeIdentity.imports.includes('native-function-reference'));
+  assert.ok(safeIdentity.imports.includes('native-logand-general-inline'));
   check(`(handler-case (progn (funcall *inline-function* :invalid) nil) (type-error () t))`);
   for (const [operator, type, arg, answer, entry] of [
     ['simple-vector-p', 'simple-vector', '#(42)', 'T', 'native-simple-vector-p-inline'],
@@ -236,7 +239,8 @@ try {
   check(`(equal (funcall *inline-function* 9223372036854775807 1) '(9223372036854775808))`);
   const unknownBits = await compile(`(lambda (x)
     (declare (optimize (safety 0)) (inline logand)) (logand x 127))`);
-  assert.ok(unknownBits.imports.includes('native-function-reference'));
+  assert.ok(unknownBits.imports.includes('native-logand-general-inline'));
+  check(`(handler-case (progn (funcall *inline-function* :invalid) nil) (type-error () t))`);
   check(`(= (funcall *inline-function* 1267650600228229401496703205631) 127)`);
   const notinlineSum = await compile(`(lambda (a b)
     (declare (optimize (safety 0)) (inline +) (type (signed-byte 32) a b))
@@ -309,6 +313,55 @@ try {
                (b (funcall *inline-function* 1 tail)))
     (and (not (eq a b)) (eq (cdr a) tail)
       (equal (multiple-value-list (funcall *inline-function* 3 4)) '((3 . 4)))))`);
+  for (const safety of [0, 3]) {
+    for (const [expression, expected] of [
+      ['(car (cons x y))', ':head'], ['(cdr (cons x y))', ':tail'],
+      ['(car (cdr (cons :unused (cons x y))))', ':head'],
+      ['(let ((cell (cons x y))) (setq x :changed) (car cell))', ':head'],
+    ]) {
+      const forwarded = await compile(`(lambda (x y)
+        (declare (optimize (safety ${safety}) (debug 0)) (inline cons car cdr)) ${expression})`);
+      assert.ok(!forwarded.imports.includes('native-cons'),
+        `An unobserved fresh cons needs no allocation: safety ${safety}, ${expression}`);
+      check(`(equal (multiple-value-list (funcall *inline-function* :head :tail)) '(${expected}))`);
+      check(`(equal (multiple-value-list (funcall *inline-function* nil nil)) '(nil))`);
+    }
+  }
+  await compile(`(lambda (x y)
+    (declare (optimize (safety 0) (debug 0)) (inline cons car cdr))
+    (let ((events nil))
+      (let ((cell (cons (progn (push :left events) (values x :discarded))
+                        (progn (push :right events) (values y :discarded)))))
+        (values (car cell) (cdr cell) (reverse events)))))`);
+  check(`(equal (multiple-value-list (funcall *inline-function* :head :tail))
+    '(:head :tail (:left :right)))`);
+  for (const mutation of ['(rplaca cell :changed)', '(funcall change cell)']) {
+    const mutableCons = await compile(`(lambda (x y change)
+      (declare (optimize (safety 0) (debug 0)) (inline cons car rplaca))
+      (let ((cell (cons x y))) ${mutation} (values cell (car cell))))`);
+    assert.ok(mutableCons.imports.includes('native-cons'), 'A mutated, escaping cons keeps its identity');
+    check(`(let* ((x (list :head)) (y (list :tail)))
+      (multiple-value-bind (cell head)
+          (funcall *inline-function* x y (lambda (cell) (rplaca cell :changed)))
+        (and (eq head :changed) (eq (car cell) :changed) (eq (cdr cell) y))))`);
+  }
+  await compile(`(lambda (x y)
+    (declare (optimize (safety 3) (debug 0)) (inline cons car))
+    (car (cons x (car y))))`);
+  check(`(and (handler-case (progn (funcall *inline-function* :head 7) nil)
+               (type-error (condition) (eql (type-error-datum condition) 7)))
+    (eq (funcall *inline-function* :head '(1)) :head))`);
+  const unpromisedCons = await compile(`(lambda (x y)
+    (declare (optimize (safety 0) (debug 0)) (inline car) (notinline cons))
+    (car (cons x y)))`);
+  assert.ok(unpromisedCons.imports.includes('native-function-reference'),
+    'NOTINLINE allocation retains the replaceable constructor call');
+  check(`(eq (funcall *inline-function* :head :tail) :head)`);
+  await compile(`(lambda (x y)
+    (declare (optimize (safety 3) (debug 0)) (inline car))
+    (flet ((cons (left right) (declare (ignore left right)) 7)) (car (cons x y))))`);
+  check(`(handler-case (progn (funcall *inline-function* :head :tail) nil)
+    (type-error (condition) (eql (type-error-datum condition) 7)))`);
   const inferredCons = await compile(`(lambda (x y)
     (declare (optimize (safety 0)) (inline cons cdr))
     (let ((cell (cons x y))) (cdr cell)))`);
@@ -333,6 +386,41 @@ try {
   assert.ok(!guardedVector.imports.includes('native-function-reference'), 'A vector predicate proves the private representation');
   check(`(and (eq (funcall *inline-function* #(:first)) :first)
     (eq (funcall *inline-function* "text") :other) (eq (funcall *inline-function* nil) :other))`);
+  const mutableCursor = await compile(`(lambda (x)
+    (declare (optimize (safety 0) (debug 0)) (inline consp car cdr cons))
+    (block done (let ((result nil))
+      (tagbody next
+        (if (consp x)
+            (setq result (cons (car x) result) x (cdr x))
+            (return-from done result))
+        (go next)))))`);
+  assert.ok(!mutableCursor.imports.some(name => /^native-(car|cdr)-/.test(name)),
+    'Each loop test proves cursor reads until the next assignment');
+  check(`(and (equal (funcall *inline-function* '(1 2 3 . :end)) '(3 2 1))
+    (null (funcall *inline-function* nil)) (null (funcall *inline-function* 7)))`);
+  const mutableVector = await compile(`(lambda (x)
+    (declare (optimize (safety 0) (debug 0)) (inline simple-vector-p svref))
+    (if (simple-vector-p x)
+        (let ((head (svref x 0))) (setq x nil) head)
+        :other))`);
+  assert.ok(!mutableVector.imports.includes('native-function-reference'),
+    'A later assignment does not invalidate a preceding dominated read');
+  check(`(and (eq (funcall *inline-function* #(:first)) :first)
+    (eq (funcall *inline-function* 7) :other))`);
+  for (const body of [
+    '(let ((valid (consp x))) (setq x 7) (if valid (car x) nil))',
+    '(let ((valid (consp x))) (if valid (setq x 7)) (if valid (car x) nil))',
+    '(if (consp x) (progn (if (car x) (setq x 7)) (car x)) nil)',
+    '(let ((valid (consp x))) (setq valid t x 7) (if valid (car x) nil))',
+  ]) {
+    const stale = await compile(`(lambda (x)
+      (declare (optimize (safety 0) (debug 0)) (inline consp car)) ${body})`);
+    assert.ok(stale.imports.includes('native-car-inline-checked'),
+      'Writes and joins cannot reuse an earlier cursor observation');
+    check(`(handler-case (progn (funcall *inline-function* (list 1)) nil)
+      (type-error (condition) (eql (type-error-datum condition) 7)))`);
+    check(`(equal (funcall (compile-native '(lambda () (values :recovered)))) :recovered)`);
+  }
   for (const body of [
     '(if (consp x) (progn (setq x 7) (car x)) (car x))',
     '(let ((change (lambda () (setq x 7)))) (if (consp x) (progn (funcall change) (car x)) (car x)))',
@@ -352,6 +440,47 @@ try {
     (declare (optimize (safety 0) (debug 0)) (inline car) (notinline consp))
     (if (consp x) (car x) :other))`);
   assert.ok(unpromisedPredicate.imports.includes('native-car-inline-checked'), 'NOTINLINE predicates do not provide definition proofs');
+  for (const [condition, yes, no, yesArg, noArg, yesResult, noResult] of [
+    ['(zerop x)', '(minusp x)', ':nonzero', '0', '3', 'nil', ':nonzero'],
+    ['(zerop x)', ':zero', '(zerop x)', '0', '3', ':zero', 'nil'],
+    ['(minusp x)', '(plusp x)', ':nonnegative', '-3', '0', 'nil', ':nonnegative'],
+    ['(minusp x)', ':negative', '(minusp x)', '-3', '0', ':negative', 'nil'],
+    ['(plusp x)', '(minusp x)', ':nonpositive', '3', '0', 'nil', ':nonpositive'],
+    ['(plusp x)', ':positive', '(plusp x)', '3', '0', ':positive', 'nil'],
+  ]) {
+    const refined = await compile(`(lambda (x)
+      (declare (type (integer ${condition === '(zerop x)' ? '0' : '-10'} 10) x)
+        (optimize (safety 0) (debug 0)) (inline zerop minusp plusp))
+      (if ${condition} ${yes} ${no}))`);
+    assert.ok(!refined.imports.includes('native-boolean'), 'The branch proves the nested predicate false');
+    check(`(and (equal (multiple-value-list (funcall *inline-function* ${yesArg})) '(${yesResult}))
+      (equal (multiple-value-list (funcall *inline-function* ${noArg})) '(${noResult})))`);
+  }
+  for (const body of [
+    '(if (plusp x) (progn (setq x -2) (minusp x)) :other)',
+    '(let ((positive (plusp x))) (setq x -2) (if positive (minusp x) :other))',
+    '(let ((change (lambda () (setq x -2)))) (if (plusp x) (progn (funcall change) (minusp x)) :other))',
+  ]) {
+    await compile(`(lambda (x) (declare (type (integer -10 10) x)
+      (optimize (safety 0) (debug 0)) (inline plusp minusp)) ${body})`);
+    check(`(and (eq (funcall *inline-function* 3) t) (eq (funcall *inline-function* 0) :other))`);
+  }
+  await compile(`(lambda (x) (declare (optimize (safety 0) (debug 0)) (inline zerop minusp))
+    (if (zerop x) (minusp x) :nonzero))`);
+  check(`(and (null (funcall *inline-function* 0.0))
+    (handler-case (progn (funcall *inline-function* #c(0.0 0.0)) nil) (type-error () t))
+    (handler-case (progn (funcall *inline-function* :bad) nil) (type-error () t)))`);
+  await compile(`(lambda (x) (declare (type integer x) (optimize (safety 0) (debug 0))
+      (inline plusp minusp))
+    (if (plusp x) (minusp x) :not-positive))`);
+  check(`(let ((original (symbol-function 'plusp)))
+    (unwind-protect
+        (progn (setf (symbol-function 'plusp) (lambda (x) (declare (ignore x)) t))
+          ;; INLINE permits the original definition, but an ordinary fallback
+          ;; must not use facts which require that definition to have run.
+          (not (null (member (funcall *inline-function* -1267650600228229401496703205376)
+                            '(t :not-positive)))))
+      (setf (symbol-function 'plusp) original)))`);
   for (const exposeHelper of [false, true]) {
     vm.evaluate(`(multiple-value-bind (entries bytes)
       (compile-native-module
@@ -418,7 +547,8 @@ try {
     const source = `(lambda (v) (declare (type simple-vector v) (optimize (safety 0)) (inline ${operator}))
       (${operator} v 0))`;
     const result = await compile(source);
-    assert.ok(result.imports.includes('native-vector-ref-inline'), operator);
+    assert.ok(result.imports.includes(operator === 'row-major-aref'
+      ? 'native-row-major-ref-inline' : 'native-vector-ref-inline'), operator);
     assert.ok(!result.imports.includes('native-function-reference'), operator);
     assert.ok(!result.imports.includes('native-tail-call'), operator);
     check(`(and (equal (multiple-value-list (funcall *inline-function* #(42))) '(42))
@@ -640,7 +770,10 @@ try {
   }
   const overlapping = await compile(`(lambda (x y)
     (declare (optimize (safety 0) (debug 0)) (inline <) (type integer x y)) (< x y))`);
-  assert.ok(overlapping.imports.includes('native-function-reference'), 'Overlapping unbounded ranges retain the comparison');
-  check(`(and (funcall *inline-function* -1 0) (not (funcall *inline-function* 0 0)))`);
+  assert.ok(overlapping.imports.includes('native-ordered-compare-inline'),
+    'Overlapping unbounded ranges retain the checked comparison');
+  check(`(and (funcall *inline-function* -1 0) (not (funcall *inline-function* 0 0))
+    (funcall *inline-function* -1267650600228229401496703205376 1267650600228229401496703205376)
+    (not (funcall *inline-function* 1267650600228229401496703205376 -1267650600228229401496703205376)))`);
   console.log('Inline types: canonical definitions, cons mutation and identity, branch-only/observed EQL, no dynamic lookup, narrow/wide indices, result counts, operand effects, bound/free declaration scope, local shadowing, NOTINLINE, first-class references and fresh emission facts pass.');
 } finally {vm.close();}

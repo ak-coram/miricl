@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import {Miricl} from '../scripts/miricl.mjs';
 import {DevFilesystem} from '../scripts/dev-filesystem.mjs';
 
-const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'));
+const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'), {
+  imports: {filesystemTest: {advanceDate() { unixTime++; }}},
+});
 const fetch = globalThis.fetch;
 const encoder = new TextEncoder();
 const files = new Map([
@@ -61,10 +63,11 @@ try {
   provider = new DevFilesystem(vm);
   await check('(progn (load "host/main.lisp") (= *host-value* 43))');
   await check('(file-write-date "host/main.lisp")', '3908988800');
-  const changed = setTimeout(() => unixTime++, 10);
-  await check(`(let ((before (file-write-date "host/main.lisp")))
-    (sleep .03) (> (file-write-date "host/main.lisp") before))`);
-  clearTimeout(changed);
+  await check(`(progn
+    (js:define-import advance-metadata-date ("filesystemTest" "advanceDate") () :void)
+    (let ((before (file-write-date "host/main.lisp")))
+      (advance-metadata-date)
+      (sleep .03) (> (file-write-date "host/main.lisp") before)))`);
   await check(`(list (namestring (truename "host/empty")) (probe-file "missing"))`,
     '("/host/empty/" NIL)');
   await check(`(sort (mapcar #'namestring (directory "host/*/")) #'string<)`,

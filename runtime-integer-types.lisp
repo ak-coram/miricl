@@ -1,4 +1,4 @@
-;;;; Integer subtype intervals, including symbolic endpoints for huge widths.
+;;;; Checked integer subtype intervals with native endpoint/interval workers.
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
@@ -11,45 +11,55 @@
   #@(local.set $value (call $digit (local.get $x) (local.get $last)))
   #@(i32.eqz (i32.and (local.get $value) (i32.add (local.get $value) (i32.const 1)))))
 
-;; Internal endpoint: N sign, A exponent, B true for 2^exponent-1. These are
-;; never exposed as Lisp integers and need no enormous digit arrays.
+(define-runtime-function $integer-endpoint-sign (($value :object)) (i32)
+  #@(if (i32.eq (call $tag (local.get $value)) (i32.const 1))
+    (then (return (call $value-n (local.get $value)))))
+  #@(call $value-n (array.get $objects (call $vector-data (local.get $value)) (i32.const 0))))
+
+;; Keep the current private vector representation at the checked metadata ABI.
 (define-runtime-function $integer-power-endpoint (($exponent :object) ($sign i32) ($ones i32)) (:object)
   #@(if (i32.eqz (call $value-n (local.get $exponent)))
     (then (return (call $int (select (i32.const 0) (local.get $sign) (local.get $ones))))))
-  #@(call $node (i32.const 9) (local.get $sign) (local.get $exponent) (call $bool (local.get $ones)) (ref.null eq)))
+  #@(call $vector-new (array.new_fixed $objects 3
+    (call $int (local.get $sign)) (local.get $exponent) (call $bool (local.get $ones)))))
 
 (define-runtime-function $integer-endpoint-width (($x :object)) (:object)
   #@(if (i32.eq (call $tag (local.get $x)) (i32.const 1))
     (then (return (call $int (call $bitlength (local.get $x))))))
-  #@(if (result (ref eq)) (ref.is_null (struct.get $obj $b (ref.cast (ref $obj) (local.get $x))))
-    (then (call $iadd (ref.as_non_null (struct.get $obj $a (ref.cast (ref $obj) (local.get $x)))) (call $int (i32.const 1))))
-    (else (ref.as_non_null (struct.get $obj $a (ref.cast (ref $obj) (local.get $x)))))))
+  #@(if (result (ref eq)) (ref.is_null (array.get $objects (call $vector-data (local.get $x)) (i32.const 2)))
+    (then (call $iadd (ref.as_non_null (array.get $objects (call $vector-data (local.get $x)) (i32.const 1))) (call $int (i32.const 1))))
+    (else (ref.as_non_null (array.get $objects (call $vector-data (local.get $x)) (i32.const 1))))))
 
 (define-runtime-function $integer-endpoint-compare (($a :object) ($b :object)) (i32)
   (:locals ($sign i32) ($cmp i32) ($width :object))
   #@(if (i32.and (i32.eq (call $tag (local.get $a)) (i32.const 1)) (i32.eq (call $tag (local.get $b)) (i32.const 1)))
     (then (return (call $compare (local.get $a) (local.get $b)))))
-  #@(local.set $sign (call $value-n (local.get $a)))
-  #@(if (i32.ne (local.get $sign) (call $value-n (local.get $b)))
-    (then (return (select (i32.const -1) (i32.const 1) (i32.lt_s (local.get $sign) (call $value-n (local.get $b)))))))
+  #@(local.set $sign (call $integer-endpoint-sign (local.get $a)))
+  #@(if (i32.ne (local.get $sign) (call $integer-endpoint-sign (local.get $b)))
+    (then (return (select (i32.const -1) (i32.const 1) (i32.lt_s (local.get $sign) (call $integer-endpoint-sign (local.get $b)))))))
   #@(if (i32.eq (call $tag (local.get $a)) (i32.const 1))
     (then (return (i32.sub (i32.const 0) (call $integer-endpoint-compare (local.get $b) (local.get $a))))))
   #@(local.set $width (call $integer-endpoint-width (local.get $a)))
   #@(local.set $cmp (call $compare (local.get $width) (call $integer-endpoint-width (local.get $b))))
   #@(if (local.get $cmp) (then (return (i32.mul (local.get $sign) (local.get $cmp)))))
   #@(if (i32.eq (call $tag (local.get $b)) (i32.const 1))
-    (then (local.set $cmp (if (result i32) (ref.is_null (struct.get $obj $b (ref.cast (ref $obj) (local.get $a))))
+    (then (local.set $cmp (if (result i32) (ref.is_null (array.get $objects (call $vector-data (local.get $a)) (i32.const 2)))
       (then (i32.sub (call $integer-power-of-two-p (local.get $b)) (i32.const 1)))
       (else (i32.sub (i32.const 1) (call $integer-all-ones-p (local.get $b)))))))
     (else
-      (if (ref.eq (struct.get $obj $b (ref.cast (ref $obj) (local.get $a))) (struct.get $obj $b (ref.cast (ref $obj) (local.get $b)))) (then (return (i32.const 0))))
+      (if (ref.eq (array.get $objects (call $vector-data (local.get $a)) (i32.const 2)) (array.get $objects (call $vector-data (local.get $b)) (i32.const 2))) (then (return (i32.const 0))))
       (if (call $eql (local.get $width) (call $int (i32.const 1))) (then (return (i32.const 0))))
-      (local.set $cmp (select (i32.const -1) (i32.const 1) (ref.is_null (struct.get $obj $b (ref.cast (ref $obj) (local.get $a))))))))
+      (local.set $cmp (select (i32.const -1) (i32.const 1) (ref.is_null (array.get $objects (call $vector-data (local.get $a)) (i32.const 2)))))))
   #@(i32.mul (local.get $sign) (local.get $cmp)))
 
 ;; Normalize real interval designators to the integer points they contain.
 (define-runtime-function $integer-interval-bound (($bound :nullable-object) ($lower i32)) (:nullable-object)
   (:locals ($exclusive i32) ($sign i32) ($number :object) ($quotient :object) ($remainder :object))
+  ;; Reject cyclic bound data before ARITY traverses the singleton wrapper.
+  #@(if (i32.eq (call $tag (local.get $bound)) (i32.const 7))
+    (then (if (ref.is_null (call $list-length-native (local.get $bound)))
+      (then (drop (call $array-type-metadata-value (call $int (i32.const 4))
+        (local.get $bound) (call $int (i32.const 3))))))))
   #@(if (i32.eq (call $id (local.get $bound)) (i32.const ,(runtime-symbol-id '*))) (then (return (ref.null eq))))
   #@(if (i32.eq (call $tag (local.get $bound)) (i32.const 7))
     (then (call $arity (local.get $bound) (i32.const 1) (i32.const 1))
@@ -67,16 +77,48 @@
     (then (local.set $quotient (call $iadd (local.get $quotient) (call $int (select (i32.const 1) (i32.const -1) (local.get $lower)))))))
   #@(local.get $quotient))
 
+(define-runtime-function $integer-expand-type
+    (($type :nullable-object) ($environment :nullable-object)) (:nullable-object)
+  ;; The shared service validates both the input and the expansion result.
+  ;; It retains target DEFTYPE/environment semantics and canonical diagnostics.
+  #@(call $array-type-metadata-value (call $int (i32.const 0))
+    (local.get $type) (local.get $environment)))
+
+(define-runtime-function $integer-width-type-error
+    (($width :nullable-object) ($minimum i32)) ()
+  ;; Invalid widths retain the checked CL worker's TYPE-ERROR contract.
+  #@(call $type-fail (local.get $width)
+    (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
+      (call $cons (call $int (local.get $minimum))
+        (call $cons (call $symbol (i32.const ,(runtime-symbol-id '*))) (ref.null eq))))
+    (i32.const ,(runtime-error-code :malformed-type))))
+
+(define-runtime-function $integer-type-interval
+    (($type :nullable-object) ($coverage i32) ($env :nullable-object)) (:nullable-object :nullable-object i32)
+  (:locals ($saved :nullable-object) ($count i32)
+           ($lower :nullable-object) ($upper :nullable-object) ($kind i32))
+  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (call $integer-type-interval-wat (local.get $type) (local.get $coverage) (local.get $env))
+    (local.set $kind) (local.set $upper) (local.set $lower)
+    (global.set $extra-values (local.get $saved))
+    (global.set $value-count (local.get $count))
+    (return (local.get $lower) (local.get $upper) (local.get $kind))))
+  #@(global.set $extra-values (local.get $saved))
+  #@(global.set $value-count (local.get $count))
+  #@(throw $transfer))
+
 ;; Kind 1 is an integer interval; kind 2 is NIL; kind 0 is outside this
 ;; kernel. COVERAGE permits a target real/rational interval's integer points.
-(define-runtime-function $integer-type-interval
+(define-runtime-function $integer-type-interval-wat
     (($type :nullable-object) ($coverage i32) ($env :nullable-object)) (:nullable-object :nullable-object i32)
   (:locals ($name :nullable-object) ($args :nullable-object) ($width :nullable-object)
            ($lower :nullable-object) ($upper :nullable-object) ($unsigned i32) ($id i32)
            ($scan :nullable-object) ($pending :nullable-object) ($part :nullable-object)
            ($part-lower :nullable-object) ($part-upper :nullable-object)
            ($kind i32) ($integer i32) ($empty i32) ($unknown i32))
-  #@(local.set $type (call $expand-derived-type (local.get $type) (local.get $env)))
+  #@(local.set $type (call $integer-expand-type (local.get $type) (local.get $env)))
   #@(if (ref.is_null (local.get $type)) (then (return (ref.null eq) (ref.null eq) (i32.const 2))))
   #@(local.set $name (local.get $type))
   #@(if (i32.eq (call $tag (local.get $type)) (i32.const 23))
@@ -99,13 +141,17 @@
             (br_if $done (ref.is_null (local.get $pending)))
             (local.set $scan (call $car (local.get $pending)))
             (local.set $pending (call $cdr (local.get $pending))) (br $next)))
-        (local.set $part (call $expand-derived-type (call $car (local.get $scan)) (local.get $env)))
+        ;; An earlier expansion may mutate an already visited spine.
+        (if (ref.is_null (call $list-length-native (local.get $scan)))
+          (then (drop (call $array-type-metadata-value (call $int (i32.const 4))
+            (local.get $scan) (call $int (i32.const 3))))))
+        (local.set $part (call $integer-expand-type (call $car (local.get $scan)) (local.get $env)))
         (local.set $scan (call $cdr (local.get $scan)))
         (if (i32.eq (call $operator (local.get $part)) (i32.const ,(runtime-symbol-id 'and)))
           (then
             (local.set $pending (call $cons (local.get $scan) (local.get $pending)))
             (local.set $scan (call $cdr (local.get $part))) (br $next)))
-        (call $integer-type-interval (local.get $part) (i32.const 1) (local.get $env))
+        (call $integer-type-interval-wat (local.get $part) (i32.const 1) (local.get $env))
         (local.set $kind) (local.set $part-upper) (local.set $part-lower)
         (if (i32.eqz (local.get $kind)) (then (local.set $unknown (i32.const 1))))
         (if (i32.eq (local.get $kind) (i32.const 2)) (then (local.set $empty (i32.const 1))))
@@ -123,7 +169,7 @@
               (then (local.set $upper (local.get $part-upper))))))
         (if (i32.eqz (i32.or (local.get $coverage) (local.get $integer)))
           (then
-            (call $integer-type-interval (local.get $part) (i32.const 0) (local.get $env))
+            (call $integer-type-interval-wat (local.get $part) (i32.const 0) (local.get $env))
             (local.set $integer) (drop) (drop)))
         (br $next)))
       (if (i32.eqz (i32.or (local.get $coverage) (local.get $integer)))
@@ -143,7 +189,8 @@
       #@(local.set $width (call $car (local.get $args)))
       #@(if (i32.ne (call $tag (local.get $width)) (i32.const 1))
         (then (call $list-type-error (local.get $width) (i32.const ,(runtime-symbol-id 'integer)))))
-      (wat-fail-when #@(i32.le_s (call $value-n (local.get $width)) (i32.const 0)) :malformed-type)
+      #@(if (i32.le_s (call $value-n (local.get $width)) (i32.const 0))
+        (then (call $integer-width-type-error (local.get $width) (i32.const 1))))
       #@(return (call $int (i32.const 0)) (call $iadd (ref.as_non_null (local.get $width)) (call $int (i32.const -1))) (i32.const 1))))
   #@(if (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'integer)))
       (i32.and (local.get $coverage) (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'real)))
@@ -175,8 +222,10 @@
     (then (return (local.get $lower) (ref.null eq) (i32.const 1))))
   #@(if (i32.ne (call $tag (local.get $width)) (i32.const 1))
     (then (call $list-type-error (local.get $width) (i32.const ,(runtime-symbol-id 'integer)))))
-  (wat-fail-when #@(i32.or (i32.lt_s (call $value-n (local.get $width)) (i32.const 0))
-    (i32.and (i32.eqz (local.get $unsigned)) (i32.eqz (call $value-n (local.get $width))))) :malformed-type)
+  #@(if (i32.or (i32.lt_s (call $value-n (local.get $width)) (i32.const 0))
+        (i32.and (i32.eqz (local.get $unsigned)) (i32.eqz (call $value-n (local.get $width)))))
+    (then (call $integer-width-type-error (local.get $width)
+      (i32.eqz (local.get $unsigned)))))
   #@(if (i32.eqz (local.get $unsigned))
     (then (local.set $width (call $iadd (ref.as_non_null (local.get $width)) (call $int (i32.const -1))))
       (local.set $lower (call $integer-power-endpoint (ref.as_non_null (local.get $width)) (i32.const -1) (i32.const 0)))))
@@ -220,6 +269,37 @@
         (then (return (call $two-values (ref.null eq) (call $symbol (i32.const 1))))))))
   #@(call $two-values (call $symbol (i32.const 1)) (call $symbol (i32.const 1))))
 
+(define-runtime-function $integer-query
+    (($a :nullable-object) ($b :nullable-object) ($mode i32) ($coverage i32) ($env :nullable-object)) (:nullable-object)
+  (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object)
+           ($lower :nullable-object) ($upper :nullable-object) ($kind i32))
+  ;; The checked array-upgrade callback consumes this descriptor transport.
+  ;; Keep its ABI while interval/subtype computation uses the native workers.
+  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (if (i32.eqz (local.get $mode))
+      (then
+        (call $integer-type-interval (local.get $a) (local.get $coverage) (local.get $env))
+        (local.set $kind) (local.set $upper) (local.set $lower)
+        (local.set $result (call $vector-new (array.new_fixed $objects 3
+          (local.get $lower) (local.get $upper) (call $int (local.get $kind))))))
+      (else
+        (local.set $result (call $integer-subtypep (local.get $a) (local.get $b) (local.get $env)))
+        (local.set $result (call $int
+          (if (result i32) (ref.is_null (call $car (global.get $extra-values)))
+            (then (i32.const 0))
+            (else (select (i32.const 2) (i32.const 1) (ref.is_null (local.get $result)))))))))
+    (global.set $extra-values (local.get $saved))
+    (global.set $value-count (local.get $count))
+    (return (local.get $result))))
+  #@(global.set $extra-values (local.get $saved))
+  #@(global.set $value-count (local.get $count))
+  #@(throw $transfer))
+
 (define-runtime-section integer-type-runtime-wat ()
-  ($integer-all-ones-p) ($integer-power-endpoint) ($integer-endpoint-width) ($integer-endpoint-compare)
-  ($integer-interval-bound) ($integer-type-interval) ($integer-subtypep))
+  ($integer-all-ones-p)
+  ($integer-power-endpoint) ($integer-endpoint-sign) ($integer-endpoint-width) ($integer-endpoint-compare)
+  ($integer-interval-bound)
+  ($integer-expand-type) ($integer-width-type-error) ($integer-type-interval-wat) ($integer-type-interval)
+  ($integer-query) ($integer-subtypep))

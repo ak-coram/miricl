@@ -51,6 +51,10 @@ try {
   stage = 'arithmetic';
   const arithmetic = await session.evaluate('(+ 20 22)');
   assert.equal(arithmetic.failed, false); assert.match(arithmetic.output, /\b42\b/u);
+  stage = 'mini-proveall';
+  const miniProveall = await session.evaluate(':mini-proveall');
+  assert.equal(miniProveall.failed, false, miniProveall.output);
+  assert.match(miniProveall.output, /Mini-proveall completed successfully\./u);
   stage = 'definition and proof';
   const proof = await session.evaluate(`
     (defun miricl-double (x)
@@ -70,7 +74,7 @@ try {
     console.log(`ACL2 restored its initialized world in ${report.checkpoint.restoreMilliseconds} ms.`);
   }
   report.passed = true;
-  console.log(`ACL2 native prover: startup ${report.startupMilliseconds} ms; arithmetic, theorem admission, false theorem rejection and recovery pass.`);
+  console.log(`ACL2 native prover: startup ${report.startupMilliseconds} ms; mini-proveall, arithmetic, theorem admission, false theorem rejection and recovery pass.`);
 } catch (error) {
   report.stage = stage;
   report.failure = {message: error.message, output: error.output, backtrace: error.backtrace};

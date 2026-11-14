@@ -41,8 +41,11 @@
 
 (define-runtime-function $eval-apply
     (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
-  (:locals ($function :nullable-object) ($binding :nullable-object) ($rest :nullable-object) ($id i32))
-  #@(block $ordinary
+  (:locals ($function :nullable-object) ($binding :nullable-object) ($rest :nullable-object)
+           ($id i32) ($arity i32) ($result :nullable-object) ($thrown i32)
+           ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object))
+  #@(block $fast
+    (block $ordinary
     (br_if $ordinary (global.get $debug-evaluating))
     (local.set $function (local.get $name))
     (if (call $symbolp (local.get $name))
@@ -63,20 +66,34 @@
         ,(wat-symbol-case #@(local.get $id)
           ((car cdr first rest not null identity consp atom symbolp listp stringp integerp
             numberp rationalp realp complexp floatp 1+ 1- length)
-            #@(call $clear-values)
-            #@(return (ref.cast (ref null eq) (any.convert_extern
-              (call $native-call1 (extern.convert_any (local.get $function))
-                (extern.convert_any (call $car (local.get $args)))))))))
+            #@(local.set $arity (i32.const 1))
+            #@(br $fast)))
         (br $ordinary)))
     (br_if $ordinary (i32.eqz (ref.is_null (call $cdr (local.get $rest)))))
     ,(wat-symbol-case #@(local.get $id)
       ((eq eql cons + - * / = /= < > <= >=)
-        #@(call $clear-values)
-        #@(return (ref.cast (ref null eq) (any.convert_extern
-          (call $native-call2 (extern.convert_any (local.get $function))
-            (extern.convert_any (call $car (local.get $args)))
-            (extern.convert_any (call $car (local.get $rest))))))))))
-  #@(return_call $apply (local.get $name) (local.get $args)))
+        #@(local.set $arity (i32.const 2))
+        #@(br $fast))))
+    (return_call $apply (local.get $name) (local.get $args)))
+  ;; Fast builtin calls retain the same diagnostic frame as $APPLY0. Restore
+  ;; overwritten ring entries on success and guest nonlocal transfers alike.
+  #@(local.set $backtrace-depth (global.get $backtrace-depth))
+  #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
+  #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
+  #@(array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $name))
+  #@(global.set $backtrace-depth (i32.add (local.get $backtrace-depth) (i32.const 1)))
+  #@(call $clear-values)
+  (debug-protected-call
+    #@(ref.cast (ref null eq) (any.convert_extern
+      (if (result externref) (i32.eq (local.get $arity) (i32.const 1))
+        (then (call $native-call1 (extern.convert_any (local.get $function))
+          (extern.convert_any (call $car (local.get $args)))))
+        (else (call $native-call2 (extern.convert_any (local.get $function))
+          (extern.convert_any (call $car (local.get $args)))
+          (extern.convert_any (call $car (local.get $rest))))))))
+    #@(block
+      (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
+      (global.set $backtrace-depth (local.get $backtrace-depth)))))
 
 (define-runtime-function $validate-params (($params :nullable-object)) ()
   (:locals ($seen :nullable-object) ($name :nullable-object) ($id i32))

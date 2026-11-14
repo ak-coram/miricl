@@ -259,11 +259,17 @@
           (call $hash-code (local.get $test) (local.get $x) (i32.sub (local.get $depth) (i32.const 1)))))))))
   #@(local.get $hash))
 
-(define-runtime-function $require-hash-table (($table :nullable-object)) (:object)
-  #@(if (i32.ne (call $tag (local.get $table)) (i32.const 29))
-    (then (call $type-fail (local.get $table) (call $symbol (i32.const ,(runtime-symbol-id 'hash-table)))
-      (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(ref.as_non_null (local.get $table)))
+(defun $require-hash-table-cl ()
+  (runtime-function-definition '$require-hash-table-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$require-hash-table-cl 'miricl-runtime:checked-hash-table-value))))
+
+(define-runtime-function $require-hash-table (($x :nullable-object)) (:object)
+  ;; Before function installation, bootstrap constants use the native type boundary.
+  #@(if (global.get $cl-kernel-functions-ready)
+    (then (return (ref.as_non_null (call $require-hash-table-cl (local.get $x))))))
+  #@(if (i32.ne (call $tag (local.get $x)) (i32.const 29))
+    (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'hash-table)))))
+  #@(ref.as_non_null (local.get $x)))
 
 (define-runtime-function $hash-index-link
     (($table :nullable-object) ($parent :nullable-object) ($hash i32) ($node :nullable-object)) ()
@@ -393,6 +399,6 @@
   ($weak-hash-p) ($weak-hash-bridge) ($hash-count) ($hash-entries)
   ($make-hash-table-object) ($hash-test-designator) ($hash-test-designator-p) ($make-hash-table-native) ($hash-table-property)
   ($hash-iterator-state) ($hash-iterator-next)
-  ($hash-mix) ($hash-test-function-id) ($hash-string-code) ($hash-code) ($require-hash-table)
+  ($hash-mix) ($hash-test-function-id) ($hash-string-code) ($hash-code) ($require-hash-table-cl) ($require-hash-table)
   ($hash-index-link) ($hash-index-find) ($hash-index-add) ($hash-index-delete)
   ($hash-cell-native) ($puthash-native) ($remhash-native))

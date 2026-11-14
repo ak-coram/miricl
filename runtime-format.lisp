@@ -1,10 +1,20 @@
 ;;;; FORMAT's control-string interpreter. All parsing and printing run in WASM.
+;;;; Ordinary CL algorithms remain in runtime-format-kernels.lisp and
+;;;; runtime-kernel-library.lisp as compiler optimization references. The measured
+;;;; production selection is recorded in build/kernel-migration/format-retention/.
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
 (define-runtime-function $format-small (($x :nullable-object)) (i32)
-  (wat-fail-when #@(i32.ne (call $tag (local.get $x)) (i32.const 1)) :expected-designator)
-  (wat-fail-when #@(i32.gt_u (call $bitlength (ref.as_non_null (local.get $x))) (i32.const 30)) :unsupported)
+  #@(if (i32.ne (call $tag (local.get $x)) (i32.const 1)) (then (call $type-fail (local.get $x)
+      (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
+      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(if (i32.gt_u (call $bitlength (ref.as_non_null (local.get $x))) (i32.const 30))
+    (then (call $type-fail (local.get $x)
+      (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
+        (call $cons (call $int (i32.const -1073741823))
+          (call $cons (call $int (i32.const 1073741823)) (ref.null eq))))
+      (i32.const ,(runtime-error-code :expected-designator)))))
   #@(i32.mul (call $value-n (local.get $x))
     (i32.or (call $digit (ref.as_non_null (local.get $x)) (i32.const 0))
       (i32.shl (call $digit (ref.as_non_null (local.get $x)) (i32.const 1)) (i32.const 15)))))
@@ -14,11 +24,15 @@
   #@(if (i32.ge_u (local.get $i) (array.len (local.get $params))) (then (return (local.get $default))))
   #@(local.set $value (array.get $objects (local.get $params) (local.get $i)))
   #@(if (ref.is_null (local.get $value)) (then (return (local.get $default))))
+  #@(if (i32.eq (call $tag (local.get $value)) (i32.const 1))
+    (then ,(wat-fail-when #@(i32.gt_u (call $bitlength (ref.as_non_null (local.get $value))) (i32.const 30)) :unsupported)))
   #@(if (result i32) (i32.eq (call $tag (local.get $value)) (i32.const 16))
     (then (call $value-n (local.get $value))) (else (call $format-small (local.get $value)))))
 
 (define-runtime-function $format-index (($value :nullable-object)) (i32)
-  (wat-fail-when #@(i32.ne (call $tag (local.get $value)) (i32.const 1)) :expected-designator)
+  #@(if (i32.ne (call $tag (local.get $value)) (i32.const 1)) (then (call $type-fail (local.get $value)
+      (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
+      (i32.const ,(runtime-error-code :expected-designator)))))
   #@(if (i32.gt_u (call $bitlength (ref.as_non_null (local.get $value))) (i32.const 30))
     (then (return (i32.const -1))))
   #@(call $format-small (local.get $value)))
@@ -26,13 +40,16 @@
 ;; Escape parameters are numeric comparisons, not output widths or indices.
 ;; Retain arbitrary integers and use NIL for omitted parameters, rather than
 ;; narrowing them to i32 or reserving an otherwise valid integer sentinel.
+
 (define-runtime-function $format-comparison-param (($params (ref $objects)) ($i i32)) (:nullable-object)
   (:locals ($value :nullable-object))
   #@(local.set $value (array.get $objects (local.get $params) (local.get $i)))
   #@(if (ref.is_null (local.get $value)) (then (return (ref.null eq))))
   #@(if (i32.eq (call $tag (local.get $value)) (i32.const 16))
     (then (return (call $int (call $value-n (local.get $value))))))
-  (wat-fail-when #@(i32.ne (call $tag (local.get $value)) (i32.const 1)) :expected-designator)
+  #@(if (i32.ne (call $tag (local.get $value)) (i32.const 1)) (then (call $type-fail (local.get $value)
+      (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
+      (i32.const ,(runtime-error-code :expected-designator)))))
   #@(local.get $value))
 
 (define-runtime-function $format-escape-p (($params (ref $objects)) ($remaining :nullable-object)) (i32)
@@ -53,14 +70,17 @@
   #@(if (ref.is_null (local.get $value)) (then (return (i32.const 0))))
   #@(if (i32.eq (call $tag (local.get $value)) (i32.const 1))
     (then (if (i32.le_s (call $value-n (local.get $value)) (i32.const 0)) (then (return (i32.const 0))))))
-  #@(call $format-small (local.get $value)))
+  #@(call $format-param (local.get $params) (local.get $i) (i32.const 0)))
 
 ;; START points just past ~. SCAN parses syntax without consuming V arguments.
-(define-runtime-function $format-parse
+
+(define-runtime-function $format-parse-raw
     (($digits :digits) ($i i32) ($end i32) ($args :nullable-object) ($scan i32))
     (i32 i32 i32 i32 (ref $objects) :nullable-object i32)
   (:locals ($c i32) ($n i32) ($sign i32) ($slot i32) ($colon i32) ($at i32)
-           ($params (ref $objects)) ($grown (ref $objects)) ($x :nullable-object) ($number :nullable-object) ($count i32))
+           ($params (ref $objects)) ($grown (ref $objects)) ($x :nullable-object) ($number :nullable-object) ($count i32) ($slow :nullable-object) ($fast :nullable-object))
+  (wat-fail-when #@(i32.or (i32.gt_u (local.get $i) (local.get $end))
+    (i32.gt_u (local.get $end) (array.len (local.get $digits)))) :malformed-form)
   #@(local.set $params (array.new_default $objects (i32.const 8)))
   #@(block $parameters (loop $next
     ,(wat-fail-when #@(i32.ge_u (local.get $i) (local.get $end)) :malformed-form)
@@ -77,13 +97,27 @@
           (local.set $x (call $node (i32.const 16) (local.get $n) (ref.null eq) (ref.null eq) (ref.null eq)))
           (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $parameter)))
       (if (i32.eq (local.get $c) (i32.const 35))
-        (then (local.set $n (call $length (local.get $args)))
+        (then (local.set $n (i32.const 0))
+          (local.set $slow (local.get $args)) (local.set $fast (local.get $args))
+          (block $counted (loop $count-arguments
+            (br_if $counted (ref.is_null (local.get $fast)))
+            ,(wat-fail-when #@(i32.ne (call $tag (local.get $fast)) (i32.const 7)) :malformed-form)
+            (local.set $fast (call $cdr (local.get $fast)))
+            (local.set $n (i32.add (local.get $n) (i32.const 1)))
+            (br_if $counted (ref.is_null (local.get $fast)))
+            ,(wat-fail-when #@(i32.ne (call $tag (local.get $fast)) (i32.const 7)) :malformed-form)
+            (local.set $fast (call $cdr (local.get $fast)))
+            (local.set $slow (call $cdr (local.get $slow)))
+            (local.set $n (i32.add (local.get $n) (i32.const 1)))
+            ,(wat-fail-when #@(ref.eq (local.get $fast) (local.get $slow)) :malformed-form)
+            (br $count-arguments)))
           (local.set $x (call $int (local.get $n)))
           (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $parameter)))
       (if (i32.eq (local.get $c) (i32.const 86))
         (then
           (if (i32.eqz (local.get $scan))
             (then ,(wat-fail-when #@(ref.is_null (local.get $args)) :wrong-arity)
+              ,(wat-fail-when #@(i32.ne (call $tag (local.get $args)) (i32.const 7)) :malformed-form)
               (local.set $x (call $car (local.get $args))) (local.set $args (call $cdr (local.get $args)))))
           (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $parameter)))
       (local.set $sign (i32.const 1))
@@ -131,9 +165,27 @@
   #@(local.get $i) #@(local.get $c) #@(local.get $colon) #@(local.get $at) #@(local.get $params) #@(local.get $args) #@(local.get $count))
 
 ;; Locate a matching close or a separator at the current nesting depth.
-(define-runtime-function $format-close
+
+;; Keep pending Lisp multiple values intact across native rejection as well.
+(define-runtime-function $format-parse (($digits :digits) ($i i32) ($end i32) ($args :nullable-object) ($scan i32)) (i32 i32 i32 i32 (ref $objects) :nullable-object i32)
+  (:locals ($saved-extra :nullable-object) ($saved-count i32) ($after i32) ($code i32) ($colon i32) ($at i32) ($params (ref $objects)) ($remaining :nullable-object) ($count i32))
+  #@(local.set $saved-extra (global.get $extra-values))
+  #@(local.set $saved-count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (call $format-parse-raw (local.get $digits) (local.get $i) (local.get $end) (local.get $args) (local.get $scan))
+    (local.set $count) (local.set $remaining) (local.set $params) (local.set $at) (local.set $colon) (local.set $code) (local.set $after)
+    (global.set $extra-values (local.get $saved-extra))
+    (global.set $value-count (local.get $saved-count))
+    (return (local.get $after) (local.get $code) (local.get $colon) (local.get $at) (local.get $params) (local.get $remaining) (local.get $count))))
+  #@(global.set $extra-values (local.get $saved-extra))
+  #@(global.set $value-count (local.get $saved-count))
+  #@(throw $transfer))
+
+(define-runtime-function $format-close-raw
     (($digits :digits) ($i i32) ($end i32) ($close i32) ($separator i32)) (i32 i32 i32 i32)
   (:locals ($start i32) ($c i32) ($colon i32) ($depth i32))
+  (wat-fail-when #@(i32.or (i32.gt_u (local.get $i) (local.get $end))
+    (i32.gt_u (local.get $end) (array.len (local.get $digits)))) :malformed-form)
   #@(block $done (loop $next
     (br_if $done (i32.ge_u (local.get $i) (local.get $end)))
     (local.set $start (local.get $i))
@@ -161,6 +213,21 @@
     (br $next)))
   (wat-fail :malformed-form)
   #@(unreachable))
+
+;; Keep pending Lisp multiple values intact across native rejection as well.
+(define-runtime-function $format-close (($digits :digits) ($i i32) ($end i32) ($close i32) ($separator i32)) (i32 i32 i32 i32)
+  (:locals ($saved-extra :nullable-object) ($saved-count i32) ($mark i32) ($after i32) ($code i32) ($colon i32))
+  #@(local.set $saved-extra (global.get $extra-values))
+  #@(local.set $saved-count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (call $format-close-raw (local.get $digits) (local.get $i) (local.get $end) (local.get $close) (local.get $separator))
+    (local.set $colon) (local.set $code) (local.set $after) (local.set $mark)
+    (global.set $extra-values (local.get $saved-extra))
+    (global.set $value-count (local.get $saved-count))
+    (return (local.get $mark) (local.get $after) (local.get $code) (local.get $colon))))
+  #@(global.set $extra-values (local.get $saved-extra))
+  #@(global.set $value-count (local.get $saved-count))
+  #@(throw $transfer))
 
 (define-runtime-function $format-repeat (($c i32) ($n i32)) ()
   (wat-fail-when #@(i32.lt_s (local.get $n) (i32.const 0)) :malformed-form)
@@ -307,9 +374,12 @@
   (:locals ($a :digits) ($n i32) ($i i32) ($b :digits))
   #@(local.set $a (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $text)))))
   #@(local.set $n (array.len (local.get $a)))
-  #@(if (i32.and (local.get $supplied) (i32.gt_u (local.get $n) (local.get $width)))
+  #@(if (i32.lt_u (local.get $n) (i32.const 2)) (then (return (local.get $text))))
+  #@(if (i32.and (local.get $supplied) (i32.gt_s (local.get $n) (local.get $width)))
     (then (if (i32.or (i32.eq (array.get $digits (local.get $a) (i32.const 0)) (i32.const 45))
         (i32.eq (array.get $digits (local.get $a) (i32.const 0)) (i32.const 43))) (then (local.set $i (i32.const 1))))
+      (if (i32.ge_u (i32.add (local.get $i) (i32.const 1)) (local.get $n))
+        (then (return (local.get $text))))
       (if (i32.and (i32.and (i32.eq (array.get $digits (local.get $a) (local.get $i)) (i32.const 48))
           (i32.eq (array.get $digits (local.get $a) (i32.add (local.get $i) (i32.const 1))) (i32.const 46)))
           (i32.or (i32.eq (local.get $width) (i32.sub (local.get $n) (i32.const 1)))
@@ -787,12 +857,29 @@
     (br $next)))
   #@(local.get $args) #@(i32.const 0))
 
-(define-runtime-function $format-slash-end (($digits :digits) ($i i32) ($end i32)) (i32)
+(define-runtime-function $format-slash-end-raw (($digits :digits) ($i i32) ($end i32)) (i32)
+  (wat-fail-when #@(i32.or (i32.gt_u (local.get $i) (local.get $end))
+    (i32.gt_u (local.get $end) (array.len (local.get $digits)))) :malformed-form)
   #@(block $done (loop $next
     ,(wat-fail-when #@(i32.ge_u (local.get $i) (local.get $end)) :malformed-form)
     (br_if $done (i32.eq (array.get $digits (local.get $digits) (local.get $i)) (i32.const 47)))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
   #@(local.get $i))
+
+;; Keep pending Lisp multiple values intact across native rejection as well.
+(define-runtime-function $format-slash-end (($digits :digits) ($i i32) ($end i32)) (i32)
+  (:locals ($saved-extra :nullable-object) ($saved-count i32) ($result i32))
+  #@(local.set $saved-extra (global.get $extra-values))
+  #@(local.set $saved-count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (call $format-slash-end-raw (local.get $digits) (local.get $i) (local.get $end))
+    (local.set $result)
+    (global.set $extra-values (local.get $saved-extra))
+    (global.set $value-count (local.get $saved-count))
+    (return (local.get $result))))
+  #@(global.set $extra-values (local.get $saved-extra))
+  #@(global.set $value-count (local.get $saved-count))
+  #@(throw $transfer))
 
 (define-runtime-function $format-slash
     (($digits :digits) ($start i32) ($end i32) ($object :nullable-object) ($params (ref $objects))
@@ -1086,7 +1173,7 @@
   #@(i32.add (local.get $n) (global.get $format-column)))
 
 (define-runtime-section format-runtime-wat ()
-  ($format-small) ($format-index) ($format-param) ($format-comparison-param) ($format-escape-p) ($format-mincol) ($format-parse) ($format-close)
+  ($format-small) ($format-index) ($format-param) ($format-comparison-param) ($format-escape-p) ($format-mincol) ($format-parse-raw) ($format-parse) ($format-close-raw) ($format-close)
   ($format-repeat) ($format-pad) ($format-aesthetic-radix) ($format-integer) ($format-real-parts) ($format-rounded) ($format-number-sign) ($format-mantissa) ($format-leading-zero) ($format-fixed) ($format-exponential) ($format-run) ($format-line-column)
-  ($format-slash-end) ($format-slash) ($format-flush) ($format-segment) ($format-constant)
+  ($format-slash-end-raw) ($format-slash-end) ($format-slash) ($format-flush) ($format-segment) ($format-constant)
   ($format-roman) ($format-logical-body) ($format-pretty-pop) ($format-restricted) ($format-clause) ($format-justify) ($format-fill-body) ($format-logical))

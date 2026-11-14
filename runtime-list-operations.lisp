@@ -13,14 +13,14 @@
   #@(call $arity (local.get $args) (local.get $count) (local.get $count))
   #@(ref.null eq))
 
+(defun $pop-argument-cl ()
+  (runtime-function-definition '$pop-argument-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$pop-argument-cl 'miricl-runtime:pop-argument-box))))
+
 (define-runtime-function $pop-argument (($box :nullable-object) ($required :nullable-object)) (:nullable-object)
-  (:locals ($args :nullable-object))
-  #@(local.set $args (call $car (local.get $box)))
-  #@(if (ref.is_null (local.get $args))
-    (then ,(wat-fail-when #@(i32.eqz (ref.is_null (local.get $required))) :wrong-arity)
-      (return (ref.null eq))))
-  #@(struct.set $obj $a (ref.cast (ref $obj) (local.get $box)) (call $cdr (local.get $args)))
-  #@(call $car (local.get $args)))
+  #@(if (i32.ne (call $tag (local.get $box)) (i32.const 7))
+    (then (call $list-type-error (local.get $box) (i32.const ,(runtime-symbol-id 'cons)))))
+  #@(call $pop-argument-cl (local.get $box) (local.get $required)))
 
 (defun $list-eq ()
   (runtime-function-definition '$list-eq
@@ -39,35 +39,24 @@
     (local.set $methods (call $cdr (local.get $methods))) (call $thread-checkpoint) (br $next)))
   #@(ref.null eq))
 
+(defun $check-generic-arguments ()
+  (runtime-function-definition '$check-generic-arguments
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$check-generic-arguments 'miricl-runtime:check-generic-arguments))))
+
 (define-runtime-function $check-generic-arity (($params :nullable-object) ($args :nullable-object)) (:nullable-object)
-  (:locals ($minimum i32) ($maximum i32) ($optional i32) ($count i32) ($id i32))
-  #@(local.set $count (call $length (local.get $args)))
-  #@(block $done (loop $next
-    (br_if $done (ref.is_null (local.get $params)))
-    (local.set $id (call $id (call $car (local.get $params))))
-    (if (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '&rest)))
-                (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '&key))))
-      (then (local.set $maximum (i32.const -1)) (br $done)))
-    (br_if $done (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '&aux))))
-    (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '&optional)))
-      (then (local.set $optional (i32.const 1)))
-      (else
-        (local.set $minimum (i32.add (local.get $minimum) (i32.eqz (local.get $optional))))
-        (local.set $maximum (i32.add (local.get $maximum) (i32.const 1)))))
-    (local.set $params (call $cdr (local.get $params))) (br $next)))
-  (wat-fail-when #@(i32.or (i32.lt_u (local.get $count) (local.get $minimum))
-    (i32.and (i32.ge_s (local.get $maximum) (i32.const 0))
-             (i32.gt_u (local.get $count) (local.get $maximum)))) :wrong-arity)
-  #@(ref.null eq))
+  #@(call $check-apply-list (local.get $params))
+  #@(call $check-generic-arguments (local.get $params) (local.get $args)))
 
 (define-runtime-function $list-type-error (($x :nullable-object) ($type i32)) ()
   #@(call $type-fail (local.get $x) (call $symbol (local.get $type))
     (i32.const ,(runtime-error-code :expected-designator))))
 
+(defun $require-list-cl ()
+  (runtime-function-definition '$require-list-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$require-list-cl 'miricl-runtime:require-list-value))))
+
 (define-runtime-function $require-list (($x :nullable-object)) ()
-  #@(if (i32.and (i32.eqz (ref.is_null (local.get $x)))
-                 (i32.ne (call $tag (local.get $x)) (i32.const 7)))
-    (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'list))))))
+  #@(drop (call $require-list-cl (local.get $x))))
 
 ;; Saturation is useful for finite list lengths. NTHCDR separately retains
 ;; large counters because its input can also be circular.
@@ -78,38 +67,32 @@
   #@(if (ref.test (ref i31) (local.get $x))
     (then (local.set $value (i31.get_s (ref.cast (ref i31) (local.get $x))))
       (if (i32.ge_s (local.get $value) (i32.const 0)) (then (return (local.get $value))))))
-  #@(if (i32.ne (call $tag (local.get $x)) (i32.const 1))
-    (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'unsigned-byte)))))
-  #@(if (i32.lt_s (call $value-n (local.get $x)) (i32.const 0))
-    (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'unsigned-byte)))))
-  #@(if (i32.gt_u (call $bitlength (ref.as_non_null (local.get $x))) (i32.const 31))
-    (then (return (i32.const 2147483647))))
-  #@(i32.or (call $digit (ref.as_non_null (local.get $x)) (i32.const 0))
-    (i32.or (i32.shl (call $digit (ref.as_non_null (local.get $x)) (i32.const 1)) (i32.const 15))
-            (i32.shl (call $digit (ref.as_non_null (local.get $x)) (i32.const 2)) (i32.const 30)))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $natural-count-cl (local.get $x) (call $int (i32.const 2147483647)))))))
+
+(defun $natural-count-cl ()
+  (runtime-function-definition '$natural-count-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$natural-count-cl 'miricl-runtime:natural-count-value))))
+
+(defun $copy-list-spine ()
+  (runtime-function-definition '$copy-list-spine
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$copy-list-spine 'miricl-runtime:copy-list-spine))))
+
+(defun $copy-alist-spine ()
+  (runtime-function-definition '$copy-alist-spine
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$copy-alist-spine 'miricl-runtime:copy-alist-spine))))
+
+(defun $copy-tree-value-cl ()
+  (runtime-function-definition '$copy-tree-value-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$copy-tree-value-cl 'miricl-runtime:copy-tree-value))))
 
 (define-runtime-function $copy-spine (($x :nullable-object) ($mode i32)) (:nullable-object)
-  (:locals ($result :nullable-object) ($tail :nullable-object) ($cell :nullable-object) ($value :nullable-object))
-  ;; Modes: COPY-LIST=0, COPY-ALIST=1, COPY-TREE=2.
+  ;; Modes COPY-LIST=0, COPY-ALIST=1, COPY-TREE=2 share sealed CL workers.
   #@(if (i32.eq (local.get $mode) (i32.const 2))
-    (then (if (i32.ne (call $tag (local.get $x)) (i32.const 7)) (then (return (local.get $x)))))
-    (else (call $require-list (local.get $x))))
-  #@(block $done (loop $next
-    (br_if $done (i32.ne (call $tag (local.get $x)) (i32.const 7)))
-    (local.set $value (call $car (local.get $x)))
-    (if (i32.eq (local.get $mode) (i32.const 2))
-      (then (local.set $value (call $copy-spine (local.get $value) (i32.const 2)))))
-    (if (i32.eq (local.get $mode) (i32.const 1))
-      (then (call $require-list (local.get $value))
-        (if (i32.eqz (ref.is_null (local.get $value)))
-          (then (local.set $value (call $cons (call $car (local.get $value)) (call $cdr (local.get $value))))))))
-    (local.set $cell (call $cons (local.get $value) (ref.null eq)))
-    (if (ref.is_null (local.get $tail)) (then (local.set $result (local.get $cell)))
-      (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-    (local.set $tail (local.get $cell)) (local.set $x (call $cdr (local.get $x))) (br $next)))
-  #@(if (i32.eq (local.get $mode) (i32.const 1)) (then (call $require-list (local.get $x))))
-  #@(if (i32.eqz (ref.is_null (local.get $tail))) (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $x))))
-  #@(local.get $result))
+    (then (return_call $copy-tree-value-cl (local.get $x))))
+  #@(if (result (ref null eq)) (i32.eq (local.get $mode) (i32.const 1))
+    (then (call $copy-alist-spine (local.get $x)))
+    (else (call $copy-list-spine (local.get $x)))))
 
 (defun $reverse-copy-onto ()
   (runtime-function-definition '$reverse-copy-onto
@@ -125,57 +108,41 @@
     (else (call $reverse-copy-onto (local.get $x) (local.get $tail)))))
 
 (define-runtime-function $reverse-sequence (($x :nullable-object) ($mutate i32)) (:nullable-object)
-  (:locals ($digits :digits) ($result :digits) ($i i32) ($j i32) ($n i32) ($value i32))
   #@(if (i32.or (i32.eq (call $tag (local.get $x)) (i32.const 35))
                  (i32.eq (call $tag (local.get $x)) (i32.const 36)))
     (then (return (call $reverse-array-sequence (local.get $x) (local.get $mutate)))))
   #@(if (i32.eq (call $tag (local.get $x)) (i32.const 34))
     (then (return (call $vector-reverse (local.get $x) (local.get $mutate)))))
-  #@(if (i32.ne (call $tag (local.get $x)) (i32.const 10))
-    (then (call $require-list (local.get $x))
-      (return (call $reverse-onto (local.get $x) (ref.null eq) (local.get $mutate)))))
-  #@(local.set $digits (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $x)))))
-  #@(local.set $n (array.len (local.get $digits)))
-  #@(if (local.get $mutate)
-    (then
-      (local.set $j (local.get $n))
-      (block $swapped (loop $swap (br_if $swapped (i32.ge_u (local.get $i) (i32.div_u (local.get $n) (i32.const 2))))
-        (local.set $j (i32.sub (local.get $j) (i32.const 1)))
-        (local.set $value (array.get $digits (local.get $digits) (local.get $i)))
-        (array.set $digits (local.get $digits) (local.get $i) (array.get $digits (local.get $digits) (local.get $j)))
-        (array.set $digits (local.get $digits) (local.get $j) (local.get $value))
-        (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $swap)))
-      (return (local.get $x))))
-  #@(local.set $result (array.new_default $digits (local.get $n)))
-  #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-    (array.set $digits (local.get $result) (local.get $i)
-      (array.get $digits (local.get $digits) (i32.sub (i32.sub (local.get $n) (i32.const 1)) (local.get $i))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(call $text (local.get $result)))
+  #@(if (i32.eq (call $tag (local.get $x)) (i32.const 10))
+    (then (return (call $reverse-array-sequence (local.get $x) (local.get $mutate)))))
+  #@(call $require-list (local.get $x))
+  #@(call $reverse-onto (local.get $x) (ref.null eq) (local.get $mutate)))
+
+(defun $make-list-bounded ()
+  (runtime-function-definition '$make-list-bounded
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$make-list-bounded 'miricl-runtime:make-list-bounded))))
 
 (define-runtime-function $make-list-native (($size :nullable-object) ($value :nullable-object)) (:nullable-object)
-  (:locals ($n i32) ($result :nullable-object))
-  #@(local.set $n (call $natural-count (local.get $size)))
+  #@(drop (call $natural-count (local.get $size)))
   (wat-fail-when #@(i32.gt_u (call $bitlength (ref.as_non_null (local.get $size))) (i32.const 31)) :allocation)
-  #@(block $done (loop $next (br_if $done (i32.eqz (local.get $n)))
-    (local.set $result (call $cons (local.get $value) (local.get $result)))
-    (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $next)))
-  #@(local.get $result))
+  #@(call $make-list-bounded (local.get $size) (local.get $value)))
+
+(defun $nthcdr-bounded ()
+  (runtime-function-definition '$nthcdr-bounded
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$nthcdr-bounded 'miricl-runtime:nthcdr-bounded))))
+
+(defun $nthcdr-general ()
+  (runtime-function-definition '$nthcdr-general
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$nthcdr-general 'miricl-runtime:nthcdr-general))))
 
 (define-runtime-function $nthcdr-native (($count :nullable-object) ($x :nullable-object)) (:nullable-object)
-  (:locals ($n i32) ($big i32) ($minus-one :nullable-object))
+  (:locals ($n i32))
   #@(local.set $n (call $natural-count (local.get $count)))
-  #@(local.set $big (i32.gt_u (call $bitlength (ref.as_non_null (local.get $count))) (i32.const 31)))
-  #@(if (local.get $big) (then (local.set $minus-one (call $int (i32.const -1)))))
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $x)))
-    (br_if $done (if (result i32) (local.get $big)
-      (then (call $zero (ref.as_non_null (local.get $count)))) (else (i32.eqz (local.get $n)))))
-    (local.set $x (call $cdr (local.get $x)))
-    (if (local.get $big)
-      (then (local.set $count (call $iadd (ref.as_non_null (local.get $count)) (ref.as_non_null (local.get $minus-one)))))
-      (else (local.set $n (i32.sub (local.get $n) (i32.const 1)))))
-    (br $next)))
-  #@(local.get $x))
+  #@(if (i32.or (i32.eqz (local.get $n)) (ref.is_null (local.get $x)))
+    (then (return (local.get $x))))
+  #@(if (i32.le_u (call $bitlength (ref.as_non_null (local.get $count))) (i32.const 31))
+    (then (return (call $nthcdr-bounded (local.get $count) (local.get $x)))))
+  #@(call $nthcdr-general (local.get $count) (local.get $x)))
 
 (defun $last-bounded ()
   (runtime-function-definition '$last-bounded
@@ -207,163 +174,62 @@
   (runtime-function-definition '$copy-before-tail
     (wat-fragment (miricl-cross:runtime-kernel-wat '$copy-before-tail 'miricl-runtime:copy-before-tail))))
 
+(defun $tail-member-p ()
+  (runtime-function-definition '$tail-member-p
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$tail-member-p 'miricl-runtime:tail-member-p))))
+
 (define-runtime-function $tail-difference (($x :nullable-object) ($object :nullable-object) ($copy i32)) (:nullable-object)
   #@(call $require-list (local.get $x))
   #@(if (local.get $copy)
     (then (return (call $copy-before-tail (local.get $x) (local.get $object)))))
-  #@(block $done (loop $next (br_if $done (call $eql (local.get $x) (local.get $object)))
-    (br_if $done (i32.ne (call $tag (local.get $x)) (i32.const 7)))
-    (local.set $x (call $cdr (local.get $x))) (br $next)))
-  #@(call $bool (call $eql (local.get $x) (local.get $object))))
+  #@(call $tail-member-p (local.get $x) (local.get $object)))
 
-(define-runtime-function $list-length-native (($fast :nullable-object)) (:nullable-object)
-  (:locals ($slow :nullable-object) ($n i32))
-  #@(local.set $slow (local.get $fast))
-  #@(loop $next
-    (if (ref.is_null (local.get $fast)) (then (return (call $int (local.get $n)))))
-    (local.set $fast (call $cdr (local.get $fast))) (local.set $n (i32.add (local.get $n) (i32.const 1)))
-    (if (ref.is_null (local.get $fast)) (then (return (call $int (local.get $n)))))
-    (local.set $fast (call $cdr (local.get $fast))) (local.set $slow (call $cdr (local.get $slow)))
-    (local.set $n (i32.add (local.get $n) (i32.const 1)))
-    (if (ref.eq (local.get $fast) (local.get $slow)) (then (return (ref.null eq)))) (br $next))
-  #@(unreachable))
+(defun $list-length-native ()
+  (runtime-function-definition '$list-length-native
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$list-length-native 'miricl-runtime:list-length-or-cycle))))
+
+(defun $pair-lists-onto ()
+  (runtime-function-definition '$pair-lists-onto
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$pair-lists-onto 'miricl-runtime:pair-lists-onto))))
 
 (define-runtime-function $pairlis-native (($keys :nullable-object) ($data :nullable-object) ($alist :nullable-object)) (:nullable-object)
-  (:locals ($result :nullable-object) ($tail :nullable-object) ($cell :nullable-object))
   #@(call $require-list (local.get $alist))
-  #@(block $done (loop $next
-    (br_if $done (i32.and (ref.is_null (local.get $keys)) (ref.is_null (local.get $data))))
-    (if (i32.ne (call $tag (local.get $keys)) (i32.const 7))
-      (then (call $list-type-error (local.get $keys) (i32.const ,(runtime-symbol-id 'cons)))))
-    (if (i32.ne (call $tag (local.get $data)) (i32.const 7))
-      (then (call $list-type-error (local.get $data) (i32.const ,(runtime-symbol-id 'cons)))))
-    (local.set $cell (call $cons (call $cons (call $car (local.get $keys)) (call $car (local.get $data))) (ref.null eq)))
-    (if (ref.is_null (local.get $tail)) (then (local.set $result (local.get $cell)))
-      (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-    (local.set $tail (local.get $cell))
-    (local.set $keys (call $cdr (local.get $keys))) (local.set $data (call $cdr (local.get $data))) (br $next)))
-  #@(if (ref.is_null (local.get $tail)) (then (return (local.get $alist))))
-  #@(struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $alist))
-  #@(local.get $result))
+  #@(call $pair-lists-onto (local.get $keys) (local.get $data) (local.get $alist)))
 
-(define-runtime-function $callable (($function :nullable-object)) (:nullable-object)
-  #@(if (call $symbolp (local.get $function))
-    (then (local.set $function (call $fdefinition (local.get $function)))))
-  #@(if (i32.ne (call $tag (local.get $function)) (i32.const 8))
-    (then (call $list-type-error (local.get $function) (i32.const ,(runtime-symbol-id 'function)))))
-  #@(local.get $function))
+(defun $callable ()
+  (runtime-function-definition '$callable
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$callable 'miricl-runtime:callable-value))))
 
 ;; Modes: MAPCAR=0, MAPC=1, MAPLIST=2, MAPL=3, EVERY=4, SOME=5.
 ;; Keep cursors separately from callback argument lists: an &REST callback
 ;; may retain its arguments after this iteration has finished.
+(defun $mapping-argument-cl ()
+  (runtime-function-definition '$mapping-argument-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$mapping-argument-cl 'miricl-runtime:mapping-argument-value))))
+
 (define-runtime-function $mapping-argument
     (($sequence :nullable-object) ($index i32) ($mode i32)) (:nullable-object)
-  #@(if (i32.and (i32.ge_u (local.get $mode) (i32.const 2)) (i32.le_u (local.get $mode) (i32.const 3)))
-    (then (return (local.get $sequence))))
-  #@(if (i32.ge_u (local.get $mode) (i32.const 4))
-    (then (return (call $sequence-value (local.get $sequence) (local.get $index)))))
-  #@(call $car (local.get $sequence)))
+  #@(call $mapping-argument-cl (local.get $sequence) (call $int (local.get $index)) (call $int (local.get $mode))))
+
+(defun $map-lists-cl ()
+  (runtime-function-definition '$map-lists-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$map-lists-cl 'miricl-runtime:map-list-values))))
 
 (define-runtime-function $map-lists-native
     (($function :nullable-object) ($inputs :nullable-object) ($mode i32) ($output :nullable-object)) (:nullable-object)
-  (:locals ($cursors (ref $objects)) ($n i32) ($i i32) ($index i32) ($tag i32) ($limit i32) ($first :nullable-object)
-           ($x :nullable-object) ($args :nullable-object) ($value :nullable-object)
-           ($result :nullable-object) ($tail :nullable-object) ($cell :nullable-object))
-  #@(local.set $function (call $callable (local.get $function)))
-  #@(local.set $n (call $length (local.get $inputs)))
-  (wat-fail-when #@(i32.and (i32.eqz (local.get $n)) (i32.ne (local.get $mode) (i32.const 8))) :wrong-arity)
-  #@(local.set $limit (i32.const -1))
-  #@(if (i32.eq (local.get $mode) (i32.const 8))
-    (then (local.set $limit (if (result i32) (call $arrayp-native (local.get $output))
-      (then (call $array-length (local.get $output))) (else (call $proper-sequence-length (local.get $output)))))))
-  #@(local.set $result (local.get $output))
-  #@(local.set $tail (local.get $output))
-  #@(local.set $first (call $car (local.get $inputs)))
-  #@(local.set $cursors (array.new_default $objects (local.get $n)))
-  #@(block $initialized (loop $initialize (br_if $initialized (i32.ge_u (local.get $i) (local.get $n)))
-    ;; Check every input before an empty earlier sequence can end traversal.
-    (local.set $x (call $car (local.get $inputs)))
-    (if (i32.and (i32.ge_u (local.get $mode) (i32.const 4)) (call $arrayp-native (local.get $x)))
-      (then (drop (call $array-sequence-length (local.get $x))))
-      (else (call $require-list (local.get $x))))
-    (array.set $objects (local.get $cursors) (local.get $i) (local.get $x))
-    (local.set $inputs (call $cdr (local.get $inputs)))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $initialize)))
-  #@(block $done (loop $next
-    (br_if $done (i32.ge_u (local.get $index) (local.get $limit)))
-    (local.set $i (i32.const 0))
-    (block $checked (loop $check (br_if $checked (i32.ge_u (local.get $i) (local.get $n)))
-      (local.set $x (array.get $objects (local.get $cursors) (local.get $i)))
-      (local.set $tag (call $tag (local.get $x)))
-      (if (i32.and (i32.ge_u (local.get $mode) (i32.const 4))
-            (call $arrayp-native (local.get $x)))
-        (then (br_if $done (i32.ge_u (local.get $index) (call $array-sequence-length (local.get $x)))))
-        (else (br_if $done (ref.is_null (local.get $x))) (call $require-list (local.get $x))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $check)))
-    ;; Native unary functions need no temporary argument list. General
-    ;; functions still receive a fresh list through SEQUENCE-KEY-VALUE.
-    (if (i32.eq (local.get $n) (i32.const 1))
-      (then (local.set $value (call $sequence-key-value (local.get $function)
-        (call $mapping-argument (array.get $objects (local.get $cursors) (i32.const 0))
-          (local.get $index) (local.get $mode)))))
-      (else
-        (local.set $args (ref.null eq))
-        (local.set $i (local.get $n))
-        (block $arguments (loop $argument (br_if $arguments (i32.eqz (local.get $i)))
-          (local.set $i (i32.sub (local.get $i) (i32.const 1)))
-          (local.set $args (call $cons (call $mapping-argument
-            (array.get $objects (local.get $cursors) (local.get $i)) (local.get $index) (local.get $mode))
-            (local.get $args))) (br $argument)))
-        (local.set $value (call $apply (local.get $function) (local.get $args)))))
-    (call $clear-values)
-    (if (i32.eq (local.get $mode) (i32.const 4))
-      (then (if (ref.is_null (local.get $value)) (then (return (ref.null eq))))))
-    (if (i32.eq (local.get $mode) (i32.const 5))
-      (then (if (i32.eqz (ref.is_null (local.get $value))) (then (return (local.get $value))))))
-    (if (i32.or (i32.eqz (local.get $mode)) (i32.eq (local.get $mode) (i32.const 2)))
-      (then (local.set $cell (call $cons (local.get $value) (ref.null eq)))
-        (if (ref.is_null (local.get $tail)) (then (local.set $result (local.get $cell)))
-          (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-        (local.set $tail (local.get $cell))))
-    (if (i32.or (i32.eq (local.get $mode) (i32.const 6)) (i32.eq (local.get $mode) (i32.const 8)))
-      (then
-        (if (call $arrayp-native (local.get $output))
-          (then (drop (call $array-raw-element (local.get $output) (local.get $index) (local.get $value) (i32.const 1))))
-          (else (struct.set $obj $a (ref.cast (ref $obj) (local.get $tail)) (local.get $value))
-            (local.set $tail (call $cdr (local.get $tail)))))))
-    (local.set $i (i32.const 0))
-    (block $advanced (loop $advance (br_if $advanced (i32.ge_u (local.get $i) (local.get $n)))
-      (local.set $x (array.get $objects (local.get $cursors) (local.get $i)))
-      (if (i32.eq (call $tag (local.get $x)) (i32.const 7))
-        (then (array.set $objects (local.get $cursors) (local.get $i) (call $cdr (local.get $x)))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $advance)))
-    (local.set $index (i32.add (local.get $index) (i32.const 1)))
-    (br $next)))
-  #@(call $clear-values)
-  #@(if (i32.and (i32.eq (local.get $mode) (i32.const 8)) (i32.eq (call $tag (local.get $output)) (i32.const 35)))
-    (then (if (i32.ge_s (struct.get $array $fill (ref.cast (ref $array) (local.get $output))) (i32.const 0))
-      (then (struct.set $array $fill (ref.cast (ref $array) (local.get $output)) (local.get $index))))))
-  #@(if (i32.eq (local.get $mode) (i32.const 4)) (then (return (call $symbol (i32.const 1)))))
-  #@(if (i32.or (i32.eq (local.get $mode) (i32.const 1)) (i32.eq (local.get $mode) (i32.const 3)))
-    (then (return (local.get $first))))
-  #@(local.get $result))
+  #@(call $map-lists-cl (local.get $function) (local.get $inputs) (call $int (local.get $mode)) (local.get $output)))
+
+(defun $map-sequence-result-cl ()
+  (runtime-function-definition '$map-sequence-result-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$map-sequence-result-cl 'miricl-runtime:map-sequence-result-value))))
 
 (define-runtime-function $map-sequences-native
     (($type :nullable-object) ($function :nullable-object) ($inputs :nullable-object)) (:nullable-object)
-  (:locals ($scan :nullable-object) ($output :nullable-object) ($length i32) ($limit i32))
+  (:locals ($output :nullable-object))
   #@(local.set $function (call $callable (local.get $function)))
-  #@(local.set $scan (local.get $inputs))
-  #@(local.set $limit (i32.const 536870910))
-  #@(block $sized (loop $size (br_if $sized (ref.is_null (local.get $scan)))
-    (local.set $length (call $proper-sequence-length (call $car (local.get $scan))))
-    (if (i32.lt_u (local.get $length) (local.get $limit)) (then (local.set $limit (local.get $length))))
-    (local.set $scan (call $cdr (local.get $scan))) (br $size)))
-  #@(if (i32.eqz (ref.is_null (local.get $type)))
-    (then (local.set $output (call $apply (call $callable (call $symbol (i32.const ,(runtime-symbol-id 'make-sequence))))
-      (call $cons (local.get $type) (call $cons (call $int (local.get $limit)) (ref.null eq)))))))
-  #@(call $clear-values)
+  #@(local.set $output (call $map-sequence-result-cl (local.get $type) (local.get $inputs)))
   #@(call $map-lists-native (local.get $function) (local.get $inputs)
-    (select (i32.const 7) (i32.const 6) (ref.is_null (local.get $type))) (local.get $output)))
+    (select (i32.const 6) (i32.const 7) (i32.eqz (ref.is_null (local.get $type)))) (local.get $output)))
 
 (define-runtime-function $map-into-apply (($args :nullable-object)) (:nullable-object)
   (:locals ($output :nullable-object) ($inputs :nullable-object) ($scan :nullable-object))
@@ -381,10 +247,14 @@
 
 ;; KIND: MEMBER=0, ASSOC=1, RASSOC=2. MODE: item=0, IF=1, IF-NOT=2.
 ;; Resolve designators once, then stop at the first match without copying.
+(defun $search-list-cl ()
+  (runtime-function-definition '$search-list-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$search-list-cl 'miricl-runtime:search-list-values))))
+
 (define-runtime-function $search-list-native
     (($kind i32) ($mode i32) ($item :nullable-object) ($list :nullable-object)
      ($key :nullable-object) ($test :nullable-object) ($test-not :nullable-object)) (:nullable-object)
-  (:locals ($entry :nullable-object) ($value :nullable-object) ($function :nullable-object) ($match i32))
+  (:locals ($function :nullable-object) ($result :nullable-object))
   #@(call $require-list (local.get $list))
   #@(if (i32.eqz (ref.is_null (local.get $key)))
     (then (local.set $key (call $callable (local.get $key)))))
@@ -392,79 +262,39 @@
     (if (result (ref null eq)) (local.get $mode) (then (local.get $item))
       (else (if (result (ref null eq)) (ref.is_null (local.get $test-not))
         (then (local.get $test)) (else (local.get $test-not)))))))
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $list)))
-    (call $require-list (local.get $list))
-    (local.set $entry (call $car (local.get $list)))
-    (block $skip
-      (local.set $value (local.get $entry))
-      (if (local.get $kind)
-        (then
-          (br_if $skip (ref.is_null (local.get $entry)))
-          (if (i32.ne (call $tag (local.get $entry)) (i32.const 7))
-            (then (call $list-type-error (local.get $entry) (i32.const ,(runtime-symbol-id 'list)))))
-          (local.set $value (if (result (ref null eq)) (i32.eq (local.get $kind) (i32.const 1))
-            (then (call $car (local.get $entry))) (else (call $cdr (local.get $entry)))))))
-      (local.set $match (call $sequence-item-match (local.get $mode) (local.get $item)
-        (local.get $value) (local.get $key) (local.get $function)
-        (i32.eqz (ref.is_null (local.get $test-not)))))
-      (if (local.get $match)
-        (then (call $clear-values)
-          (return (if (result (ref null eq)) (local.get $kind)
-            (then (local.get $entry)) (else (local.get $list)))))))
-    (local.set $list (call $cdr (local.get $list))) (br $next)))
+  #@(local.set $result (call $search-list-cl (local.get $list) (local.get $item) (local.get $key)
+    (call $cons (call $int (local.get $kind))
+      (call $cons (call $int (local.get $mode))
+        (call $cons (local.get $function) (call $cons (call $bool (i32.eqz (ref.is_null (local.get $test-not)))) (ref.null eq)))))))
   #@(call $clear-values)
-  #@(ref.null eq))
+  #@(local.get $result))
 
 ;; ADJOIN=0, SUBSETP=1, INTERSECTION=2, SET-DIFFERENCE=3, UNION=4.
 ;; Keys apply to both inputs; the comparison keeps list-1 first even for
 ;; asymmetric predicates. UNION can share list-2 without modifying it.
+(defun $list-exclusive-cl ()
+  (runtime-function-definition '$list-exclusive-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$list-exclusive-cl 'miricl-runtime:list-exclusive-values))))
+
 (define-runtime-function $list-exclusive-native
     (($a :nullable-object) ($b :nullable-object) ($key :nullable-object)
      ($test :nullable-object) ($test-not :nullable-object)) (:nullable-object)
-  (:locals ($result :nullable-object) ($other :nullable-object) ($scan-a :nullable-object) ($scan-b :nullable-object)
-           ($value :nullable-object) ($function :nullable-object) ($marks :digits)
-           ($length i32) ($i i32) ($word i32) ($match i32) ($matched i32) ($negate i32))
+  (:locals ($result :nullable-object) ($other :nullable-object))
   #@(call $clear-values)
-  #@(drop (call $proper-sequence-length (local.get $a)))
-  #@(local.set $length (call $proper-sequence-length (local.get $b)))
-  #@(if (ref.is_null (local.get $a)) (then (return (local.get $b))))
-  #@(if (ref.is_null (local.get $b)) (then (return (local.get $a))))
   #@(if (i32.and (ref.is_null (local.get $test-not)) (call $hash-test-function-id (local.get $test)))
     (then
+      (drop (call $proper-sequence-length (local.get $a)))
+      (drop (call $proper-sequence-length (local.get $b)))
+      (if (ref.is_null (local.get $a)) (then (return (local.get $b))))
+      (if (ref.is_null (local.get $b)) (then (return (local.get $a))))
       (local.set $result (call $list-set-native (i32.const 3) (local.get $a) (local.get $b)
         (local.get $key) (local.get $test) (ref.null eq)))
       (local.set $other (call $list-set-native (i32.const 3) (local.get $b) (local.get $a)
         (local.get $key) (local.get $test) (ref.null eq)))
       (return (call $reverse-onto (local.get $result) (local.get $other) (i32.const 1)))))
-  ;; An arbitrary predicate need not be symmetric. Visit original ordered
-  ;; pairs once and mark every right-hand element participating in any match.
-  #@(local.set $negate (i32.eqz (ref.is_null (local.get $test-not))))
-  #@(local.set $function (if (result (ref null eq)) (local.get $negate)
-    (then (local.get $test-not)) (else (local.get $test))))
-  #@(local.set $marks (array.new_default $digits (i32.shr_u (i32.add (local.get $length) (i32.const 31)) (i32.const 5))))
-  #@(local.set $scan-a (local.get $a))
-  #@(block $done (loop $left (br_if $done (ref.is_null (local.get $scan-a)))
-    (local.set $value (call $sequence-key-value (local.get $key) (call $car (local.get $scan-a))))
-    (local.set $scan-b (local.get $b)) (local.set $i (i32.const 0)) (local.set $matched (i32.const 0))
-    (block $compared (loop $right (br_if $compared (ref.is_null (local.get $scan-b)))
-      (local.set $match (call $sequence-item-match (i32.const 0) (local.get $value) (call $car (local.get $scan-b))
-        (local.get $key) (local.get $function) (local.get $negate)))
-      (if (local.get $match)
-        (then (local.set $matched (i32.const 1))
-          (local.set $word (i32.shr_u (local.get $i) (i32.const 5)))
-          (array.set $digits (local.get $marks) (local.get $word)
-            (i32.or (array.get $digits (local.get $marks) (local.get $word)) (i32.shl (i32.const 1) (local.get $i))))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (local.set $scan-b (call $cdr (local.get $scan-b))) (br $right)))
-    (if (i32.eqz (local.get $matched)) (then (local.set $result (call $cons (call $car (local.get $scan-a)) (local.get $result)))))
-    (local.set $scan-a (call $cdr (local.get $scan-a))) (br $left)))
-  #@(local.set $i (i32.const 0))
-  #@(block $done (loop $remaining (br_if $done (ref.is_null (local.get $b)))
-    (if (i32.eqz (i32.and (array.get $digits (local.get $marks) (i32.shr_u (local.get $i) (i32.const 5)))
-                         (i32.shl (i32.const 1) (local.get $i))))
-      (then (local.set $result (call $cons (call $car (local.get $b)) (local.get $result)))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1)))
-    (local.set $b (call $cdr (local.get $b))) (br $remaining)))
+  ;; General predicates retain the original left/right ordered pair semantics.
+  #@(local.set $result (call $list-exclusive-cl (local.get $a) (local.get $b) (local.get $key)
+    (call $cons (local.get $test) (local.get $test-not))))
   #@(call $clear-values)
   #@(local.get $result))
 
@@ -501,11 +331,14 @@
   #@(call $list-set-native (local.get $mode) (local.get $a) (local.get $b)
     (local.get $key) (local.get $test) (local.get $test-not)))
 
+(defun $list-set-values-cl ()
+  (runtime-function-definition '$list-set-values-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$list-set-values-cl 'miricl-runtime:list-set-values))))
+
 (define-runtime-function $list-set-native
     (($mode i32) ($a :nullable-object) ($b :nullable-object) ($key :nullable-object)
      ($test :nullable-object) ($test-not :nullable-object)) (:nullable-object)
-  (:locals ($value :nullable-object) ($result :nullable-object) ($match i32)
-           ($table :nullable-object) ($scan :nullable-object) ($hash-test i32) ($key-id i32))
+  (:locals ($result :nullable-object) ($hash-test i32) ($key-id i32))
   #@(call $require-list (local.get $b))
   #@(if (local.get $mode) (then (call $require-list (local.get $a))))
   #@(if (i32.eqz (ref.is_null (local.get $key))) (then (local.set $key (call $callable (local.get $key)))))
@@ -515,67 +348,32 @@
   #@(if (i32.eq (local.get $mode) (i32.const 5))
     (then (return (call $list-exclusive-native (local.get $a) (local.get $b) (local.get $key)
       (local.get $test) (local.get $test-not)))))
-  #@(block $done
-    (if (i32.eqz (local.get $mode))
+  ;; Function-object identity, rather than a source name, grants canonical
+  ;; hash indexing. Callback-free key selection retains the existing contract.
+  #@(block $selected
+    (br_if $selected (i32.eqz (ref.is_null (local.get $test-not))))
+    (local.set $hash-test (call $hash-test-function-id (local.get $test)))
+    (if (i32.eqz (ref.is_null (local.get $key)))
       (then
-        (local.set $value (local.get $a))
-        (if (i32.eqz (ref.is_null (local.get $key)))
-          (then (local.set $value (call $apply (local.get $key) (call $cons (local.get $value) (ref.null eq))))))
-        (local.set $result (if (result (ref null eq)) (ref.is_null
-          (call $search-list-native (i32.const 0) (i32.const 0) (local.get $value)
-            (local.get $b) (local.get $key) (local.get $test) (local.get $test-not)))
-          (then (call $cons (local.get $a) (local.get $b))) (else (local.get $b))))
-        (br $done)))
-    (if (i32.eq (local.get $mode) (i32.const 1)) (then (local.set $result (call $symbol (i32.const 1)))))
-    (if (i32.eq (local.get $mode) (i32.const 4)) (then (local.set $result (local.get $b))))
-    ;; Index only native equality with callback-free key extraction. Custom
-    ;; predicates and keys retain their ordinary traversal and side effects.
-    (block $linear
-      (br_if $linear (i32.eqz (ref.is_null (local.get $test-not))))
-      (local.set $hash-test (call $hash-test-function-id (local.get $test)))
-      (br_if $linear (i32.eqz (local.get $hash-test)))
-      (if (i32.eqz (ref.is_null (local.get $key)))
-        (then
-          (local.set $key-id (i32.sub (call $value-n (local.get $key)) (i32.const 1)))
-          ,(wat-symbol-case #@(local.get $key-id)
-            ((identity car cdr char-code char-int 1+ 1-) #@(local.set $key-id (i32.const 0))))
-          (br_if $linear (local.get $key-id))))
-      (br_if $linear (i32.lt_u (call $proper-sequence-length (local.get $a)) (i32.const 32)))
-      (br_if $linear (i32.lt_u (call $proper-sequence-length (local.get $b)) (i32.const 32)))
-      (local.set $table (call $node (i32.const 29) (i32.const 0) (call $symbol (local.get $hash-test))
-        (ref.null eq) (ref.null eq)))
-      (local.set $scan (local.get $b))
-      (loop $index (br_if $linear (ref.is_null (local.get $scan)))
-        (drop (call $puthash-native (call $sequence-key-value (local.get $key) (call $car (local.get $scan)))
-          (local.get $table) (ref.null eq)))
-        (local.set $scan (call $cdr (local.get $scan))) (br $index)))
-    (loop $next (br_if $done (ref.is_null (local.get $a)))
-      (call $require-list (local.get $a))
-      (local.set $value (call $car (local.get $a)))
-      (local.set $value (call $sequence-key-value (local.get $key) (local.get $value)))
-      (local.set $match (i32.eqz (ref.is_null
-        (if (result (ref null eq)) (ref.is_null (local.get $table))
-          (then (call $search-list-native (i32.const 0) (i32.const 0) (local.get $value)
-            (local.get $b) (local.get $key) (local.get $test) (local.get $test-not)))
-          (else (call $hash-cell-native (local.get $value) (local.get $table)))))))
-      (if (i32.eq (local.get $mode) (i32.const 1))
-        (then (if (i32.eqz (local.get $match)) (then (local.set $result (ref.null eq)) (br $done))))
-        (else (if (i32.eq (local.get $match) (i32.eq (local.get $mode) (i32.const 2)))
-          (then (local.set $result (call $cons (call $car (local.get $a)) (local.get $result)))))))
-      (local.set $a (call $cdr (local.get $a))) (br $next)))
+        (local.set $key-id (i32.sub (call $value-n (local.get $key)) (i32.const 1)))
+        ,(wat-symbol-case #@(local.get $key-id)
+          ((identity car cdr char-code char-int 1+ 1-) #@(local.set $key-id (i32.const 0))))
+        (if (local.get $key-id) (then (local.set $hash-test (i32.const 0)))))))
+  #@(local.set $result (call $list-set-values-cl (local.get $a) (local.get $b) (local.get $key)
+    (call $vector-new (array.new_fixed $objects 4 (call $int (local.get $mode))
+      (local.get $test) (local.get $test-not)
+      (if (result (ref null eq)) (local.get $hash-test)
+        (then (call $symbol (local.get $hash-test))) (else (ref.null eq)))))))
   #@(call $clear-values)
   #@(local.get $result))
 
+(defun $bounded-index-cl ()
+  (runtime-function-definition '$bounded-index-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$bounded-index-cl 'miricl-runtime:bounded-index-value))))
+
 (define-runtime-function $bounded-index (($x :nullable-object) ($limit i32)) (i32)
-  (:locals ($n i32))
-  #@(local.set $n (call $natural-count (local.get $x)))
-  #@(if (i32.or (i32.gt_u (local.get $n) (local.get $limit))
-                 (i32.gt_u (call $bitlength (ref.as_non_null (local.get $x))) (i32.const 31)))
-    (then (call $type-fail (local.get $x)
-      (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
-        (call $cons (call $int (i32.const 0)) (call $cons (call $int (local.get $limit)) (ref.null eq))))
-      (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(local.get $n))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $bounded-index-cl (local.get $x) (call $int (local.get $limit)))))))
 
 (define-runtime-function $sequence-character-kind (($function :nullable-object)) (i32)
   (runtime-wat-forms
@@ -605,30 +403,9 @@
     (stringp #@(return (call $stringp-native (local.get $value)))))
   #@(i32.const -1))
 
-(define-runtime-function $sequence-key-value
-    (($key :nullable-object) ($value :nullable-object)) (:nullable-object)
-  (:locals ($id i32) ($predicate i32))
-  #@(if (ref.is_null (local.get $key)) (then (return (local.get $value))))
-  #@(local.set $id (i32.sub (call $value-n (local.get $key)) (i32.const 1)))
-  (wat-symbol-case #@(local.get $id)
-    (identity #@(return (local.get $value)))
-    ((char-upcase char-downcase) #@(return (call $character-case-native (local.get $value)
-      (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'char-downcase))))))
-    (car #@(return (call $car (local.get $value))))
-    (cdr #@(return (call $cdr (local.get $value))))
-    ((char-code char-int) #@(return (call $int (call $character-code (local.get $value)))))
-    ((oddp evenp)
-      #@(local.set $value (call $oddp-native (local.get $value)))
-      #@(return (if (result (ref null eq)) (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'oddp)))
-        (then (local.get $value)) (else (call $bool (ref.is_null (local.get $value))))))))
-  #@(if (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '1+)))
-                 (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '1-))))
-    (then (return (call $op (i32.const 0) (local.get $value)
-      (call $int (select (i32.const 1) (i32.const -1) (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '1+)))))))))
-  #@(local.set $predicate (call $simple-predicate-value (local.get $id) (local.get $value)))
-  #@(if (i32.ge_s (local.get $predicate) (i32.const 0))
-    (then (return (call $bool (local.get $predicate)))))
-  #@(call $apply (local.get $key) (call $cons (local.get $value) (ref.null eq))))
+(defun $sequence-key-value ()
+  (runtime-function-definition '$sequence-key-value
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$sequence-key-value 'miricl-runtime:sequence-key))))
 
 (define-runtime-function $sequence-item-match
     (($mode i32) ($item :nullable-object) ($value :nullable-object) ($key :nullable-object)
@@ -660,16 +437,18 @@
 
 ;; COUNT=0, COUNT-IF=1, COUNT-IF-NOT=2. Forward lists use a single
 ;; cursor. Reverse traversal buffers only the selected range, in O(n).
+(defun $count-sequence-value-cl ()
+  (runtime-function-definition '$count-sequence-value-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$count-sequence-value-cl 'miricl-runtime:count-sequence-value))))
+
 (define-runtime-function $count-sequence-native
     (($mode i32) ($item :nullable-object) ($sequence :nullable-object) ($key :nullable-object)
      ($test :nullable-object) ($test-not :nullable-object) ($start :nullable-object)
      ($end :nullable-object) ($from-end :nullable-object) ($negate i32)) (:nullable-object)
-  (:locals ($vector i32) ($indexed i32) ($string i32) ($length i32) ($i i32) ($stop i32) ($left i32) ($count i32) ($match i32)
+  (:locals ($string i32) ($length i32) ($i i32) ($stop i32) ($left i32) ($count i32)
            ($character-kind i32) ($needle i32)
-           ($scan :nullable-object) ($buffer :nullable-object) ($value :nullable-object) ($function :nullable-object))
+           ($value :nullable-object) ($function :nullable-object))
   #@(local.set $string (i32.eq (call $tag (local.get $sequence)) (i32.const 10)))
-  #@(local.set $vector (i32.and (call $arrayp-native (local.get $sequence)) (i32.eqz (local.get $string))))
-  #@(local.set $indexed (i32.or (local.get $string) (local.get $vector)))
   #@(local.set $length (call $proper-sequence-length (local.get $sequence)))
   #@(local.set $stop (if (result i32) (ref.is_null (local.get $end))
     (then (local.get $length)) (else (call $bounded-index (local.get $end) (local.get $length)))))
@@ -693,66 +472,28 @@
             (i32.eq (local.get $character-kind) (i32.const 3)) (local.get $negate)
             (i32.eqz (ref.is_null (local.get $from-end))) (i32.const 1)))
           (call $clear-values) (return (call $int (local.get $count)))))))
-  #@(if (local.get $indexed)
-    (then (if (i32.eqz (ref.is_null (local.get $from-end)))
-      (then (local.set $i (i32.sub (local.get $stop) (i32.const 1))))))
-    (else
-      (local.set $scan (local.get $sequence))
-      (block $skipped (loop $skip (br_if $skipped (i32.eqz (local.get $i)))
-        (local.set $scan (call $cdr (local.get $scan)))
-        (local.set $i (i32.sub (local.get $i) (i32.const 1))) (br $skip)))
-      (if (i32.eqz (ref.is_null (local.get $from-end)))
-        (then (local.set $i (local.get $left))
-          (block $buffered (loop $buffer-next (br_if $buffered (i32.eqz (local.get $i)))
-            (local.set $buffer (call $cons (local.get $scan) (local.get $buffer)))
-            (local.set $scan (call $cdr (local.get $scan)))
-            (local.set $i (i32.sub (local.get $i) (i32.const 1))) (br $buffer-next)))
-          (local.set $scan (local.get $buffer))))))
-  #@(block $done (loop $next (br_if $done (i32.eqz (local.get $left)))
-    (local.set $value (if (result (ref null eq)) (local.get $string)
-      (then (call $node (i32.const 16)
-        (array.get $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $sequence))) (local.get $i))
-        (ref.null eq) (ref.null eq) (ref.null eq)))
-      (else (if (result (ref null eq)) (local.get $vector)
-        (then (call $sequence-value (local.get $sequence) (local.get $i)))
-        (else (call $car (if (result (ref null eq)) (ref.is_null (local.get $from-end))
-          (then (local.get $scan)) (else (call $car (local.get $scan))))))))))
-    (local.set $match (call $sequence-item-match (local.get $mode) (local.get $item)
-      (local.get $value) (local.get $key) (local.get $function)
-      (local.get $negate)))
-    (local.set $count (i32.add (local.get $count) (local.get $match)))
-    (if (local.get $indexed)
-      (then (local.set $i (i32.add (local.get $i)
-        (select (i32.const 1) (i32.const -1) (ref.is_null (local.get $from-end))))))
-      (else (local.set $scan (call $cdr (local.get $scan)))))
-    (local.set $left (i32.sub (local.get $left) (i32.const 1))) (br $next)))
+  #@(local.set $value (call $count-sequence-value-cl (local.get $item) (local.get $sequence) (local.get $function)
+    (call $vector-new (array.new_fixed $objects 4 (local.get $key) (call $int (local.get $i))
+      (call $int (local.get $stop))
+      (call $int (i32.or (local.get $mode) (i32.or (i32.shl (local.get $negate) (i32.const 2))
+        (i32.shl (i32.eqz (ref.is_null (local.get $from-end))) (i32.const 3)))))))))
   #@(call $clear-values)
-  #@(call $int (local.get $count)))
+  #@(local.get $value))
 
 ;; Decode the fixed-size native calling convention once per public call.
 (defun list-operation-argument (n)
   `(call $car ,(loop with form = '(local.get $args) repeat n
                     do (setf form `(call $cdr ,form)) finally (return form))))
 
+(defun $check-keyword-pairs ()
+  (runtime-function-definition '$check-keyword-pairs
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$check-keyword-pairs 'miricl-runtime:check-keyword-pairs))))
+
 (define-runtime-function $check-keywords-native
     (($args :nullable-object) ($allowed :nullable-object) ($allow i32)) (:nullable-object)
-  (:locals ($scan :nullable-object) ($key :nullable-object) ($tail :nullable-object))
-  ;; The first :ALLOW-OTHER-KEYS pair controls the entire keyword list.
-  #@(if (i32.eqz (local.get $allow))
-    (then (local.set $allow (i32.eqz (ref.is_null (call $car
-      (call $property-cell (local.get $args) (call $symbol (i32.const ,(runtime-symbol-id :allow-other-keys))))))))))
-  #@(local.set $scan (local.get $args))
-  #@(block $done (loop $next
-    (br_if $done (ref.is_null (local.get $scan)))
-    (local.set $key (call $car (local.get $scan)))
-    (local.set $tail (call $cdr (local.get $scan)))
-    ,(wat-fail-when #@(i32.or (ref.is_null (local.get $tail))
-      (i32.eqz (call $symbolp (local.get $key)))) :malformed-form)
-    ,(wat-fail-when #@(i32.and (i32.eqz (local.get $allow))
-      (i32.and (i32.ne (call $id (local.get $key)) (i32.const ,(runtime-symbol-id :allow-other-keys)))
-        (i32.eqz (call $member-eq (local.get $key) (local.get $allowed))))) :malformed-form)
-    (local.set $scan (call $cdr (local.get $tail))) (br $next)))
-  #@(ref.null eq))
+  #@(call $check-apply-list (local.get $args))
+  #@(call $check-apply-list (local.get $allowed))
+  #@(call $check-keyword-pairs (local.get $args) (local.get $allowed) (call $bool (local.get $allow))))
 
 (define-runtime-function $list-primitive (($op i32) ($args :nullable-object)) (:nullable-object)
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%proclaim-variable)))
@@ -909,14 +650,14 @@
   #@(ref.null eq))
 
 (define-runtime-section list-operations-runtime-wat ()
-  ($check-apply-list) ($check-apply-arguments) ($pop-argument) ($list-eq) ($find-method-list)
-  ($check-generic-arity)
-  ($check-keywords-native)
-  ($list-type-error) ($require-list) ($natural-count) ($copy-spine)
+  ($check-apply-list) ($check-apply-arguments) ($pop-argument-cl) ($pop-argument) ($list-eq) ($find-method-list)
+  ($check-generic-arguments) ($check-generic-arity)
+  ($check-keyword-pairs) ($check-keywords-native)
+  ($list-type-error) ($require-list-cl) ($require-list) ($natural-count-cl) ($natural-count) ($copy-list-spine) ($copy-alist-spine) ($copy-tree-value-cl) ($copy-spine)
   ($reverse-copy-onto) ($reverse-mutate-onto) ($reverse-onto) ($reverse-sequence)
-  ($make-list-native) ($nthcdr-native) ($last-bounded) ($last-native)
+  ($make-list-bounded) ($make-list-native) ($nthcdr-bounded) ($nthcdr-general) ($nthcdr-native) ($last-bounded) ($last-native)
   ($copy-butlast-bounded) ($truncate-butlast-bounded) ($butlast-native)
-  ($copy-before-tail) ($tail-difference)
-  ($list-length-native) ($pairlis-native) ($callable) ($mapping-argument) ($map-lists-native) ($map-sequences-native) ($map-into-apply) ($bounded-index)
+  ($copy-before-tail) ($tail-member-p) ($tail-difference)
+  ($list-length-native) ($pair-lists-onto) ($pairlis-native) ($callable) ($mapping-argument-cl) ($mapping-argument) ($map-lists-cl) ($map-lists-native) ($map-sequence-result-cl) ($map-sequences-native) ($map-into-apply) ($bounded-index-cl) ($bounded-index)
   ($sequence-character-kind) ($sequence-character-needle) ($simple-predicate-value) ($sequence-key-value) ($sequence-item-match)
-  ($search-list-native) ($list-exclusive-native) ($list-set-apply) ($list-set-native) ($count-sequence-native) ($list-primitive))
+  ($search-list-cl) ($search-list-native) ($list-exclusive-cl) ($list-exclusive-native) ($list-set-apply) ($list-set-values-cl) ($list-set-native) ($count-sequence-value-cl) ($count-sequence-native) ($list-primitive))

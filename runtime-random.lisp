@@ -21,10 +21,17 @@
   #@(array.set $digits (local.get $state) (i32.const 3) (i32.rotl (local.get $d) (i32.const 11)))
   #@(local.get $result))
 
-(define-runtime-function $require-random-state (($state :nullable-object)) (:object)
-  #@(if (i32.ne (call $tag (local.get $state)) (i32.const 42))
-    (then (call $list-type-error (local.get $state) (i32.const ,(runtime-symbol-id 'random-state)))))
-  #@(ref.as_non_null (local.get $state)))
+(defun $require-random-state-cl ()
+  (runtime-function-definition '$require-random-state-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$require-random-state-cl 'miricl-runtime:checked-random-state-value))))
+
+(define-runtime-function $require-random-state (($x :nullable-object)) (:object)
+  ;; Before function installation, bootstrap constants use the native type boundary.
+  #@(if (global.get $cl-kernel-functions-ready)
+    (then (return (ref.as_non_null (call $require-random-state-cl (local.get $x))))))
+  #@(if (i32.ne (call $tag (local.get $x)) (i32.const 42))
+    (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'random-state)))))
+  #@(ref.as_non_null (local.get $x)))
 
 (define-runtime-function $make-random-state-native (($state :nullable-object)) (:object)
   (:locals ($data :digits) ($i i32) ($bits i32) ($word i32))
@@ -172,5 +179,5 @@
   ;; The hosts replace this deterministic bootstrap seed through SEED-RANDOM.
   #@(global $random-seeder (ref $digits)
     (array.new_fixed $digits 4 (i32.const 305419896) (i32.const -1698898192) (i32.const 324508639) (i32.const 610839776)))
-  ($random-word) ($require-random-state) ($make-random-state-native) ($seed-random)
+  ($random-word) ($require-random-state-cl) ($require-random-state) ($make-random-state-native) ($seed-random)
   ($initialize-random) ($random-native) ($random-apply) ($read-random-state) ($print-random-state))

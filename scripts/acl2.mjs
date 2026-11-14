@@ -38,6 +38,13 @@ export async function createAcl2(image, core, files, {progress = () => {}, books
       ${core ? '(unless (acl2::initialize-acl2) (error "ACL2 world initialization did not complete."))' : ''}
       (with-open-file (stream acl2::*acl2-status-file*)
         (unless (eq (read stream) :initialized) (error "ACL2 did not mark its world initialized.")))
+      ;; LD bypasses LP, which normally initializes the proof-builder controls.
+      (progn
+        (acl2::f-put-global 'acl2::pc-info
+          (acl2::make acl2::pc-info :print-macroexpansion-flg nil
+            :print-prompt-and-instr-flg t :prompt "->: " :prompt-depth-prefix "#")
+          acl2::*the-live-state*)
+        (values))
       (js:define-import cl-user::acl2-browser-result ("acl2Browser" "result") (:boolean) :void)
       ${core ? `(acl2::set-initial-cbd)
       (multiple-value-bind (erp val state)

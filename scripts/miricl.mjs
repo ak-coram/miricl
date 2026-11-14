@@ -65,6 +65,9 @@ class GreenThreads {
       this.owner.runTime += performance.now() - this.owner.activeStart - this.owner.sleepTime;
     this.owner.activeStart = null;
     this.running = false;
+    // Direct host exports (for example file transfers) have no promising
+    // entry. Only the scheduler's next running Wasm segment may yield.
+    this.vm['thread-active'].value = 0;
   }
   flushOutput() {
     if (!this.owner.onOutput || !this.owner.javascript) return;
@@ -160,7 +163,7 @@ class GreenThreads {
       this.endSegment();
       this.vm['thread-save']();
       this.vm['thread-main-state'](1);
-      this.vm['thread-active'].value = 1;
+      this.vm['thread-active'].value = 0;
       this.main = false;
       this.schedule();
     }

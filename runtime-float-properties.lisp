@@ -2,7 +2,14 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defun $require-float-cl ()
+  (runtime-function-definition '$require-float-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$require-float-cl 'miricl-runtime:checked-float-value))))
+
 (define-runtime-function $require-float (($x :nullable-object)) (:object)
+  ;; Before function installation, bootstrap constants use the native type boundary.
+  #@(if (global.get $cl-kernel-functions-ready)
+    (then (return (ref.as_non_null (call $require-float-cl (local.get $x))))))
   #@(if (i32.gt_u (i32.sub (call $tag (local.get $x)) (i32.const 3)) (i32.const 1))
     (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'float)))))
   #@(ref.as_non_null (local.get $x)))
@@ -152,4 +159,4 @@
   #@(call $three-values (local.get $primary) (call $int (local.get $exponent)) (local.get $sign)))
 
 (define-runtime-section float-properties-runtime-wat ()
-  ($require-float) ($float-bits) ($bits-float) ($float-parts) ($scale-binary) ($float-scale-overflow) ($float-property-apply))
+  ($require-float-cl) ($require-float) ($float-bits) ($bits-float) ($float-parts) ($scale-binary) ($float-scale-overflow) ($float-property-apply))

@@ -14,54 +14,73 @@
     (i32.and (i32.ne (call $value-n (local.get $x)) (i32.const 0))
       (i32.ne (call $value-n (local.get $x)) (i32.const 2147483645)))))
 
+(defun $integer-power-of-two-p-cl ()
+  (runtime-function-definition '$integer-power-of-two-p-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$integer-power-of-two-p-cl 'miricl-runtime:integer-power-of-two-p :result :truth))))
+
 (define-runtime-function $integer-power-of-two-p (($x :object)) (i32)
-  (:locals ($i i32) ($bits i32))
-  #@(if (call $scalar-integer-p (local.get $x))
-    (then (return (i64.eq (i64.popcnt (call $magnitude64 (local.get $x))) (i64.const 1)))))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (call $integer-length (local.get $x))))
-    (local.set $bits (i32.add (local.get $bits) (i32.popcnt (call $digit (local.get $x) (local.get $i)))))
-    (if (i32.gt_u (local.get $bits) (i32.const 1)) (then (return (i32.const 0))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(i32.eq (local.get $bits) (i32.const 1)))
+  #@(call $integer-power-of-two-p-cl (local.get $x)))
 
 (define-runtime-function $upgraded-complex-part-type (($type :nullable-object) ($env :nullable-object)) (:nullable-object)
-  (:locals ($expanded :nullable-object) ($class :nullable-object) ($name :nullable-object) ($result :nullable-object))
-  (wat-symbol-case #@(call $id (local.get $type))
-    ((nil) #@(return (ref.null eq)))
-    ((integer rational ratio fixnum bignum bit signed-byte unsigned-byte)
-      #@(return (call $symbol (i32.const ,(runtime-symbol-id 'rational)))))
-    ((short-float single-float)
-      #@(return (call $symbol (i32.const ,(runtime-symbol-id 'single-float)))))
-    ((double-float long-float)
-      #@(return (call $symbol (i32.const ,(runtime-symbol-id 'double-float)))))
-    ((float real) #@(return (local.get $type))))
-  #@(local.set $expanded (call $expand-derived-type (local.get $type) (local.get $env)))
-  #@(if (i32.eqz (ref.eq (local.get $expanded) (local.get $type)))
-    (then (return (call $upgraded-complex-part-type (local.get $expanded) (local.get $env)))))
-  #@(local.set $class (call $subtype-class (local.get $type)))
-  #@(if (i32.eqz (ref.is_null (local.get $class)))
-    (then (local.set $name (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $class)))
-      ,(clos-library-reference :name))))
-      (if (i32.eqz (ref.eq (local.get $name) (local.get $type)))
-        (then (return (call $upgraded-complex-part-type (local.get $name) (local.get $env)))))))
-  ;; Bounded numeric types use the same exact emptiness and representation
-  ;; proofs as SUBTYPEP. In particular, a FLOAT interval can exclude one format.
-  (wat-symbol-case #@(call $operator (local.get $type))
-    ((integer rational ratio fixnum bignum bit signed-byte unsigned-byte mod
-      real float short-float single-float double-float long-float)
-      (apply #'runtime-wat-sequence
-        (loop for candidate in '(nil rational single-float double-float float real)
-              for reference = (wat-fragment (if candidate
-                                  #@(call $symbol (i32.const ,(runtime-symbol-id candidate)))
-                                  #@(ref.null eq)))
-              collect #@(block
-                (local.set $result (call $numeric-subtypep (local.get $type)
-                  ,reference (local.get $env)))
-                (call $clear-values)
-                (if (i32.eqz (ref.is_null (local.get $result)))
-                  (then (return ,reference))))))))
-  #@(call $apply ,(clos-library-reference '%upgraded-complex-part-type)
-    (call $cons (local.get $type) (call $cons (local.get $env) (ref.null eq)))))
+  #@(call $complex-type-worker (local.get $type) (local.get $env) (i32.const 2)))
+
+(defun $compound-typep-cl ()
+  (runtime-function-definition '$compound-typep-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$compound-typep-cl 'miricl-runtime:compound-typep-value :result :truth))))
+
+(define-runtime-function $compound-type-metadata-function () (:nullable-object)
+  #@(if (ref.is_null (global.get $compound-type-metadata-function))
+    (then (global.set $compound-type-metadata-function
+      (call $node (i32.const 8) (i32.const ,(+ +clos-primitive-base+ (clos-primitive-op '%%compound-type-metadata)))
+        (ref.null eq) (ref.null eq) (ref.null eq)))))
+  #@(global.get $compound-type-metadata-function))
+
+(define-runtime-function $compound-type-metadata-primitive (($op i32) ($args :nullable-object)) (:nullable-object)
+  (:locals ($tail :nullable-object))
+  #@(local.set $tail (local.get $args))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $tail)) (i32.const 7)) :wrong-arity)
+  #@(local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $tail)) (i32.const 7)) :wrong-arity)
+  #@(local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $tail)) (i32.const 7)) :wrong-arity)
+  #@(local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+  (wat-fail-when #@(i32.eqz (ref.is_null (local.get $tail))) :wrong-arity)
+  #@(call $compound-type-metadata-value (call $car (local.get $args))
+    (call $car (call $cdr (local.get $args))) (call $car (call $cdr (call $cdr (local.get $args))))))
+
+;; Only representation operations and existing checked services live here.
+;; Boolean dispatch, membership traversal and callback-sensitive control are CL.
+(define-runtime-function $compound-type-metadata-value
+    (($selector :nullable-object) ($object :nullable-object) ($argument :nullable-object)) (:nullable-object)
+  (:locals ($code i64) ($result :nullable-object))
+  (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :malformed-type)
+  #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
+  (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 5)) :malformed-type)
+  #@(call $clear-values)
+  #@(if (i64.eqz (local.get $code))
+    (then (call $check-type-control-structure (local.get $argument))
+      (local.set $result (call $bool (call $typep (local.get $object) (local.get $argument))))
+      (call $clear-values) (return (local.get $result))))
+  #@(if (i64.eq (local.get $code) (i64.const 1))
+    (then (return (call $bool (call $eql (local.get $object) (local.get $argument))))))
+  #@(if (i64.eq (local.get $code) (i64.const 2))
+    (then
+      ,(wat-fail-when #@(i32.eqz (call $symbolp (local.get $argument))) :malformed-type)
+      (local.set $result (call $apply (local.get $argument) (call $cons (local.get $object) (ref.null eq))))
+      (call $clear-values) (return (call $bool (i32.eqz (ref.is_null (local.get $result)))))))
+  #@(if (i64.eq (local.get $code) (i64.const 5))
+    (then (call $check-type-control-structure (local.get $object)) (return (local.get $object))))
+  #@(return_call $array-type-metadata-value (local.get $selector) (local.get $object) (local.get $argument)))
+
+(define-runtime-function $compound-typep-worker (($x :nullable-object) ($type :nullable-object)) (i32)
+  (:locals ($saved :nullable-object) ($count i32) ($result i32))
+  #@(local.set $saved (global.get $extra-values)) #@(local.set $count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (local.set $result (call $compound-typep-cl (local.get $x) (local.get $type) (call $compound-type-metadata-function)))
+    (global.set $extra-values (local.get $saved)) (global.set $value-count (local.get $count))
+    (return (local.get $result))))
+  #@(global.set $extra-values (local.get $saved)) #@(global.set $value-count (local.get $count))
+  #@(throw $transfer))
 
 (define-runtime-function $typep
     (($x :nullable-object) ($type :nullable-object))
@@ -192,27 +211,8 @@
       (then (local.set $id (call $id (call $car (local.get $type))))
             (local.set $args (call $cdr (local.get $type)))))
   (wat-symbol-case #@(local.get $id)
-    (not
-      (wat-fail-when #@(i32.ne (call $tag (local.get $type)) (i32.const 7)) :malformed-type)
-      #@(call $arity (local.get $args) (i32.const 1) (i32.const 1))
-      #@(return (i32.eqz (call $typep (local.get $x) (call $car (local.get $args))))))
-    (eql
-      (wat-fail-when #@(i32.ne (call $tag (local.get $type)) (i32.const 7)) :malformed-type)
-      #@(call $arity (local.get $args) (i32.const 1) (i32.const 1))
-      #@(return (call $eql (local.get $x) (call $car (local.get $args)))))
-    (member
-      (wat-fail-when #@(i32.ne (call $tag (local.get $type)) (i32.const 7)) :malformed-type)
-      #@(block $done (loop $next (br_if $done (ref.is_null (local.get $args)))
-        (if (call $eql (local.get $x) (call $car (local.get $args))) (then (return (i32.const 1))))
-        (local.set $args (call $cdr (local.get $args))) (br $next)))
-      #@(return (i32.const 0)))
-    (satisfies
-      #@(call $arity (local.get $args) (i32.const 1) (i32.const 1))
-      #@(local.set $bound (call $car (local.get $args)))
-      (wat-fail-when #@(i32.eqz (call $symbolp (local.get $bound))) :malformed-type)
-      #@(local.set $bound (call $apply (local.get $bound) (call $cons (local.get $x) (ref.null eq))))
-      #@(call $clear-values)
-      #@(return (i32.eqz (ref.is_null (local.get $bound)))))
+    ((not eql member satisfies and or)
+      #@(return (call $compound-typep-worker (local.get $x) (local.get $type))))
     (cons
       #@(call $arity (local.get $args) (i32.const 0) (i32.const 2))
       #@(if (i32.ne (local.get $tag) (i32.const 7)) (then (return (i32.const 0))))
@@ -226,19 +226,7 @@
       #@(local.set $bound (call $car (local.get $args)))
       #@(if (i32.eq (call $id (local.get $bound)) (i32.const ,(runtime-symbol-id '*)))
         (then (return (i32.const 1))))
-      #@(return (call $typep (call $cdr (local.get $x)) (local.get $bound))))
-    (and
-      #@(block $done (loop $next
-              (br_if $done (ref.is_null (local.get $args)))
-              (if (i32.eqz (call $typep (local.get $x) (call $car (local.get $args)))) (then (return (i32.const 0))))
-              (local.set $args (call $cdr (local.get $args))) (br $next)))
-      #@(return (i32.const 1)))
-    (or
-      #@(block $done (loop $next
-              (br_if $done (ref.is_null (local.get $args)))
-              (if (call $typep (local.get $x) (call $car (local.get $args))) (then (return (i32.const 1))))
-              (local.set $args (call $cdr (local.get $args))) (br $next)))
-      #@(return (i32.const 0))))
+      #@(return (call $typep (call $cdr (local.get $x)) (local.get $bound)))))
   (runtime-wat-forms (loop for type in '(symbol package string base-string simple-string boolean null character keyword function)
           for expression in '((call $symbolp (local.get $x))
             (i32.eq (local.get $tag) (i32.const 12))
@@ -419,5 +407,8 @@
   #@(global.set $extra-values (local.get $extra)))
 
 (define-runtime-section type-runtime-wat ()
-  ($compiled-function-p) ($integer-power-of-two-p) ($upgraded-complex-part-type) ($typep) ($array-typep)
+  #@(global $compound-type-metadata-function (mut (ref null eq)) (ref.null eq))
+  ($compound-type-metadata-function) ($compound-type-metadata-primitive) ($compound-type-metadata-value)
+  ($compound-typep-cl) ($compound-typep-worker)
+  ($compiled-function-p) ($integer-power-of-two-p-cl) ($integer-power-of-two-p) ($upgraded-complex-part-type) ($typep) ($array-typep)
   ($check-type) ($check-value-types))

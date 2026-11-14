@@ -47,6 +47,16 @@ raw and compressed snapshot size alongside execution and compilation time.
 
 *** Optimization and debugging policy
 
+The intended default favors compact browser code: =(space 3)= and =(speed 1)=.
+Users can favor measured hot paths locally with =(speed 3)= and =(space 1)=.
+Relative priority controls inlining and duplication; equal priorities favor
+improvements to both and resolve uncertain tradeoffs toward smaller code.
+The caller owns inlining growth, with INLINE as a bounded strong hint and
+NOTINLINE as a veto. COMPILATION-SPEED independently controls analysis effort;
+SPEED/SPACE do not lower SAFETY/DEBUG or change visibility and STRIP contracts.
+This policy is not yet implemented by the current fixed inlining budgets.
+See AGENTS.md for the working design rules.
+
 DEBUG 1 remains the default. It should provide useful function/frame identity
 and compact source locations without the cost of full lexical inspection and
 stepping. DEBUG 0 is the explicit policy for more aggressive stripping, and
@@ -122,6 +132,14 @@ a temporary compatibility path, not the intended long-term debugging design.
 
 ** Deployment and compiler bootstrap
 
+Retain the full interpreter-to-compiler bootstrap: the host builds the Wasm
+interpreter, the interpreter runs the compiler's CL implementation, and that
+compiler compiles itself to native Wasm for the default image. The interpreted
+stage is an intentional interpreter performance and correctness benchmark.
+Host compilation of runtime kernels supports migration and iteration; it must
+not bypass this benchmark by replacing the full compiler bootstrap. Report
+interpreted bootstrap cost separately from native compiler throughput.
+
 For bootstrapping, the host runs the HIR frontend, proof passes and Wasm emitter
 directly. This is build tooling for producing the Wasm system, rather than a
 second supported environment for application compilation.
@@ -153,37 +171,13 @@ feedback loop; a full guest image build is a later validation step. The host
 interface and explicit expansion adapters serve trusted bootstrap sources;
 extending them into a general host application compiler is outside this scope.
 
-Runtime migration starts with =runtime-kernel-library.lisp=. Its ordinary CL
-property-cell lookup and checked helpers compile as a closed group; helper
-inlining leaves one worker. The host linker proves that the worker needs no
-closure, padded arguments or literals before changing its external-reference
-view to the core's raw reference ABI. It resolves a small set of representation
-primitives and links the worker directly as =$property-cell=. No Lisp function
-object, startup compilation, additional module loader or kernel source ships
-for that entry, including in the compiler-less image.
-
-
-*** Kernel lowering and measurements
-
-The identity-membership kernel uses the same pipeline with an i32 truth-result
-ABI. The adapter normalizes Lisp truth values and cancels adjacent boolean
-representation conversions on return. The compiler emits T through its scalar
-boolean primitive without a function-owned literal, while retaining repeated
-loop-literal caches. Backend reloads invalidate the host kernel cache using
-the actual compiler function definitions, so REPL experiments do not silently
-reuse code from an earlier emitter generation.
-
-These initial kernels have fixed arity up to four and return one value. Their
-raw callers own multiple-value state. The linker rejects unsupported
-dependencies and captures; it does not
-silently interpret them. Structural checks precede SAFETY 0 field access, and
-malformed storage keeps the checked primitive error path. Ordinary compiled
-Lisp loops retain their scheduler polls; only explicitly non-suspending kernels
-omit them. The pairwise identity-list comparison uses =:interruptible t= and
-retains the compiler's loop-backedge checkpoints. A circular comparison can
-still yield and receive a nonlocal interrupt. Extend the interface incrementally,
-measuring execution time and raw/compressed image size against each handwritten
-implementation before replacing it.
+Runtime kernels may be cross-compiled from ordinary CL into the runtime module.
+The linker validates dependencies and closure/literal ownership before adapting
+reference arguments and scalar results to a raw internal ABI. Raw callers own
+multiple-value state; public structural checks precede unchecked internals.
+Reloading a backend invalidates its host kernel cache. Keep migration decisions
+per kernel: retain demonstrated benefits, restore handwritten Wasm for substantial
+size or speed regressions, and preserve correctness fixes.
 
 Canonical inline operations also supply value-count facts. Single-valued
 primitive results stay scalar through full-value returns and joins, avoiding
@@ -295,7 +289,72 @@ uncompiled library support. Once those functions are compiled, the reader and
 evaluator can become optional production extensions. Object storage, allocation,
 numeric operations, closures and conditions remain part of the runtime.
 
+*** Major measured performance outliers
+
+These are warmed actual CL-derived Wasm workers versus equivalent SBCL CL,
+from recorded paired experiments. Restored WAT kernels remain CL compiler
+benchmarks; these figures describe CL output, not deployed WAT. They identify
+compiler work; they are not
+WAT-to-CL slowdown ratios or a matched current release benchmark. Later generic
+improvements are reflected where a newer comparison exists. Detailed sources,
+listings, semantic checks and timing limitations remain in
+=build/kernel-migration/*-notes.org=.
+
+| CL outlier | Gap versus SBCL | Shared compiler cost to address |
+|------------+-----------------+--------------------------------|
+| Complex upgrading / disjoint types |38–85x|Boxed kind comparisons, metadata calls and duplicated upgrading helpers.|
+| GCD Euclidean / zero paths |29–54x|Generic numeric calls and scalar argument/result transport.|
+| Real interval / ratio subtype |34–52x|Boxed interval state, repeated checks and callback/result packets.|
+| Path-prefix hit / miss |39–41x|Character access, generic equality and boxed loop counters.|
+| Array adjustment copy / stack |13–31x|Array services, temporary info/copy packets and avoidable copies.|
+| Array upgrading / subtype |21–27x|Descriptor transport and repeated kind/validation work.|
+| Integer endpoint width / boundary |15–23x|Canonical numeric calls, private scalar signatures and helper sharing.|
+| Stream read / write |21–23x|Private state and callback transport.|
+| Compound TYPEP predicate calls |20x|Predicate call transport with dynamic definitions preserved.|
+| FORMAT numeric / growth parsing |12–14x|Temporary vectors and boxed arithmetic.|
+
+The complex EQL fallback's much larger reported ratio includes interpreted
+guest Lisp versus compiled SBCL; it is excluded from compiler-only priorities.
+Tiny-case ratios depend on JIT warmup and driver inlining. Recheck current
+candidates with separate equivalent drivers and serialized timings.
+
+*** Next compiler optimization goals
+
+1. Eliminate proven nonescaping fixed-shape vectors/lists and carry their fields
+   directly. Start with FORMAT packets, array info/copy packets and type-query
+   state; escaping REST lists, aliases and effectful callbacks retain semantics.
+2. Keep scalar values raw across private calls and checked string/array services.
+   Extend target interval/control-flow proofs through loops and returns; remove
+   box/unbox pairs and repeated validation only under sound facts.
+3. Lower canonical primitive calls directly when definition/INLINE contracts
+   permit. Preserve NOTINLINE, redefinition, operand order, numeric contagion,
+   arbitrary precision, multiple values and observable conditions.
+4. Share retained helpers across runtime entry groups, proving literal/capture
+   identity. Measure complete modules/images, including imports, literals and
+   retained helpers, to avoid trading local code savings for global growth.
+
+Use the existing CL ports as compiler regression inputs even when the deployed
+kernel returns to handwritten Wasm. Compare old WAT, current CL and SBCL
+separately. Accept improvements using matched kernels, the fixed original
+compiler corpus and application controls; maintain the default raw1MiB budget.
+Do not infer migration success from port counts or historical compiler timings.
+
 ** Integer representations
+
+Here, /raw Wasm integer/ means an =i32= or =i64= value held in a Wasm local or
+on its operand stack, outside the Lisp reference ABI. The compiler can keep
+proven integer computations in these numeric locals without allocating Lisp
+objects for intermediate results. This is the sense of /unboxed arithmetic/
+in compiled loops; it does not imply an unboxed 64-bit Lisp
+object representation.
+
+Lisp object slots and ordinary Lisp function boundaries carry references.
+Within that ABI, =i31ref= is the immediate integer representation (signed
+31-bit payload, range -2^30 through 2^30-1). Other integer values need boxed
+scalar or bignum objects. A raw =i64= result crossing back to the reference
+ABI is converted to the appropriate immediate or boxed representation;
+reference inputs may be unboxed once into numeric locals at a proven entry.
+
 
 Generic Lisp value slots use WasmGC =eqref=. Integers have three canonical
 representations, with automatic promotion and demotion according to value:
@@ -420,14 +479,37 @@ every predecessor has established the premise. Outside predecessors and
 unresolved loop backedges stop propagation. Dense block IDs index the small
 predecessor-count and traversal tables. The premises are dependencies
 of the affected reads, so they participate in the same worklist as module
-argument and return summaries. Actual cell uses must establish no writes,
-aliasing or capture; client-provided binding flags alone are insufficient.
+argument and return summaries. Actual cell uses must exclude aliasing and
+capture; client-provided binding flags alone are insufficient. A private mutable
+cell can retain a premise until its next write. Its tested load must occur in
+the branch block without an intervening write; a saved predicate result cannot
+certify a later value. A write stops propagation on that path, including through
+joins and loop backedges. Copies of the tested SSA value also retain its fact.
 Debug-visible functions and possible captured nonlocal entries are excluded.
 A linear visit budget bounds region analysis, keeping the analysis small
 and predictable.
 Canonical predicate results can pass through read-only temporaries, including
 those introduced by =cond= expansion. Writes or aliases that expose the cell
 prevent using the temporary as a predicate certificate.
+
+Canonical INLINE plans which prove a branch true or false also supply a bounded
+reachability view for multiple-value cardinality. An unreachable arm cannot
+force a surviving single-valued join to allocate a value packet. This view is
+temporary lowering data: it does not mutate retained HIR, move operand effects,
+or infer value counts from primary-value types. Unknown branches, captured
+landing entries and exhausted budgets retain the ordinary representation.
+Fresh emission rebuilds the view after HIR edits. Static counters record proved
+edges, write barriers and scalar joins.
+
+Within a basic block, canonical INLINE CONS calls establish temporary field
+facts. Transparent copies preserve those observations; a canonical CAR/CDR of
+the fresh cons can use the original operand value. Unknown effects and mutations
+discard the field facts. This is distinct from assuming declared cons field
+types remain valid after mutation. Operands still execute in their original
+order, and liveness retains allocations whose identity escapes. Unobserved
+allocations and their checked field accesses can disappear, including at
+SAFETY 3 because freshness proves those accesses cannot signal. DEBUG-visible
+functions keep their ordinary lowering; reasoning and alias walks are bounded.
 
 The same integer rules prove binary identities for addition, subtraction,
 multiplication, =logand=, =logior=, =logxor= and =ash=. A singleton integer
@@ -436,6 +518,36 @@ bignums. Inference retains that operand's type; safety-0 canonical =inline=
 calls can return its value directly. Both operands must be proven integers,
 and their expressions still run in order. Unknown, floating-point and complex
 operands retain ordinary arithmetic and its type conversions or errors.
+
+At SAFETY 0, a canonical INLINE =ash= with a singleton count lowers to a
+direct Wasm shift when its operand fits signed =i64=. Left shifts additionally
+prove that the result fits; possible overflow retains Common Lisp bignum
+promotion. Right shifts of 63 or more places saturate to the sign bit rather
+than using Wasm's masked count. The count's producing expression still runs
+with its effects and errors, but its unused value needs no literal pool or
+boxing. The portable optimizer, runtime optimizer, bootstrap translator and
+disassembler share support for the emitted =i64.shl= and =i64.shr_s= instructions.
+The shift interval rule also clamps scalar right shifts at 63 while answering
+queries, including singleton bignum counts. It therefore retains the exact
+small-result range needed for immediate boxing without constructing a huge
+numeric intermediate. Positive proof shifts remain bounded, and possible
+overflow supplies no scalar proof.
+
+Signed-i64 =lognot= is closed over that representation. The interval rule
+reverses its bounds while complementing both endpoints; the native canonical
+INLINE path emits =i64.xor= with -1. Ordinary and hoisted emissions share the
+same unary constant, and intermediate values use the existing unboxed planner.
+Unknown and wider integer arguments retain the general operation and checked
+calls keep their errors.
+
+Return-only arithmetic results request interval facts too. Their transient
+unboxed records identify the original result producer across aliases. When
+that result fits signed 31 bits and the module has not needed a generic
+integer-boxing import, emission constructs =i31ref= directly. Otherwise the
+existing call is three instruction bytes smaller. This combines the target
+representation proof with an import-size decision; unknown or wider ranges
+retain generic boxing.
+
 
 Canonical explicitly inlined =zerop=, =minusp=, =plusp=, =evenp= and =oddp=
 use direct Wasm tests at safety 0 when their operand fits signed =i64=.
@@ -454,6 +566,51 @@ helpers retain the possibilities supplied by outside callers. Safety-0 inline
 lowering can replace the comparison with its proven boolean, preserving both
 operand evaluations. Opaque types and overlapping intervals retain the ordinary
 comparison.
+
+Canonical =zerop=, =minusp= and =plusp= branches also narrow integer operands
+within their dominated regions. Positive and negative arms intersect the
+existing integer interval with the sign/zero constraint. Removing an interior
+zero keeps the interval's conservative hull. A numeric predicate does not itself
+prove INTEGER: floating-point, complex and unknown operands retain their type
+and ordinary checks. Mutable cells use the same write, alias, capture and join
+barriers as other branch premises; saved booleans cannot certify a changed value.
+For native lowering, these numeric premises currently require SAFETY 0 and
+scalar integer operands, ensuring the predicate actually uses its captured
+canonical implementation. A wider ordinary call may still observe global
+redefinition and therefore supplies no sign certificate to its successor.
+
+Native lowering retains proven signed-64 arithmetic results in transient =i64=
+locals. Arithmetic consumers read those scalars directly; ordinary Lisp uses
+materialize a number. Several reference consumers share one box rather than
+allocating a copy per use. Canonical INLINE plans must establish that arithmetic
+cannot overflow; checked overflow and bignum promotion retain their ordinary
+paths. Copies and scalar primary-value extraction name the same raw result.
+Immutable arguments with repeated numeric reads can also retain an =i64= cache,
+initialized at the original first read in the entry block, after earlier checks
+and effects. Reassignment creates a different value. DEBUG-visible functions,
+captured landing entries and entry backedges retain ordinary lowering. Planning
+and alias walks are bounded; incomplete plans are discarded. These are fresh
+emission facts: retained HIR and snapshots keep ordinary Lisp values.
+Private mutable cells can also retain =i64= storage when their initializer and
+every write prove scalar integer bounds. Actual operand uses must exclude cell
+aliasing, capture and escape. A numeric consumer and a write must make this
+storage useful; an unknown or checked write keeps the ordinary representation.
+Each read receives its own SSA snapshot so subsequent writes cannot change
+earlier observations. Generic consumers still receive boxed numbers. The same
+debug, captured-entry and work-budget restrictions apply. Block parameters and
+private-call signatures still use the boxed ABI.
+
+At SAFETY 0, a bounded integer declaration on a parameter also constrains its
+initial immutable argument value. The frontend records that entry contract
+after resolving declarations to binding identities. Shadowed AUX parameters
+and outer free declarations cannot supply a contract for another argument.
+Unbounded and opaque types retain ordinary inference. These entry facts let
+the private-cell planner handle mutable parameters without a separate local
+copy; they do not prove that arithmetic results avoid overflow. The source
+declaration's lexical scope and the target's integer rules remain authoritative.
+The shared compiler-free HIR frontend skips this optional enrichment when the
+compiler's proof query is unavailable; it retains ordinary declaration handling
+and HIR compilation without importing the proof engine into the small image.
 
 Native branches can consume an adjacent canonical scalar predicate directly,
 without first boxing its boolean result. Only a single-use suffix of copies,

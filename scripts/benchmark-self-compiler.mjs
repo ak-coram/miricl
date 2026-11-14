@@ -175,6 +175,8 @@ benchmark: try {
   const report = {imagePath, imageSha256: createHash('sha256').update(image).digest('hex'),
     sourceSha256: createHash('sha256').update(corpus).digest('hex'), compilerSourcePolicy: true,
     gensymCounter: 0, optimizationPipeline: 'standard',
+    compilationMode: moduleMode ? 'module' : 'individual-functions',
+    moduleInline: moduleMode ? false : undefined,
     compilerPreparationMode, bootstrapBlocks: !individualBootstrap, count, moduleBytes,
     node: process.version, execArgv: process.execArgv, synchronous,
     platform: process.platform, architecture: process.arch, warmupRounds, rounds,

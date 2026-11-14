@@ -2,42 +2,23 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-(define-runtime-function $reverse-list (($x :nullable-object)) (:nullable-object)
-  (:locals ($result :nullable-object))
-  (wat-list-loop ($x)
-    #@(local.set $result (call $cons (call $car (local.get $x)) (local.get $result))))
-  #@(local.get $result))
+(defun $reverse-list ()
+  (runtime-function-definition '$reverse-list
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$reverse-list 'miricl-runtime:reverse-list-copy))))
 
 (define-runtime-function $join-lists (($args :nullable-object) ($copy i32)) (:nullable-object)
-  (:locals ($result :nullable-object) ($tail :nullable-object)
-           ($x :nullable-object) ($cell :nullable-object))
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $args)))
-    (local.set $x (call $car (local.get $args)))
-    (if (ref.is_null (call $cdr (local.get $args)))
-      (then (if (ref.is_null (local.get $tail)) (then (return (local.get $x))))
-        (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $x)) (return (local.get $result))))
-    (call $require-list (local.get $x))
-    (block $list-done (loop $item (br_if $list-done (ref.is_null (local.get $x)))
-      (local.set $cell (if (result (ref null eq)) (local.get $copy)
-        (then (call $cons (call $car (local.get $x)) (ref.null eq)))
-        (else (drop (call $car (local.get $x))) (local.get $x))))
-      (if (ref.is_null (local.get $tail)) (then (local.set $result (local.get $cell)))
-        (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-      (local.set $tail (local.get $cell)) (local.set $x (call $cdr (local.get $x)))
-      ;; NCONC replaces a dotted tail at the last cons. APPEND still requires
-      ;; a proper list for every argument except the final one.
-      (br_if $list-done (i32.and (i32.eqz (local.get $copy))
-        (i32.ne (call $tag (local.get $x)) (i32.const 7))))
-      (br $item)))
-    (local.set $args (call $cdr (local.get $args))) (br $next)))
-  #@(local.get $result))
+  #@(call $join-list-spines (local.get $args) (call $bool (local.get $copy))))
+
+(defun $join-list-spines ()
+  (runtime-function-definition '$join-list-spines
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$join-list-spines 'miricl-runtime:join-list-spines))))
+
+(defun $sequence-index-cl ()
+  (runtime-function-definition '$sequence-index-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$sequence-index-cl 'miricl-runtime:sequence-index-value))))
 
 (define-runtime-function $sequence-index (($x :nullable-object)) (i32)
-  (wat-fail-when #@(i32.ne (call $tag (local.get $x)) (i32.const 1)) :expected-designator)
-  (wat-fail-when #@(i32.or (i32.lt_s (call $value-n (local.get $x)) (i32.const 0))
-    (i32.gt_u (call $bitlength (ref.as_non_null (local.get $x))) (i32.const 30))) :expected-designator)
-  #@(i32.or (call $digit (ref.as_non_null (local.get $x)) (i32.const 0))
-    (i32.shl (call $digit (ref.as_non_null (local.get $x)) (i32.const 1)) (i32.const 15))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $sequence-index-cl (local.get $x))))))
 
 (define-runtime-function $sequence-apply (($id i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($x :nullable-object) ($y :nullable-object) ($n i32))
@@ -298,4 +279,4 @@
   #@(ref.null eq))
 
 (define-runtime-section sequence-runtime-wat ()
-  ($reverse-list) ($join-lists) ($sequence-index) ($sequence-apply))
+  ($reverse-list) ($join-list-spines) ($join-lists) ($sequence-index-cl) ($sequence-index) ($sequence-apply))

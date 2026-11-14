@@ -258,36 +258,37 @@
       (then (return (array.new_fixed $objects 2 (local.get $a) (local.get $b)))))))
   #@(call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq))))
 
+(defun $native-packed-argument-cl ()
+  (runtime-function-definition '$native-packed-argument-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-packed-argument-cl 'miricl-runtime:packed-argument-value))))
+
 (define-runtime-function $native-packed-argument (($args (ref $objects)) ($index i32)) (:nullable-object)
-  ;; Private argument arrays have exactly their live arguments, without the
-  ;; Lisp object header and unused slots of a fixed-size packet.
-  #@(if (i32.ge_u (local.get $index) (array.len (local.get $args))) (then (return (ref.null eq))))
-  #@(array.get $objects (local.get $args) (local.get $index)))
+  #@(call $native-packed-argument-cl (call $vector-new (local.get $args)) (call $int (local.get $index))))
+
+(defun $native-list-tail-cl ()
+  (runtime-function-definition '$native-list-tail-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-list-tail-cl 'miricl-runtime:native-list-tail-value))))
 
 (define-runtime-function $native-list-tail (($value :nullable-object) ($index i32)) (:nullable-object)
-  ;; Parameter indices are compiler constants; traverse without boxing them.
   (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
-  #@(block $done (loop $next
-    (br_if $done (i32.or (i32.eqz (local.get $index)) (ref.is_null (local.get $value))))
-    (local.set $value (call $cdr (local.get $value)))
-    (local.set $index (i32.sub (local.get $index) (i32.const 1))) (br $next)))
-  #@(local.get $value))
+  #@(call $native-list-tail-cl (local.get $value) (call $int (local.get $index))))
+
+(defun $native-rest-argument-cl ()
+  (runtime-function-definition '$native-rest-argument-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-rest-argument-cl 'miricl-runtime:rest-argument-values))))
 
 (define-runtime-function $native-rest-argument (($args externref) ($index i32)) (externref)
   (:export-raw "native-rest-argument")
-  (:locals ($value :nullable-object) ($count i32) ($result :nullable-object))
+  (:locals ($value :nullable-object))
   (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
   #@(local.set $value ,(native-object '(local.get $args)))
   #@(if (ref.test (ref $objects) (local.get $value))
-    (then
-      (local.set $count (array.len (ref.cast (ref $objects) (local.get $value))))
-      (block $done (loop $next (br_if $done (i32.le_s (local.get $count) (local.get $index)))
-        (local.set $count (i32.sub (local.get $count) (i32.const 1)))
-        (local.set $result (call $cons (call $native-packed-argument
-          (ref.cast (ref $objects) (local.get $value)) (local.get $count)) (local.get $result)))
-        (br $next)))
-      (return (extern.convert_any (local.get $result)))))
-  #@(extern.convert_any (call $native-list-tail (local.get $value) (local.get $index))))
+    (then (local.set $value (call $vector-new (ref.cast (ref $objects) (local.get $value))))))
+  #@(extern.convert_any (call $native-rest-argument-cl (local.get $value) (call $int (local.get $index)))))
+
+(defun $native-argument-cl ()
+  (runtime-function-definition '$native-argument-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-argument-cl 'miricl-runtime:argument-value))))
 
 (define-runtime-function $native-argument (($args externref) ($index i32)) (externref)
   (:export-raw "native-argument")
@@ -295,29 +296,23 @@
   (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
   #@(local.set $value ,(native-object '(local.get $args)))
   #@(if (ref.test (ref $objects) (local.get $value))
-    (then (return (extern.convert_any (call $native-packed-argument
-      (ref.cast (ref $objects) (local.get $value)) (local.get $index))))))
-  #@(extern.convert_any (call $car (call $native-list-tail (local.get $value) (local.get $index)))))
+    (then (local.set $value (call $vector-new (ref.cast (ref $objects) (local.get $value))))))
+  #@(extern.convert_any (call $native-argument-cl (local.get $value) (call $int (local.get $index)))))
+
+(defun $native-check-arguments-cl ()
+  (runtime-function-definition '$native-check-arguments-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-check-arguments-cl 'miricl-runtime:private-arguments-valid-p :result :truth))))
 
 (define-runtime-function $native-check-arguments (($args externref) ($count i32) ($maximum i32)) ()
   (:export-raw "native-check-arguments")
-  (:locals ($scan :nullable-object) ($i i32))
-  #@(local.set $scan ,(native-object '(local.get $args)))
-  #@(if (ref.test (ref $objects) (local.get $scan))
-    (then (local.set $i (array.len (ref.cast (ref $objects) (local.get $scan))))
-      ,(wat-fail-when #@(i32.or (i32.lt_u (local.get $i) (local.get $count))
-        (i32.and (i32.ge_s (local.get $maximum) (i32.const 0))
-          (i32.gt_u (local.get $i) (local.get $maximum)))) :wrong-arity)
-      (return)))
-  ;; REST accepts dotted tails in the private destructuring ABI as before.
-  #@(if (i32.lt_s (local.get $maximum) (i32.const 0))
-    (then
-      (block $done (loop $required (br_if $done (i32.eq (local.get $i) (local.get $count)))
-        ,(wat-fail-when #@(i32.ne (call $tag (local.get $scan)) (i32.const 7)) :wrong-arity)
-        (local.set $scan (call $cdr (local.get $scan)))
-        (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $required)))
-      (return)))
-  #@(call $arity (local.get $scan) (local.get $count) (local.get $maximum)))
+  (:locals ($value :nullable-object))
+  #@(local.set $value ,(native-object '(local.get $args)))
+  #@(if (ref.test (ref $objects) (local.get $value))
+    (then (local.set $value (call $vector-new (ref.cast (ref $objects) (local.get $value))))))
+  ;; Keep the runtime's precise checked arity condition and legacy message.
+  ;; The traversal and packet-size validation remain ordinary Common Lisp.
+  (wat-fail-when #@(i32.eqz (call $native-check-arguments-cl
+    (local.get $value) (call $int (local.get $count)) (call $int (local.get $maximum)))) :wrong-arity))
 
 (define-runtime-function $native-check-apply-arguments (($args externref) ($count i32)) ()
   (:export-raw "native-check-apply-arguments")
@@ -841,12 +836,223 @@
   #@(extern.convert_any (array.get $objects
     (call $vector-data ,(native-object '(local.get $vector))) (i32.wrap_i64 (local.get $index)))))
 
+(define-runtime-function $checked-sbit-ref
+    (($array :nullable-object) ($index :nullable-object)) (:nullable-object)
+  (:locals ($position i32))
+  ;; A flat simple bit-vector has a packed backing array and rank one. Keep
+  ;; the complete slow boundary for multidimensional/wrong-type/large indices.
+  #@(if (i32.and (i32.eq (call $tag (local.get $array)) (i32.const 36))
+            (ref.test (ref i31) (local.get $index)))
+    (then
+      (local.set $position (i31.get_s (ref.cast (ref i31) (local.get $index))))
+      (if (i32.lt_u (local.get $position) (call $value-n (local.get $array)))
+        (then (return (call $array-raw-element (local.get $array) (local.get $position)
+          (ref.null eq) (i32.const 0)))))))
+  #@(call $array-bit-check (local.get $array) (i32.const 1))
+  (wat-fail-when #@(i32.ne (call $array-rank-value (local.get $array)) (i32.const 1)) :wrong-arity)
+  #@(call $array-element (local.get $array) (local.get $index) (ref.null eq) (i32.const 0)))
+
+(define-runtime-function $native-sbit-ref-inline (($array externref) ($index externref)) (externref)
+  (:export-raw "native-sbit-ref-inline")
+  #@(extern.convert_any (call $checked-sbit-ref ,(native-object '(local.get $array))
+    ,(native-object '(local.get $index)))))
+
+(define-runtime-function $native-row-major-ref-inline (($array externref) ($index externref)) (externref)
+  (:export-raw "native-row-major-ref-inline")
+  ;; ARRAY-ELEMENT checks the original array and its physical capacity, then
+  ;; resolves displacement live. Fill-pointer changes do not narrow storage.
+  #@(extern.convert_any (call $array-element ,(native-object '(local.get $array))
+    ,(native-object '(local.get $index)) (ref.null eq) (i32.const 0))))
+
+(define-runtime-function $checked-row-major-set
+    (($value :nullable-object) ($array :nullable-object) ($index :nullable-object)) (:nullable-object)
+  ;; Retain the checked array/index boundary and live displacement resolution.
+  ;; The ordinary representation store validates specialized element values
+  ;; before writing, and returns exactly the supplied value.
+  #@(call $array-element (local.get $array) (local.get $index)
+    (local.get $value) (i32.const 1)))
+
+(define-runtime-function $native-row-major-set-inline
+    (($value externref) ($array externref) ($index externref)) (externref)
+  (:export-raw "native-row-major-set-inline")
+  #@(extern.convert_any (call $checked-row-major-set
+    ,(native-object '(local.get $value)) ,(native-object '(local.get $array))
+    ,(native-object '(local.get $index)))))
+
+(define-runtime-function $native-character-code (($function externref) ($character externref)) (externref)
+  (:export-raw "native-character-code")
+  ;; Only the canonical function and a real character justify a raw field
+  ;; read. Other operands retain the ordinary TYPE-ERROR and recovery path.
+  #@(if (i32.and
+      (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
+        (i32.const ,(1+ (runtime-symbol-id 'char-code))))
+      (i32.eq (call $tag ,(native-object '(local.get $character))) (i32.const 16)))
+    (then (return (extern.convert_any (call $int (call $value-n
+      ,(native-object '(local.get $character))))))))
+  #@(return_call $native-call1 (local.get $function) (local.get $character)))
+
+(define-runtime-function $native-character-ref
+    (($function externref) ($string externref) ($index externref)) (externref)
+  (:export-raw "native-character-ref")
+  #@(if (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
+        (i32.const ,(1+ (runtime-symbol-id 'char))))
+    (then (return_call $native-character-ref-inline (local.get $string) (local.get $index))))
+  #@(return_call $native-call2 (local.get $function) (local.get $string) (local.get $index)))
+
+(define-runtime-function $native-character-code-inline (($character externref)) (externref)
+  (:export-raw "native-character-code-inline")
+  #@(if (i32.eq (call $tag ,(native-object '(local.get $character))) (i32.const 16))
+    (then (return (extern.convert_any (call $int (call $value-n
+      ,(native-object '(local.get $character))))))))
+  #@(extern.convert_any (call $int (call $character-code ,(native-object '(local.get $character))))))
+
+(define-runtime-function $native-character-ref-inline (($string externref) ($index externref)) (externref)
+  (:export-raw "native-character-ref-inline")
+  (:locals ($position i32) ($text :nullable-object) ($data (ref $digits)))
+  ;; A bounded flat-string read is a representation operation. Displaced,
+  ;; adjustable and fill-pointer strings use the ordinary array implementation;
+  ;; CHAR must use the capacity rather than the fill pointer.
+  #@(local.set $text ,(native-object '(local.get $string)))
+  #@(if (i32.and (i32.eq (call $tag (local.get $text)) (i32.const 10))
+            (ref.test (ref i31) ,(native-object '(local.get $index))))
+        (then
+          (local.set $position (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $index)))))
+          (local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $text)))))
+          (if (i32.lt_u (local.get $position) (array.len (local.get $data)))
+            (then (return (extern.convert_any
+              (call $node (i32.const 16) (array.get $digits (local.get $data) (local.get $position))
+                (ref.null eq) (ref.null eq) (ref.null eq))))))))
+  #@(extern.convert_any (call $character-element (local.get $text)
+        ,(native-object '(local.get $index)) (ref.null eq) (i32.const 0))))
+
+(define-runtime-function $native-make-character-vector-inline (($size externref)) (externref)
+  (:export-raw "native-make-character-vector-inline")
+  (:locals ($n i32))
+  #@(if (ref.test (ref i31) ,(native-object '(local.get $size)))
+    (then
+      (local.set $n (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $size)))))
+      (if (i32.le_u (local.get $n) (i32.const 536870910))
+        (then (return (extern.convert_any (call $text
+          (array.new_default $digits (local.get $n)))))))))
+  #@(extern.convert_any (call $make-string-native ,(native-object '(local.get $size))
+    (call $node (i32.const 16) (i32.const 0) (ref.null eq) (ref.null eq) (ref.null eq)) (i32.const 0))))
+
+(define-runtime-function $native-make-string-inline (($size externref)) (externref)
+  (:export-raw "native-make-string-inline")
+  ;; MIRICL's chosen MAKE-STRING default is #\Space. Unlike uninitialized
+  ;; MAKE-ARRAY storage, these characters are observable immediately.
+  #@(extern.convert_any (call $make-string-native ,(native-object '(local.get $size))
+    (call $node (i32.const 16) (i32.const 32) (ref.null eq) (ref.null eq) (ref.null eq)) (i32.const 0))))
+
+(define-runtime-function $native-make-vector-inline (($size externref) ($initial externref)) (externref)
+  (:export-raw "native-make-vector-inline")
+  ;; The default MAKE-ARRAY element type and absent layout keywords produce a
+  ;; simple general vector. Share the ordinary checked allocation primitive.
+  #@(extern.convert_any (call $make-vector-native
+    ,(native-object '(local.get $size)) ,(native-object '(local.get $initial)))))
+
+(define-runtime-function $native-code-character-inline (($code externref)) (externref)
+  (:export-raw "native-code-character-inline")
+  (:locals ($n i32))
+  #@(block $validated
+    (if (ref.test (ref i31) ,(native-object '(local.get $code)))
+      (then
+        (local.set $n (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $code)))))
+        (br_if $validated (i32.le_u (local.get $n) (i32.const 1114111)))))
+    (local.set $n (call $bounded-index ,(native-object '(local.get $code)) (i32.const 1114111))))
+  #@(if (i32.and (i32.ge_u (local.get $n) (i32.const 55296))
+                 (i32.le_u (local.get $n) (i32.const 57343)))
+    (then (return (ref.null extern))))
+  #@(extern.convert_any (call $node (i32.const 16) (local.get $n)
+    (ref.null eq) (ref.null eq) (ref.null eq))))
+
+(define-runtime-function $native-simple-character-set-inline
+    (($value externref) ($string externref) ($index i64)) (externref)
+  (:export-raw "native-simple-character-set-inline")
+  (:locals ($data (ref null $digits)))
+  #@(local.set $data (struct.get $obj $digits
+    (ref.cast (ref $obj) ,(native-object '(local.get $string)))))
+  ;; The proof removes representation checks, while the unsigned comparison
+  ;; keeps negative, large and out-of-bounds indexes on the Lisp error path.
+  ;; Empty NIL-element strings are simple strings with no character backing.
+  #@(if (i32.eqz (ref.is_null (local.get $data)))
+    (then
+      (if (i64.lt_u (local.get $index) (i64.extend_i32_u (array.len (ref.as_non_null (local.get $data)))))
+        (then
+          (array.set $digits (ref.as_non_null (local.get $data)) (i32.wrap_i64 (local.get $index))
+            (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $value)))))
+          (return (local.get $value))))))
+  #@(extern.convert_any (call $character-element ,(native-object '(local.get $string))
+    (call $int64 (local.get $index)) ,(native-object '(local.get $value)) (i32.const 1))))
+
+(define-runtime-function $native-character-set-inline
+    (($value externref) ($string externref) ($index externref)) (externref)
+  (:export-raw "native-character-set-inline")
+  (:locals ($text :nullable-object) ($data (ref $digits)) ($position i32))
+  #@(local.set $text ,(native-object '(local.get $string)))
+  #@(if (i32.and (i32.eq (call $tag (local.get $text)) (i32.const 10))
+                 (ref.test (ref i31) ,(native-object '(local.get $index))))
+    (then
+      (local.set $position (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $index)))))
+      (local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $text)))))
+      (if (i32.lt_u (local.get $position) (array.len (local.get $data)))
+        (then
+          (array.set $digits (local.get $data) (local.get $position)
+            (if (result i32) (i32.eq (call $tag ,(native-object '(local.get $value))) (i32.const 16))
+              (then (call $value-n ,(native-object '(local.get $value))))
+              (else (call $character-code ,(native-object '(local.get $value))))))
+          (return (local.get $value))))))
+  #@(extern.convert_any (call $character-element
+    ,(native-object '(local.get $string)) ,(native-object '(local.get $index))
+    ,(native-object '(local.get $value)) (i32.const 1))))
+
 (define-runtime-function $native-vector-set-inline
     (($value externref) ($vector externref) ($index i64)) (externref)
   (:export-raw "native-vector-set-inline")
   #@(array.set $objects (call $vector-data ,(native-object '(local.get $vector)))
     (i32.wrap_i64 (local.get $index)) ,(native-object '(local.get $value)))
   #@(local.get $value))
+
+(define-runtime-function $native-character-code-at-inline (($string externref) ($index externref)) (externref)
+  (:export-raw "native-character-code-at-inline")
+  #@(if (ref.test (ref i31) ,(native-object '(local.get $index)))
+    (then (return_call $native-character-code-at64-inline (local.get $string)
+      (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $index))))))))
+  #@(return_call $native-character-code-inline
+    (call $native-character-ref-inline (local.get $string) (local.get $index))))
+
+(define-runtime-function $native-character-code-at64-inline (($string externref) ($index i64)) (externref)
+  (:export-raw "native-character-code-at64-inline")
+  #@(extern.convert_any (call $int64
+    (call $native-character-code-at64-unboxed-inline (local.get $string) (local.get $index)))))
+
+(define-runtime-function $native-character-code-at-unboxed-inline (($string externref) ($index externref)) (i64)
+  (:export-raw "native-character-code-at-unboxed-inline")
+  #@(if (ref.test (ref i31) ,(native-object '(local.get $index)))
+    (then (return_call $native-character-code-at64-unboxed-inline (local.get $string)
+      (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $index))))))))
+  #@(call $native-unbox-int64
+    (call $native-character-code-inline
+      (call $native-character-ref-inline (local.get $string) (local.get $index)))))
+
+(define-runtime-function $native-character-code-at64-unboxed-inline (($string externref) ($index i64)) (i64)
+  (:export-raw "native-character-code-at64-unboxed-inline")
+  (:locals ($text :nullable-object) ($data (ref $digits)))
+  ;; Canonical CHAR followed only by canonical CHAR-CODE needs no character
+  ;; object. Keep CHAR's checked capacity/index behavior and the general view
+  ;; fallback, including errors, at the original element-read instruction.
+  #@(local.set $text ,(native-object '(local.get $string)))
+  #@(if (i32.eq (call $tag (local.get $text)) (i32.const 10))
+        (then
+          (local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $text)))))
+          ;; Full-width unsigned comparison rejects negatives and oversized
+          ;; values before the narrowing conversion used for array indexing.
+          (if (i64.lt_u (local.get $index) (i64.extend_i32_u (array.len (local.get $data))))
+            (then (return (i64.extend_i32_u
+              (array.get $digits (local.get $data) (i32.wrap_i64 (local.get $index)))))))))
+  #@(call $native-unbox-int64
+    (call $native-character-code-inline
+      (call $native-character-ref-inline (local.get $string) (extern.convert_any (call $int64 (local.get $index)))))))
 
 (define-runtime-function $native-cdr-list (($function externref) ($list externref)) (externref)
   (:export-raw "native-cdr-list")
@@ -890,8 +1096,17 @@
 
 (define-runtime-function $native-length-inline (($sequence externref)) (externref)
   (:export-raw "native-length-inline")
+  #@(if (i32.eq (call $tag ,(native-object '(local.get $sequence))) (i32.const 10))
+    (then (return (extern.convert_any (call $int (array.len
+      (ref.as_non_null (struct.get $obj $digits
+        (ref.cast (ref $obj) ,(native-object '(local.get $sequence)))))))))))
   #@(extern.convert_any (call $int (call $proper-sequence-length
     ,(native-object '(local.get $sequence))))))
+
+(define-runtime-function $native-list-length-inline (($value externref)) (externref)
+  (:export-raw "native-list-length-inline")
+  ;; Reuse the checked CL spine/cycle worker, including TYPE-ERROR recovery.
+  #@(extern.convert_any (call $list-length-native ,(native-object '(local.get $value)))))
 
 (define-runtime-function $native-vector-length-inline (($vector externref)) (externref)
   (:export-raw "native-vector-length-inline")
@@ -911,13 +1126,22 @@
       (call $cons (call $bool (i32.eqz (ref.is_null (local.get $cell)))) (ref.null eq))))))
   #@(extern.convert_any (local.get $value)))
 
+(define-runtime-function $checked-gethash-primary (($key :nullable-object) ($table :nullable-object)) (:nullable-object)
+  (:locals ($cell :nullable-object) ($values :nullable-object) ($count i32))
+  ;; User hash predicates can return extra values. A primary-only lookup must
+  ;; not expose those through a raw runtime caller's pending value packet.
+  #@(local.set $values (global.get $extra-values))
+  #@(local.set $count (global.get $value-count))
+  #@(local.set $cell (call $hash-cell-native (local.get $key) (local.get $table)))
+  #@(global.set $extra-values (local.get $values))
+  #@(global.set $value-count (local.get $count))
+  #@(if (result (ref null eq)) (ref.is_null (local.get $cell))
+    (then (ref.null eq)) (else (call $cdr (local.get $cell)))))
+
 (define-runtime-function $native-gethash-primary-inline (($key externref) ($table externref)) (externref)
   (:export-raw "native-gethash-primary-inline")
-  (:locals ($cell :nullable-object))
-  #@(local.set $cell (call $hash-cell-native
-    ,(native-object '(local.get $key)) ,(native-object '(local.get $table))))
-  #@(extern.convert_any (if (result (ref null eq)) (ref.is_null (local.get $cell))
-    (then (ref.null eq)) (else (call $cdr (local.get $cell))))))
+  #@(extern.convert_any (call $checked-gethash-primary
+    ,(native-object '(local.get $key)) ,(native-object '(local.get $table)))))
 
 (define-runtime-function $native-puthash-inline
     (($value externref) ($key externref) ($table externref)) (externref)
@@ -934,6 +1158,145 @@
   (:export-raw "native-simple-vector-p-inline")
   #@(extern.convert_any (call $bool (i32.eq
     (call $tag ,(native-object '(local.get $value))) (i32.const 34)))))
+
+(define-runtime-function $native-vector-p-inline (($value externref)) (externref)
+  (:export-raw "native-vector-p-inline")
+  ;; Rank is fixed for an array's lifetime, including across ADJUST-ARRAY.
+  ;; The canonical predicate is total, so arbitrary Lisp objects are valid.
+  #@(extern.convert_any (call $bool (call $vectorp-native
+    ,(native-object '(local.get $value))))))
+
+(define-runtime-function $native-string-p-inline (($value externref)) (externref)
+  (:export-raw "native-string-p-inline")
+  ;; This uses the same representation predicate as ordinary STRINGP, covering
+  ;; displaced/adjustable strings and the empty NIL-element string subtype.
+  #@(extern.convert_any (call $bool (call $stringp-native
+    ,(native-object '(local.get $value))))))
+
+(define-runtime-function $native-integer-length-inline (($value externref)) (externref)
+  (:export-raw "native-integer-length-inline")
+  #@(extern.convert_any (call $integer-bit-measure
+    ,(native-object '(local.get $value)) (i32.const 1))))
+
+(define-runtime-function $native-ash-general-inline (($value externref) ($count externref)) (externref)
+  (:export-raw "native-ash-general-inline")
+  #@(extern.convert_any (call $ash-native
+    ,(native-object '(local.get $value)) ,(native-object '(local.get $count)))))
+
+(define-runtime-function $native-logand-general-inline (($left externref) ($right externref)) (externref)
+  (:export-raw "native-logand-general-inline")
+  #@(extern.convert_any (call $boole-native (i32.const 8)
+    ,(native-object '(local.get $left)) ,(native-object '(local.get $right)) (i32.const 0))))
+
+(define-runtime-function $native-zero-inline (($value externref)) (externref)
+  (:export-raw "native-zero-inline")
+  #@(if (ref.test (ref i31) ,(native-object '(local.get $value)))
+    (then (return (extern.convert_any (call $bool (i32.eqz
+      (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $value))))))))))
+  #@(extern.convert_any (call $bool (call $zero
+    (call $number ,(native-object '(local.get $value)))))))
+
+(define-runtime-function $ordered-compare-native
+    (($left :nullable-object) ($right :nullable-object) ($mode i32)) (:nullable-object)
+  (:locals ($comparison i32))
+  #@(local.set $comparison (call $compare (local.get $left) (local.get $right)))
+  #@(call $bool
+    (if (result i32) (i32.eq (local.get $mode) (i32.const 0))
+      (then (i32.lt_s (local.get $comparison) (i32.const 0)))
+      (else (if (result i32) (i32.eq (local.get $mode) (i32.const 1))
+        (then (i32.gt_s (local.get $comparison) (i32.const 0)))
+        (else (if (result i32) (i32.eq (local.get $mode) (i32.const 2))
+          (then (i32.le_s (local.get $comparison) (i32.const 0)))
+          (else (i32.ge_s (local.get $comparison) (i32.const 0))))))))))
+
+(define-runtime-function $native-ordered-compare-inline
+    (($left externref) ($right externref) ($mode i32)) (externref)
+  (:export-raw "native-ordered-compare-inline")
+  #@(extern.convert_any (call $ordered-compare-native
+    ,(native-object '(local.get $left)) ,(native-object '(local.get $right)) (local.get $mode))))
+
+(define-runtime-function $native-mod-general-inline (($left externref) ($right externref)) (externref)
+  (:export-raw "native-mod-general-inline")
+  (:locals ($quotient :object) ($remainder :object) ($a i32) ($b i32) ($r i32))
+  ;; Immediate integers fit signed i32, including their quotient. Keep zero
+  ;; on the checked general path so its Lisp condition retains both operands.
+  #@(if (i32.and (ref.test (ref i31) ,(native-object '(local.get $left)))
+                 (ref.test (ref i31) ,(native-object '(local.get $right))))
+    (then
+      (local.set $a (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $left)))))
+      (local.set $b (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $right)))))
+      (if (local.get $b)
+        (then
+          (local.set $r (i32.rem_s (local.get $a) (local.get $b)))
+          (if (i32.and (i32.ne (local.get $r) (i32.const 0))
+                        (i32.lt_s (i32.xor (local.get $r) (local.get $b)) (i32.const 0)))
+            (then (local.set $r (i32.add (local.get $r) (local.get $b)))))
+          (return (extern.convert_any (call $int (local.get $r))))))))
+  #@(call $rounding-native (call $real ,(native-object '(local.get $left)))
+    (call $real ,(native-object '(local.get $right))) (i32.const 0) (i32.const 0))
+  #@(local.set $remainder) #@(local.set $quotient)
+  #@(extern.convert_any (local.get $remainder)))
+
+(define-runtime-function $native-rounding-primary-inline
+    (($left externref) ($right externref) ($mode i32)) (externref)
+  (:locals ($quotient :object) ($remainder :object) ($a i32) ($b i32)
+           ($q i32) ($r i32) ($negative i32) ($adjust i32) ($twice i32) ($divisor i32))
+  #@(if (i32.and (ref.test (ref i31) ,(native-object '(local.get $left)))
+                 (ref.test (ref i31) ,(native-object '(local.get $right))))
+    (then
+      (local.set $a (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $left)))))
+      (local.set $b (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $right)))))
+      ;; i31 operands cannot overflow signed i32 division, including -2^30/-1.
+      ;; INT still promotes that quotient rather than wrapping it to i31.
+      (if (local.get $b)
+        (then
+          (local.set $q (i32.div_s (local.get $a) (local.get $b)))
+          (local.set $r (i32.rem_s (local.get $a) (local.get $b)))
+          (if (local.get $r)
+            (then
+              (local.set $negative (i32.lt_s (i32.xor (local.get $a) (local.get $b)) (i32.const 0)))
+              (if (i32.eq (local.get $mode) (i32.const 0))
+                (then (local.set $adjust (local.get $negative))))
+              (if (i32.eq (local.get $mode) (i32.const 1))
+                (then (local.set $adjust (i32.eqz (local.get $negative)))))
+              (if (i32.eq (local.get $mode) (i32.const 3))
+                (then
+                  ;; Twice an absolute i31 remainder fits signed i32.
+                  (local.set $twice (i32.shl
+                    (select (i32.sub (i32.const 0) (local.get $r)) (local.get $r)
+                      (i32.lt_s (local.get $r) (i32.const 0))) (i32.const 1)))
+                  (local.set $divisor
+                    (select (i32.sub (i32.const 0) (local.get $b)) (local.get $b)
+                      (i32.lt_s (local.get $b) (i32.const 0))))
+                  (local.set $adjust (i32.or (i32.gt_s (local.get $twice) (local.get $divisor))
+                    (i32.and (i32.eq (local.get $twice) (local.get $divisor))
+                      (i32.and (local.get $q) (i32.const 1)))))))
+              (if (local.get $adjust)
+                (then (local.set $q (i32.add (local.get $q)
+                  (select (i32.const -1) (i32.const 1) (local.get $negative))))))))
+          (return (extern.convert_any (call $int (local.get $q))))))))
+  ;; Only the primary quotient is observed. Other reals and zero divisors
+  ;; retain ordinary exact rounding, contagion and checked Lisp conditions.
+  #@(call $rounding-native (call $real ,(native-object '(local.get $left)))
+    (call $real ,(native-object '(local.get $right))) (local.get $mode) (i32.const 0))
+  #@(local.set $remainder) #@(local.set $quotient)
+  #@(extern.convert_any (local.get $quotient)))
+
+(define-runtime-function $native-truncate-primary-inline (($left externref) ($right externref)) (externref)
+  (:export-raw "native-truncate-primary-inline")
+  #@(return_call $native-rounding-primary-inline
+    (local.get $left) (local.get $right) (i32.const 2)))
+
+(define-runtime-function $native-character-p-inline (($value externref)) (externref)
+  (:export-raw "native-character-p-inline")
+  #@(extern.convert_any (call $bool (i32.eq
+    (call $tag ,(native-object '(local.get $value))) (i32.const 16)))))
+
+(define-runtime-function $native-integer-p-inline (($value externref)) (externref)
+  (:export-raw "native-integer-p-inline")
+  ;; TAG normalizes immediate integers and all scalar/limb integer objects.
+  #@(extern.convert_any (call $bool (i32.eq
+    (call $tag ,(native-object '(local.get $value))) (i32.const 1)))))
 
 (define-runtime-function $native-primary-apply
     (($function :nullable-object) ($args :nullable-object)) (:nullable-object)
@@ -1128,11 +1491,79 @@
         (if (local.get $hit)
           (then (call $clear-values) (return (extern.convert_any (local.get $direct-result))))))))))
 
+(defun native-fixed-primitive-entries ()
+  ;; Only checked object-argument entries belong here. Their fixed ABI accepts
+  ;; already evaluated Lisp values and never exposes the caller's argument
+  ;; packet. These descriptors do not change private primitive ordinals.
+  '((%%list-length 1 $list-length-native)
+    (%%oddp 1 $oddp-native)
+    (%cell 2 $property-cell)
+    (%list-eq 2 $list-eq)
+    (%%hash-cell 2 $hash-cell-native)
+    (%%package-present-entry 2 $present)
+    (%%package-inherited-entry 2 $inherited)
+    (%%package-node-ref 3 $package-node-ref-value)
+    (%%array-type-metadata 3 $array-type-metadata-value)
+    (%%stream-sequence-metadata 3 $stream-sequence-metadata-value)
+    (%%clos-method-metadata 3 $clos-method-metadata-value)
+    (%%real-type-metadata 3 $real-type-metadata-value)
+    (%%array-upgrade-metadata 3 $array-upgrade-metadata-value)
+    (%%clos-initarg-metadata 3 $clos-initarg-metadata-value)
+    (%%complex-type-metadata 3 $complex-type-metadata-value)
+    (%%generic-dispatch-metadata 3 $generic-dispatch-metadata-value)
+    (%%compound-type-metadata 3 $compound-type-metadata-value)
+    (%%array-adjust-metadata 3 $array-adjust-metadata-value)))
+
+(defun native-fixed-primitive-call-wat (arity)
+  ;; NATIVE-BUILTIN-ID reads the actual function object's code, independently
+  ;; of its current name. Interpreted/native closures (code zero), replacements
+  ;; and other arities continue through ordinary APPLY, including its errors.
+  (let ((arguments (ecase arity (1 '($value)) (2 '($left $right)) (3 '($a $b $c)))))
+    (runtime-wat-forms
+      (loop for (name count target) in (native-fixed-primitive-entries)
+            when (= count arity) collect
+        `(if (i32.eq (local.get $id)
+                     (i32.const ,(let ((code (+ +clos-primitive-base+ (clos-primitive-op name))))
+                                   (if (= arity 3) (- -1 code) (1- code)))))
+           (then
+             (local.set $direct-result
+               (call ,target ,@(mapcar (lambda (name) (native-object `(local.get ,name))) arguments)))
+             ;; These entry points can call CL workers and leave transient
+             ;; multiple values. This ABI promises only the primary value.
+             (call $clear-values)
+             (return (extern.convert_any (local.get $direct-result)))))))))
+
+(defun native-fixed-vector-call-wat (arity)
+  ;; VECTOR accepts arbitrary objects and returns a fresh simple general
+  ;; vector. Recognize the saved builtin's immutable code, never its current
+  ;; global binding. The fixed ABI already owns evaluated argument values;
+  ;; allocating its backing array directly avoids an APPLY argument list.
+  (let* ((arguments (ecase arity
+                      (0 nil) (1 '($a)) (2 '($a $b))
+                      (3 '($a $b $c)) (4 '($a $b $c $d))))
+         (id (if (member arity '(1 2 3)) '(local.get $id)
+                 `(call $native-builtin-id ,(native-object '(local.get $function)))))
+         (expected (runtime-symbol-id 'vector)))
+    (wat-fragment #@(if (i32.eq ,id (i32.const ,(if (= arity 3) (- -2 expected) expected)))
+      (then
+        ;; CALL1..4 checkpoint before their builtin cases. CALL0 normally
+        ;; reaches APPLY's checkpoint, which this constructor now bypasses.
+        ,@(when (zerop arity)
+            '((if (global.get $thread-active) (then (call $thread-checkpoint)))))
+        (local.set $direct-result
+          (call $vector-new (array.new_fixed $objects ,arity
+            ,@(mapcar (lambda (name)
+                        (if (member arity '(1 2)) `(local.get ,name)
+                            (native-object `(local.get ,name)))) arguments))))
+        (call $clear-values)
+        (return (extern.convert_any (local.get $direct-result))))))))
+
 (define-runtime-function $native-call0 (($function externref)) (externref)
   (:export-raw "native-call0")
   (:locals ($direct-result :nullable-object) ($hit i32))
   (native-direct-call-wat 0)
   (native-generic-fast-call-wat 0)
+  (native-fixed-vector-call-wat 0)
   #@(extern.convert_any (call $native-primary-apply
     ,(native-object '(local.get $function)) (ref.null eq))))
 
@@ -1178,10 +1609,25 @@
       (then ,(native-direct-call-wat 1 t)
         (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (array.new_fixed $objects 1 (local.get $a)))))))))
+  (native-fixed-vector-call-wat 1)
   (wat-symbol-case #@(local.get $id)
     ((not null) #@(return (extern.convert_any (call $bool (ref.is_null (local.get $a))))))
     (identity #@(return (local.get $value)))
+    ;; Dispatch on the actual saved builtin, retaining replacement closures.
+    ;; STRING preserves string identity, including displaced/fill-pointer views.
+    (string #@(return (extern.convert_any (call $string-designator (local.get $a)))))
+    (symbol-name #@(return (extern.convert_any (call $symbol-name (local.get $a)))))
     (list #@(return (extern.convert_any (call $cons (local.get $a) (ref.null eq)))))
+    (char-upcase #@(return (extern.convert_any
+      (call $character-case-native (local.get $a) (i32.const 0)))))
+    (char-downcase #@(return (extern.convert_any
+      (call $character-case-native (local.get $a) (i32.const 1)))))
+    (unicode-char-upcase #@(return (extern.convert_any
+      (call $character-case-native (local.get $a) (i32.const 2)))))
+    (unicode-char-downcase #@(return (extern.convert_any
+      (call $character-case-native (local.get $a) (i32.const 3)))))
+    (alphanumericp #@(return (extern.convert_any
+      (call $character-property-apply (local.get $id) (local.get $a)))))
     ((car first)
       #@(if (i32.or (ref.is_null (local.get $a)) (i32.eq (local.get $tag) (i32.const 7)))
         (then (return (extern.convert_any (call $car (local.get $a)))))))
@@ -1194,6 +1640,13 @@
     ((listp stringp)
       #@(return (extern.convert_any (call $bool (call $simple-predicate-value (local.get $id) (local.get $a))))))
     (integerp #@(return (extern.convert_any (call $bool (i32.eq (local.get $tag) (i32.const 1))))))
+    ((oddp evenp)
+      ;; Dispatch on the saved builtin function object, rather than its current
+      ;; global binding. The ordinary checked predicate handles all integers
+      ;; and reports noninteger arguments before EVENP inverts its result.
+      #@(return (extern.convert_any (call $bool (i32.xor
+        (i32.eqz (ref.is_null (call $oddp-native (local.get $a))))
+        (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'evenp))))))))
     (numberp #@(return (extern.convert_any (call $bool
       (i32.le_u (i32.sub (local.get $tag) (i32.const 1)) (i32.const 4))))))
     (rationalp #@(return (extern.convert_any (call $bool
@@ -1201,6 +1654,28 @@
     (realp #@(return (extern.convert_any (call $bool
       (i32.le_u (i32.sub (local.get $tag) (i32.const 1)) (i32.const 3))))))
     (complexp #@(return (extern.convert_any (call $bool (i32.eq (local.get $tag) (i32.const 5))))))
+    (abs
+      ;; Validate before the shared magnitude helpers inspect numeric fields.
+      ;; REAL-ABSOLUTE preserves the target's real type and signed-zero rules.
+      #@(local.set $a (call $number (local.get $a)))
+      #@(local.set $direct-result
+        (if (result (ref eq)) (i32.eq (local.get $tag) (i32.const 5))
+          (then (call $complex-absolute (ref.as_non_null (local.get $a))))
+          (else (call $real-absolute (ref.as_non_null (local.get $a))))))
+      #@(call $clear-values)
+      #@(return (extern.convert_any (local.get $direct-result))))
+    (signum
+      #@(local.set $direct-result (call $root-signum-native (local.get $a) (i32.const 1)))
+      #@(call $clear-values)
+      #@(return (extern.convert_any (local.get $direct-result))))
+    ((floor ceiling truncate round)
+      #@(if (i32.le_u (i32.sub (local.get $tag) (i32.const 1)) (i32.const 3))
+        (then
+          (call $native-rounding-primary-inline (local.get $value)
+            (extern.convert_any (call $int (i32.const 1)))
+            (i32.sub (local.get $id) (i32.const ,(runtime-symbol-id 'floor))))
+          (call $clear-values)
+          (return))))
     (floatp #@(return (extern.convert_any (call $bool
       (i32.le_u (i32.sub (local.get $tag) (i32.const 3)) (i32.const 1))))))
     ((1+ 1-)
@@ -1228,6 +1703,7 @@
         (return (extern.convert_any (local.get $a)))))))
   ;; Uncommon functions and exceptional arguments share the complete call
   ;; path, including its backtrace, arity checks and dynamic cleanup.
+  (native-fixed-primitive-call-wat 1)
   (native-generic-fast-call-wat 1)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     (call $cons (local.get $a) (ref.null eq)))))
@@ -1248,9 +1724,13 @@
       (then ,(native-direct-call-wat 2 t)
         (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (array.new_fixed $objects 2 (local.get $a) (local.get $b)))))))))
+  (native-fixed-vector-call-wat 2)
   (wat-symbol-case #@(local.get $id)
     (eq #@(return (extern.convert_any (call $bool (ref.eq (local.get $a) (local.get $b))))))
     (eql #@(return (extern.convert_any (call $bool (call $eql (local.get $a) (local.get $b))))))
+    (string= #@(return (extern.convert_any (call $bool (call $string-equal
+      (call $string-contents (call $string-designator (local.get $a)))
+      (call $string-contents (call $string-designator (local.get $b))))))))
     ((= /=)
       #@(if (i32.and (i32.le_u (i32.sub (local.get $at) (i32.const 1)) (i32.const 4))
                      (i32.le_u (i32.sub (local.get $bt) (i32.const 1)) (i32.const 4)))
@@ -1294,6 +1774,24 @@
                      (i32.le_u (i32.sub (local.get $bt) (i32.const 1)) (i32.const 4)))
         (then (return (extern.convert_any (call $op
           (i32.sub (local.get $id) (i32.const ,(runtime-symbol-id '+))) (local.get $a) (local.get $b)))))))
+    (/
+      #@(if (i32.and (i32.le_u (i32.sub (local.get $at) (i32.const 1)) (i32.const 4))
+                     (i32.le_u (i32.sub (local.get $bt) (i32.const 1)) (i32.const 4)))
+        (then
+          (local.set $direct-result (call $op (i32.const 3) (local.get $a) (local.get $b)))
+          (call $clear-values)
+          (return (extern.convert_any (local.get $direct-result))))))
+    ((floor ceiling truncate round)
+      ;; This ABI consumes only the primary value. Reuse the ordinary exact
+      ;; rounding operation, avoiding APPLY's argument and second-value packets.
+      ;; Complex/non-number inputs retain the checked general call path.
+      #@(if (i32.and (i32.le_u (i32.sub (local.get $at) (i32.const 1)) (i32.const 3))
+                     (i32.le_u (i32.sub (local.get $bt) (i32.const 1)) (i32.const 3)))
+        (then
+          (call $native-rounding-primary-inline (local.get $left) (local.get $right)
+            (i32.sub (local.get $id) (i32.const ,(runtime-symbol-id 'floor))))
+          (call $clear-values)
+          (return))))
     ((< > <= >=)
       #@(if (i32.and (i32.le_u (i32.sub (local.get $at) (i32.const 1)) (i32.const 3))
                      (i32.le_u (i32.sub (local.get $bt) (i32.const 1)) (i32.const 3)))
@@ -1323,6 +1821,7 @@
         (struct.get $direct-function $owner (ref.cast (ref $direct-function) ,(native-object '(local.get $function))))
         (struct.get $direct-function $slot (ref.cast (ref $direct-function) ,(native-object '(local.get $function))))
         (local.get $a) (i32.const 1))))))))
+  (native-fixed-primitive-call-wat 2)
   (native-generic-fast-call-wat 2)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     (call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq))))))
@@ -1342,6 +1841,7 @@
         (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (array.new_fixed $objects 3
           ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) ,(native-object '(local.get $c))))))))))
+  (native-fixed-vector-call-wat 3)
   #@(if (i32.eq (local.get $id) (i32.const ,(- -2 (runtime-symbol-id 'list))))
     (then (return (extern.convert_any
       (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
@@ -1367,6 +1867,7 @@
                 (then (array.set $objects (call $vector-data (local.get $array)) (local.get $index)
                   ,(native-object '(local.get $a)))
                   (return (local.get $a))))))))))
+  (native-fixed-primitive-call-wat 3)
   (native-generic-fast-call-wat 3)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
@@ -1384,6 +1885,7 @@
         ,(native-object '(local.get $function)) (array.new_fixed $objects 4
           ,(native-object '(local.get $a)) ,(native-object '(local.get $b))
           ,(native-object '(local.get $c)) ,(native-object '(local.get $d))))))))))
+  (native-fixed-vector-call-wat 4)
   #@(if (i32.eq (call $native-builtin-id ,(native-object '(local.get $function)))
                  (i32.const ,(runtime-symbol-id 'list)))
     (then (return (extern.convert_any
@@ -1393,18 +1895,13 @@
     (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
       (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null eq))))))))
 
+(defun $native-value-arguments-cl ()
+  (runtime-function-definition '$native-value-arguments-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-value-arguments-cl 'miricl-runtime:flatten-value-groups))))
+
 (define-runtime-function $native-value-arguments (($groups externref)) (:nullable-object)
-  (:locals ($scan :nullable-object) ($group :nullable-object) ($head :nullable-object)
-           ($tail :nullable-object) ($cell :nullable-object))
-  #@(local.set $scan ,(native-object '(local.get $groups)))
-  (wat-list-loop ($scan)
-    #@(local.set $group (call $car (local.get $scan)))
-    (wat-list-loop ($group)
-      #@(local.set $cell (call $cons (call $car (local.get $group)) (ref.null eq)))
-      #@(if (ref.is_null (local.get $head)) (then (local.set $head (local.get $cell)))
-        (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-      #@(local.set $tail (local.get $cell))))
-  #@(local.get $head))
+  #@(call $check-apply-list ,(native-object '(local.get $groups)))
+  #@(call $native-value-arguments-cl ,(native-object '(local.get $groups))))
 
 (define-runtime-function $native-multiple-value-call
     (($environment externref) ($function externref) ($groups externref)) (externref)
@@ -1448,28 +1945,46 @@
   ($native-install) ($native-function) ($native-function-with-code) ($native-close-with-arity) ($native-close) ($native-close-fixed) ($native-close-cached) ($native-close-static) ($native-with-arity) ($native-code-size) ($native-capture) ($native-code-storage) ($native-code-entry) ($native-code-bytes) ($native-literal)
   ($native-debug-wrap) ($native-debug-attach) ($native-debug-close) ($native-debug-info)
   ($native-attach-direct) ($native-attach-direct-root) ($native-set-argument-usage) ($native-attach-direct-usage) ($native-direct-apply) ($native-shared-entry)
-  ($native-two-arguments) ($native-packed-argument) ($native-list-tail) ($native-argument) ($native-rest-argument) ($native-check-arguments) ($native-check-apply-arguments) ($native-check-apply-list) ($native-environment)
+  ($native-two-arguments) ($native-packed-argument-cl) ($native-packed-argument) ($native-list-tail-cl) ($native-list-tail) ($native-argument-cl) ($native-argument) ($native-rest-argument-cl) ($native-rest-argument) ($native-check-arguments-cl) ($native-check-arguments) ($native-check-apply-arguments) ($native-check-apply-list) ($native-environment)
   ($native-restore-environment) ($native-bind)
   ($native-block-enter) ($native-block-environment) ($native-block-return) ($native-block-match) ($native-block-values)
   ($native-control) ($native-restart-signal) ($native-throw)
   ($native-global-read) ($native-global-write) ($native-function-reference)
   ($native-cons) ($native-cell) ($native-primary) ($native-cell-read) ($native-cell-write)
-  ($native-call) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
+  ($native-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1)
   ($native-int64) ($native-unbox-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)
   ($native-logand-int64) ($native-logior-int64) ($native-logxor-int64) ($native-ash-int64)
   ($native-add-int64-checked) ($native-sub-int64-checked) ($native-mul-int64-checked)
   ($native-lt-int64) ($native-gt-int64) ($native-le-int64) ($native-ge-int64) ($native-eq-int64) ($native-ne-int64)
   ($native-vector-ref) ($native-boolean)
-  ($native-eq-inline) ($native-eql-inline) ($native-eql-test) ($native-length-inline) ($native-vector-length-inline)
-  ($native-gethash-inline) ($native-gethash-primary-inline) ($native-puthash-inline)
-  ($native-consp-inline) ($native-simple-vector-p-inline)
+  ($native-eq-inline) ($native-eql-inline) ($native-eql-test) ($native-length-inline) ($native-list-length-inline) ($native-vector-length-inline)
+  ($native-gethash-inline) ($checked-gethash-primary) ($native-gethash-primary-inline) ($native-puthash-inline)
+  ($native-consp-inline) ($native-simple-vector-p-inline) ($native-vector-p-inline)
+  ($native-string-p-inline) ($native-integer-p-inline) ($native-character-p-inline)
+  ($native-integer-length-inline) ($native-ash-general-inline) ($native-logand-general-inline)
+  ($native-mod-general-inline) ($native-rounding-primary-inline) ($native-truncate-primary-inline)
+  ($ordered-compare-native) ($native-ordered-compare-inline)
+  ($native-zero-inline)
   ($native-vector-ref-trusted) ($native-car-list) ($native-cdr-list)
   ($native-car-checked) ($native-cdr-checked)
   ($native-car-inline-checked) ($native-cdr-inline-checked)
   ($native-car-list-inline) ($native-cdr-list-inline)
   ($native-vector-ref-trusted64)
   ($native-vector-ref-inline)
+  ($checked-sbit-ref) ($native-sbit-ref-inline) ($native-row-major-ref-inline)
+  ($checked-row-major-set) ($native-row-major-set-inline)
+  ($native-character-ref) ($native-character-code)
+  ($native-character-ref-inline) ($native-character-code-inline) ($native-character-set-inline)
+  ($native-simple-character-set-inline)
+  ($native-code-character-inline)
+  ($native-make-character-vector-inline)
+  ($native-make-string-inline)
+  ($native-make-vector-inline)
+  ($native-character-code-at-inline)
+  ($native-character-code-at64-inline)
+  ($native-character-code-at-unboxed-inline)
+  ($native-character-code-at64-unboxed-inline)
   ($native-vector-set-inline)
   ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-tail-enter) ($native-tail-direct) ($native-tail-call)
   ($native-call0) ($native-call1) ($native-call2) ($native-call3) ($native-call4) ($native-generic-call))

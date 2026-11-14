@@ -24,6 +24,21 @@ try {
     (hir-type-proves-p '(or null (cons integer t)) 'list)
     (not (hir-type-proves-p '(or null simple-vector) 'simple-vector))
     (not (hir-type-proves-p '(or cons integer) 'list)))`);
+  check(`(let ((types '(integer (integer 0 *) (integer * 0) (integer -4 4)
+                       (member -3 0 2) (eql 0) (eql -2)
+                       (integer -1267650600228229401496703205376 1267650600228229401496703205376)))
+               (samples '(-1267650600228229401496703205376 -4 -3 -2 -1 0 1 2 3 4
+                          1267650600228229401496703205376)))
+    (every (lambda (type)
+      (every (lambda (name)
+        (every (lambda (positive)
+          (let ((refined (hir-integer-branch-type type name positive)))
+            (every (lambda (x)
+              (or (not (and (typep x type) (eq (not (null (funcall name x))) positive)))
+                  (typep x refined))) samples))) '(nil t))) '(zerop minusp plusp))) types))`);
+  check(`(every (lambda (type)
+      (equal (hir-integer-branch-type type 'zerop t) type))
+    '(t number real float (or integer null) (satisfies identity)))`);
   check(`(and (eq (hir-inline-result-type '+ '(integer (eql 0))) 'integer)
     (equal (hir-inline-result-type '* '((eql 0) integer)) '(eql 0))
     (equal (hir-inline-result-type 'logior '(integer (integer -1 -1))) '(integer -1 -1))
@@ -79,6 +94,46 @@ try {
     const module = await WebAssembly.compile(await vm.readFile('/flow.wasm'));
     return WebAssembly.Module.imports(module).map(entry => entry.name);
   };
+  // A proven dead arm must not force a surviving single value through an
+  // allocated multiple-value packet. Preserve operand effects and CL's exact
+  // zero/one/many counts when either arm can actually execute.
+  for (const [type, yes, no, argument] of [
+    ['(integer 1 10)', '(values :dead :extra)', ':live', '3'],
+    ['(integer 0 0)', ':live', '(values)', '0'],
+  ]) {
+    const imports = await compile(`(lambda (x)
+      (declare (type ${type} x) (optimize (safety 0) (debug 0)) (inline zerop))
+      (if (zerop x) ${yes} ${no}))`);
+    assert.ok(!imports.includes('native-cons'), 'A proven single-valued return needs no packet allocation');
+    check(`(equal (multiple-value-list (funcall *flow-function* ${argument})) '(:live))`);
+  }
+  await compile(`(lambda (x)
+    (declare (type (integer 1 10) x) (optimize (safety 0) (debug 0)) (inline zerop plusp))
+    (if (zerop x) (values :first :second) :live))`);
+  check(`(progn
+    (dolist (value (hir-function-values (first (hir-unit-functions *flow-unit*))))
+      (let ((producer (hir-value-producer value)))
+        (when (and (%hir-instruction-p producer)
+                   (eq (hir-instruction-opcode producer) :function-reference)
+                   (eq (first (hir-instruction-attributes producer)) 'zerop))
+          (setf (first (hir-instruction-attributes producer)) 'plusp))))
+    (multiple-value-bind (bytes literals) (emit-native-module *flow-unit*)
+      (let ((new (compiler-primitive 17 bytes literals nil)))
+        (and (equal (multiple-value-list (funcall *flow-function* 3)) '(:live))
+             (equal (multiple-value-list (funcall new 3)) '(:first :second))))))`);
+  vm.evaluate('(defparameter *branch-effects* 0) (values)');
+  await compile(`(lambda (x)
+    (declare (type (integer 1 10) x) (special *branch-effects*)
+      (optimize (safety 0) (debug 0)) (inline zerop 1+))
+    (if (zerop (progn (setq *branch-effects* (1+ *branch-effects*)) (values x :discarded)))
+        (values :dead :extra) :live))`);
+  check(`(and (equal (multiple-value-list (funcall *flow-function* 3)) '(:live))
+    (= *branch-effects* 1))`);
+  await compile(`(lambda (x)
+    (declare (type (integer 0 1) x) (optimize (safety 0) (debug 0)) (inline zerop))
+    (if (zerop x) (values) (values :first :second)))`);
+  check(`(and (null (multiple-value-list (funcall *flow-function* 0)))
+    (equal (multiple-value-list (funcall *flow-function* 1)) '(:first :second)))`);
   for (const [source, args, expected, entry = 'native-add-int64'] of [
     [`(lambda (x) (declare (type (and (integer 0 *) (integer * 255)) x) (inline 1+))
        (list (* (1+ x) 2)))`, '255', '(512)\n', 'native-mul-int64'],

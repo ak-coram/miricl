@@ -2,15 +2,12 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defun $array-same-shape-cl ()
+  (runtime-function-definition '$array-same-shape-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$array-same-shape-cl 'miricl-runtime:arrays-same-shape-p :result :truth))))
+
 (define-runtime-function $array-same-shape (($a :nullable-object) ($b :nullable-object)) (i32)
-  (:locals ($rank i32) ($i i32))
-  #@(local.set $rank (call $array-rank-value (local.get $a)))
-  #@(if (i32.ne (local.get $rank) (call $array-rank-value (local.get $b))) (then (return (i32.const 0))))
-  #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $rank)))
-    (if (i32.ne (call $array-dimension-value (local.get $a) (local.get $i))
-                 (call $array-dimension-value (local.get $b) (local.get $i))) (then (return (i32.const 0))))
-    (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(i32.const 1))
+  #@(call $array-same-shape-cl (local.get $a) (local.get $b)))
 
 (define-runtime-function $bit-array-location (($array :nullable-object)) (:digits i32)
   (:locals ($offset i32))
@@ -168,5 +165,5 @@
   #@(global $bit-array-opcodes (ref $digits)
     (array.new_fixed $digits ,(length *bit-array-functions*)
       ,@(loop for (name . opcode) in *bit-array-functions* collect `(i32.const ,opcode))))
-  ($array-same-shape) ($bit-array-location) ($bit-read-word) ($bit-write-word)
+  ($array-same-shape-cl) ($array-same-shape) ($bit-array-location) ($bit-read-word) ($bit-write-word)
   ($bit-region-overlap) ($bit-region-snapshot) ($bit-region-copy) ($bit-array-aligned) ($bit-array-apply))

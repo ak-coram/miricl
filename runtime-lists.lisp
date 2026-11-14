@@ -25,13 +25,26 @@
       (i32.const ,(runtime-error-code :expected-designator)))))
   #@(struct.get $obj $b (ref.cast (ref $obj) (local.get $x))))
 
-(define-runtime-function $length
-    (($list :nullable-object))
-    (i32)
-  (:locals ($n i32))
-  (wat-list-loop ($list)
-    #@(local.set $n (i32.add (local.get $n) (i32.const 1))))
-  #@(local.get $n))
+;; Checked proper-list count for internal argument spines. Keep the original
+;; raw ABI while rejecting dotted and cyclic input before unchecked callers.
+(define-runtime-function $length (($list :nullable-object)) (i32)
+  (:locals ($fast :nullable-object) ($slow :nullable-object) ($count i64))
+  #@(local.set $fast (local.get $list)) #@(local.set $slow (local.get $list))
+  #@(block $done (loop $next
+    (br_if $done (ref.is_null (local.get $fast)))
+    (local.set $fast (call $cdr (local.get $fast)))
+    (local.set $count (i64.add (local.get $count) (i64.const 1)))
+    (br_if $done (ref.is_null (local.get $fast)))
+    (local.set $fast (call $cdr (local.get $fast)))
+    (local.set $slow (call $cdr (local.get $slow)))
+    (local.set $count (i64.add (local.get $count) (i64.const 1)))
+    (if (ref.eq (local.get $fast) (local.get $slow))
+      (then (call $type-fail (local.get $list)
+        (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'satisfies)))
+          (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'list-length))) (ref.null eq)))
+        (i32.const ,(runtime-error-code :expected-designator)))))
+    (br $next)))
+  #@(i32.wrap_i64 (local.get $count)))
 
 (define-runtime-function $arity
     (($args :nullable-object) ($min i32) ($max i32))
@@ -74,47 +87,38 @@
     (then (return (i32.add (i32.const 16) (i32.add (local.get $id) (i32.div_u (local.get $id) (i32.const 7)))))))
   #@(i32.const 0))
 
+(defun $read-list-path ()
+  (runtime-function-definition '$read-list-path
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$read-list-path 'miricl-runtime:read-list-path))))
+
+(defun $write-list-path ()
+  (runtime-function-definition '$write-list-path
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$write-list-path 'miricl-runtime:write-list-path))))
+
 (define-runtime-function $list-accessor
     (($x :nullable-object) ($code i32) ($write i32) ($value :nullable-object)) (:nullable-object)
-  #@(block $last (loop $next (br_if $last (i32.le_u (local.get $code) (i32.const 3)))
-    (local.set $x (if (result (ref null eq)) (i32.and (local.get $code) (i32.const 1))
-      (then (call $cdr (local.get $x))) (else (call $car (local.get $x)))))
-    (local.set $code (i32.shr_u (local.get $code) (i32.const 1))) (br $next)))
-  #@(if (local.get $write)
-    (then
-      (if (i32.ne (call $tag (local.get $x)) (i32.const 7))
-        (then (call $type-fail (local.get $x) (call $symbol (i32.const ,(runtime-symbol-id 'cons)))
-          (i32.const ,(runtime-error-code :expected-designator)))))
-      (if (i32.and (local.get $code) (i32.const 1))
-        (then (struct.set $obj $b (ref.cast (ref $obj) (local.get $x)) (local.get $value)))
-        (else (struct.set $obj $a (ref.cast (ref $obj) (local.get $x)) (local.get $value))))
-      (return (local.get $value))))
-  #@(if (result (ref null eq)) (i32.and (local.get $code) (i32.const 1))
-    (then (call $cdr (local.get $x))) (else (call $car (local.get $x)))))
+  #@(if (result (ref null eq)) (local.get $write)
+    (then (call $write-list-path (local.get $x) (call $int (local.get $code)) (local.get $value)))
+    (else (call $read-list-path (local.get $x) (call $int (local.get $code))))))
 
 (define-runtime-section list-runtime-wat ()
   ($cons)
   ($car)
   ($cdr)
   ($length)
-  ($arity) ($arity0) ($arity1) ($arity2) ($arity3) ($list-accessor-code) ($list-accessor))
+  ($arity) ($arity0) ($arity1) ($arity2) ($arity3) ($list-accessor-code) ($read-list-path) ($write-list-path) ($list-accessor))
 
 (defun $member-eq ()
   (runtime-function-definition '$member-eq
     (wat-fragment (miricl-cross:runtime-kernel-wat '$member-eq 'miricl-runtime:member-eq :result :truth))))
 
-(define-runtime-function $remove-eq
-    (($x :nullable-object) ($list :nullable-object))
-    (:nullable-object)
-  #@(if (ref.is_null (local.get $list)) (then (return (ref.null eq))))
-  #@(if (ref.eq (local.get $x) (call $car (local.get $list))) (then (return (call $cdr (local.get $list)))))
-  #@(call $cons (call $car (local.get $list)) (call $remove-eq (local.get $x) (call $cdr (local.get $list)))))
+(defun $remove-eq ()
+  (runtime-function-definition '$remove-eq
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$remove-eq 'miricl-runtime:remove-first-eq))))
 
-(define-runtime-function $as-list
-    (($x :nullable-object))
-    (:nullable-object)
-  #@(if (result (ref null eq)) (i32.or (ref.is_null (local.get $x)) (i32.eq (call $tag (local.get $x)) (i32.const 7)))
-      (then (local.get $x)) (else (call $cons (local.get $x) (ref.null eq)))))
+(defun $as-list ()
+  (runtime-function-definition '$as-list
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$as-list 'miricl-runtime:ensure-list))))
 
 (define-runtime-section list-utilities-runtime-wat ()
   ($member-eq)

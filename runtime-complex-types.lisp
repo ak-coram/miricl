@@ -1,9 +1,114 @@
-;;;; Complex subtype proofs follow the implementation's three part formats.
+;;;; Native complex type decisions with checked control and value boundaries.
+;;;; The beneficial CL component accessor and other CL kernel oracles remain.
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-;; Zero denotes an unrelated type; eight denotes an empty complex type.
+(define-runtime-function $complex-type-metadata-function () (:nullable-object)
+  #@(if (ref.is_null (global.get $complex-type-metadata-function))
+    (then (global.set $complex-type-metadata-function
+      (call $node (i32.const 8) (i32.const ,(+ +clos-primitive-base+ (clos-primitive-op '%%complex-type-metadata)))
+        (ref.null eq) (ref.null eq) (ref.null eq)))))
+  #@(global.get $complex-type-metadata-function))
+
+(define-runtime-function $complex-type-metadata-primitive (($op i32) ($args :nullable-object)) (:nullable-object)
+  (:locals ($tail :nullable-object))
+  #@(local.set $tail (local.get $args))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $tail)) (i32.const 7)) :wrong-arity)
+  #@(local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $tail)) (i32.const 7)) :wrong-arity)
+  #@(local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $tail)) (i32.const 7)) :wrong-arity)
+  #@(local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+  (wat-fail-when #@(i32.eqz (ref.is_null (local.get $tail))) :wrong-arity)
+  #@(call $complex-type-metadata-value (call $car (local.get $args))
+    (call $car (call $cdr (local.get $args))) (call $car (call $cdr (call $cdr (local.get $args))))))
+
+(define-runtime-function $complex-type-metadata-value
+    (($selector :nullable-object) ($type :nullable-object) ($argument :nullable-object)) (:nullable-object)
+  (:locals ($code i64) ($class :nullable-object) ($result :nullable-object) ($valid i32))
+  (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :malformed-type)
+  #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
+  (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 7)) :malformed-type)
+  #@(call $clear-values)
+  #@(if (i64.eqz (local.get $code))
+    (then (call $check-type-control-structure (local.get $type))
+      (return_call $array-type-metadata-value (local.get $selector) (local.get $type) (local.get $argument))))
+  #@(if (i64.eq (local.get $code) (i64.const 1))
+    (then (return_call $array-type-metadata-value (call $int (i32.const 2)) (local.get $type) (ref.null eq))))
+  #@(if (i32.and (i64.ge_u (local.get $code) (i64.const 3)) (i64.le_u (local.get $code) (i64.const 4)))
+    (then (return_call $array-type-metadata-value (local.get $selector) (local.get $type) (local.get $argument))))
+  #@(if (i64.eq (local.get $code) (i64.const 5))
+    (then (call $check-type-control-structure (local.get $type))
+      (return (call $apply ,(clos-library-reference '%upgraded-complex-part-type)
+        (call $cons (local.get $type) (call $cons (local.get $argument) (ref.null eq)))))))
+  #@(if (i64.eq (local.get $code) (i64.const 7))
+    (then
+      (local.set $class (call $subtype-class (local.get $type)))
+      (if (ref.is_null (local.get $class)) (then (return (ref.null eq))))
+      (return (call $vector-new (array.new_fixed $objects 3 (local.get $class)
+        (call $car (call $property-cell
+          (struct.get $obj $b (ref.cast (ref $obj) (call $named-class (call $symbol (i32.const ,(runtime-symbol-id 'complex))))))
+          ,(clos-library-reference :cpl)))
+        (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $class)))
+          ,(clos-library-reference :finalized))))))))
+  ;; Proof requests carry (target . environment), preserving arbitrary target
+  ;; environment objects without inspecting their representation.
+  (wat-fail-when #@(i32.ne (call $tag (local.get $argument)) (i32.const 7)) :malformed-type)
+  #@(call $check-type-control-structure (local.get $type))
+  #@(call $check-type-control-structure (call $car (local.get $argument)))
+  #@(local.set $result (if (result (ref null eq)) (i64.eq (local.get $code) (i64.const 2))
+    (then (call $numeric-subtypep (local.get $type) (call $car (local.get $argument)) (call $cdr (local.get $argument))))
+    (else (call $subtypep-native (local.get $type) (call $car (local.get $argument)) (call $cdr (local.get $argument))))))
+  #@(local.set $valid (i32.eqz (ref.is_null (call $car (global.get $extra-values)))))
+  #@(call $clear-values)
+  #@(call $int (select (i32.const 1) (select (i32.const 2) (i32.const 0) (local.get $valid))
+    (i32.eqz (ref.is_null (local.get $result))))))
+
+(define-runtime-function $complex-type-worker
+    (($a :nullable-object) ($b :nullable-object) ($mode i32)) (:nullable-object)
+  (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object))
+  #@(local.set $saved (global.get $extra-values)) #@(local.set $count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (call $check-type-control-structure (local.get $a))
+    (if (i32.eq (local.get $mode) (i32.const 1))
+      (then (call $check-type-control-structure (array.get $objects (call $vector-data (local.get $b)) (i32.const 0)))))
+    (local.set $result (if (result (ref null eq)) (i32.eqz (local.get $mode))
+      (then (call $int (call $complex-type-mask-native (local.get $a) (local.get $b))))
+      (else (if (result (ref null eq)) (i32.eq (local.get $mode) (i32.const 1))
+        (then (call $int (call $complex-subtype-native (local.get $a)
+          (array.get $objects (call $vector-data (local.get $b)) (i32.const 0))
+          (array.get $objects (call $vector-data (local.get $b)) (i32.const 1)))))
+        (else (call $upgraded-complex-part-native (local.get $a) (local.get $b)))))))
+    (global.set $extra-values (local.get $saved)) (global.set $value-count (local.get $count))
+    (return (local.get $result))))
+  #@(global.set $extra-values (local.get $saved)) #@(global.set $value-count (local.get $count))
+  #@(throw $transfer))
+
 (define-runtime-function $complex-type-mask (($type :nullable-object) ($env :nullable-object)) (i32)
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $complex-type-worker (local.get $type) (local.get $env) (i32.const 0))))))
+
+(defun $complex-part-type ()
+  (runtime-function-definition '$complex-part-type
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$complex-part-type 'miricl-runtime:complex-component-type))))
+
+(define-runtime-function $complex-subtypep
+    (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (i32)
+  (:locals ($saved :nullable-object) ($count i32) ($result i32))
+  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (call $check-type-control-structure (local.get $a))
+    (call $check-type-control-structure (local.get $b))
+    (local.set $result (call $complex-subtype-native (local.get $a) (local.get $b) (local.get $env)))
+    (global.set $extra-values (local.get $saved))
+    (global.set $value-count (local.get $count))
+    (return (local.get $result))))
+  #@(global.set $extra-values (local.get $saved))
+  #@(global.set $value-count (local.get $count))
+  #@(throw $transfer))
+
+(define-runtime-function $complex-type-mask-native (($type :nullable-object) ($env :nullable-object)) (i32)
   (:locals ($args :nullable-object) ($part :nullable-object) ($class :nullable-object))
   #@(local.set $class (call $subtype-class (local.get $type)))
   #@(if (i32.eqz (ref.is_null (local.get $class)))
@@ -14,7 +119,10 @@
       (if (i32.ne (call $operator (local.get $type)) (i32.const ,(runtime-symbol-id 'complex)))
         (then (return (i32.const 0))))
       (local.set $args (call $cdr (local.get $type)))
-      (call $arity (local.get $args) (i32.const 0) (i32.const 1))))
+      (if (i32.eqz (ref.is_null (local.get $args)))
+        (then (if (i32.eqz (ref.is_null (call $cdr (local.get $args))))
+          (then (drop (call $array-type-metadata-value (call $int (i32.const 4))
+            (local.get $type) (call $int (i32.const 1))))))))))
   #@(if (ref.is_null (local.get $args)) (then (return (i32.const 7))))
   #@(local.set $part (call $car (local.get $args)))
   #@(if (i32.eq (call $id (local.get $part)) (i32.const ,(runtime-symbol-id '*)))
@@ -29,16 +137,7 @@
     (real #@(return (i32.const 7))))
   #@(i32.const 0))
 
-(define-runtime-function $complex-part-type (($type :nullable-object)) (:nullable-object)
-  (:locals ($args :nullable-object))
-  #@(if (i32.eq (call $tag (local.get $type)) (i32.const 7))
-    (then (local.set $args (call $cdr (local.get $type)))
-      (if (i32.eqz (ref.is_null (local.get $args)))
-        (then (if (i32.ne (call $id (call $car (local.get $args))) (i32.const ,(runtime-symbol-id '*)))
-          (then (return (call $car (local.get $args)))))))))
-  #@(call $symbol (i32.const ,(runtime-symbol-id 'real))))
-
-(define-runtime-function $complex-subtypep
+(define-runtime-function $complex-subtype-native
     (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (i32)
   (:locals ($am i32) ($bm i32) ($class :nullable-object) ($base :nullable-object)
            ($result :nullable-object) ($other :nullable-object))
@@ -82,5 +181,49 @@
       (i32.and (i32.eqz (local.get $am)) (i32.eqz (ref.is_null (local.get $result))))))))
   #@(i32.const 0))
 
+(define-runtime-function $upgraded-complex-part-native (($type :nullable-object) ($env :nullable-object)) (:nullable-object)
+  (:locals ($expanded :nullable-object) ($class :nullable-object) ($name :nullable-object) ($result :nullable-object))
+  (wat-symbol-case #@(call $id (local.get $type))
+    ((nil) #@(return (ref.null eq)))
+    ((integer rational ratio fixnum bignum bit signed-byte unsigned-byte)
+      #@(return (call $symbol (i32.const ,(runtime-symbol-id 'rational)))))
+    ((short-float single-float)
+      #@(return (call $symbol (i32.const ,(runtime-symbol-id 'single-float)))))
+    ((double-float long-float)
+      #@(return (call $symbol (i32.const ,(runtime-symbol-id 'double-float)))))
+    ((float real) #@(return (local.get $type))))
+  #@(call $check-type-control-structure (local.get $type))
+  #@(local.set $expanded (call $array-type-metadata-value (call $int (i32.const 0)) (local.get $type) (local.get $env)))
+  #@(if (i32.eqz (ref.eq (local.get $expanded) (local.get $type)))
+    (then (return (call $upgraded-complex-part-native (local.get $expanded) (local.get $env)))))
+  #@(local.set $class (call $subtype-class (local.get $type)))
+  #@(if (i32.eqz (ref.is_null (local.get $class)))
+    (then (local.set $name (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $class)))
+      ,(clos-library-reference :name))))
+      (if (i32.eqz (ref.eq (local.get $name) (local.get $type)))
+        (then (return (call $upgraded-complex-part-native (local.get $name) (local.get $env)))))))
+  ;; Bounded numeric types use the same exact emptiness and representation
+  ;; proofs as SUBTYPEP. In particular, a FLOAT interval can exclude one format.
+  (wat-symbol-case #@(call $operator (local.get $type))
+    ((integer rational ratio fixnum bignum bit signed-byte unsigned-byte mod
+      real float short-float single-float double-float long-float)
+      (apply #'runtime-wat-sequence
+        (loop for candidate in '(nil rational single-float double-float float real)
+              for reference = (wat-fragment (if candidate
+                                  #@(call $symbol (i32.const ,(runtime-symbol-id candidate)))
+                                  #@(ref.null eq)))
+              collect #@(block
+                (local.set $result (call $numeric-subtypep (local.get $type)
+                  ,reference (local.get $env)))
+                (call $clear-values)
+                (if (i32.eqz (ref.is_null (local.get $result)))
+                  (then (return ,reference))))))))
+  #@(call $apply ,(clos-library-reference '%upgraded-complex-part-type)
+    (call $cons (local.get $type) (call $cons (local.get $env) (ref.null eq)))))
+
+
 (define-runtime-section complex-type-runtime-wat ()
+  #@(global $complex-type-metadata-function (mut (ref null eq)) (ref.null eq))
+  ($complex-type-metadata-function) ($complex-type-metadata-primitive) ($complex-type-metadata-value)
+  ($upgraded-complex-part-native) ($complex-type-mask-native) ($complex-subtype-native) ($complex-type-worker)
   ($complex-type-mask) ($complex-part-type) ($complex-subtypep))

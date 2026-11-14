@@ -314,7 +314,7 @@
 (define-runtime-function $source-reader-callback
     (($function :nullable-object) ($arguments :nullable-object)) (:nullable-object)
   (:locals ($stream :nullable-object) ($old-stream :nullable-object) ($value :nullable-object) ($thrown i32)
-           ($dynamic :nullable-object))
+           ($dynamic :nullable-object) ($count i32) ($extra :nullable-object))
   #@(local.set $old-stream (global.get $reader-stream))
   #@(local.set $stream (local.get $old-stream))
   #@(if (ref.is_null (local.get $stream))
@@ -343,7 +343,13 @@
   #@(global.set $reader-stream (local.get $old-stream))
   #@(global.set $dynamic-variables (local.get $dynamic))
   #@(if (local.get $thrown) (then (throw $transfer)))
+  ;; Readtable validation can call compiled CL helpers. Keep the callback's
+  ;; actual value count, including zero values used to suppress reader objects.
+  #@(local.set $count (global.get $value-count))
+  #@(local.set $extra (global.get $extra-values))
   #@(call $refresh-reader-readtable)
+  #@(global.set $value-count (local.get $count))
+  #@(global.set $extra-values (local.get $extra))
   #@(local.get $value))
 
 ;; Suppressed dispatch still consumes its grammatical operand, but numerical

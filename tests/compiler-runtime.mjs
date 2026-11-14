@@ -3,8 +3,17 @@ import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
 import {compilerSmokeCases} from './compiler-cases.mjs';
 
-const bytes = await fs.readFile(process.argv[2] ?? 'miricl-cold.wasm');
 const precompiled = process.argv.includes('--precompiled');
+const modeOptions = process.argv.slice(3).filter(arg => arg.startsWith('--mode='));
+assert.ok(modeOptions.length <= 1, 'Supply at most one --mode=async|sync|concurrent option.');
+const selectedMode = modeOptions[0]?.slice('--mode='.length);
+assert.ok(selectedMode === undefined || ['async', 'sync', 'concurrent'].includes(selectedMode),
+  'Expected --mode=async|sync|concurrent.');
+for (const option of process.argv.slice(3))
+  assert.ok(option === '--precompiled' || option === modeOptions[0], `Unknown option: ${option}`);
+const modes = selectedMode ? [selectedMode] : ['async', 'sync', 'concurrent'];
+const bytes = await fs.readFile(process.argv[2] ?? 'miricl-cold.wasm');
+const progress = (mode, stage) => console.log(`Compiler runtime (${precompiled ? 'precompiled' : 'cold'}/${mode}): ${stage}`);
 const module = await WebAssembly.compile(bytes);
 assert.deepEqual(WebAssembly.Module.imports(module), []);
 if (precompiled) {
@@ -13,7 +22,8 @@ if (precompiled) {
 }
 // Both adapter entry points provide the compiler immediately, without any
 // filesystem mount, compiler option, companion artifact or asynchronous fetch.
-for (const mode of ['async', 'sync']) {
+for (const mode of modes.filter(mode => mode !== 'concurrent')) {
+  progress(mode, 'startup');
   const vm = mode === 'async' ? await Miricl.instantiate(bytes)
     : new Miricl(new WebAssembly.Instance(module));
   try {
@@ -45,7 +55,10 @@ for (const mode of ['async', 'sync']) {
              (not (compiled-function-p original)))))`).output, 'T\n');
     assert.equal(vm.evaluate('miricl-compiler::*compiler-state*').output, precompiled ? ':READY\n' : ':COLD\n',
       'Disassembly must not bootstrap the optimizing compiler.');
+    progress(mode, precompiled ? 'native compilation' : 'first-use self-compilation started');
+    const bootstrapStarted = performance.now();
     assert.equal(vm.evaluate(`(funcall (miricl-compiler:compile-native '(lambda () 42)))`).output, '42\n');
+    progress(mode, `${precompiled ? 'native compilation' : 'first-use self-compilation'} completed in ${((performance.now() - bootstrapStarted) / 1000).toFixed(1)}s`);
     assert.equal(vm.evaluate('miricl-compiler::*compiler-origin*').output, precompiled ? ':IMAGE\n' : ':FIRST-USE\n');
     if (!precompiled) assert.equal(vm.evaluate(`(every (lambda (name)
       (and (compiled-function-p (symbol-function name))
@@ -64,16 +77,22 @@ for (const mode of ['async', 'sync']) {
         (setf (symbol-function 'miricl-compiler::wasm-byte) original)))`).output, 'T\n',
       'Compiler blocks must retain their internal function bindings.');
     vm.evaluate("(defparameter *saved-compiler* #'miricl-compiler:compile-to-hir)");
-    for (const [name, source] of compilerSmokeCases)
+    for (const [name, source] of compilerSmokeCases) {
+      progress(mode, name);
       assert.equal(vm.evaluate(source, {eof: true}).output, 'T\n', `${mode}: ${name}`);
+    }
     assert.equal(vm.evaluate("(eq *saved-compiler* #'miricl-compiler:compile-to-hir)").output, 'T\n');
     // ASDF remains an explicitly loaded library.
     assert.equal(vm.evaluate(`(notany #'find-package '("ASDF" "UIOP"))`).output, 'T\n');
   } finally {vm.close();}
 }
-const concurrent = await Miricl.instantiate(bytes);
-try {
-  assert.equal((await concurrent.evaluateAsync(`(let
+if (modes.includes('concurrent')) {
+  progress('concurrent', 'startup');
+  const concurrent = await Miricl.instantiate(bytes);
+  try {
+    progress('concurrent', precompiled ? 'concurrent compilation started' : 'concurrent first-use self-compilation started');
+    const bootstrapStarted = performance.now();
+    assert.equal((await concurrent.evaluateAsync(`(let
       ((first (miricl-threads:make-thread (lambda ()
          (funcall (miricl-compiler:compile-native '(lambda () 42))))))
        (second (miricl-threads:make-thread (lambda ()
@@ -81,7 +100,7 @@ try {
     (and (= (miricl-threads:join-thread first) 42)
          (= (miricl-threads:join-thread second) 43)
          (eq miricl-compiler::*compiler-state* :ready)))`)).output, 'T\n');
-} finally {concurrent.close();}
-console.log(precompiled
-  ? 'Precompiled compiler: ready at startup, native kernels, no bootstrap, sync/async adapters, concurrent compilation and native test bodies pass.'
-  : 'Built-in compiler: cold startup, first-use self-compilation, native reuse and no ASDF dependency pass.');
+    progress('concurrent', `compilation completed in ${((performance.now() - bootstrapStarted) / 1000).toFixed(1)}s`);
+  } finally {concurrent.close();}
+}
+console.log(`${precompiled ? 'Precompiled' : 'Cold'} compiler runtime (${modes.join(', ')}): passed.`);

@@ -7,12 +7,15 @@
     (i32.or (i32.le_u (i32.sub (call $tag (local.get $stream)) (i32.const 43)) (i32.const 3))
       (i32.le_u (i32.sub (call $tag (local.get $stream)) (i32.const 39)) (i32.const 2)))))
 
+(defun $require-stream-cl ()
+  (runtime-function-definition '$require-stream-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$require-stream-cl 'miricl-runtime:checked-stream-value))))
+
 (define-runtime-function $require-stream (($stream :nullable-object)) ()
+  #@(if (global.get $cl-kernel-functions-ready) (then (drop (call $require-stream-cl (local.get $stream))) (return)))
   #@(if (i32.eqz (call $streamp-native (local.get $stream)))
     (then (call $list-type-error (local.get $stream) (i32.const ,(runtime-symbol-id 'stream))))))
 
-;; Direction queries ignore the closed flag, and synonym queries consult the
-;; dynamic binding on every call, rather than retaining an obsolete target.
 (define-runtime-function $stream-direction (($stream :nullable-object) ($input i32)) (i32)
   #@(loop $resolve
     (call $require-stream (local.get $stream))
@@ -313,6 +316,6 @@
     (then (struct.get $obj $a (ref.cast (ref $obj) (local.get $stream)))) (else (struct.get $obj $b (ref.cast (ref $obj) (local.get $stream))))))
 
 (define-runtime-section constructed-stream-runtime-wat ()
-  ($streamp-native) ($require-stream) ($stream-direction) ($stream-open-p) ($require-stream-direction)
+  ($streamp-native) ($require-stream-cl) ($require-stream) ($stream-direction) ($stream-open-p) ($require-stream-direction)
   ($stream-component) ($stream-element-type-native) ($stream-interactive-p)
   ($output-stream-column) ($write-byte-stream) ($stream-file-query) ($constructed-stream-apply))

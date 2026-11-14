@@ -14,7 +14,9 @@ const fixtures = [
   ['(let ((v #4((1)))) (eq (svref v 0) (svref v 3)))', 'T'],
   ['`#(1 ,(+ 1 1) ,@(list 3 4))', '#(1 2 3 4)'],
   ['`#(1 ,@(list 2 3) ,.(list 4 5))', '#(1 2 3 4 5)'],
-  ['(let ((x 7)) (equalp `#(1 `#(2 ,x) ,x) (vector 1 (list \'quasiquote (vector 2 (list \'unquote \'x))) 7)))', 'T'],
+  // Backquote expansion trees are implementation-dependent (CLHS 2.4.6).
+  // Check evaluation at each nesting level and the outer comma's effects.
+  ['(let* ((n 0) (x 7) (template `#(1 `#(2 ,x) ,(progn (incf n) x)))) (and (= n 1) (= (svref template 0) 1) (= (svref template 2) 7) (let ((x 11)) (declare (special x)) (equalp (eval (svref template 1)) #(2 11))) (= n 1)))', 'T'],
   ["(let ((v '#1=#(#1#))) (eq v (svref v 0)))", 'T'],
   ["(let ((v '#1=#((a . #1#)))) (eq v (cdr (svref v 0))))", 'T'],
   ["(let ((v '#1=(#(#1#)))) (eq v (svref (car v) 0)))", 'T'],

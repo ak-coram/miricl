@@ -31,24 +31,88 @@
 (defun character-property-data ()
   (runtime-library-data (character-property-bytes)))
 
-;; Non-ASCII digit weights are part of the bootstrapped character repertoire.
-;; Each record is START, END, CODE-MINUS-WEIGHT.
+;; Non-ASCII decimal digits are a target extension, independent of the host.
+;; Unicode 15.1.0 UnicodeData.txt, category Nd / decimal digit value (field 6):
+;; https://www.unicode.org/Public/15.1.0/ucd/UnicodeData.txt
+;; Each record is START, END, CODE-MINUS-WEIGHT. ASCII and radix letters have
+;; their separate checked fast path. Keep this data pinned across host Lisps.
 (defparameter *character-digit-ranges*
-  (let ((pairs (loop for code from 128 below (min char-code-limit #x110000)
-                     for char = (code-char code)
-                     for weight = (and char (digit-char-p char 36))
-                     when weight collect (cons code (- code weight)))))
-    (loop while pairs for (start . delta) = (pop pairs) for end = start
-          do (loop while (and pairs (= (caar pairs) (1+ end)) (= (cdar pairs) delta))
-                   do (setf end (car (pop pairs))))
-          append (list start end delta))))
+  (apply #'append
+   '(
+    (#x660 #x669 #x660)
+    (#x6f0 #x6f9 #x6f0)
+    (#x7c0 #x7c9 #x7c0)
+    (#x966 #x96f #x966)
+    (#x9e6 #x9ef #x9e6)
+    (#xa66 #xa6f #xa66)
+    (#xae6 #xaef #xae6)
+    (#xb66 #xb6f #xb66)
+    (#xbe6 #xbef #xbe6)
+    (#xc66 #xc6f #xc66)
+    (#xce6 #xcef #xce6)
+    (#xd66 #xd6f #xd66)
+    (#xde6 #xdef #xde6)
+    (#xe50 #xe59 #xe50)
+    (#xed0 #xed9 #xed0)
+    (#xf20 #xf29 #xf20)
+    (#x1040 #x1049 #x1040)
+    (#x1090 #x1099 #x1090)
+    (#x17e0 #x17e9 #x17e0)
+    (#x1810 #x1819 #x1810)
+    (#x1946 #x194f #x1946)
+    (#x19d0 #x19d9 #x19d0)
+    (#x1a80 #x1a89 #x1a80)
+    (#x1a90 #x1a99 #x1a90)
+    (#x1b50 #x1b59 #x1b50)
+    (#x1bb0 #x1bb9 #x1bb0)
+    (#x1c40 #x1c49 #x1c40)
+    (#x1c50 #x1c59 #x1c50)
+    (#xa620 #xa629 #xa620)
+    (#xa8d0 #xa8d9 #xa8d0)
+    (#xa900 #xa909 #xa900)
+    (#xa9d0 #xa9d9 #xa9d0)
+    (#xa9f0 #xa9f9 #xa9f0)
+    (#xaa50 #xaa59 #xaa50)
+    (#xabf0 #xabf9 #xabf0)
+    (#xff10 #xff19 #xff10)
+    (#x104a0 #x104a9 #x104a0)
+    (#x10d30 #x10d39 #x10d30)
+    (#x11066 #x1106f #x11066)
+    (#x110f0 #x110f9 #x110f0)
+    (#x11136 #x1113f #x11136)
+    (#x111d0 #x111d9 #x111d0)
+    (#x112f0 #x112f9 #x112f0)
+    (#x11450 #x11459 #x11450)
+    (#x114d0 #x114d9 #x114d0)
+    (#x11650 #x11659 #x11650)
+    (#x116c0 #x116c9 #x116c0)
+    (#x11730 #x11739 #x11730)
+    (#x118e0 #x118e9 #x118e0)
+    (#x11950 #x11959 #x11950)
+    (#x11c50 #x11c59 #x11c50)
+    (#x11d50 #x11d59 #x11d50)
+    (#x11da0 #x11da9 #x11da0)
+    (#x11f50 #x11f59 #x11f50)
+    (#x16a60 #x16a69 #x16a60)
+    (#x16ac0 #x16ac9 #x16ac0)
+    (#x16b50 #x16b59 #x16b50)
+    (#x1d7ce #x1d7d7 #x1d7ce)
+    (#x1d7d8 #x1d7e1 #x1d7d8)
+    (#x1d7e2 #x1d7eb #x1d7e2)
+    (#x1d7ec #x1d7f5 #x1d7ec)
+    (#x1d7f6 #x1d7ff #x1d7f6)
+    (#x1e140 #x1e149 #x1e140)
+    (#x1e2f0 #x1e2f9 #x1e2f0)
+    (#x1e4f0 #x1e4f9 #x1e4f0)
+    (#x1e950 #x1e959 #x1e950)
+    (#x1fbf0 #x1fbf9 #x1fbf0))))
+
+(defun $character-code-cl ()
+  (runtime-function-definition '$character-code-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$character-code-cl 'miricl-runtime:checked-character-value))))
 
 (define-runtime-function $character-code (($x :nullable-object)) (i32)
-  #@(if (i32.ne (call $tag (local.get $x)) (i32.const 16))
-    (then (call $type-fail (local.get $x)
-      (call $symbol (i32.const ,(runtime-symbol-id 'character)))
-      (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(call $value-n (local.get $x)))
+  #@(call $value-n (call $character-code-cl (local.get $x))))
 
 (define-runtime-function $character-compare (($args :nullable-object) ($op i32)) (:nullable-object)
   (:locals ($scan :nullable-object) ($pairs :nullable-object)
@@ -112,27 +176,14 @@
   #@(if (i32.eq (local.get $code) (local.get $upper)) (then (return (local.get $x))))
   #@(call $node (i32.const 16) (local.get $upper) (ref.null eq) (ref.null eq) (ref.null eq)))
 
+(defun $character-digit-code-cl ()
+  (runtime-function-definition '$character-digit-code-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$character-digit-code-cl 'miricl-runtime:character-digit-code-value))))
+
 (define-runtime-function $character-digit-weight (($code i32)) (i32)
-  (:locals ($low i32) ($high i32) ($mid i32) ($offset i32) ($start i32) ($end i32))
-  #@(if (i32.and (i32.ge_u (local.get $code) (i32.const 48)) (i32.le_u (local.get $code) (i32.const 57)))
-    (then (return (i32.sub (local.get $code) (i32.const 48)))))
-  #@(if (i32.and (i32.ge_u (local.get $code) (i32.const 65)) (i32.le_u (local.get $code) (i32.const 90)))
-    (then (return (i32.sub (local.get $code) (i32.const 55)))))
-  #@(if (i32.and (i32.ge_u (local.get $code) (i32.const 97)) (i32.le_u (local.get $code) (i32.const 122)))
-    (then (return (i32.sub (local.get $code) (i32.const 87)))))
-  #@(local.set $high (i32.const ,(/ (length *character-digit-ranges*) 3)))
-  #@(block $done (loop $search (br_if $done (i32.ge_u (local.get $low) (local.get $high)))
-    (local.set $mid (i32.shr_u (i32.add (local.get $low) (local.get $high)) (i32.const 1)))
-    (local.set $offset (i32.mul (local.get $mid) (i32.const 3)))
-    (local.set $start (array.get $digits (global.get $character-digit-ranges) (local.get $offset)))
-    (local.set $end (array.get $digits (global.get $character-digit-ranges) (i32.add (local.get $offset) (i32.const 1))))
-    (if (i32.lt_u (local.get $code) (local.get $start)) (then (local.set $high (local.get $mid)))
-      (else (if (i32.gt_u (local.get $code) (local.get $end))
-        (then (local.set $low (i32.add (local.get $mid) (i32.const 1))))
-        (else (return (i32.sub (local.get $code)
-          (array.get $digits (global.get $character-digit-ranges) (i32.add (local.get $offset) (i32.const 2)))))))))
-    (br $search)))
-  #@(i32.const -1))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $character-digit-code-cl (call $int (local.get $code))
+      (global.get $character-digit-table))))))
 
 (define-runtime-function $character-digit-apply (($id i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($x :nullable-object) ($radix :nullable-object) ($base i32) ($weight i32))
@@ -165,6 +216,7 @@
 
 (define-runtime-function $initialize-character-properties () ()
   (:locals ($names :nullable-object) ($entry :nullable-object))
+  #@(global.set $character-digit-table (call $text (global.get $character-digit-ranges)))
   #@(call $reset-library-strings)
   #@(global.set $cursor (i32.const 0))
   #@(global.set $limit (i32.const ,(length (character-property-bytes))))
@@ -173,6 +225,7 @@
   #@(data.drop $character-property-data)
   #@(global.set $character-alpha-ranges (ref.as_non_null
     (struct.get $obj $digits (ref.cast (ref $obj) (call $read-library-literal)))))
+  #@(global.set $character-alpha-table (call $text (global.get $character-alpha-ranges)))
   #@(global.set $character-names (call $read-library-literal))
   #@(call $reset-library-strings)
   #@(global.set $character-name-index (array.new_default $objects
@@ -183,23 +236,13 @@
     #@(array.set $objects (global.get $character-name-index)
       (call $natural-count (call $car (local.get $entry))) (call $cdr (local.get $entry)))))
 
+(defun $character-alpha-code-cl ()
+  (runtime-function-definition '$character-alpha-code-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$character-alpha-code-cl 'miricl-runtime:character-alpha-code-p :result :truth))))
+
 (define-runtime-function $character-alpha-code (($code i32)) (i32)
-  (:locals ($low i32) ($high i32) ($mid i32) ($offset i32) ($start i32) ($end i32))
-  #@(if (i32.lt_u (local.get $code) (i32.const 128))
-    (then (return (i32.or
-      (i32.and (i32.ge_u (local.get $code) (i32.const 65)) (i32.le_u (local.get $code) (i32.const 90)))
-      (i32.and (i32.ge_u (local.get $code) (i32.const 97)) (i32.le_u (local.get $code) (i32.const 122)))))))
-  #@(local.set $high (i32.shr_u (array.len (global.get $character-alpha-ranges)) (i32.const 1)))
-  #@(block $done (loop $search (br_if $done (i32.ge_u (local.get $low) (local.get $high)))
-    (local.set $mid (i32.shr_u (i32.add (local.get $low) (local.get $high)) (i32.const 1)))
-    (local.set $offset (i32.shl (local.get $mid) (i32.const 1)))
-    (local.set $start (array.get $digits (global.get $character-alpha-ranges) (local.get $offset)))
-    (local.set $end (array.get $digits (global.get $character-alpha-ranges) (i32.add (local.get $offset) (i32.const 1))))
-    (if (i32.lt_u (local.get $code) (local.get $start)) (then (local.set $high (local.get $mid)))
-      (else (if (i32.gt_u (local.get $code) (local.get $end))
-        (then (local.set $low (i32.add (local.get $mid) (i32.const 1))))
-        (else (return (i32.const 1)))))) (br $search)))
-  #@(i32.const 0))
+  #@(call $character-alpha-code-cl (call $int (local.get $code))
+    (global.get $character-alpha-table)))
 
 (define-runtime-function $character-alphanumeric-code (($code i32)) (i32)
   #@(if (call $character-alpha-code (local.get $code)) (then (return (i32.const 1))))
@@ -233,8 +276,7 @@
     (else (ref.null eq))))
 
 (define-runtime-function $character-name-code (($name :nullable-object)) (i32)
-  (:locals ($names :nullable-object) ($entry :nullable-object)
-           ($data :digits) ($length i32) ($position i32) ($code i32) ($digit i32))
+  (:locals ($names :nullable-object) ($entry :nullable-object))
   #@(local.set $names (global.get $character-names))
   (wat-list-loop ($names)
     #@(local.set $entry (call $car (local.get $names)))
@@ -245,31 +287,14 @@
     (then (return (i32.const 10))))
   #@(if (call $string-fold-equal (local.get $name) ,(wat-text-literal "Nul"))
     (then (return (i32.const 0))))
-  ;; Accept the common Unicode character names U+HHHH and UHHHH, with four
-  ;; to six hexadecimal digits. The reader and NAME-CHAR share this lookup.
-  #@(local.set $data (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $name)))))
-  #@(local.set $length (array.len (local.get $data)))
-  #@(if (i32.ge_u (local.get $length) (i32.const 5))
-    (then
-      (if (i32.eq (i32.or (array.get $digits (local.get $data) (i32.const 0)) (i32.const 32)) (i32.const 117))
-        (then
-          (local.set $position (i32.const 1))
-          (if (i32.eq (array.get $digits (local.get $data) (i32.const 1)) (i32.const 43))
-            (then (local.set $position (i32.const 2))))
-          (if (i32.or
-                (i32.lt_u (i32.sub (local.get $length) (local.get $position)) (i32.const 4))
-                (i32.gt_u (i32.sub (local.get $length) (local.get $position)) (i32.const 6)))
-            (then (return (i32.const -1))))
-          (block $done (loop $next
-            (br_if $done (i32.eq (local.get $position) (local.get $length)))
-            (local.set $digit (call $digit-value (array.get $digits (local.get $data) (local.get $position))))
-            (if (i32.ge_u (local.get $digit) (i32.const 16)) (then (return (i32.const -1))))
-            (local.set $code (i32.add (i32.shl (local.get $code) (i32.const 4)) (local.get $digit)))
-            (local.set $position (i32.add (local.get $position) (i32.const 1)))
-            (br $next)))
-          (if (i32.lt_u (local.get $code) (i32.const 1114112))
-            (then (return (local.get $code))))))))
-  #@(i32.const -1))
+  ;; The CL parser handles the target's Unicode-name extension after table
+  ;; aliases have had priority. NAME has already been made a simple string.
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $unicode-character-name-code-cl (local.get $name))))))
+
+(defun $unicode-character-name-code-cl ()
+  (runtime-function-definition '$unicode-character-name-code-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$unicode-character-name-code-cl 'miricl-runtime:unicode-character-name-code))))
 
 (define-runtime-function $character-name-apply (($id i32) ($x :nullable-object)) (:nullable-object)
   (:locals ($code i32) ($name :nullable-object))
@@ -286,12 +311,14 @@
 (define-runtime-section character-runtime-wat ()
   #@(data $character-property-data ,(character-property-data))
   #@(global $character-alpha-ranges (mut (ref $digits)) (array.new_default $digits (i32.const 0)))
+  #@(global $character-alpha-table (mut (ref null eq)) (ref.null eq))
+  #@(global $character-digit-table (mut (ref null eq)) (ref.null eq))
   #@(global $character-names (mut (ref null eq)) (ref.null eq))
   #@(global $character-name-index (mut (ref $objects)) (array.new_default $objects (i32.const 0)))
   #@(global $character-digit-ranges (ref $digits)
     (array.new_fixed $digits ,(length *character-digit-ranges*)
       ,(runtime-wat-forms (loop for value in *character-digit-ranges* collect `(i32.const ,value)))))
-  ($character-code) ($character-compare) ($character-apply) ($character-case-native)
-  ($character-digit-weight) ($character-digit-apply) ($initialize-character-properties)
-  ($character-alpha-code) ($character-alphanumeric-code) ($character-property-apply)
-  ($character-name) ($character-name-code) ($character-name-apply))
+  ($character-code-cl) ($character-code) ($character-compare) ($character-apply) ($character-case-native)
+  ($character-digit-code-cl) ($character-digit-weight) ($character-digit-apply) ($initialize-character-properties)
+  ($character-alpha-code-cl) ($character-alpha-code) ($character-alphanumeric-code) ($character-property-apply)
+  ($character-name) ($unicode-character-name-code-cl) ($character-name-code) ($character-name-apply))

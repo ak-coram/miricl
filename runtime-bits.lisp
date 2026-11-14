@@ -2,10 +2,16 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defun $require-integer-cl ()
+  (runtime-function-definition '$require-integer-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$require-integer-cl 'miricl-runtime:checked-integer-value))))
+
 (define-runtime-function $require-integer (($x :nullable-object)) (:object)
+  ;; Before function installation, bootstrap constants use the native type boundary.
+  #@(if (global.get $cl-kernel-functions-ready)
+    (then (return (ref.as_non_null (call $require-integer-cl (local.get $x))))))
   #@(if (i32.ne (call $tag (local.get $x)) (i32.const 1))
-    (then (call $type-fail (local.get $x) (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
-      (i32.const ,(runtime-error-code :expected-designator)))))
+    (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'integer)))))
   #@(ref.as_non_null (local.get $x)))
 
 (define-runtime-function $ash-native (($x :nullable-object) ($count :nullable-object)) (:nullable-object)
@@ -101,22 +107,14 @@
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
   #@(call $int (local.get $result)))
 
+(defun $logbitp-native-cl ()
+  (runtime-function-definition '$logbitp-native-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$logbitp-native-cl 'miricl-runtime:integer-bit-present-p))))
+
 (define-runtime-function $logbitp-native (($index :nullable-object) ($x :nullable-object)) (:nullable-object)
-  (:locals ($value :object) ($bit i32) ($word i32) ($i i32) ($borrow i32) ($v i32) ($negative i32))
-  #@(local.set $value (call $require-integer (local.get $x)))
-  #@(local.set $bit (call $natural-count (local.get $index)))
-  #@(local.set $negative (i32.lt_s (call $value-n (local.get $value)) (i32.const 0)))
-  #@(if (i32.ge_u (local.get $bit) (call $bitlength (local.get $value))) (then (return (call $bool (local.get $negative)))))
-  #@(local.set $word (i32.div_u (local.get $bit) (i32.const 15)))
-  #@(local.set $v (call $digit (local.get $value) (local.get $word)))
-  #@(if (local.get $negative)
-    (then
-      (local.set $borrow (i32.const 1))
-      (block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $word)))
-        (if (call $digit (local.get $value) (local.get $i)) (then (local.set $borrow (i32.const 0)) (br $done)))
-        (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-      (local.set $v (i32.xor (i32.sub (local.get $v) (local.get $borrow)) (i32.const -1)))))
-  #@(call $bool (i32.and (i32.shr_u (local.get $v) (i32.rem_u (local.get $bit) (i32.const 15))) (i32.const 1))))
+  #@(local.set $x (call $require-integer (local.get $x)))
+  #@(drop (call $natural-count (local.get $index)))
+  #@(call $logbitp-native-cl (local.get $index) (local.get $x)))
 
 (define-runtime-function $boole-word (($op i32) ($a i32) ($b i32)) (i32)
   ;; Dispatch once to the native operation instead of expanding the truth table
@@ -269,5 +267,5 @@
   #@(local.get $result))
 
 (define-runtime-section integer-bits-runtime-wat ()
-  ($require-integer) ($ash-native) ($integer-bit-measure) ($logbitp-native)
+  ($require-integer-cl) ($require-integer) ($ash-native) ($integer-bit-measure) ($logbitp-native-cl) ($logbitp-native)
   ($boole-word) ($boole64-word) ($boole-native) ($integer-bits-apply))

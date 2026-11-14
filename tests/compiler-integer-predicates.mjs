@@ -62,14 +62,16 @@ try {
     for (const safety of [1, 3]) {
       const safe = await compile(`(lambda (x) (declare (optimize (safety ${safety})) (fixnum x) (inline ${operator}))
         (${operator} x))`);
-      assert.ok(safe.includes('native-function-reference'), `${operator} safety ${safety}`);
+      assert.ok(safe.includes(operator === 'zerop' ? 'native-zero-inline' : 'native-function-reference'),
+        `${operator} safety ${safety} retains checked numeric behavior`);
       check(`(handler-case (progn (funcall *predicate-function* :bad) nil) (type-error () t))`);
     }
     const dynamic = await compile(`(lambda (x) (declare (optimize (safety 0)) (fixnum x) (notinline ${operator}))
       (${operator} x))`);
     assert.ok(dynamic.includes('native-function-reference'), `${operator} NOTINLINE`);
     const unrestricted = await compile(`(lambda (x) (declare (optimize (safety 0)) (inline ${operator})) (${operator} x))`);
-    assert.ok(unrestricted.includes('native-function-reference'), `${operator} unknown operands`);
+    assert.ok(unrestricted.includes(operator === 'zerop' ? 'native-zero-inline' : 'native-function-reference'),
+      `${operator} unknown operands retain checked numeric behavior`);
     for (const value of [-(1n << 160n), -(1n << 160n) + 1n, 1n << 160n, (1n << 160n) + 1n])
       assert.equal(vm.evaluate(`(funcall *predicate-function* ${value})`).output,
         expected(value) ? 'T\n' : 'NIL\n', `${operator} bignum`);

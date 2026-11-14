@@ -153,50 +153,72 @@
       (else (struct.set $obj $c (ref.cast (ref $obj) (local.get $x)) (local.get $plist))))
   #@(local.get $plist))
 
-;; Return the value cons, so a present property with value NIL is distinguishable.
+(defun $property-set-location ()
+  (runtime-function-definition '$property-set-location
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$property-set-location 'miricl-runtime:property-set-location))))
+
+;; Keep the empty/first-property cases at the checked boundary. The remaining
+;; traversal runs in CL; its result also identifies malformed storage to check.
 (define-runtime-function $get-properties-native (($plist :nullable-object) ($indicators :nullable-object)) (:nullable-object)
   (:locals ($key :nullable-object) ($value :nullable-object))
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $plist)))
-    (local.set $key (call $car (local.get $plist)))
-    (local.set $value (call $cdr (local.get $plist)))
-    (if (i32.ne (call $tag (local.get $value)) (i32.const 7))
-      (then (call $list-type-error (local.get $value) (i32.const ,(runtime-symbol-id 'cons)))))
-    (if (call $member-eq (local.get $key) (local.get $indicators))
-      (then (return (call $three-values (local.get $key) (call $car (local.get $value)) (local.get $plist)))))
-    (local.set $plist (call $cdr (local.get $value))) (br $next)))
-  #@(call $three-values (ref.null eq) (ref.null eq) (ref.null eq)))
+  #@(if (ref.is_null (local.get $plist))
+    (then (return (call $three-values (ref.null eq) (ref.null eq) (ref.null eq)))))
+  #@(local.set $key (call $car (local.get $plist)))
+  #@(local.set $value (call $cdr (local.get $plist)))
+  #@(if (i32.ne (call $tag (local.get $value)) (i32.const 7))
+    (then (call $list-type-error (local.get $value) (i32.const ,(runtime-symbol-id 'cons)))))
+  #@(if (call $member-eq (local.get $key) (local.get $indicators))
+    (then (return (call $three-values (local.get $key) (call $car (local.get $value)) (local.get $plist)))))
+  #@(local.set $plist (call $cdr (local.get $value)))
+  #@(if (ref.is_null (local.get $plist))
+    (then (return (call $three-values (ref.null eq) (ref.null eq) (ref.null eq)))))
+  #@(local.set $plist (call $property-set-location (local.get $plist) (local.get $indicators)))
+  #@(if (ref.is_null (local.get $plist))
+    (then (return (call $three-values (ref.null eq) (ref.null eq) (ref.null eq)))))
+  #@(local.set $key (call $car (local.get $plist)))
+  #@(local.set $value (call $cdr (local.get $plist)))
+  #@(if (i32.ne (call $tag (local.get $value)) (i32.const 7))
+    (then (call $list-type-error (local.get $value) (i32.const ,(runtime-symbol-id 'cons)))))
+  #@(call $three-values (local.get $key) (call $car (local.get $value)) (local.get $plist)))
+
+(defun $property-value ()
+  (runtime-function-definition '$property-value
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$property-value 'miricl-runtime:property-value))))
 
 (define-runtime-function $getf-native
     (($plist :nullable-object) ($indicator :nullable-object) ($default :nullable-object)) (:nullable-object)
-  (:locals ($cell :nullable-object))
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $plist)))
-    (local.set $cell (call $cdr (local.get $plist)))
-    (if (i32.ne (call $tag (local.get $cell)) (i32.const 7))
-      (then (call $list-type-error (local.get $cell) (i32.const ,(runtime-symbol-id 'cons)))))
-    (if (ref.eq (call $car (local.get $plist)) (local.get $indicator))
-      (then (return (call $car (local.get $cell)))))
-    (local.set $plist (call $cdr (local.get $cell))) (br $next)))
-  #@(local.get $default))
+  #@(call $check-apply-list (local.get $plist))
+  #@(call $property-value (local.get $plist) (local.get $indicator) (local.get $default)))
+
+(defun $property-link-cell ()
+  (runtime-function-definition '$property-link-cell
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$property-link-cell 'miricl-runtime:property-link-cell))))
 
 (define-runtime-function $property-list-edit
     (($plist :nullable-object) ($indicator :nullable-object) ($value :nullable-object) ($remove i32)) (:nullable-object i32)
   (:locals ($scan :nullable-object) ($cell :nullable-object) ($previous :nullable-object))
   #@(local.set $scan (local.get $plist))
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $scan)))
+  #@(block $missing (br_if $missing (ref.is_null (local.get $scan)))
     (local.set $cell (call $cdr (local.get $scan)))
     (if (i32.ne (call $tag (local.get $cell)) (i32.const 7))
       (then (call $list-type-error (local.get $cell) (i32.const ,(runtime-symbol-id 'cons)))))
-    (if (ref.eq (call $car (local.get $scan)) (local.get $indicator))
+    (if (i32.eqz (ref.eq (call $car (local.get $scan)) (local.get $indicator)))
       (then
-        (if (local.get $remove)
-          (then
-            (if (ref.is_null (local.get $previous))
-              (then (local.set $plist (call $cdr (local.get $cell))))
-              (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $previous)) (call $cdr (local.get $cell))))))
-          (else (struct.set $obj $a (ref.cast (ref $obj) (local.get $cell)) (local.get $value))))
-        (return (local.get $plist) (i32.const 1))))
-    (local.set $previous (local.get $cell))
-    (local.set $scan (call $cdr (local.get $cell))) (br $next)))
+        ;; Avoid entering the scanner for a single-property miss.
+        (local.set $scan (call $cdr (local.get $cell)))
+        (br_if $missing (ref.is_null (local.get $scan)))
+        (local.set $previous (call $property-link-cell (local.get $cell) (local.get $indicator)))
+        (local.set $scan (call $cdr (local.get $previous)))
+        (br_if $missing (ref.is_null (local.get $scan)))
+        (local.set $cell (call $cdr (local.get $scan)))
+        (if (i32.ne (call $tag (local.get $cell)) (i32.const 7))
+          (then (call $list-type-error (local.get $cell) (i32.const ,(runtime-symbol-id 'cons)))))))
+    (if (local.get $remove)
+      (then (if (ref.is_null (local.get $previous))
+        (then (local.set $plist (call $cdr (local.get $cell))))
+        (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $previous)) (call $cdr (local.get $cell))))))
+      (else (struct.set $obj $a (ref.cast (ref $obj) (local.get $cell)) (local.get $value))))
+    (return (local.get $plist) (i32.const 1)))
   #@(if (i32.eqz (local.get $remove)) (then (local.set $plist
     (call $cons (local.get $indicator) (call $cons (local.get $value) (local.get $plist))))))
   #@(local.get $plist) #@(i32.const 0))
@@ -212,31 +234,35 @@
   (runtime-function-definition '$property-cell
     (wat-fragment (miricl-cross:runtime-kernel-wat '$property-cell 'miricl-runtime:property-cell))))
 
+(defun $put-property-box ()
+  (runtime-function-definition '$put-property-box
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$put-property-box 'miricl-runtime:put-property-box))))
+
+(defun $remove-property-box ()
+  (runtime-function-definition '$remove-property-box
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$remove-property-box 'miricl-runtime:remove-property-box :result :truth))))
+
 (define-runtime-function $put-property (($x :nullable-object) ($key :nullable-object) ($value :nullable-object)) (:nullable-object)
-  (:locals ($cell :nullable-object))
-  #@(local.set $cell (call $property-cell (call $symbol-plist (local.get $x)) (local.get $key)))
-  #@(if (ref.is_null (local.get $cell))
-      (then (drop (call $set-symbol-plist (local.get $x)
-        (call $cons (local.get $key) (call $cons (local.get $value) (call $symbol-plist (local.get $x)))))))
-      (else (struct.set $obj $a (ref.cast (ref $obj) (local.get $cell)) (local.get $value))))
-  #@(local.get $value))
+  (:locals ($plist :nullable-object) ($box :nullable-object) ($result :nullable-object))
+  #@(local.set $plist (call $symbol-plist (local.get $x)))
+  #@(local.set $box (call $cons (local.get $plist) (ref.null eq)))
+  #@(local.set $result (call $put-property-box (local.get $box) (local.get $key) (local.get $value)))
+  #@(if (i32.eqz (ref.eq (local.get $plist) (call $car (local.get $box))))
+    (then (drop (call $set-symbol-plist (local.get $x) (call $car (local.get $box))))))
+  #@(local.get $result))
 
 (define-runtime-function $remprop (($x :nullable-object) ($key :nullable-object)) (i32)
-  (:locals ($plist :nullable-object) ($previous :nullable-object))
+  (:locals ($plist :nullable-object) ($box :nullable-object) ($found i32))
   #@(local.set $plist (call $symbol-plist (local.get $x)))
-  #@(block $done (loop $next (br_if $done (ref.is_null (local.get $plist)))
-    (if (ref.eq (call $car (local.get $plist)) (local.get $key))
-        (then (if (ref.is_null (local.get $previous))
-                  (then (drop (call $set-symbol-plist (local.get $x) (call $cdr (call $cdr (local.get $plist))))))
-                  (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $previous)) (call $cdr (call $cdr (local.get $plist))))))
-              (return (i32.const 1))))
-    (local.set $previous (call $cdr (local.get $plist)))
-    (local.set $plist (call $cdr (local.get $previous))) (br $next)))
-  #@(i32.const 0))
+  #@(local.set $box (call $cons (local.get $plist) (ref.null eq)))
+  #@(local.set $found (call $remove-property-box (local.get $box) (local.get $key)))
+  #@(if (i32.eqz (ref.eq (local.get $plist) (call $car (local.get $box))))
+    (then (drop (call $set-symbol-plist (local.get $x) (call $car (local.get $box))))))
+  #@(local.get $found))
 
-(define-runtime-function $copy-list (($list :nullable-object)) (:nullable-object)
-  #@(if (ref.is_null (local.get $list)) (then (return (ref.null eq))))
-  #@(call $cons (call $car (local.get $list)) (call $copy-list (call $cdr (local.get $list)))))
+(defun $copy-list ()
+  (runtime-function-definition '$copy-list
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$copy-list 'miricl-runtime:copy-proper-list))))
 
 ;; Function-name bindings are separate for FOO and (SETF FOO).
 (define-runtime-function $function-documentation
@@ -362,6 +388,47 @@
       (then (global.set $undefined-name (local.get $name)) ,(wat-fail :undefined-function)))
   #@(call $binding-value (local.get $binding)))
 
+(define-runtime-function $canonical-builtin-function (($id i32) ($setf i32)) (:nullable-object)
+  (:locals ($slot i32) ($function :nullable-object))
+  ;; Only checked core builtin IDs reach this internal factory. The same
+  ;; objects are installed publicly during bootstrap and retained privately
+  ;; for sealed runtime workers, including references needed before install.
+  #@(local.set $slot (i32.add (i32.shl (local.get $id) (i32.const 1)) (local.get $setf)))
+  #@(local.set $function (array.get $objects (global.get $canonical-builtin-functions) (local.get $slot)))
+  #@(if (ref.is_null (local.get $function))
+    (then (local.set $function (call $node (i32.const 8)
+      (if (result i32) (local.get $setf)
+        (then (i32.sub (i32.const -1) (local.get $id)))
+        (else (i32.add (local.get $id) (i32.const 1))))
+      (ref.null eq) (ref.null eq) (ref.null eq)))
+      (array.set $objects (global.get $canonical-builtin-functions) (local.get $slot) (local.get $function))))
+  #@(local.get $function))
+
+(define-runtime-function $kernel-function-reference (($name :nullable-object)) (:nullable-object)
+  (:locals ($symbol :nullable-object) ($setf i32) ($id i32) ($mask i32))
+  ;; This resolver is used only by trusted runtime-kernel FUNCTION references.
+  ;; Explicit FDEFINITION and user/application compilation remain dynamic.
+  ;; Validate before reading IDs or indexing the finite core builtin cache.
+  #@(local.set $symbol (call $function-name-symbol (local.get $name)))
+  #@(local.set $setf (i32.eqz (call $symbolp (local.get $name))))
+  #@(local.set $id (call $id (local.get $symbol)))
+  #@(local.set $mask (i32.shl (i32.const 1) (local.get $setf)))
+  #@(if (i32.and (call $native-function-flags (local.get $id)) (local.get $mask))
+    (then (return (call $canonical-builtin-function (local.get $id) (local.get $setf)))))
+  ;; Private library functions and names without a target builtin keep their
+  ;; existing binding contract, regardless of host FBOUNDP or package names.
+  #@(call $fdefinition (local.get $name)))
+
+(define-runtime-function $kernel-setter-function-reference (($id i32)) (:nullable-object)
+  ;; The host linker proves the literal is exactly (SETF core-symbol).
+  ;; Preserve that reference without allocating its name conses per call.
+  (wat-fail-when #@(i32.ge_u (local.get $id) (i32.const ,(length *runtime-symbols*))) :malformed-form)
+  #@(if (i32.and (call $native-function-flags (local.get $id)) (i32.const 2))
+    (then (return (call $canonical-builtin-function (local.get $id) (i32.const 1)))))
+  #@(call $fdefinition
+    (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'setf)))
+      (call $cons (call $symbol (local.get $id)) (ref.null eq)))))
+
 (define-runtime-function $store-function (($name :nullable-object) ($value :nullable-object)) (:nullable-object)
   (:locals ($binding :nullable-object) ($setf i32) ($table (ref $symbol-index)) ($id i32))
   #@(call $invalidate-slot-access (local.get $name))
@@ -390,34 +457,27 @@
     (then (drop (call $set-macro (local.get $name) (ref.null eq)))))
   #@(call $store-function (local.get $name) (local.get $value)))
 
+(defun $copy-symbol-cl ()
+  (runtime-function-definition '$copy-symbol-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$copy-symbol-cl 'miricl-runtime:copy-symbol-value))))
+
 (define-runtime-function $copy-symbol (($x :nullable-object) ($properties :nullable-object)) (:nullable-object)
-  (:locals ($copy :nullable-object) ($binding :nullable-object))
-  #@(local.set $copy (call $new-symbol (call $symbol-name (local.get $x)) (ref.null eq)))
+  (:locals ($binding :nullable-object) ($function :nullable-object))
+  #@(call $require-symbol (local.get $x))
   #@(if (i32.eqz (ref.is_null (local.get $properties)))
-      (then (if (call $boundp (local.get $x))
-                (then (drop (call $set-symbol-value (local.get $copy) (call $symbol-value (local.get $x))))))
-            (local.set $binding (call $function-binding (local.get $x)))
-            (if (i32.eqz (ref.is_null (local.get $binding)))
-                (then (drop (call $store-function (local.get $copy) (call $binding-value (local.get $binding))))))
-            (drop (call $set-symbol-plist (local.get $copy) (call $copy-list (call $symbol-plist (local.get $x)))))))
-  #@(local.get $copy))
+    (then (local.set $binding (call $function-binding (local.get $x)))
+      (if (i32.eqz (ref.is_null (local.get $binding))) (then (local.set $function (call $binding-value (local.get $binding)))))))
+  #@(call $copy-symbol-cl (local.get $x) (local.get $properties) (local.get $function)))
+
+(defun $generated-name-cl ()
+  (runtime-function-definition '$generated-name-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$generated-name-cl 'miricl-runtime:generated-symbol-text))))
 
 (define-runtime-function $generated-name (($prefix :nullable-object) ($suffix :nullable-object)) (:nullable-object)
-  (:locals ($digits :digits) ($tail :nullable-object) ($n i32) ($m i32))
   #@(if (i32.eqz (call $stringp-native (local.get $prefix)))
     (then (call $list-type-error (local.get $prefix) (i32.const ,(runtime-symbol-id 'string)))))
-  #@(if (i32.ne (call $tag (local.get $suffix)) (i32.const 1))
-    (then (call $list-type-error (local.get $suffix) (i32.const ,(runtime-symbol-id 'unsigned-byte)))))
-  #@(if (i32.lt_s (call $value-n (local.get $suffix)) (i32.const 0))
-    (then (call $list-type-error (local.get $suffix) (i32.const ,(runtime-symbol-id 'unsigned-byte)))))
-  #@(local.set $prefix (call $string-contents (local.get $prefix)))
-  #@(local.set $tail (call $decimal-text (ref.as_non_null (local.get $suffix))))
-  #@(local.set $n (array.len (struct.get $obj $digits (ref.cast (ref $obj) (local.get $prefix)))))
-  #@(local.set $m (array.len (struct.get $obj $digits (ref.cast (ref $obj) (local.get $tail)))))
-  #@(local.set $digits (array.new_default $digits (i32.add (local.get $n) (local.get $m))))
-  #@(array.copy $digits $digits (local.get $digits) (i32.const 0) (struct.get $obj $digits (ref.cast (ref $obj) (local.get $prefix))) (i32.const 0) (local.get $n))
-  #@(array.copy $digits $digits (local.get $digits) (local.get $n) (struct.get $obj $digits (ref.cast (ref $obj) (local.get $tail))) (i32.const 0) (local.get $m))
-  #@(call $text (local.get $digits)))
+  #@(drop (call $natural-count (local.get $suffix)))
+  #@(call $generated-name-cl (local.get $prefix) (local.get $suffix)))
 
 (define-runtime-function $symbol-apply (($id i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($a :nullable-object) ($b :nullable-object) ($rest :nullable-object)
@@ -569,14 +629,12 @@
     (local.set $flags (call $native-function-flags (local.get $id)))
     (if (i32.and (local.get $flags) (i32.const 1))
       (then (drop (call $store-function (call $symbol (local.get $id))
-        (call $node (i32.const 8) (i32.add (local.get $id) (i32.const 1))
-          (ref.null eq) (ref.null eq) (ref.null eq))))))
+        (call $canonical-builtin-function (local.get $id) (i32.const 0))))))
     (if (i32.and (local.get $flags) (i32.const 2))
       (then (drop (call $store-function
         (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'setf)))
           (call $cons (call $symbol (local.get $id)) (ref.null eq)))
-        (call $node (i32.const 8) (i32.sub (i32.const -1) (local.get $id))
-          (ref.null eq) (ref.null eq) (ref.null eq))))))
+        (call $canonical-builtin-function (local.get $id) (i32.const 1))))))
     (local.set $id (i32.add (local.get $id) (i32.const 1))) (br $next))))
 
 (define-runtime-section symbol-functions-runtime-wat ()
@@ -594,6 +652,8 @@
   ($global-binding) ($register-global-binding)
   #@(global $function-bindings (ref $symbol-index) ,(empty-symbol-index-wat))
   #@(global $setf-bindings (ref $symbol-index) ,(empty-symbol-index-wat))
+  #@(global $canonical-builtin-functions (ref $objects)
+    (array.new_default $objects (i32.const ,(* 2 (length *runtime-symbols*)))))
   #@(global $nil-plist (mut (ref null eq)) (ref.null eq))
   #@(global $gentemp-counter (mut (ref null eq)) (ref.null eq))
   #@(global $setf-functions (mut (ref null eq)) (ref.null eq))
@@ -607,9 +667,9 @@
   #@(global $unbound-symbol (mut i32) (i32.const 0))
   #@(func (export "unbound-symbol") (result i32) (global.get $unbound-symbol))
   ($require-symbol) ($check-variable) ($constant-symbol-p) ($install-keyword) ($clear-binding-cache) ($value-binding) ($boundp) ($symbol-value)
-  ($set-symbol-value) ($define-constant) ($makunbound) ($symbol-plist) ($set-symbol-plist) ($get-properties-native) ($getf-native) ($property-list-edit) ($property-list-edit-values)
-  ($property-cell) ($put-property) ($remprop) ($copy-list)
+  ($set-symbol-value) ($define-constant) ($makunbound) ($symbol-plist) ($set-symbol-plist) ($property-set-location) ($get-properties-native) ($property-value) ($getf-native) ($property-link-cell) ($property-list-edit) ($property-list-edit-values)
+  ($property-cell) ($put-property-box) ($remove-property-box) ($put-property) ($remprop) ($copy-list)
   ($function-documentation) ($function-lambda-expression-native) ($function-name-symbol) ($native-function-flags) ($fdefinition-accessor)
-  ($function-binding) ($fdefinition) ($store-function) ($set-fdefinition)
-  ($copy-symbol) ($generated-name) ($symbol-apply) ($symbol-setter)
+  ($function-binding) ($fdefinition) ($canonical-builtin-function) ($kernel-function-reference) ($kernel-setter-function-reference) ($store-function) ($set-fdefinition)
+  ($copy-symbol-cl) ($copy-symbol) ($generated-name-cl) ($generated-name) ($symbol-apply) ($symbol-setter)
   ($initialize-symbol-functions))

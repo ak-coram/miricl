@@ -1,6 +1,54 @@
-;;;; Character semantics compared with the host, including nonadjacent duplicates.
+;;;; Character semantics, including target scripts and nonadjacent duplicates.
 (in-package #:miricl-test)
 (in-suite :miricl)
+
+;; The target's decimal repertoire is pinned to Unicode 15.1, whereas CCL's
+;; DIGIT-CHAR-P recognizes only ASCII. Keep this slow reference independent of
+;; the runtime's packed ranges and binary search. These are the zero characters
+;; of all ten-character Nd runs in UnicodeData.txt (decimal value, field 6).
+;; https://www.unicode.org/Public/15.1.0/ucd/UnicodeData.txt
+(defparameter *reference-decimal-zero-codes*
+  '(#x30 #x660 #x6f0 #x7c0 #x966 #x9e6 #xa66 #xae6 #xb66 #xbe6 #xc66 #xce6
+    #xd66 #xde6 #xe50 #xed0 #xf20 #x1040 #x1090 #x17e0 #x1810 #x1946 #x19d0
+    #x1a80 #x1a90 #x1b50 #x1bb0 #x1c40 #x1c50 #xa620 #xa8d0 #xa900 #xa9d0
+    #xa9f0 #xaa50 #xabf0 #xff10 #x104a0 #x10d30 #x11066 #x110f0 #x11136
+    #x111d0 #x112f0 #x11450 #x114d0 #x11650 #x116c0 #x11730 #x118e0 #x11950
+    #x11c50 #x11d50 #x11da0 #x11f50 #x16a60 #x16ac0 #x16b50 #x1d7ce
+    #x1d7d8 #x1d7e2 #x1d7ec #x1d7f6 #x1e140 #x1e2f0 #x1e4f0 #x1e950 #x1fbf0))
+
+(defun reference-target-digit-char-p (character &optional (radix 10))
+  (let* ((code (char-code character))
+         (weight (or (loop for zero in *reference-decimal-zero-codes*
+                           when (<= zero code (+ zero 9)) return (- code zero))
+                     (cond ((char<= #\A character #\Z) (+ 10 (- code (char-code #\A))))
+                           ((char<= #\a character #\z) (+ 10 (- code (char-code #\a))))))))
+    (and weight (< weight radix) weight)))
+
+(defun reference-target-alphanumericp (character)
+  ;; Alphabetic scripts are still generated from this host's ALPHA-CHAR-P.
+  (or (alpha-char-p character) (not (null (reference-target-digit-char-p character)))))
+
+(defun reference-target-case (character direction)
+  ;; Host case maps supply the target's repertoire, restricted to reciprocal
+  ;; pairs for Common Lisp case operations. Do not query production helpers.
+  (let* ((up-p (eq direction :up))
+         (mapped (if up-p (char-upcase character) (char-downcase character))))
+    (if (char= character (if up-p (char-downcase mapped) (char-upcase mapped)))
+        mapped character)))
+
+(defun reference-target-string-capitalize (text &key (start 0) end)
+  ;; Determine each word start from the original bounded substring, without
+  ;; using either the host's STRING-CAPITALIZE or the runtime's state machine.
+  (let* ((source (string text)) (result (copy-seq source)))
+    (loop for index from start below (or end (length result))
+          for character = (char source index)
+          when (reference-target-alphanumericp character) do
+            (setf (char result index)
+                  (reference-target-case character
+                    (if (or (= index start)
+                            (not (reference-target-alphanumericp (char source (1- index)))))
+                        :up :down))))
+    result))
 
 (test native-character-upcase
   (m:with-interpreter (vm)
@@ -129,7 +177,15 @@
       (loop for start from 0 to (length text) do
         (loop for end from start to (length text) do
           (let ((form `(string-capitalize ,text :start ,start :end ,end)))
-            (is (equal (eval form) (m:evaluate vm form)))))))
+            (is (equal (reference-target-string-capitalize text :start start :end end)
+                       (m:evaluate vm form)))))))
+    ;; Digits start and continue words even on hosts which do not recognize
+    ;; these target scripts. Punctuation still delimits words; START resets one.
+    (dolist (entry '(("١A-١A" "١a-١a") ("A١B" "A١b") ("१A １B 𝟘C" "१a １b 𝟘c")))
+      (is (equal (second entry) (reference-target-string-capitalize (first entry))))
+      (is (equal (second entry) (m:evaluate vm `(string-capitalize ,(first entry)))))
+      (is (equal (second entry) (m:evaluate vm `(nstring-capitalize (copy-seq ,(first entry)))))))
+    (is (equal "١A" (m:evaluate vm '(string-capitalize "١a" :start 1))))
     (dolist (form '((string-capitalize 'kludgy-hash-search) (string-capitalize #\a)
                     (string-capitalize nil)
                     (string-capitalize "ABC" :start 0 :start 2 :end nil :end 0)
@@ -156,16 +212,19 @@
                                       (char/= char (char-downcase char)))) collect code)
              (loop for boundary in miricl::*character-alpha-ranges*
                    append (list (1- boundary) boundary (1+ boundary)))
+             (loop for zero in *reference-decimal-zero-codes*
+                   append (loop for code from (1- zero) to (+ zero 10) collect code))
              '(55295 57344 65535 65536 128578 1114111)))
            (characters (map 'string #'code-char (sort (remove-duplicates codes) #'<))))
       (dolist (predicate '(upper-case-p lower-case-p both-case-p alpha-char-p alphanumericp graphic-char-p))
         (is (equal (coerce (mapcar (lambda (c) (if
                            (case predicate
-                             (upper-case-p (and (char= c (m::ansi-character-upcase c))
-                                                (char/= c (m::ansi-character-downcase c))))
-                             (lower-case-p (and (char= c (m::ansi-character-downcase c))
-                                                (char/= c (m::ansi-character-upcase c))))
-                             (both-case-p (char/= (m::ansi-character-upcase c) (m::ansi-character-downcase c)))
+                             (upper-case-p (and (char= c (reference-target-case c :up))
+                                                (char/= c (reference-target-case c :down))))
+                             (lower-case-p (and (char= c (reference-target-case c :down))
+                                                (char/= c (reference-target-case c :up))))
+                             (both-case-p (char/= (reference-target-case c :up) (reference-target-case c :down)))
+                             (alphanumericp (reference-target-alphanumericp c))
                              (otherwise (funcall predicate c))) #\1 #\0))
                                   (coerce characters 'list)) 'string)
           (m:evaluate vm `(coerce (mapcar (lambda (c) (if (,predicate c) #\1 #\0))
@@ -200,10 +259,11 @@
     (let ((characters (coerce
             (loop for code below (min char-code-limit #x110000)
                   for char = (code-char code)
-                  when (and char (or (< code 128) (digit-char-p char 36))) collect char) 'string))
+                  when (and char (or (< code 128) (digit-char-p char 36)
+                                    (reference-target-digit-char-p char 36))) collect char) 'string))
           (weights (append (loop for i below 40 collect i) (list (expt 2 100)))))
       (loop for radix from 2 to 36 do
-        (is (equal (mapcar (lambda (c) (digit-char-p c radix)) (coerce characters 'list))
+        (is (equal (mapcar (lambda (c) (reference-target-digit-char-p c radix)) (coerce characters 'list))
           (m:evaluate vm `(mapcar (lambda (c) (digit-char-p c ,radix)) (coerce ,characters 'list)))))
         (is (equal (mapcar (lambda (n) (digit-char n radix)) weights)
           (m:evaluate vm `(mapcar (lambda (n) (digit-char n ,radix)) ',weights))))))

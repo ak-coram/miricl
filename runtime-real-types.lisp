@@ -1,57 +1,107 @@
-;;;; Native subtype intervals over rationals and the two IEEE float formats.
+;;;; Real interval algorithms in Common Lisp above checked numeric services.
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-;; Mask bits denote rational, single, and double representations. Target bits
-;; 16 and 32 require integer or ratio membership. Eight has no real members;
-;; zero means this interval engine is inapplicable.
+(defun $real-type-interval-cl ()
+  (runtime-function-definition '$real-type-interval-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$real-type-interval-cl 'miricl-runtime:real-type-interval-value))))
+(defun $float-interval-bound-cl ()
+  (runtime-function-definition '$float-interval-bound-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$float-interval-bound-cl 'miricl-runtime:float-interval-bound-value))))
+(defun $real-subtype-query-cl ()
+  (runtime-function-definition '$real-subtype-query-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$real-subtype-query-cl 'miricl-runtime:real-subtype-query-value))))
+
+(define-runtime-function $real-type-metadata-function () (:nullable-object)
+  #@(if (ref.is_null (global.get $real-type-metadata-function))
+    (then (global.set $real-type-metadata-function
+      (call $node (i32.const 8) (i32.const ,(+ +clos-primitive-base+ (clos-primitive-op '%%real-type-metadata)))
+        (ref.null eq) (ref.null eq) (ref.null eq)))))
+  #@(global.get $real-type-metadata-function))
+
+(define-runtime-function $real-type-metadata-primitive (($op i32) ($args :nullable-object)) (:nullable-object)
+  (:locals ($tail :nullable-object))
+  #@(local.set $tail (local.get $args))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $tail)) (i32.const 7)) :wrong-arity)
+  #@(local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $tail)) (i32.const 7)) :wrong-arity)
+  #@(local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $tail)) (i32.const 7)) :wrong-arity)
+  #@(local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+  (wat-fail-when #@(i32.eqz (ref.is_null (local.get $tail))) :wrong-arity)
+  #@(call $real-type-metadata-value (call $car (local.get $args))
+    (call $car (call $cdr (local.get $args))) (call $car (call $cdr (call $cdr (local.get $args))))))
+
+(define-runtime-function $real-type-metadata-call (($args :nullable-object)) (:nullable-object)
+  #@(call $real-type-metadata-primitive (i32.const 0) (local.get $args)))
+
+;; Checked class metadata, IEEE representation operations, and ordinary TYPEP.
+;; Interval construction, rounding direction and subtype decisions live in CL.
+(define-runtime-function $real-type-metadata-value
+    (($selector :nullable-object) ($value :nullable-object) ($argument :nullable-object)) (:nullable-object)
+  (:locals ($code i64) ($kind i32) ($adjacent f64))
+  (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :malformed-type)
+  #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
+  (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 5)) :malformed-type)
+  #@(call $clear-values)
+  #@(if (i64.eqz (local.get $code))
+    (then (return_call $array-type-metadata-value (call $int (i32.const 2)) (local.get $value) (ref.null eq))))
+  #@(if (i64.eq (local.get $code) (i64.const 1))
+    (then
+      (local.set $kind (call $tag (local.get $value)))
+      ,(wat-fail-when #@(i32.and (i32.ne (local.get $kind) (i32.const 3)) (i32.ne (local.get $kind) (i32.const 4))) :malformed-type)
+      (local.set $adjacent (call $to-float (ref.as_non_null (local.get $value))))
+      ,(wat-fail-when #@(i64.eq (i64.and (i64.reinterpret_f64 (local.get $adjacent)) (i64.const 9218868437227405312))
+        (i64.const 9218868437227405312)) :invalid-float)
+      (local.set $adjacent (call $adjacent-float (call $to-float (ref.as_non_null (local.get $value))) (local.get $kind)
+        (i32.eqz (ref.is_null (local.get $argument)))))
+      ;; The CL worker uses +/-1 only as private out-of-range edge sentinels.
+      ;; Never construct an invalid target infinity object.
+      (if (f64.eq (f64.abs (local.get $adjacent)) (f64.const inf))
+        (then (return (call $int (select (i32.const -1) (i32.const 1) (ref.is_null (local.get $argument)))))))
+      (return (call $float (local.get $kind) (local.get $adjacent)))))
+  #@(if (i64.eq (local.get $code) (i64.const 2))
+    (then (call $check-type-control-structure (local.get $argument))
+      (return (call $bool (call $typep (local.get $value) (local.get $argument))))))
+  #@(if (i64.le_u (local.get $code) (i64.const 4))
+    (then (return_call $array-type-metadata-value (local.get $selector) (local.get $value) (local.get $argument))))
+  (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $value))) :malformed-type)
+  (wat-fail-when #@(i32.and
+    (i64.ne (call $scalar-integer-value (ref.as_non_null (local.get $value))) (i64.const 3))
+    (i64.ne (call $scalar-integer-value (ref.as_non_null (local.get $value))) (i64.const 4))) :malformed-type)
+  #@(local.set $kind (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $value)))))
+  #@(call $float (local.get $kind)
+    (if (result f64) (i32.eq (local.get $kind) (i32.const 3))
+      (then (f64.const 3.4028234663852886e38)) (else (f64.const 1.7976931348623157e308)))))
+
+(define-runtime-function $real-type-worker
+    (($a :nullable-object) ($b :nullable-object) ($mode i32)) (:nullable-object)
+  (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object))
+  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $count (global.get $value-count))
+  #@(block $failed (try_table (catch $transfer $failed)
+    (if (i32.ne (local.get $mode) (i32.const 1))
+      (then (call $check-type-control-structure (local.get $a))
+        (if (i32.eq (local.get $mode) (i32.const 2)) (then (call $check-type-control-structure (local.get $b))))))
+    (local.set $result (if (result (ref null eq)) (i32.eqz (local.get $mode))
+      (then (call $real-type-interval-cl (local.get $a) (local.get $b) (call $real-type-metadata-function)))
+      (else (if (result (ref null eq)) (i32.eq (local.get $mode) (i32.const 1))
+        (then (call $float-interval-bound-cl (local.get $a) (local.get $b) (call $real-type-metadata-function)))
+        (else (call $real-subtype-query-cl (local.get $a) (local.get $b) (call $real-type-metadata-function)))))))
+    (global.set $extra-values (local.get $saved)) (global.set $value-count (local.get $count))
+    (return (local.get $result))))
+  #@(global.set $extra-values (local.get $saved))
+  #@(global.set $value-count (local.get $count))
+  #@(throw $transfer))
+
 (define-runtime-function $real-type-interval
     (($type :nullable-object) ($coverage i32)) (:nullable-object :nullable-object i32 i32)
-  (:locals ($name :nullable-object) ($args :nullable-object) ($lower :nullable-object)
-           ($upper :nullable-object) ($flags i32) ($mask i32))
-  #@(local.set $name (local.get $type))
-  #@(if (i32.eq (call $tag (local.get $type)) (i32.const 23))
-    (then (local.set $name (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $type)))
-      (call $symbol (i32.const ,(runtime-symbol-id :name))))))))
-  #@(if (i32.eq (call $tag (local.get $type)) (i32.const 7))
-    (then (local.set $name (call $car (local.get $type))) (local.set $args (call $cdr (local.get $type)))))
-  (wat-symbol-case #@(call $id (local.get $name))
-    ((nil) #@(local.set $mask (i32.const 8)))
-    (rational #@(local.set $mask (i32.const 1)))
-    (real #@(local.set $mask (i32.const 7)))
-    (float #@(local.set $mask (i32.const 6)))
-    ((short-float single-float) #@(local.set $mask (i32.const 2)))
-    ((double-float long-float) #@(local.set $mask (i32.const 4)))
-    ((integer fixnum bignum bit signed-byte unsigned-byte mod)
-     #@(if (local.get $coverage) (then (local.set $mask (i32.const 16)))))
-    (ratio #@(if (local.get $coverage) (then (local.set $mask (i32.const 32)))))
-    (complex #@(if (local.get $coverage)
-      (then (return (ref.null eq) (ref.null eq) (i32.const 0) (i32.const 8)))))
-    ((number atom t) #@(if (local.get $coverage) (then (local.set $mask (i32.const 7))))))
-  #@(if (i32.eqz (local.get $mask))
-    (then (return (ref.null eq) (ref.null eq) (i32.const 0) (i32.const 0))))
-  #@(call $arity (local.get $args) (i32.const 0) (i32.const 2))
-  #@(if (i32.eqz (ref.is_null (local.get $args)))
-    (then
-      (local.set $lower (call $car (local.get $args)))
-      (if (i32.eq (call $id (local.get $lower)) (i32.const ,(runtime-symbol-id '*)))
-        (then (local.set $lower (ref.null eq)))
-        (else (if (i32.eq (call $tag (local.get $lower)) (i32.const 7))
-          (then (call $arity (local.get $lower) (i32.const 1) (i32.const 1))
-            (local.set $lower (call $car (local.get $lower))) (local.set $flags (i32.const 1))))
-          (drop (call $real (local.get $lower)))))
-      (local.set $args (call $cdr (local.get $args)))
-      (if (i32.eqz (ref.is_null (local.get $args)))
-        (then
-          (local.set $upper (call $car (local.get $args)))
-          (if (i32.eq (call $id (local.get $upper)) (i32.const ,(runtime-symbol-id '*)))
-            (then (local.set $upper (ref.null eq)))
-            (else (if (i32.eq (call $tag (local.get $upper)) (i32.const 7))
-              (then (call $arity (local.get $upper) (i32.const 1) (i32.const 1))
-                (local.set $upper (call $car (local.get $upper)))
-                (local.set $flags (i32.or (local.get $flags) (i32.const 2)))))
-              (drop (call $real (local.get $upper)))))))))
-  #@(local.get $lower) #@(local.get $upper) #@(local.get $flags) #@(local.get $mask))
+  (:locals ($parts (ref $objects)))
+  #@(local.set $parts (call $vector-data (call $real-type-worker (local.get $type) (call $bool (local.get $coverage)) (i32.const 0))))
+  #@(array.get $objects (local.get $parts) (i32.const 0))
+  #@(array.get $objects (local.get $parts) (i32.const 1))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (array.get $objects (local.get $parts) (i32.const 2)))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (array.get $objects (local.get $parts) (i32.const 3))))))
 
 ;; Adjacent representable value, with infinities used only as internal empty
 ;; interval sentinels. Both zero signs have the same ordering for type bounds.
@@ -73,105 +123,19 @@
 
 (define-runtime-function $float-interval-bound
     (($bound :nullable-object) ($exclusive i32) ($kind i32) ($lower i32)) (f64)
-  (:locals ($max f64) ($value f64) ($cmp i32) ($limit :object))
-  #@(local.set $max (if (result f64) (i32.eq (local.get $kind) (i32.const 3))
-    (then (f64.const 3.4028234663852886e38)) (else (f64.const 1.7976931348623157e308))))
-  #@(if (ref.is_null (local.get $bound))
-    (then (return (f64.copysign (local.get $max)
-      (f64.convert_i32_s (select (i32.const -1) (i32.const 1) (local.get $lower)))))))
-  #@(local.set $limit (call $float (local.get $kind) (local.get $max)))
-  #@(if (i32.gt_s (call $compare (local.get $bound) (local.get $limit)) (i32.const 0))
-    (then (local.set $value (local.get $max)))
-    (else
-      (local.set $limit (call $float (local.get $kind) (f64.neg (local.get $max))))
-      (if (i32.lt_s (call $compare (local.get $bound) (local.get $limit)) (i32.const 0))
-        (then (local.set $value (f64.neg (local.get $max))))
-        (else (local.set $value (call $coerce-float (call $real (local.get $bound)) (local.get $kind)))))))
-  #@(local.set $cmp (call $compare (call $float (local.get $kind) (local.get $value)) (local.get $bound)))
-  #@(if (i32.or (if (result i32) (local.get $lower)
-      (then (i32.lt_s (local.get $cmp) (i32.const 0))) (else (i32.gt_s (local.get $cmp) (i32.const 0))))
-      (i32.and (i32.eqz (local.get $cmp)) (i32.ne (local.get $exclusive) (i32.const 0))))
-    (then (local.set $value (call $adjacent-float (local.get $value) (local.get $kind) (local.get $lower)))))
-  #@(local.get $value))
+  (:locals ($result :object))
+  #@(local.set $result (ref.as_non_null (call $real-type-worker (local.get $bound)
+    (call $vector-new (array.new_fixed $objects 3 (call $bool (local.get $exclusive))
+      (call $int (local.get $kind)) (call $bool (local.get $lower)))) (i32.const 1))))
+  #@(if (call $scalar-integer-p (local.get $result))
+    (then (return (f64.copysign (f64.const inf) (f64.convert_i64_s (call $scalar-integer-value (local.get $result)))))))
+  #@(call $to-float (local.get $result)))
 
 (define-runtime-function $real-subtypep (($a :nullable-object) ($b :nullable-object)) (:nullable-object)
-  (:locals ($lo :nullable-object) ($hi :nullable-object) ($blo :nullable-object) ($bhi :nullable-object)
-           ($integer-low :nullable-object) ($integer-high :nullable-object)
-           ($flags i32) ($bflags i32) ($mask i32) ($bmask i32) ($cmp i32) ($kind i32) ($bit i32)
-           ($low f64) ($high f64))
-  #@(call $real-type-interval (local.get $a) (i32.const 0))
-  #@(local.set $mask) #@(local.set $flags) #@(local.set $hi) #@(local.set $lo)
-  #@(if (i32.eqz (local.get $mask)) (then (return (call $two-values (ref.null eq) (ref.null eq)))))
-  #@(call $real-type-interval (local.get $b) (i32.const 1))
-  #@(local.set $bmask) #@(local.set $bflags) #@(local.set $bhi) #@(local.set $blo)
-  #@(if (i32.eqz (local.get $bmask)) (then (return (call $two-values (ref.null eq) (ref.null eq)))))
-  #@(block $not-subtype
-    (block $rational-done
-      (br_if $rational-done (i32.eqz (i32.and (local.get $mask) (i32.const 1))))
-      (if (i32.and (i32.eqz (ref.is_null (local.get $lo))) (i32.eqz (ref.is_null (local.get $hi))))
-        (then (local.set $cmp (call $compare (local.get $lo) (local.get $hi)))
-          (br_if $rational-done (i32.or (i32.gt_s (local.get $cmp) (i32.const 0))
-            (i32.and (i32.eqz (local.get $cmp)) (i32.ne (local.get $flags) (i32.const 0)))))))
-      (if (i32.and (local.get $bmask) (i32.const 16))
-        (then
-          ;; A nonempty rational interval with positive width contains ratios.
-          ;; Only a closed singleton can be wholly in an integer subtype.
-          (br_if $not-subtype (i32.or (ref.is_null (local.get $lo)) (ref.is_null (local.get $hi))))
-          (br_if $not-subtype (local.get $flags))
-          (br_if $not-subtype (i32.ne (call $compare (local.get $lo) (local.get $hi)) (i32.const 0)))
-          (br_if $not-subtype (i32.eqz (call $typep (call $rational (call $real (local.get $lo))) (local.get $b))))
-          (br $rational-done)))
-      (if (i32.and (local.get $bmask) (i32.const 32))
-        (then
-          ;; An interval's rational members are all ratios exactly when it
-          ;; contains no integer point. Reuse exact integer bound rounding.
-          (call $integer-type-interval (local.get $a) (i32.const 1) (ref.null eq))
-          (local.set $kind) (local.set $integer-high) (local.set $integer-low)
-          (if (i32.ne (local.get $kind) (i32.const 1))
-            (then (return (call $two-values (ref.null eq) (ref.null eq)))))
-          (br_if $not-subtype (i32.or (ref.is_null (local.get $integer-low)) (ref.is_null (local.get $integer-high))))
-          (br_if $not-subtype (i32.le_s (call $integer-endpoint-compare
-            (ref.as_non_null (local.get $integer-low)) (ref.as_non_null (local.get $integer-high))) (i32.const 0)))
-          (br $rational-done)))
-      (br_if $not-subtype (i32.eqz (i32.and (local.get $bmask) (i32.const 1))))
-      (if (i32.eqz (ref.is_null (local.get $blo)))
-        (then
-          (br_if $not-subtype (ref.is_null (local.get $lo)))
-          (local.set $cmp (call $compare (local.get $lo) (local.get $blo)))
-          (br_if $not-subtype (i32.or (i32.lt_s (local.get $cmp) (i32.const 0))
-            (i32.and (i32.eqz (local.get $cmp))
-              (i32.and (i32.and (local.get $bflags) (i32.const 1))
-                (i32.eqz (i32.and (local.get $flags) (i32.const 1)))))))))
-      (if (i32.eqz (ref.is_null (local.get $bhi)))
-        (then
-          (br_if $not-subtype (ref.is_null (local.get $hi)))
-          (local.set $cmp (call $compare (local.get $hi) (local.get $bhi)))
-          (br_if $not-subtype (i32.or (i32.gt_s (local.get $cmp) (i32.const 0))
-            (i32.and (i32.eqz (local.get $cmp))
-              (i32.and (i32.ne (i32.and (local.get $bflags) (i32.const 2)) (i32.const 0))
-                (i32.eqz (i32.and (local.get $flags) (i32.const 2))))))))))
-    (local.set $kind (i32.const 3))
-    (loop $formats
-      (local.set $bit (i32.shl (i32.const 1) (i32.sub (local.get $kind) (i32.const 2))))
-      (if (i32.and (local.get $mask) (local.get $bit))
-        (then
-          (local.set $low (call $float-interval-bound (local.get $lo) (i32.and (local.get $flags) (i32.const 1))
-            (local.get $kind) (i32.const 1)))
-          (local.set $high (call $float-interval-bound (local.get $hi) (i32.and (local.get $flags) (i32.const 2))
-            (local.get $kind) (i32.const 0)))
-          (if (f64.le (local.get $low) (local.get $high))
-            (then
-              (br_if $not-subtype (i32.eqz (i32.and (local.get $bmask) (local.get $bit))))
-              (br_if $not-subtype (f64.lt (local.get $low)
-                (call $float-interval-bound (local.get $blo) (i32.and (local.get $bflags) (i32.const 1))
-                  (local.get $kind) (i32.const 1))))
-              (br_if $not-subtype (f64.gt (local.get $high)
-                (call $float-interval-bound (local.get $bhi) (i32.and (local.get $bflags) (i32.const 2))
-                  (local.get $kind) (i32.const 0))))))))
-      (local.set $kind (i32.add (local.get $kind) (i32.const 1)))
-      (br_if $formats (i32.le_u (local.get $kind) (i32.const 4))))
-    (return (call $two-values (call $symbol (i32.const 1)) (call $symbol (i32.const 1)))))
-  #@(call $two-values (ref.null eq) (call $symbol (i32.const 1))))
+  (:locals ($result i32))
+  #@(local.set $result (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+    (call $real-type-worker (local.get $a) (local.get $b) (i32.const 2))))))
+  #@(call $two-values (call $bool (i32.eq (local.get $result) (i32.const 1))) (call $bool (local.get $result))))
 
 (define-runtime-function $numeric-subtypep
     (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (:nullable-object)
@@ -188,26 +152,16 @@
       (then (return (local.get $type))))))
   #@(ref.null eq))
 
-(define-runtime-function $cons-type-parts
-    (($type :nullable-object)) (:nullable-object :nullable-object i32)
-  (:locals ($args :nullable-object) ($car :nullable-object) ($cdr :nullable-object))
-  #@(if (i32.ne (call $id (local.get $type)) (i32.const ,(runtime-symbol-id 'cons)))
-    (then
-      (if (i32.ne (call $operator (local.get $type)) (i32.const ,(runtime-symbol-id 'cons)))
-        (then (return (ref.null eq) (ref.null eq) (i32.const 0))))
-      (local.set $args (call $cdr (local.get $type)))
-      (call $arity (local.get $args) (i32.const 0) (i32.const 2))))
-  #@(local.set $car (call $symbol (i32.const 1)))
-  #@(local.set $cdr (local.get $car))
-  #@(if (i32.eqz (ref.is_null (local.get $args)))
-    (then
-      (if (i32.ne (call $id (call $car (local.get $args))) (i32.const ,(runtime-symbol-id '*)))
-        (then (local.set $car (call $car (local.get $args)))))
-      (local.set $args (call $cdr (local.get $args)))
-      (if (i32.eqz (ref.is_null (local.get $args)))
-        (then (if (i32.ne (call $id (call $car (local.get $args))) (i32.const ,(runtime-symbol-id '*)))
-          (then (local.set $cdr (call $car (local.get $args)))))))))
-  #@(local.get $car) #@(local.get $cdr) #@(i32.const 1))
+(defun $cons-type-parts-cl ()
+  (runtime-function-definition '$cons-type-parts-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$cons-type-parts-cl 'miricl-runtime:cons-type-components))))
+
+(define-runtime-function $cons-type-parts (($type :nullable-object)) (:nullable-object :nullable-object i32)
+  (:locals ($parts :nullable-object))
+  #@(if (i32.eq (call $tag (local.get $type)) (i32.const 7)) (then (call $check-apply-list (local.get $type))))
+  #@(local.set $parts (call $cons-type-parts-cl (local.get $type)))
+  #@(if (ref.is_null (local.get $parts)) (then (return (ref.null eq) (ref.null eq) (i32.const 0))))
+  #@(call $car (local.get $parts)) #@(call $cdr (local.get $parts)) #@(i32.const 1))
 
 (define-runtime-function $cons-positive-subtypep
     (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (i32)
@@ -279,8 +233,14 @@
     (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (:nullable-object)
   (:locals ($result :nullable-object) ($ca :nullable-object) ($cb :nullable-object) ($cpl :nullable-object)
            ($proof i32))
+  ;; Validate control spines before user expansion and again on its results.
+  ;; Literal MEMBER/EQL values and opaque type arguments remain data.
+  #@(call $check-type-control-structure (local.get $a))
+  #@(call $check-type-control-structure (local.get $b))
   #@(local.set $a (call $expand-derived-type (local.get $a) (local.get $env)))
   #@(local.set $b (call $expand-derived-type (local.get $b) (local.get $env)))
+  #@(call $check-type-control-structure (local.get $a))
+  #@(call $check-type-control-structure (local.get $b))
   #@(if (i32.or (ref.eq (local.get $a) (local.get $b))
         (i32.or (ref.is_null (local.get $a)) (ref.eq (local.get $b) (call $symbol (i32.const 1)))))
     (then (return (call $two-values (call $symbol (i32.const 1)) (call $symbol (i32.const 1))))))
@@ -329,6 +289,9 @@
     (call $cons (local.get $a) (call $cons (local.get $b) (call $cons (local.get $env) (ref.null eq))))))
 
 (define-runtime-section real-type-runtime-wat ()
+  #@(global $real-type-metadata-function (mut (ref null eq)) (ref.null eq))
+  ($real-type-metadata-function) ($real-type-metadata-call) ($real-type-metadata-primitive) ($real-type-metadata-value)
+  ($real-type-interval-cl) ($float-interval-bound-cl) ($real-subtype-query-cl) ($real-type-worker)
   ($real-type-interval) ($adjacent-float) ($float-interval-bound) ($real-subtypep) ($numeric-subtypep)
-  ($subtype-class) ($cons-type-parts) ($cons-positive-subtypep) ($finite-subtype-target-p) ($finite-subtypep)
+  ($subtype-class) ($cons-type-parts-cl) ($cons-type-parts) ($cons-positive-subtypep) ($finite-subtype-target-p) ($finite-subtypep)
   ($subtypep-native))

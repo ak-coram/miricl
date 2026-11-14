@@ -80,7 +80,7 @@
     <div class="titlebar"><span class="handle" aria-hidden="true"></span><span>common-lisp</span><span class="right">miricl</span></div>
     <div class="masthead"><div><p class="eyebrow">COMMON LISP / WEBASSEMBLY</p><h1><q>The quote special operator just returns object.</q></h1><p class="intro">Common Lisp HyperSpec</p>
       <nav class="applications" aria-label="Applications"><a href="maxima/">Maxima</a><a href="fricas/">FriCAS</a><a href="acl2/">ACL2</a><a href="coalton/">Coalton</a><a href="mcclim/">McCLIM</a></nav></div>
-      <nav aria-label="Resources"><a href="https://www.lispworks.com/documentation/HyperSpec/Front/index.htm" target="_blank" rel="noopener">HyperSpec ↗</a><a href="image-sizes.html">Image sizes</a><a href="https://github.com/ak-coram/miricl" target="_blank" rel="noopener">miricl GitHub ↗</a></nav></div>
+      <nav aria-label="Resources"><a href="https://www.lispworks.com/documentation/HyperSpec/Front/index.htm" target="_blank" rel="noopener">HyperSpec ↗</a><a href="image-sizes.html">Image sizes</a><a href="compiler-statistics.html">Compiler stats</a><a href="https://github.com/ak-coram/miricl" target="_blank" rel="noopener">miricl GitHub ↗</a></nav></div>
   </section>
   <section id="startup-panel" class="window" aria-label="Session startup" style="margin-top:18px"><div class="titlebar"><span class="handle" aria-hidden="true"></span><span>session startup</span></div><div class="panel-content"><p id="startup-message" role="status">Starting Common Lisp…</p><details id="startup-details" hidden><summary>Loading output</summary><pre id="startup-output"></pre></details></div></section>
   <div class="workspace">
@@ -132,7 +132,7 @@
   <footer><span>Common Lisp · miricl / Wasm</span><span>Runs entirely in your browser, including offline. Restart starts fresh; Resume restores saved inputs.</span><span><a href="todo.html">CLOS TODO example</a> · <a href="ansi-results.html">Full ANSI test results</a></span></footer>
 </main>
 <noscript>This REPL needs JavaScript and WebAssembly.</noscript>
-<script id="miricl-wasm" type="application/octet-stream">@@MIRICL_WASM@@</script>
+<script id="miricl-wasm" type="application/gzip">@@MIRICL_WASM@@</script>
 <script id="miricl-worker" type="text/plain">
 @@MIRICL_ADAPTER@@
 

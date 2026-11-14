@@ -20,6 +20,8 @@
          (*wat-declaration-hook* (unless wasi #'core-wat-declaration))
         (*runtime-function-definitions*
           (make-array 0 :adjustable t :fill-pointer 0))
+        (miricl-cross::*kernel-shared-workers*
+          (when miricl-cross::*kernel-share-helpers* (make-hash-table :test 'equal)))
         (*runtime-output-literals* (make-hash-table :test 'equal))
         (*runtime-output-bytes* (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
     #@(module

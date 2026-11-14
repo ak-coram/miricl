@@ -305,44 +305,23 @@
     (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))) (local.get $value)
     (i32.eq (call $value-n (local.get $function)) (i32.const 2147483646))))
 
+(defun $function-body-documentation-cl ()
+  (runtime-function-definition '$function-body-documentation-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$function-body-documentation-cl 'miricl-runtime:split-function-documentation))))
+
 (define-runtime-function $function-body-documentation (($body :nullable-object)) (:nullable-object :nullable-object)
-  (:locals ($scan :nullable-object) ($doc :nullable-object) ($head :nullable-object)
-           ($tail :nullable-object) ($cell :nullable-object))
-  #@(local.set $scan (local.get $body))
-  #@(block $scanned (loop $declaration
-    (br_if $scanned (i32.ne (call $operator (call $car (local.get $scan)))
-      (i32.const ,(runtime-symbol-id 'declare))))
-    (local.set $scan (call $cdr (local.get $scan))) (br $declaration)))
-  #@(if (i32.or (ref.is_null (call $cdr (local.get $scan)))
-                (i32.eqz (call $stringp-native (call $car (local.get $scan)))))
-    (then (return (local.get $body) (ref.null eq))))
-  #@(local.set $doc (call $car (local.get $scan)))
-  #@(block $copied (loop $copy (br_if $copied (ref.eq (local.get $body) (local.get $scan)))
-    (local.set $cell (call $cons (call $car (local.get $body)) (ref.null eq)))
-    (if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
-      (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-    (local.set $tail (local.get $cell))
-    (local.set $body (call $cdr (local.get $body))) (br $copy)))
-  #@(if (ref.is_null (local.get $tail))
-    (then (return (call $cdr (local.get $scan)) (local.get $doc))))
-  #@(struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (call $cdr (local.get $scan)))
-  #@(local.get $head) #@(local.get $doc))
+  (:locals ($result :nullable-object))
+  #@(call $check-apply-list (local.get $body))
+  #@(local.set $result (call $function-body-documentation-cl (local.get $body)))
+  #@(call $car (local.get $result)) #@(call $cdr (local.get $result)))
+
+(defun $function-block-body-cl ()
+  (runtime-function-definition '$function-block-body-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$function-block-body-cl 'miricl-runtime:function-block-forms))))
 
 (define-runtime-function $function-block-body (($name :nullable-object) ($body :nullable-object)) (:nullable-object)
-  (:locals ($head :nullable-object) ($tail :nullable-object) ($cell :nullable-object))
-  #@(block $copied (loop $copy
-    (br_if $copied (i32.ne (call $operator (call $car (local.get $body))) (i32.const ,(runtime-symbol-id 'declare))))
-    (local.set $cell (call $cons (call $car (local.get $body)) (ref.null eq)))
-    (if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
-      (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
-    (local.set $tail (local.get $cell))
-    (local.set $body (call $cdr (local.get $body))) (br $copy)))
-  #@(local.set $body (call $cons
-    (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'block)))
-      (call $cons (call $function-name-symbol (local.get $name)) (local.get $body))) (ref.null eq)))
-  #@(if (ref.is_null (local.get $tail)) (then (return (local.get $body))))
-  #@(struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $body))
-  #@(local.get $head))
+  #@(call $check-apply-list (local.get $body))
+  #@(call $function-block-body-cl (call $function-name-symbol (local.get $name)) (local.get $body)))
 
 (define-runtime-function $closure (($params :nullable-object) ($body :nullable-object) ($env :nullable-object)) (:nullable-object)
   (:locals ($scan :nullable-object) ($normalized :nullable-object) ($doc :nullable-object) ($function :nullable-object))
@@ -719,9 +698,9 @@
   #@(call $cons (call $new-restart (local.get $name) (local.get $function) (local.get $target) (local.get $options) (local.get $case))
     (call $restart-bindings (call $cdr (local.get $bindings)) (local.get $env) (local.get $target) (local.get $case))))
 
-(define-runtime-function $prepend-list (($list :nullable-object) ($tail :nullable-object)) (:nullable-object)
-  #@(if (result (ref null eq)) (ref.is_null (local.get $list)) (then (local.get $tail))
-      (else (call $cons (call $car (local.get $list)) (call $prepend-list (call $cdr (local.get $list)) (local.get $tail))))))
+(defun $prepend-list ()
+  (runtime-function-definition '$prepend-list
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$prepend-list 'miricl-runtime:copy-list-onto))))
 
 (define-runtime-function $restart-expression (($form :nullable-object) ($env :nullable-object) ($restarts :nullable-object)) (:nullable-object)
   (:locals ($id i32) ($args :nullable-object) ($condition :nullable-object) ($control :nullable-object))
@@ -1041,7 +1020,7 @@
   ($condition-class) ($register-condition-class) ($condition-subtype-p) ($condition-slot) ($put-condition-slot)
   ($condition-init-value) ($condition-defaults) ($slot-initarg-p) ($slot-initarg-value) ($condition-init-slots) ($make-condition) ($coerce-condition)
   ($transfer-to) ($signal-condition) ($debug-condition) ($fail) ($type-fail) ($division-error) ($condition-access) ($condition-reader)
-  ($function-body-documentation) ($function-block-body) ($closure) ($marked-closure) ($validate-condition-slots) ($define-condition) ($new-restart) ($restart-visible-p) ($compute-restarts)
+  ($function-body-documentation-cl) ($function-body-documentation) ($function-block-body-cl) ($function-block-body) ($closure) ($marked-closure) ($validate-condition-slots) ($define-condition) ($new-restart) ($restart-visible-p) ($compute-restarts)
   ($find-restart) ($invoke-restart) ($system-restart) ($unbound-value) ($condition-apply)
   ($handler-bindings) ($option-function) ($restart-bindings) ($prepend-list) ($restart-expression)
   ($protected-eval) ($go-eval) ($tagbody-eval) ($condition-operator-p) ($condition-eval) ($check-assert) ($initialize-conditions))
