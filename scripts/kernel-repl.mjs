@@ -51,10 +51,16 @@ if (action === 'submit') {
     host.stderr.on('data', report);
     host.on('exit', code => { console.error(`SBCL exited: ${code}`); process.exitCode = code ?? 1; });
   } else if (kind === 'wasm') {
-    if (!imagePath) throw Error('Supply the cold image path');
+    if (!imagePath) throw Error('Supply the interpreter or cold image path');
     vm = await Miricl.instantiate(await fs.readFile(imagePath), {directory: process.cwd()});
     vm.evaluate('(setq miricl-compiler:*compile-evaluations* nil miricl-compiler::*compiler-state* :interpreted)');
-    vm.evaluate(await fs.readFile(path.join(project, 'wasm-compiler.lisp'), 'utf8'));
+    const backendPresent = vm.evaluate("(if (fboundp 'miricl-compiler:emit-native-module) t nil)").output === 'T\n';
+    const sources = backendPresent ? ['wasm-compiler'] : [
+      'whole-program', 'hir-reconstruction', 'compiler-statistics', 'hir-types',
+      'hir-optimize', 'wasm-compiler', 'wasm-optimizer', 'wasm-disassembly',
+    ];
+    for (const source of sources)
+      await vm.evaluateAsync(await fs.readFile(path.join(project, source + '.lisp'), 'utf8'), {eof: true});
     vm.evaluate('(in-package :cl-user)');
   } else throw Error('Session kind must be host or wasm');
   console.log(`Queue REPL ready: ${name} (${kind})`);

@@ -492,6 +492,17 @@ Canonical predicate results can pass through read-only temporaries, including
 those introduced by =cond= expansion. Writes or aliases that expose the cell
 prevent using the temporary as a predicate certificate.
 
+Executable branch premises also supply a separate truth channel to native
+lowering at every SAFETY level. A previously executed truth test can remove a
+dominated repeated test of the same private value, while preserving its operand
+effects and the surviving arm's complete value group. Positive canonical type
+predicates can establish non-NIL truth through the same channel. These premises
+do not depend on unchecked declarations or ordinary replaceable callees;
+numeric premises requiring declaration-based scalar bounds stay on their
+existing safety-restricted path. Inference returns its already computed premise
+table, so this adds no second inference pass. Applied condition simplifications
+have their own =:optimization/proven-condition= counter, labeled by SAFETY.
+
 Canonical INLINE plans which prove a branch true or false also supply a bounded
 reachability view for multiple-value cardinality. An unreachable arm cannot
 force a surviving single-valued join to allocate a value packet. This view is
@@ -2018,8 +2029,8 @@ boxed predicates and deeply nested control blocks also merit size experiments.
 Their benefits are hypotheses until matched code and workload measurements
 confirm them. Do not infer speed from a shorter individual worker.
 
-The persistent source compiler also confirms that bounded variable ASH still
-uses the shared general helper: both a nonnegative 24-bit value shifted by
+Earlier persistent source compiler probes showed bounded variable ASH using
+the shared general helper: both a nonnegative 24-bit value shifted by
 0..31 and a signed-64 value shifted by -63..0 emit a 192-byte module with a
 10-byte direct worker calling ASH-GENERAL-INLINE. INTEGER-LENGTH on a signed-64
 argument emits a 189-byte module with an 8-byte helper-calling worker. These
@@ -2029,6 +2040,27 @@ preserve negative shifts, sign extension and arbitrary-precision fallback.
 Literal MEMBER already lowers groups of at most eight elements to ordered
 EQL comparisons; a compact bitset rule must preserve matching-tail identity
 in value contexts and the applicable definition/INLINE contracts.
+
+The actual McCLIM generic dispatch key matcher exposed the same bounded ASH
+gap on a measured hot path: its declared 0..3 position survived private
+countdown writes, but inference and lowering required a singleton count.
+ASH now derives scalar result intervals from operand and count endpoints,
+with bounded proof work, and canonical INLINE calls at SAFETY 0 lower
+one-sign count ranges within -63..63 directly when their results fit signed
+i64. Variable counts remain live; singleton huge-negative right shifts keep
+sign saturation. Mixed-sign counts, unsafe positive shifts and wider counts
+retain ordinary arbitrary-precision implementations. Proven scalar integer
+EQL uses integer equality under the same existing INLINE and SAFETY contracts.
+The actual matcher emission module changes from 975 / 521 / 478 raw / gzip /
+Brotli bytes to 878 / 494 / 456. Its worker body changes from 551 to 503
+bytes; the ASH-only intermediate grows the worker to 563 bytes but shrinks
+the complete module to 938 bytes by removing generic imports. Linked runtime
+code now uses scalar shifts, masks and equality where the equivalent SBCL
+worker uses SHL and TEST. These are emitted-size observations, not application
+throughput or whole-image size claims; matching runtime and application
+measurements remain necessary. Temporary evidence is in
+=/tmp/miricl-mcclim-dispatch-opt4/= and independent review in
+=/tmp/miricl-mcclim-dispatch7/=.
 
 Detailed temporary sources, images and disassemblies are in
 =/tmp/miricl-implement-batch1/=, =/tmp/miricl-validation-batch1/=,

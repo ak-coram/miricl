@@ -19,6 +19,7 @@
           (uiop:symbol-call :ql :quickload :miricl :verbose t)
           (asdf:load-system :miricl))
       (load (merge-pathnames "tests/runtime-wat-reachability.lisp" root))
+      (load (merge-pathnames "tests/runtime-kernel-callbacks.lisp" root))
       (load (merge-pathnames "tests/runtime-library-codec.lisp" root))
       (format t "~&MIRICL host compilation and loading passed on ~A ~A.~%"
               (lisp-implementation-type) (lisp-implementation-version))

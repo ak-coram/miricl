@@ -39,6 +39,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 ;; Host runtime linkage may erase call-only references to verified closed
 ;; workers. Ordinary guest/application emission never enables this contract.
 (defvar *wasm-closed-worker-functions* nil)
+;; Host runtime adapters may lower a proved immutable fixed callback. Ordinary
+;; guest emission leaves this NIL; declarations never establish its identity.
+(defvar *wasm-fixed-call-emitter* nil)
 (defvar *native-call-stack-effects* nil)
 (defvar *native-import-stack-effects* nil)
 (defvar *wasm-worker-origins* nil)
@@ -67,6 +70,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-tail-calls* nil)
 (defvar *wasm-integer-widths* nil)
 (defvar *wasm-inferred-types* nil)
+(defvar *wasm-type-guards* nil)
 (defvar *wasm-inline-vector-calls* nil)
 (defvar *wasm-inline-simple-calls* nil)
 (defvar *wasm-inline-references* nil)
@@ -514,7 +518,13 @@ Bind to NIL to interpret forms, including forms without native lowering.")
           ;; dynamic environment. Their explicit operands retain evaluation order.
           ;; A singleton shift count is encoded in the instruction. Dropping
           ;; its value does not drop effectful or potentially signaling producers.
-          (if (member kind '(#x86 #x87)) (list (third inputs)) (cddr inputs))
+          (if (and (member kind '(#x86 #x87))
+                   (multiple-value-bind (low high known)
+                       (hir-integer-bounds
+                         (if *wasm-inferred-types* (gethash (fourth inputs) *wasm-inferred-types* t)
+                             (hir-value-type (fourth inputs))))
+                     (and known (= low high))))
+              (list (third inputs)) (cddr inputs))
           ;; Scalar runtime calls use the active dynamic state directly. Their
           ;; emitter does not read the HIR environment operand, so it must not
           ;; keep an otherwise unused entry snapshot alive.
@@ -1076,6 +1086,16 @@ Liveness can then remove an allocation whose identity is never observed."
         (cond ((hir-type-proves-p type '(not null)) (return-from native-proven-truth (values t t)))
               ((hir-type-proves-p type 'null) (return-from native-proven-truth (values nil t)))))))
   (loop repeat 32 do
+    ;; These premises come from an executed branch, independently of any
+    ;; unchecked declaration. Private-cell writes, capture and joins already
+    ;; limit their extent in HIR-TYPE-BRANCH-GUARDS. They are usable at every
+    ;; safety level; an ordinary replaceable predicate supplies no premise.
+    (dolist (premise (and *wasm-type-guards* (gethash value *wasm-type-guards*)))
+      (let ((restriction (cdr premise)))
+        (cond ((eq restriction t) (return-from native-proven-truth (values t t)))
+              ((null restriction) (return-from native-proven-truth (values nil t)))
+              ((and (symbolp restriction) (hir-type-proves-p restriction '(not null)))
+               (return-from native-proven-truth (values t t))))))
     (let ((producer (hir-value-producer value)))
       (unless (%hir-instruction-p producer) (return))
       (case (hir-instruction-opcode producer)
@@ -1249,6 +1269,8 @@ exhausted work budgets keep every incoming value group."
       t)))
 
 (defun emit-native-fixed-call (inputs)
+  (when (and *wasm-fixed-call-emitter* (funcall *wasm-fixed-call-emitter* inputs))
+    (return-from emit-native-fixed-call nil))
   (when (emit-native-local-call inputs) (return-from emit-native-fixed-call nil))
   (compiler-statistic :lowering/ordinary-call (length (cddr inputs)))
   (dolist (input (cdr inputs)) (wasm-get input))
@@ -1395,10 +1417,10 @@ exhausted work budgets keep every incoming value group."
          (width (native-integer-width left))
          (type (if *wasm-inferred-types* (gethash count *wasm-inferred-types* t) (hir-value-type count))))
     (multiple-value-bind (low high known) (hir-integer-bounds type)
-      (when (and width known (= low high))
-        (cond ((minusp low)
+      (when (and width known)
+        (cond ((or (and (= low high) (minusp low)) (<= -63 low high 0))
                (compiler-statistic :proof/integer-shift-range :right) #x87)
-              ((and (< low 64) (<= (+ width low) 64))
+              ((and (<= 0 low high 63) (native-integer-result-fits-p 'ash inputs))
                (compiler-statistic :proof/integer-shift-range :left) #x86))))))
 
 (defun native-inline-nonnegative-division-opcode (name inputs)
@@ -1459,7 +1481,7 @@ exhausted work budgets keep every incoming value group."
             (* (and (or (<= (+ left right) 64)
                         (native-integer-result-fits-p name inputs)) #x7e))
             (logand #x83) (logior #x84) (logxor #x85)
-            (= #x51) (/= #x52) (< #x53) (> #x55) (<= #x57) (>= #x59)))))))
+            ((= eql) #x51) (/= #x52) (< #x53) (> #x55) (<= #x57) (>= #x59)))))))
 
 (defun emit-native-integer-chain (arguments widths opcode &optional invariant)
   (declare (type list arguments widths) (type (unsigned-byte 8) opcode))
@@ -1496,12 +1518,21 @@ exhausted work budgets keep every incoming value group."
       (let* ((count (fourth inputs))
              (type (if *wasm-inferred-types* (gethash count *wasm-inferred-types* t) (hir-value-type count))))
         (multiple-value-bind (low high known) (hir-integer-bounds type)
-          (unless (and known (= low high)) (error "A native shift lost its singleton count proof."))
+          (unless (and known
+                       (if (= opcode #x87)
+                           (or (and (= low high) (minusp low)) (<= -63 low high 0))
+                           (<= 0 low high 63)))
+            (error "A native shift lost its count range proof."))
           (compiler-statistic :optimization/inline-shift (if (= opcode #x87) :right :left))
           (emit-native-unboxed-integer (third inputs) (native-integer-width (third inputs)))
           ;; Wasm masks the shift count. Arithmetic right shifts of signed
           ;; i64 by 63 or more instead saturate to the sign bit, as CL requires.
-          (wasm-byte #x42) (wasm-s32 (if (= opcode #x87) (min 63 (- low)) low))))
+          (if (= low high)
+              (progn (wasm-byte #x42) (wasm-s32 (if (= opcode #x87) (min 63 (- low)) low)))
+              (progn
+                (when (= opcode #x87) (wasm-byte #x42) (wasm-s32 0))
+                (emit-native-unboxed-integer count (native-integer-width count))
+                (when (= opcode #x87) (wasm-byte #x7d))))))
       (dolist (operand (cddr inputs))
         (emit-native-unboxed-integer operand (native-integer-width operand))))
   (when (and (= (length inputs) 3) (/= opcode #x50))
@@ -1679,6 +1710,10 @@ exhausted work budgets keep every incoming value group."
                            (if (eq name 'rplaca) :rplaca-cons :rplacd-cons)))
                      (eq (and (= (length inputs) 4) :eq))
                      (eql (and (= (length inputs) 4)
+                       ;; Proven scalar integers have the same EQL identity
+                       ;; exactly when their mathematical integer values agree.
+                       (or (and (zerop (hir-instruction-safety-level instruction))
+                                (native-inline-integer-opcode name inputs))
                        ;; EQL differs from EQ only for numbers and characters.
                        ;; A nonnumeric, noncharacter literal proves identity
                        ;; comparison sufficient, even when the other type is T.
@@ -1688,7 +1723,7 @@ exhausted work budgets keep every incoming value group."
                                     (eq (hir-instruction-opcode producer) :constant)
                                     (let ((literal (first (hir-instruction-attributes producer))))
                                       (not (or (numberp literal) (characterp literal))))))) (cddr inputs))
-                           :eq :eql)))
+                           :eq :eql))))
                      (cons (and (= (length inputs) 4) :cons))
                      ;; Canonical LIST needs only its fresh result spine.
                      ;; Large ordinary calls already emit that same spine as
@@ -2499,6 +2534,7 @@ exhausted work budgets keep every incoming value group."
   (multiple-value-bind (truth known)
       (native-proven-truth (first (hir-instruction-inputs end)) (hir-instruction-safety-level end))
     (when known
+      (compiler-statistic :optimization/proven-condition (hir-instruction-safety-level end))
       (wasm-integer (if (eq truth truep) 1 0))
       (return-from emit-native-condition nil)))
   (let* ((test (and *wasm-branch-tests* (gethash end *wasm-branch-tests*)))
@@ -3985,8 +4021,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
     (dolist (function (hir-unit-functions unit))
       (dolist (block (hir-function-blocks function))
         (let ((end (hir-block-terminator block)))
-          (when (and (eq (hir-instruction-opcode end) :branch)
-                     (zerop (hir-instruction-safety-level end)))
+          (when (eq (hir-instruction-opcode end) :branch)
             (push (first (hir-instruction-inputs end)) roots)))
         (dolist (instruction (hir-block-instructions block))
           (when (eq (hir-instruction-opcode instruction) :call)
@@ -4112,7 +4147,10 @@ the named-entry format for hosts that translate individual Wasm workers."
          (*wasm-optimization-barriers* (hir-optimization-barriers unit))
          (*hir-inline-definitions* (make-hash-table :test 'equal))
          ;; These roots come directly from validated instruction operands.
-         (*wasm-inferred-types* (infer-hir-types-checked unit (native-type-roots unit) t entries))
+         (type-analysis (multiple-value-list
+                         (infer-hir-types-checked unit (native-type-roots unit) t entries)))
+         (*wasm-inferred-types* (first type-analysis))
+         (*wasm-type-guards* (second type-analysis))
          (*wasm-debug* (some (lambda (function) (>= (hir-function-debug-level function) 2)) *native-functions*))
          (*wasm-function-plans* (make-hash-table :test 'eq))
          (*wasm-local-call-functions* nil)

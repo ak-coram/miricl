@@ -155,6 +155,37 @@ try {
   // An exhausted proof budget supplies no proof, even for a true relationship.
   check(`(and (not (hir-type-proves-p 'integer 'integer 0))
     (not (hir-type-proves-p 'integer 'integer 32 (list 0))))`);
+  // Variable shift proofs must enclose every result, including negative
+  // operands and counts. Leaving signed i64 supplies no scalar proof.
+  check(`(and
+    (every (lambda (case)
+      (let* ((operand (first case)) (count (second case))
+             (result (hir-inline-result-type 'ash (list operand count))))
+        (and (hir-type-proves-p result '(signed-byte 64))
+          (loop for value from (second operand) to (third operand) always
+            (loop for shift from (second count) to (third count) always
+              (typep (ash value shift) result))))))
+      '(((integer -7 -1) (integer -3 3))
+        ((integer -7 7) (integer -3 3))
+        ((integer 0 7) (integer -3 3))))
+    (hir-type-proves-p
+      (hir-inline-result-type 'ash '((integer -1 0) (integer 0 63))) '(signed-byte 64))
+    (not (hir-type-proves-p
+      (hir-inline-result-type 'ash '((integer 1 1) (integer 0 63))) '(signed-byte 64))))`);
+  for (const [countType, count, expected] of [
+    ['(integer 0 5)', 3, -136], ['(integer -5 0)', -2, -5],
+  ]) {
+    check(`(let ((effects nil)
+        (function (compile-native '(lambda (value count effect)
+          (declare (type (integer -100 100) value) (type ${countType} count)
+            (inline ash) (optimize (safety 0) (debug 0)))
+          (values (ash (progn (funcall effect :left) value)
+                       (progn (funcall effect :right) count)) :extra)))))
+      (and (equal (multiple-value-list
+          (funcall function -17 ${count} (lambda (value) (push value effects))))
+        '(${expected} :extra))
+        (equal effects '(:right :left))))`);
+  }
   // Non-NIL proofs share the target's numeric/array rules. General sequences
   // and symbols can contain NIL; an opaque restriction supplies no new fact.
   check(`(and
@@ -197,6 +228,47 @@ try {
         (if value (values :present :extra) (values :missing)))))))
     (and (equal (multiple-value-list (funcall function nil)) '(:present :extra))
       (equal (multiple-value-list (funcall function t)) '(:missing))))`);
+  // Executed truth tests establish facts at checked safeties too. Their
+  // extent is limited by real writes, capture and control-flow joins, rather
+  // than by declared parameter types or the result of an ordinary callee.
+  for (const safety of [1, 2, 3]) {
+    check(`(let ((effects 0)
+        (function (compile-native '(lambda (value effect)
+          (declare (optimize (safety ${safety}) (debug 0)))
+          (if value
+            (progn (funcall effect)
+              (if value (values :present nil :extra) :wrong))
+            (progn (funcall effect)
+              (if value :wrong (values :missing :extra))))))))
+      (and (equal (multiple-value-list
+          (funcall function :value (lambda () (incf effects)))) '(:present nil :extra))
+        (equal (multiple-value-list
+          (funcall function nil (lambda () (incf effects)))) '(:missing :extra))
+        (= effects 2)))`);
+    check(`(let ((function (compile-native '(lambda (value)
+        (declare (optimize (safety ${safety}) (debug 0)))
+        (if value
+          (progn (setq value nil) (if value :wrong (values :cleared :extra)))
+          (progn (setq value :new) (if value (values :set :extra) :wrong)))))))
+      (and (equal (multiple-value-list (funcall function t)) '(:cleared :extra))
+        (equal (multiple-value-list (funcall function nil)) '(:set :extra))))`);
+    check(`(let ((function (compile-native '(lambda (value)
+        (declare (optimize (safety ${safety}) (debug 0)))
+        (let ((change (lambda () (setq value (not value)))))
+          (if value
+            (progn (funcall change) (if value :wrong :cleared))
+            (progn (funcall change) (if value :set :wrong))))))))
+      (and (eq (funcall function t) :cleared)
+        (eq (funcall function nil) :set)))`);
+    check(`(let ((function (compile-native '(lambda (value observe)
+        (declare (optimize (safety ${safety}) (debug 0)))
+        (when observe (if value :present :missing))
+        (if value (values :present :extra) (values :missing :extra))))))
+      (and (equal (multiple-value-list (funcall function t nil)) '(:present :extra))
+        (equal (multiple-value-list (funcall function nil nil)) '(:missing :extra))
+        (equal (multiple-value-list (funcall function t t)) '(:present :extra))
+        (equal (multiple-value-list (funcall function nil t)) '(:missing :extra))))`);
+  }
   // ANSI leaves redefining CL primitives undefined. MIRICL explicitly supports
   // it unless an INLINE/sealed contract permits capturing the old definition.
   check(`(let ((function (compile-native '(lambda (v i)

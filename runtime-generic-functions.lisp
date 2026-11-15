@@ -191,7 +191,8 @@
 
 (define-runtime-function $generic-dispatch-metadata-value
     (($selector-value :nullable-object) ($object :nullable-object) ($extra :nullable-object)) (:nullable-object)
-  (:locals ($selector i32) ($mode i32) ($data (ref $objects)) ($info :nullable-object) ($properties :nullable-object))
+  (:locals ($selector i32) ($mode i32) ($data (ref $objects)) ($info :nullable-object)
+           ($properties :nullable-object) ($length :nullable-object))
   #@(local.set $selector (call $natural-count (local.get $selector-value)))
   #@(if (i32.eqz (local.get $selector))
     (then (call $check-apply-list (local.get $object))
@@ -244,8 +245,15 @@
       (if (i32.ne (call $tag (local.get $info)) (i32.const 23))
         (then (call $generic-dispatch-invalid (local.get $object) ,(wat-text-literal "Generic metadata requires instance storage."))))
       (local.set $properties (struct.get $obj $b (ref.cast (ref $obj) (local.get $info))))
-      (call $check-apply-list (local.get $properties))
-      (if (i32.and (call $length (local.get $properties)) (i32.const 1))
+      ;; Retain the checked count instead of traversing the same spine again
+      ;; for parity. LIST-LENGTH-NATIVE rejects dotted spines and returns NIL
+      ;; for cycles; its successful count fits a nonnegative signed i64.
+      (local.set $length (call $list-length-native (local.get $properties)))
+      (if (ref.is_null (local.get $length))
+        (then (call $type-fail (local.get $properties)
+          (call $symbol-value ,(clos-library-reference '%proper-list-type))
+          (i32.const ,(runtime-error-code :expected-designator)))))
+      (if (i32.and (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $length)))) (i32.const 1))
         (then (call $generic-dispatch-invalid (local.get $object) ,(wat-text-literal "Generic metadata property list must contain key/value pairs."))))
       (if (i32.eq (local.get $selector) (i32.const 1))
         (then (return (call $car (call $property-cell (local.get $properties) ,(clos-library-reference :object))))))
@@ -260,16 +268,20 @@
 
 (defun $dispatch-eql-key-cl ()
   (runtime-function-definition '$dispatch-eql-key-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$dispatch-eql-key-cl 'miricl-runtime:dispatch-eql-key-value))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$dispatch-eql-key-cl 'miricl-runtime:dispatch-eql-key-value
+      :fixed-callbacks '((2 %%generic-dispatch-metadata))))))
 (defun $generic-fixed-arity-cl ()
   (runtime-function-definition '$generic-fixed-arity-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$generic-fixed-arity-cl 'miricl-runtime:generic-fixed-arity-value :result :truth))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$generic-fixed-arity-cl 'miricl-runtime:generic-fixed-arity-value
+      :result :truth :fixed-callbacks '((2 %%generic-dispatch-metadata))))))
 (defun $generic-cache-permitted-cl ()
   (runtime-function-definition '$generic-cache-permitted-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$generic-cache-permitted-cl 'miricl-runtime:generic-cache-permitted-value :result :truth))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$generic-cache-permitted-cl 'miricl-runtime:generic-cache-permitted-value
+      :result :truth :fixed-callbacks '((1 %%generic-dispatch-metadata))))))
 (defun $generic-key-match-cl ()
   (runtime-function-definition '$generic-key-match-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$generic-key-match-cl 'miricl-runtime:generic-key-match-value :result :truth))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$generic-key-match-cl 'miricl-runtime:generic-key-match-value
+      :result :truth :fixed-callbacks '((2 %%generic-dispatch-metadata))))))
 
 (define-runtime-function $dispatch-eql-key
     (($object :nullable-object) ($specializers :nullable-object)) (:nullable-object)

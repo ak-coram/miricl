@@ -4,7 +4,7 @@ the host REPL and its clients have separate sandbox `/tmp` directories.
 
 ```sh
 node scripts/kernel-repl.mjs start runtime-host host
-node scripts/kernel-repl.mjs start runtime-source wasm build/kernel-migration/miricl-cold.wasm
+node scripts/kernel-repl.mjs start runtime-source wasm miricl-interpreter.wasm
 node scripts/kernel-repl.mjs submit runtime-host build/kernel-migration/experiment.lisp
 node scripts/kernel-repl.mjs result runtime-host REQUEST-ID
 ```
@@ -22,14 +22,16 @@ directory when starting the host session. This registers that directory before
 loading ASDF, so source lookups and kernel emission use the frozen files while
 other sessions continue editing the workspace. Requests still run from the
 workspace and can write the usual build artifacts.
-For a Wasm session, the same variable selects the source compiler file reloaded
+For a Wasm session, the same variable selects the source compiler files loaded
 at startup; the mounted working directory remains the workspace.
 
-The Wasm session starts a cold image, disables automatic compilation, selects
-the interpreted source compiler, and reloads `wasm-compiler.lisp`. It evaluates
+The Wasm session disables automatic compilation and selects the interpreted
+source compiler. With an interpreter-only image it loads the eight missing
+compiler source files once; with a cold image it reloads `wasm-compiler.lisp`.
+Neither path bootstraps the native compiler. It evaluates
 request text directly, so compiler-source changes can be reloaded by submitting
 the source file itself. Reload other affected compiler files explicitly; use a
-matching fresh cold image after native runtime/import/representation changes.
+matching fresh image after native runtime/import/representation changes.
 Explicit COMPILE-NATIVE still emits real Wasm. Host requests can call
 MIRICL-CROSS:COMPILE-LAMBDA, COMPILE-MODULE or RUNTIME-KERNEL-WAT directly and
 reload edited backend definitions without bootstrapping the guest compiler.

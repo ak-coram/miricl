@@ -55,6 +55,190 @@ as COMPILE-LAMBDA."
 (defvar *kernel-shared-workers* nil)
 (defvar *kernel-share-helpers* t)
 
+(defun kernel-fixed-imports ()
+  ;; Reuse the checked, primary-value ABI of the actual fixed-call dispatcher.
+  ;; MIRICL/CROSS alone has no runtime registry and therefore no such adapters.
+  (when (fboundp 'miricl::native-fixed-primitive-entries)
+    (loop for (primitive arity target) in (miricl::native-fixed-primitive-entries)
+          for index from 0 collect
+      (list (format nil "native-kernel-fixed-~D" index) arity target primitive))))
+
+(defun kernel-fixed-callback-descriptor (descriptor)
+  "Validate and copy the private adapter's zero-based formal/primitive contract."
+  (let ((context "runtime kernel fixed callbacks") (seen nil) (copy nil)
+        (registry (kernel-fixed-imports)))
+    (when (> (miricl-compiler::compiler-list-length descriptor context) 4)
+      (miricl-compiler::compiler-input-fail context descriptor "at most four fixed callbacks are supported"))
+    (dolist (item descriptor (nreverse copy))
+      (unless (= (miricl-compiler::compiler-list-length item context) 2)
+        (miricl-compiler::compiler-input-fail context item "expected (formal-index registered-primitive)"))
+      (let* ((index (first item)) (primitive (second item))
+             (entry (and (symbolp primitive) (find primitive registry :key #'fourth :test #'eq))))
+        (unless (and (typep index '(integer 0 3)) (not (member index seen)))
+          (miricl-compiler::compiler-input-fail context item "formal index must be unique and between zero and three"))
+        (unless (and entry (member (second entry) '(1 2 3)) (symbolp (third entry)))
+          (miricl-compiler::compiler-input-fail context item "primitive has no registered checked fixed-call ABI"))
+        (push index seen)
+        (push (list index primitive) copy)))))
+
+(defun kernel-fixed-callback-facts (unit selected descriptor)
+  "Prove callback identity on this fresh, verified closed HIR only.
+Intersect every internal ingress, including reentry into SELECTED, with the
+private adapter's ingress. Exhausted work and unknown provenance prove nothing."
+  (miricl-compiler:verify-hir unit)
+  (let* ((functions (miricl-compiler:hir-unit-functions unit))
+         (arguments (make-hash-table :test 'eq)) (owners (make-hash-table :test 'eq))
+         (uses (make-hash-table :test 'eq)) (calls (make-hash-table :test 'eq))
+         (incoming (make-hash-table :test 'eq)) (reachable (make-hash-table :test 'eq))
+         (unsafe (make-hash-table :test 'eq)) (edges (make-hash-table :test 'eq))
+         (masks (make-hash-table :test 'eq)) (facts (make-hash-table :test 'eq))
+         (entries (mapcar (lambda (item) (find (second item) (kernel-fixed-imports) :key #'fourth :test #'eq)) descriptor))
+         (budget 32768) (all (1- (ash 1 (length entries)))))
+    (block proof
+      (labels ((spend () (when (minusp (decf budget)) (return-from proof nil)))
+               (origin (value)
+                 (loop for producer = (miricl-compiler::hir-value-producer value) do
+                   (spend)
+                   (unless (and (miricl-compiler::%hir-instruction-p producer)
+                                (eq (miricl-compiler::hir-instruction-opcode producer) :copy))
+                     (return producer))
+                   (setq value (first (miricl-compiler::hir-instruction-inputs producer)))))
+               (callee (value)
+                 (let ((producer (origin value)))
+                   (and (miricl-compiler::%hir-instruction-p producer)
+                        (eq (miricl-compiler::hir-instruction-opcode producer) :closure)
+                        (gethash (first (miricl-compiler::hir-instruction-attributes producer)) arguments)
+                        (first (miricl-compiler::hir-instruction-attributes producer)))))
+               (value-mask (value &optional (depth 0))
+                 (spend)
+                 (when (or (> depth 64) (gethash value unsafe)) (return-from value-mask 0))
+                 (let ((producer (miricl-compiler::hir-value-producer value)))
+                   (if (not (miricl-compiler::%hir-instruction-p producer)) 0
+                     (case (miricl-compiler::hir-instruction-opcode producer)
+                       (:argument (gethash value masks 0))
+                       (:copy (value-mask (first (miricl-compiler::hir-instruction-inputs producer)) (1+ depth)))
+                       (:cell-read
+                        (let* ((cell (first (miricl-compiler::hir-instruction-inputs producer)))
+                               (creation (origin cell)))
+                          (if (and (not (gethash cell unsafe))
+                                   (miricl-compiler::%hir-instruction-p creation)
+                                   (eq (miricl-compiler::hir-instruction-opcode creation) :cell-new)
+                                   (not (gethash (miricl-compiler::hir-instruction-output creation) unsafe)))
+                              (value-mask (first (miricl-compiler::hir-instruction-inputs creation)) (1+ depth)) 0)))
+                       (otherwise 0))))))
+        (unless (and (<= (length functions) 64) (member selected functions :test #'eq))
+          (return-from proof nil))
+        (dolist (function functions)
+          (unless (and (null (miricl-compiler::hir-function-parent function))
+                       (null (miricl-compiler::hir-function-captures function)))
+            (return-from proof nil))
+          (let ((arity (miricl-compiler::native-fixed-arity function)))
+            (unless arity (return-from proof nil))
+            (setf (gethash function arguments) (make-array arity :initial-element nil)))
+          (dolist (block (miricl-compiler::hir-function-blocks function))
+            (dolist (instruction (cons (miricl-compiler::hir-block-terminator block)
+                                      (miricl-compiler::hir-block-instructions block)))
+              (spend)
+              (setf (gethash instruction owners) function)
+              (when (eq (miricl-compiler::hir-instruction-opcode instruction) :argument)
+                (setf (aref (gethash function arguments)
+                            (first (miricl-compiler::hir-instruction-attributes instruction)))
+                      (miricl-compiler::hir-instruction-output instruction)))
+              (loop for input in (miricl-compiler::hir-instruction-inputs instruction) for index from 0 do
+                (spend) (push (cons instruction index) (gethash input uses))))))
+        (dolist (item descriptor)
+          (unless (< (first item) (length (gethash selected arguments)))
+            (miricl-compiler::compiler-input-fail "runtime kernel fixed callbacks" item "formal index exceeds entry arity")))
+        ;; Resolve internal edges before proving any callback, so a replacement
+        ;; arriving through a recursive or otherwise inconvenient edge counts.
+        (maphash (lambda (instruction owner)
+          (spend)
+          (when (eq (miricl-compiler::hir-instruction-opcode instruction) :call)
+            (let* ((inputs (miricl-compiler::hir-instruction-inputs instruction))
+                   (target (callee (second inputs))))
+              (when target
+                (unless (= (length (cddr inputs)) (length (gethash target arguments)))
+                  (return-from proof nil))
+                (setf (gethash instruction calls) target)
+                (push (cons instruction owner) (gethash target incoming)))))) owners)
+        (let ((work (list selected)))
+          (loop while work for function = (pop work) unless (gethash function reachable) do
+            (spend) (setf (gethash function reachable) t)
+            (maphash (lambda (instruction target)
+              (spend) (when (eq (gethash instruction owners) function) (push target work))) calls)))
+        ;; Private cells permit reads only. Escape, mutation, capture and an
+        ;; unknown argument consumer invalidate every upstream identity fact.
+        (maphash (lambda (value consumers)
+          (dolist (use consumers)
+            (spend)
+            (let* ((instruction (car use)) (index (cdr use))
+                   (opcode (miricl-compiler::hir-instruction-opcode instruction))
+                   (output (miricl-compiler::hir-instruction-output instruction))
+                   (target (gethash instruction calls)))
+              (cond ((and (member opcode '(:copy :cell-new :cell-read)) (zerop index))
+                     (push output (gethash value edges)))
+                    ((and (eq opcode :call) (= index 1)))
+                    ((and target (>= index 2))
+                     (push (aref (gethash target arguments) (- index 2)) (gethash value edges)))
+                    (t (setf (gethash value unsafe) t)))))) uses)
+        (loop with changed = t while changed do
+          (setq changed nil)
+          (maphash (lambda (value targets)
+            (spend)
+            (when (and (not (gethash value unsafe)) (some (lambda (target) (gethash target unsafe)) targets))
+              (setf (gethash value unsafe) t changed t))) edges))
+        (maphash (lambda (function values)
+          (loop for value across values for index from 0 do
+            (spend)
+            (setf (gethash value masks)
+              (cond ((not (gethash function reachable)) 0)
+                    ((eq function selected)
+                     (loop for item in descriptor for bit from 0
+                           when (= (first item) index) return (ash 1 bit) finally (return 0)))
+                    (t all))))) arguments)
+        (loop with changed = t while changed do
+          (setq changed nil)
+          (maphash (lambda (function values)
+            (loop for value across values for index from 0 do
+              (spend)
+              (let ((mask (gethash value masks 0)))
+                (dolist (edge (gethash function incoming))
+                  (when (gethash (cdr edge) reachable)
+                    (setq mask (logand mask (value-mask
+                      (nth (+ index 2) (miricl-compiler::hir-instruction-inputs (car edge))))))))
+                (unless (= mask (gethash value masks 0))
+                  (setf (gethash value masks) mask changed t))))) arguments))
+        (maphash (lambda (instruction owner)
+          (when (and (gethash owner reachable)
+                     (eq (miricl-compiler::hir-instruction-opcode instruction) :call))
+            (let* ((inputs (miricl-compiler::hir-instruction-inputs instruction))
+                   (value (second inputs)) (mask (value-mask value)))
+              (loop for entry in entries for bit from 0
+                    when (and (logbitp bit mask) (= (length (cddr inputs)) (second entry))) do
+                      (setf (gethash value facts) entry) (return))))) owners)
+        facts))))
+
+(defun kernel-fixed-callback-emitter (facts)
+  (when facts
+    (lambda (inputs)
+      (let ((entry (gethash (second inputs) facts)))
+        (when (and entry (= (length (cddr inputs)) (second entry)))
+          ;; All operands already have SSA values. Keep their source evaluation
+          ;; order and the callee snapshot even when its eventual use disappears.
+          (dolist (input (cddr inputs)) (miricl-compiler::wasm-get input))
+          (miricl-compiler::wasm-call (first entry))
+          t)))))
+
+(defun kernel-emit-native-module (unit selected descriptor entries)
+  (let* ((facts (and descriptor (kernel-fixed-callback-facts unit selected descriptor)))
+         (miricl-compiler::*wasm-fixed-call-emitter* (kernel-fixed-callback-emitter facts))
+         (miricl-compiler::*native-imports*
+           (append miricl-compiler::*native-imports*
+             (when facts
+               (loop for (name arity) in (kernel-fixed-imports) collect
+                 (list name (make-list arity :initial-element :object) :object))))))
+    (miricl-compiler:emit-native-module unit :entries entries :entry-tables nil)))
+
 (defun kernel-macroexpand-hook (expander form environment)
   ;; Use the target's logical expansion: host AND/OR expanders can introduce
   ;; implementation-private operators unavailable in the shipped runtime.
@@ -93,6 +277,14 @@ as COMPILE-LAMBDA."
     (fdefinition 'kernel-import-name)
     (fdefinition 'kernel-closed-helper-unit) (fdefinition 'kernel-helper-group-wat)
     (fdefinition 'kernel-link-helper-group)
+    (fdefinition 'kernel-fixed-imports)
+    (fdefinition 'kernel-fixed-callback-descriptor)
+    (fdefinition 'kernel-fixed-callback-facts)
+    (fdefinition 'kernel-fixed-callback-emitter)
+    (fdefinition 'kernel-emit-native-module)
+    (when (fboundp 'miricl::native-fixed-primitive-entries)
+      (fdefinition 'miricl::native-fixed-primitive-entries))
+    (copy-tree (kernel-fixed-imports))
     (fdefinition 'kernel-macroexpand-hook)
     (copy-tree miricl-compiler::*native-imports*)
     (loop for name in miricl-compiler::*native-compiler-seeds*
@@ -209,6 +401,7 @@ as COMPILE-LAMBDA."
       (error "Unsupported runtime worker signature: ~S." signature))
     (let* ((imports (map 'vector (lambda (import)
                                   (list (first import) (kernel-import-name import))) imports))
+           (fixed-imports (kernel-fixed-imports))
            (ops (miricl-compiler::native-read-ops body))
            (input (miricl-compiler::wasm-input body)) (locals nil) (raw-truth nil)
            (vector-read nil) (vector-write nil) (vector-index nil) (vector-object nil) (vector-value nil)
@@ -314,6 +507,12 @@ as COMPILE-LAMBDA."
                (error "Runtime kernel retains a general or indirect call."))
              (let ((target (second (aref imports argument))))
                (cond
+                 ((assoc target fixed-imports :test #'equal)
+                  ;; Exact same checkpoint and success-only primary-value
+                  ;; cleanup as NATIVE-CALL1..3's registered primitive branch.
+                  (write-line "(if (global.get $thread-active) (then (call $thread-checkpoint)))" out)
+                  (format out "call ~A~%call $clear-values~%"
+                    (miricl:wat-string (third (assoc target fixed-imports :test #'equal)))))
                  ;; Raw callers own value state. Preserve backedge polling
                  ;; for interruptible kernels; the other kernels explicitly
                  ;; match their original non-suspending primitive contract.
@@ -661,14 +860,14 @@ as COMPILE-LAMBDA."
         (when (eq result :truth) (write-line "ref.is_null i32.eqz" out))
         (write-line ")" out)))))
 
-(defun kernel-helper-group-wat (unit entry name result interruptible &optional defer)
+(defun kernel-helper-group-wat (unit entry name result interruptible &optional defer fixed-callbacks)
   (multiple-value-bind (unit selected closed) (kernel-closed-helper-unit unit entry)
     (let* ((children (miricl-compiler:hir-unit-functions unit))
            (miricl-compiler::*wasm-closed-worker-functions* closed)
            (*kernel-worker-preserve-abi* t)
            (*kernel-module-workers* (make-hash-table))
            (records nil))
-      (multiple-value-bind (bytes literals) (miricl-compiler:emit-native-module unit :entries children :entry-tables nil)
+      (multiple-value-bind (bytes literals) (kernel-emit-native-module unit selected fixed-callbacks children)
         (loop for function in children for slot from 0 for pool in literals
               for arity = (miricl-compiler::native-fixed-arity function)
               for index = (kernel-export-index bytes (format nil "direct-entry~D-~D" slot arity))
@@ -684,21 +883,25 @@ as COMPILE-LAMBDA."
                (group (list bytes (nreverse records) index arity name result interruptible)))
           (if defer group (kernel-link-helper-group group)))))))
 
-(defun runtime-kernel-wat (wat-name entry &key (result :object) interruptible)
+(defun runtime-kernel-wat (wat-name entry &key (result :object) interruptible fixed-callbacks)
   "Cross-compile one single-valued internal runtime kernel.
 Compile its closed helper group with inlining; link only the verified worker.
 INTERRUPTIBLE preserves compiler backedge polls as core scheduler checkpoints.
 Fixed bootstrap symbols and ordinary Lisp calls are linked explicitly.
+FIXED-CALLBACKS is a trusted private adapter contract: each (formal-index
+registered-primitive) names the immutable saved callback supplied on every
+external entry. Internal ingresses are proved separately on fresh HIR.
 Unsupported dependencies and captures are errors, never fallbacks."
   ;; The cache tracks replacements of this linker entry. Same-file calls may
   ;; otherwise retain the compiled definition on hosts such as ECL.
   (declare (notinline kernel-worker-wat kernel-macroexpand-hook))
   (unless (member result '(:object :truth)) (error "Unsupported runtime result ABI: ~S." result))
   (miricl-compiler::compiler-function-name entry "runtime kernel entry")
+  (setf fixed-callbacks (kernel-fixed-callback-descriptor fixed-callbacks))
   (let ((backend (kernel-backend)))
     (unless (equal backend *kernel-backend*)
       (clrhash *kernel-cache*) (setq *kernel-backend* backend)))
-  (let* ((definitions (kernel-definitions)) (key (list wat-name entry result interruptible definitions))
+  (let* ((definitions (kernel-definitions)) (key (list wat-name entry result interruptible fixed-callbacks definitions))
          (cached
            (or (gethash key *kernel-cache*)
                (setf (gethash key *kernel-cache*)
@@ -708,7 +911,7 @@ Unsupported dependencies and captures are errors, never fallbacks."
                    (let* ((unit (miricl-compiler:compile-module-to-hir definitions :entry-points (list entry)))
                           (children (rest (miricl-compiler:hir-unit-functions unit))))
                      (if (not (and children (null (cdr children))))
-                         (kernel-helper-group-wat unit entry (miricl:wat-string wat-name) result interruptible t)
+                         (kernel-helper-group-wat unit entry (miricl:wat-string wat-name) result interruptible t fixed-callbacks)
                          (progn
                            (when (miricl-compiler::hir-function-captures (first children))
                              (error "Runtime kernel retains lexical captures: ~S." entry))
@@ -718,7 +921,7 @@ Unsupported dependencies and captures are errors, never fallbacks."
                            (let ((arity (miricl-compiler::native-fixed-arity (first children))))
                              (unless arity (error "Runtime kernel requires fixed arity: ~S." entry))
                              (multiple-value-bind (bytes literals)
-                                 (miricl-compiler:emit-native-module unit :entries children :entry-tables nil)
+                                 (kernel-emit-native-module unit (first children) fixed-callbacks children)
                                (kernel-worker-wat bytes
                                  (kernel-export-index bytes (format nil "direct-entry0-~D" arity))
                                  (miricl:wat-string wat-name) arity result interruptible (first literals))))))))))))

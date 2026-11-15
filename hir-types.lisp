@@ -723,16 +723,19 @@ numbers, including bignums, and is never proved true by this rule."
             (when (or left right)
               (return-from hir-inline-result-type
                 (list 'integer (if (and left right) (max left right) (or left right)) -1)))))
-        (when (and (eq name 'ash) integer-a integer-b (= c d) (<= c 64)
+        (when (and (eq name 'ash) integer-a integer-b (<= d 64)
                    (<= -9223372036854775808 a b 9223372036854775807))
           ;; Scalar arithmetic right shifts saturate at the sign bit, even
-          ;; when the singleton count is a bignum. Never construct a huge
-          ;; positive-shift intermediate while answering a proof query.
-          (let* ((count (max -63 c)) (low (ash a count)) (high (ash b count)))
+          ;; when a count bound is a bignum. ASH is monotone in its first
+          ;; operand; either endpoint count supplies each extremum, depending
+          ;; on that operand's sign. Bound positive shifts before computing.
+          (let* ((first-count (max -63 c)) (last-count (max -63 d))
+                 (low (min (ash a first-count) (ash a last-count)))
+                 (high (max (ash b first-count) (ash b last-count))))
             (return-from hir-inline-result-type
               (if (<= -9223372036854775808 low high 9223372036854775807)
                   (progn (compiler-statistic :proof/integer-shift-result-range
-                           (if (minusp c) :right :left))
+                           (if (minusp d) :right :left))
                          (list 'integer low high)) t))))
         (when (and integer-a integer-b (<= -9223372036854775808 a b 9223372036854775807)
                    (<= -9223372036854775808 c d 9223372036854775807))
@@ -781,10 +784,11 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                  (member root (hir-function-values (hir-value-owner root)) :test #'eq))
       (compiler-input-fail "type-inference root" root "value does not belong to this HIR unit")))
   (let ((*hir-inline-definitions* nil))
-    (infer-hir-types-checked unit roots rootsp entries)))
+    (values (infer-hir-types-checked unit roots rootsp entries))))
 
 (defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only)
-  "Internal inference kernel; UNIT and ROOTS have passed the public boundary."
+  "Internal inference kernel; UNIT and ROOTS have passed the public boundary.
+Return primary type facts and executable branch premises as separate values."
   (declare (type hir-unit unit) (type list roots entries))
   ;; Explicitly requesting no facts needs no dependency or escape graph.
   ;; Many initialization units contain no operations using inferred types.
@@ -986,4 +990,4 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                                        (hir-type-restrict t (hir-value-type value))))))))))
             (setf (gethash value facts) next)
             (dolist (user (gethash value users)) (enqueue user)))))
-      facts)))
+      (values facts guards))))
