@@ -203,12 +203,17 @@
   (wat-fail :malformed-form)
   #@(unreachable))
 
+;; The private WAT ingresses below supply the saved immutable metadata
+;; callback. Prove its uses through the CL workers while preserving the
+;; checked service and every dynamic MOP call inside it.
 (defun $clos-default-initargs-cl ()
   (runtime-function-definition '$clos-default-initargs-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-default-initargs-cl 'miricl-runtime:clos-default-initargs-value))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-default-initargs-cl 'miricl-runtime:clos-default-initargs-value
+      :fixed-callbacks '((2 %%clos-method-metadata))))))
 (defun $clos-shared-initialize-cl ()
   (runtime-function-definition '$clos-shared-initialize-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-shared-initialize-cl 'miricl-runtime:clos-shared-initialize-value))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-shared-initialize-cl 'miricl-runtime:clos-shared-initialize-value
+      :fixed-callbacks '((3 %%clos-method-metadata))))))
 (defun $clos-find-slot-cl ()
   (runtime-function-definition '$clos-find-slot-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-find-slot-cl 'miricl-runtime:clos-find-slot-value))))
@@ -698,10 +703,12 @@
 
 (defun $clos-check-initargs-cl ()
   (runtime-function-definition '$clos-check-initargs-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-check-initargs-cl 'miricl-runtime:clos-check-initargs-value))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-check-initargs-cl 'miricl-runtime:clos-check-initargs-value
+      :fixed-callbacks '((3 %%clos-initarg-metadata))))))
 (defun $clos-allocate-instance-cl ()
   (runtime-function-definition '$clos-allocate-instance-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-allocate-instance-cl 'miricl-runtime:clos-allocate-instance-value))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-allocate-instance-cl 'miricl-runtime:clos-allocate-instance-value
+      :fixed-callbacks '((1 %%clos-initarg-metadata))))))
 
 (define-runtime-section clos-defaults-runtime-wat ()
   #@(global $clos-method-metadata-function (mut (ref null eq)) (ref.null eq))

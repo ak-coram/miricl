@@ -59,7 +59,7 @@
   #@(local.set $result (if (result (ref null eq)) (i64.eq (local.get $code) (i64.const 2))
     (then (call $numeric-subtypep (local.get $type) (call $car (local.get $argument)) (call $cdr (local.get $argument))))
     (else (call $subtypep-native (local.get $type) (call $car (local.get $argument)) (call $cdr (local.get $argument))))))
-  #@(local.set $valid (i32.eqz (ref.is_null (call $car (global.get $extra-values)))))
+  #@(local.set $valid (i32.eqz (ref.is_null (call $secondary-value))))
   #@(call $clear-values)
   #@(call $int (select (i32.const 1) (select (i32.const 2) (i32.const 0) (local.get $valid))
     (i32.eqz (ref.is_null (local.get $result))))))
@@ -67,7 +67,7 @@
 (define-runtime-function $complex-type-worker
     (($a :nullable-object) ($b :nullable-object) ($mode i32)) (:nullable-object)
   (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object))
-  #@(local.set $saved (global.get $extra-values)) #@(local.set $count (global.get $value-count))
+  #@(local.set $saved (call $extra-value-list)) #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (call $check-type-control-structure (local.get $a))
     (if (i32.eq (local.get $mode) (i32.const 1))
@@ -95,7 +95,7 @@
 (define-runtime-function $complex-subtypep
     (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (i32)
   (:locals ($saved :nullable-object) ($count i32) ($result i32))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (call $check-type-control-structure (local.get $a))
@@ -155,7 +155,7 @@
         (call $complex-part-type (local.get $b)) (local.get $env)))
       (if (i32.eqz (ref.is_null (local.get $result))) (then (return (i32.const 1))))
       (return (select (i32.const 2) (i32.const 0)
-        (i32.eqz (ref.is_null (call $car (global.get $extra-values))))))))
+        (i32.eqz (ref.is_null (call $secondary-value)))))))
   #@(if (i32.eqz (i32.or (local.get $am) (local.get $bm))) (then (return (i32.const 0))))
   #@(local.set $other (if (result (ref null eq)) (local.get $am)
     (then (local.get $b)) (else (local.get $a))))
@@ -176,7 +176,7 @@
   ;; Numeric emptiness is important here: an empty real interval is a subtype
   ;; of every complex type, while every inhabited real interval is disjoint.
   #@(local.set $result (call $numeric-subtypep (local.get $other) (ref.null eq) (local.get $env)))
-  #@(if (i32.eqz (ref.is_null (call $car (global.get $extra-values))))
+  #@(if (i32.eqz (ref.is_null (call $secondary-value)))
     (then (return (select (i32.const 1) (i32.const 2)
       (i32.and (i32.eqz (local.get $am)) (i32.eqz (ref.is_null (local.get $result))))))))
   #@(i32.const 0))

@@ -251,7 +251,7 @@
         (i32.and (i32.eq (local.get $stop1) (local.get $length1))
                  (i32.eq (local.get $stop2) (local.get $length2)))))
     (then (return (call $bool (call $string-equal (local.get $a) (local.get $b))))))
-  #@(local.set $saved-extra (global.get $extra-values))
+  #@(local.set $saved-extra (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(local.set $result (call $compare-character-regions-cl (local.get $a) (local.get $b)
     (call $vector-new (array.new_fixed $objects 6

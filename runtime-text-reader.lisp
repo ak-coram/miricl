@@ -207,7 +207,7 @@
   #@(local.set $name (call $slice (local.get $a) (local.get $colon) (i32.sub (local.get $n) (local.get $colon))))
   #@(if (i32.eq (local.get $colons) (i32.const 2)) (then (return (call $intern (local.get $name) (local.get $p)))))
   #@(local.set $value (call $find-symbol (local.get $name) (local.get $p)))
-  (wat-fail-when #@(i32.ne (call $id (call $car (global.get $extra-values))) (i32.const ,(runtime-symbol-id :external))) :invalid-package)
+  (wat-fail-when #@(i32.ne (call $id (call $secondary-value)) (i32.const ,(runtime-symbol-id :external))) :invalid-package)
   #@(local.get $value))
 
 (define-runtime-function $source-list-body
@@ -346,7 +346,7 @@
   ;; Readtable validation can call compiled CL helpers. Keep the callback's
   ;; actual value count, including zero values used to suppress reader objects.
   #@(local.set $count (global.get $value-count))
-  #@(local.set $extra (global.get $extra-values))
+  #@(local.set $extra (call $extra-value-list))
   #@(call $refresh-reader-readtable)
   #@(global.set $value-count (local.get $count))
   #@(global.set $extra-values (local.get $extra))

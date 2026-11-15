@@ -708,7 +708,7 @@
   ;; lexical macros and symbol macros can expand into ERROR or SIGNAL.
   #@(block $expanded (loop $expand
     (local.set $form (call $macroexpand-1 (local.get $form) (local.get $env)))
-    (br_if $expanded (ref.is_null (call $car (global.get $extra-values))))
+    (br_if $expanded (ref.is_null (call $secondary-value)))
     (br $expand)))
   #@(call $clear-values)
   #@(local.set $id (call $operator (local.get $form)))

@@ -195,8 +195,15 @@
            ($properties :nullable-object) ($length :nullable-object))
   #@(local.set $selector (call $natural-count (local.get $selector-value)))
   #@(if (i32.eqz (local.get $selector))
-    (then (call $check-apply-list (local.get $object))
-      (return (call $int (call $length (local.get $object))))))
+    (then
+      ;; The proper-list check already computes the count. Retain it instead
+      ;; of walking and boxing the same spine a second time.
+      (local.set $length (call $list-length-native (local.get $object)))
+      (if (ref.is_null (local.get $length))
+        (then (call $type-fail (local.get $object)
+          (call $symbol-value ,(clos-library-reference '%proper-list-type))
+          (i32.const ,(runtime-error-code :expected-designator)))))
+      (return (local.get $length))))
   #@(if (i32.eq (local.get $selector) (i32.const 9))
     (then
       (local.set $mode (call $natural-count (local.get $object)))
@@ -286,7 +293,7 @@
 (define-runtime-function $dispatch-eql-key
     (($object :nullable-object) ($specializers :nullable-object)) (:nullable-object)
   (:locals ($result :nullable-object) ($saved :nullable-object) ($saved-count i32))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (local.set $result (call $dispatch-eql-key-cl (local.get $object) (local.get $specializers)
@@ -302,7 +309,7 @@
     (($key :nullable-object) ($gf :nullable-object) ($a :nullable-object)
      ($ca :nullable-object) ($cb :nullable-object) ($cc :nullable-object) ($cd :nullable-object) ($mode i32)) (i32)
   (:locals ($result i32) ($saved :nullable-object) ($saved-count i32))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (local.set $result (call $generic-key-match-cl (local.get $key)
@@ -318,7 +325,7 @@
 
 (define-runtime-function $generic-cache-permitted-p (($gf :nullable-object)) (i32)
   (:locals ($result i32) ($saved :nullable-object) ($saved-count i32))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (local.set $result (call $generic-cache-permitted-cl (local.get $gf) (call $generic-dispatch-metadata-function)))
@@ -463,7 +470,7 @@
 ;; allocating an argument container or invoking the universal dispatcher.
 (define-runtime-function $generic-fixed-arity-p (($params :nullable-object) ($count i32)) (i32)
   (:locals ($result i32) ($saved :nullable-object) ($saved-count i32))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (local.set $result (call $generic-fixed-arity-cl (local.get $params) (call $int (local.get $count))

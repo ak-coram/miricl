@@ -397,7 +397,7 @@
      ($initial :nullable-object) ($contents :nullable-object) ($supplied i32)
      ($fill :nullable-object) ($displaced :nullable-object) ($offset :nullable-object)) (:nullable-object)
   (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object))
-  #@(local.set $saved (global.get $extra-values)) #@(local.set $count (global.get $value-count))
+  #@(local.set $saved (call $extra-value-list)) #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (local.set $result (call $adjust-array-work (local.get $old) (local.get $dimensions) (local.get $element)
       (local.get $initial) (local.get $contents) (local.get $supplied) (local.get $fill) (local.get $displaced) (local.get $offset)))
@@ -408,7 +408,7 @@
 
 (define-runtime-function $vector-stack-apply (($id i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object))
-  #@(local.set $saved (global.get $extra-values)) #@(local.set $count (global.get $value-count))
+  #@(local.set $saved (call $extra-value-list)) #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (local.set $result (call $vector-stack-work (local.get $id) (local.get $args)))
     (global.set $extra-values (local.get $saved)) (global.set $value-count (local.get $count))

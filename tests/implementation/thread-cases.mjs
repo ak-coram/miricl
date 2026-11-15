@@ -61,9 +61,16 @@ export const threadCases = [
         (miricl-threads:interrupt-thread (miricl-threads:current-thread) (lambda () (incf count)))))
     (loop until (= count 1000) do (miricl-threads:thread-yield))
     (= count 1000))`],
-  ['multiple values', `(equal (multiple-value-list (miricl-threads:join-thread
-    (miricl-threads:make-thread (lambda () (miricl-threads:thread-yield) (values 42 :ok))))) '(42 :ok))`],
-  ['zero values', `(null (multiple-value-list (miricl-threads:join-thread (miricl-threads:make-thread (lambda () (values))))))`],
+  ['multiple value groups survive scheduling and interrupts', `(let*
+      ((groups '(nil (nil) (42 :ok) (1 nil 3) (1 nil 3 4 nil)))
+       (workers (mapcar (lambda (group)
+         (miricl-threads:make-thread (lambda ()
+           (multiple-value-prog1 (values-list group)
+             (miricl-threads:interrupt-thread (miricl-threads:current-thread)
+               (lambda () (values :clobber :second :third :fourth)))
+             (miricl-threads:thread-yield))))) groups)))
+    (equal (mapcar (lambda (worker) (multiple-value-list (miricl-threads:join-thread worker))) workers)
+           groups))`],
   ['shared heap and timeslicing', `(let ((stop nil) (count 0))
     (let ((worker (miricl-threads:make-thread (lambda () (loop until stop do (incf count))))))
       (sleep 0.01) (setq stop t) (miricl-threads:join-thread worker) (plusp count)))`],

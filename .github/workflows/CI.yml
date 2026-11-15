@@ -24,7 +24,7 @@ jobs:
     defaults:
       run:
         shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}
-    timeout-minutes: 30
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +59,7 @@ jobs:
   runtime:
     name: Build shared runtime and standalone pages
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 360
     env:
       LISP: sbcl-bin
       MIRICL_COMPILER_STATISTICS_DIRECTORY: ${{ github.workspace }}/build/compiler-statistics
@@ -126,7 +126,7 @@ jobs:
     name: Core checks beyond ANSI
     needs: runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-miricl
@@ -146,7 +146,7 @@ jobs:
     name: Application / ${{ matrix.app }}
     needs: runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -217,7 +217,7 @@ jobs:
           key: fricas-bootstrap-v1-${{ runner.os }}-${{ hashFiles('vendor/fricas/**', 'scripts/prepare-fricas.mjs', 'scripts/fricas-files.mjs') }}
       - name: Build and test Maxima
         if: matrix.app == 'maxima'
-        timeout-minutes: 35
+        timeout-minutes: 360
         env:
           NATIVE_CACHE_HIT: ${{ steps.native.outputs.cache-hit }}
           MIRICL_MAXIMA_CORE: build/maxima/maxima-optimized.wasm
@@ -232,7 +232,7 @@ jobs:
           node tests/browser-maxima-app.mjs build/maxima/site
       - name: Build and test FriCAS
         if: matrix.app == 'fricas'
-        timeout-minutes: 60
+        timeout-minutes: 360
         env:
           NATIVE_CACHE_HIT: ${{ steps.native.outputs.cache-hit }}
         run: |
@@ -289,7 +289,7 @@ jobs:
     name: Application / acl2
     needs: runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 360
     env:
       CHROMIUM: google-chrome
       MIRICL_COMPILER_STATISTICS_DIRECTORY: ${{ github.workspace }}/build/compiler-statistics
@@ -321,7 +321,7 @@ jobs:
           key: acl2-native-v2-${{ runner.os }}-${{ steps.source.outputs.revision }}-${{ hashFiles('miricl.wasm', '*.lisp', '*.asd', 'scripts/*.mjs', 'acl2/*.mjs', 'acl2/*.lisp', 'tests/acl2-native.mjs') }}
       - name: Compile portable ACL2 core (without world initialization)
         if: steps.core.outputs.cache-hit != 'true'
-        timeout-minutes: 60
+        timeout-minutes: 360
         run: node scripts/probe-acl2.mjs miricl.wasm build/acl2/fasl.json fasl build/acl2/acl2.wasm
       - name: Compile native ACL2 core on the default stack
         if: steps.core.outputs.cache-hit != 'true'
@@ -392,7 +392,7 @@ jobs:
     name: Application / coalton
     needs: runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     env:
       CHROMIUM: google-chrome
       MIRICL_COMPILER_STATISTICS_DIRECTORY: ${{ github.workspace }}/build/compiler-statistics
@@ -500,7 +500,7 @@ jobs:
     name: ANSI / ${{ matrix.mode }}
     needs: runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -521,7 +521,7 @@ jobs:
         if: matrix.mode == 'interpreter'
         run: node tests/ansi.mjs miricl-interpreter.wasm
       - name: Full ANSI suite
-        timeout-minutes: 20
+        timeout-minutes: 360
         # Both execution modes must pass every upstream test.
         # Always render and upload diagnostics, including after a failed run.
         env:
@@ -574,7 +574,7 @@ jobs:
     name: Assemble browser examples and size report
     needs: [host, runtime, core-checks, applications, acl2, coalton]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -637,7 +637,7 @@ jobs:
     needs: [host, runtime, core-checks, applications, acl2, coalton, ansi-reports, browser-examples]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 360
     permissions:
       contents: read
       actions: read

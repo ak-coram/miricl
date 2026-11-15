@@ -118,7 +118,7 @@
 
 (define-runtime-function $filesystem-name (($path externref) ($merge i32)) (externref)
   (:locals ($value :nullable-object) ($extra :nullable-object) ($count i32) ($mask i32) ($cursor i32) ($failed i32))
-  #@(local.set $extra (global.get $extra-values)) #@(local.set $count (global.get $value-count))
+  #@(local.set $extra (call $extra-value-list)) #@(local.set $count (global.get $value-count))
   #@(local.set $mask (global.get $thread-mask)) #@(local.set $cursor (global.get $cursor))
   #@(global.set $thread-mask (i32.add (local.get $mask) (i32.const 1)))
   #@(block $done

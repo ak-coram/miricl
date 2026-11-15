@@ -107,7 +107,7 @@
 
 (define-runtime-function $upgraded-array-kind-environment (($type :nullable-object) ($env :nullable-object)) (i32)
   (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (call $check-type-control-structure (local.get $type))

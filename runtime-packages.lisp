@@ -93,7 +93,7 @@
 (define-runtime-function $find-global-package (($name :nullable-object)) (:nullable-object)
   (:locals ($values :nullable-object) ($result :nullable-object) ($count i32))
   #@(if (i32.eq (call $tag (local.get $name)) (i32.const 12)) (then (return (local.get $name))))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $name (call $string-contents (call $string-designator (local.get $name))))
   #@(local.set $result (call $find-global-package-name-cl (local.get $name) (global.get $packages)
@@ -221,7 +221,7 @@
 
 (define-runtime-function $present (($name :nullable-object) ($p :nullable-object)) (:nullable-object)
   (:locals ($values :nullable-object) ($result :nullable-object) ($count i32) ($size :nullable-object))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $name (call $string-contents (local.get $name)))
   #@(local.set $size (call $package-node-ref (local.get $p) (i32.const 0) (ref.null eq)))
@@ -280,7 +280,7 @@
 
 (define-runtime-function $inherited (($name :nullable-object) ($p :nullable-object)) (:nullable-object)
   (:locals ($values :nullable-object) ($result :nullable-object) ($count i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $result (call $inherited-entry-cl (call $string-contents (local.get $name))
     (call $package-node-ref (local.get $p) (i32.const 2) (ref.null eq))
@@ -296,7 +296,7 @@
 
 (define-runtime-function $accessible (($name :nullable-object) ($p :nullable-object)) (:nullable-object)
   (:locals ($values :nullable-object) ($result :nullable-object) ($count i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $result (call $accessible-entry-cl (local.get $name) (local.get $p)
     (call $package-entry-function (i32.const 1)) (call $package-entry-function (i32.const 2))))
@@ -344,7 +344,7 @@
   (:locals ($symbol :nullable-object))
   #@(local.set $name (call $string-contents (local.get $name)))
   #@(local.set $symbol (call $find-symbol (local.get $name) (local.get $p)))
-  #@(if (i32.eqz (ref.is_null (call $car (global.get $extra-values)))) (then (return (local.get $symbol))))
+  #@(if (i32.eqz (ref.is_null (call $secondary-value))) (then (return (local.get $symbol))))
   #@(local.set $symbol (call $new-symbol (local.get $name) (local.get $p)))
   #@(call $add-entry (local.get $symbol) (local.get $p)
     (select (i32.const 2) (i32.const 1) (ref.eq (local.get $p) (global.get $keyword-package))))
@@ -356,7 +356,7 @@
 
 (define-runtime-function $names-available (($names :nullable-object) ($p :nullable-object)) ()
   (:locals ($values :nullable-object) ($count i32) ($ok i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $ok (call $package-names-available-cl (local.get $names) (local.get $p)
     (call $package-entry-function (i32.const 0))))
@@ -378,7 +378,7 @@
   ;; Their strings precede the symbols used by the ordinary checked worker.
   #@(if (i32.eqz (global.get $cl-kernel-functions-ready))
     (then (return (call $bootstrap-package-name-list-cl (local.get $names)))))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $result (call $package-name-list-cl (local.get $names)))
   #@(global.set $extra-values (local.get $values))
@@ -430,7 +430,7 @@
 
 (define-runtime-function $shadowed (($symbol :nullable-object) ($p :nullable-object)) (i32)
   (:locals ($values :nullable-object) ($count i32) ($result i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $result (call $symbol-shadowed-cl (local.get $symbol)
     (call $package-node-ref (local.get $p) (i32.const 3) (ref.null eq))))
@@ -444,7 +444,7 @@
 
 (define-runtime-function $check-conflict (($symbol :nullable-object) ($p :nullable-object)) ()
   (:locals ($entry :nullable-object) ($values :nullable-object) ($count i32) ($result i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $entry (call $accessible (call $symbol-name (local.get $symbol)) (local.get $p)))
   #@(if (i32.eqz (ref.is_null (local.get $entry)))
@@ -498,7 +498,7 @@
 
 (define-runtime-function $used-by (($p :nullable-object)) (:nullable-object)
   (:locals ($values :nullable-object) ($result :nullable-object) ($count i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $result (call $package-users-cl (local.get $p) (global.get $packages)
     (call $package-kernel-function (i32.const 1))))
@@ -795,7 +795,7 @@
             (else (local.set $p (call $require-package (local.get $p)))))
         (if (local.get $mode)
             (then (local.set $symbol (call $find-symbol (call $car (local.get $args)) (local.get $p)))
-                  ,(wat-fail-when #@(i32.ne (call $id (call $car (global.get $extra-values))) (i32.const ,(runtime-symbol-id :external))) :invalid-package))
+                  ,(wat-fail-when #@(i32.ne (call $id (call $secondary-value)) (i32.const ,(runtime-symbol-id :external))) :invalid-package))
             (else (local.set $symbol (call $intern (call $car (local.get $args)) (local.get $p)))))))
   #@(global.set $cursor (i32.const 0))
   #@(call $write32 (i32.const 14))
@@ -812,7 +812,7 @@
 
 (define-runtime-function $package-symbols (($p :nullable-object) ($external i32) ($inherited i32)) (:nullable-object)
   (:locals ($values :nullable-object) ($result :nullable-object) ($count i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $result (call $collect-package-symbols-cl (local.get $p)
     (if (result (ref null eq)) (local.get $external) (then (call $int (i32.const 1))) (else (ref.null eq)))
@@ -834,7 +834,7 @@
 
 (define-runtime-function $package-iterator-state (($packages :nullable-object) ($mask i32)) (:nullable-object)
   (:locals ($values :nullable-object) ($result :nullable-object) ($count i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $result (call $make-package-iteration-state-cl (local.get $packages)
     (call $int (local.get $mask))
@@ -901,7 +901,7 @@
 
 (define-runtime-function $all-symbols () (:nullable-object)
   (:locals ($values :nullable-object) ($result :nullable-object) ($count i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $result (call $collect-all-package-symbols-cl (global.get $packages)
     (call $package-entry-function (i32.const 0))))
@@ -948,7 +948,7 @@
 
 (define-runtime-function $check-defpackage (($options :nullable-object)) ()
   (:locals ($values :nullable-object) ($count i32))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(drop (call $check-defpackage-cl (local.get $options)))
   #@(global.set $extra-values (local.get $values))
@@ -958,7 +958,7 @@
     (($name :nullable-object) ($source :nullable-object) ($target :nullable-object) ($shadow i32)) ()
   (:locals ($symbol :nullable-object))
   #@(local.set $symbol (call $find-symbol (call $string-designator (local.get $name)) (local.get $source)))
-  #@(if (ref.is_null (call $car (global.get $extra-values)))
+  #@(if (ref.is_null (call $secondary-value))
     (then
       ;; Continuing skips the missing name; never intern into the source.
       (drop (call $condition-apply (i32.const ,(runtime-symbol-id 'cerror))

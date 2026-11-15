@@ -20,6 +20,31 @@ try {
     assert.ok(output.length < 4096, 'Malformed graphs must have bounded diagnostics.');
     recover();
   };
+  // Malformed source spines must fail before unchecked evaluator traversal;
+  // repairing the same source must leave all subsequent values intact.
+  for (const tail of ['arguments', ':dotted']) {
+    check(`(let* ((arguments (list 1 nil 3 :fourth :fifth))
+        (last (last arguments)) (form (cons 'values arguments)) (rejected nil))
+      (setf (cdr last) ${tail})
+      (handler-case (eval form)
+        (type-error (condition)
+          (setq rejected (and (eq (type-error-datum condition) arguments)
+            (type-error-expected-type condition)))))
+      (setf (cdr last) nil)
+      (and rejected
+        (equal (multiple-value-list (eval form)) '(1 nil 3 :fourth :fifth))))`);
+  }
+  for (const tail of ['arguments', ':dotted']) {
+    check(`(let* ((arguments (list 1 2 3 4 5))
+        (last (last arguments)) (form (cons '+ arguments)) (rejected nil))
+      (setf (cdr last) ${tail})
+      (handler-case (eval form)
+        (type-error (condition)
+          (setq rejected (and (consp (type-error-datum condition))
+            (type-error-expected-type condition)))))
+      (setf (cdr last) nil)
+      (and rejected (equal (multiple-value-list (eval form)) '(15))))`);
+  }
   for (const [source, reason] of [
     ["(compile-native '(lambda (x . tail) x))", /dotted tail/],
     ["(compile-native '(lambda (x x) x))", /duplicate parameter/],
@@ -55,6 +80,61 @@ try {
     (and (eq object (funcall (compile-native (list 'lambda nil (list 'quote object)))))
       (equal (funcall (compile-native (list 'lambda '(x) (list 'list shared shared))) 1) '(2 2))))`);
   console.log('Soundness: compiler boundaries reject malformed graphs and recover.');
+
+  // Group kinds determine the executable calling convention. They cannot be
+  // forged into single-value certificates through the public HIR boundary.
+  for (const [form, opcode] of [
+    ['(lambda () (values nil nil))', ':values'],
+    ['(lambda (f) (funcall f))', ':call'],
+  ]) reject(`(let* ((unit (compile-to-hir '${form}))
+      (function (first (hir-unit-functions unit)))
+      (instruction (find ${opcode} (mapcan (lambda (block) (copy-list (hir-block-instructions block)))
+        (hir-function-blocks function)) :key (lambda (instruction) (hir-instruction-opcode instruction)))))
+    (setf (hir-value-kind (hir-instruction-output instruction)) :single)
+    (emit-native-module unit))`, /multiple-value group/);
+  reject(`(let* ((unit (compile-to-hir '(lambda (x) (if x (values 1 2) (values 3 4)))))
+      (function (first (hir-unit-functions unit)))
+      (join (find-if (lambda (block) (hir-block-parameters block)) (hir-function-blocks function))))
+    (setf (hir-value-kind (first (hir-block-parameters join))) :single)
+    (emit-native-module unit))`, /multiple-value group|block arguments/);
+
+  // The prover distinguishes zero values from one NIL and does not infer a
+  // fixed result count from a union of different return counts.
+  check(`(and (loop for count from 0 to 5 always
+      (let* ((unit (compile-to-hir (list 'lambda nil (cons 'values (make-list count)))))
+             (facts (hir-result-arities-checked unit)))
+        (eql count (gethash (first (hir-unit-functions unit)) facts))))
+    (let* ((unit (compile-to-hir '(lambda (x) (if x (values nil nil) (values)))))
+           (facts (hir-result-arities-checked unit)))
+      (null (gethash (first (hir-unit-functions unit)) facts))))`);
+  // A closed consumer and a later dynamic caller share the same function.
+  // Its fixed native results preserve padding, complete returns and identity.
+  for (const count of [2, 3, 4]) {
+    const values = Array(count).fill('y').join(' ');
+    check(`(let* ((factory (compile-native '(lambda (escape x)
+          (declare (optimize (debug 0)))
+          (flet ((worker (y) (declare (optimize (debug 0))) (values ${values})))
+            (declare (notinline worker))
+            (if escape #'worker
+              (multiple-value-bind (a b c d e) (worker x) (list a b c d e)))))))
+        (worker (funcall factory t nil)))
+      (and (equal (multiple-value-list (funcall worker 17)) (make-list ${count} :initial-element 17))
+        (equal (funcall factory nil 19)
+          (append (make-list ${count} :initial-element 19) (make-list (- 5 ${count}))))))`);
+  }
+  // Discarding native secondary results must retain operand order and errors.
+  check(`(let ((effects nil) (function (compile-native '(lambda (x y effect)
+        (declare (optimize (debug 0)))
+        (flet ((pair (a b) (declare (inline car) (optimize (debug 0) (safety 1)))
+                 (values a (car b))))
+          (declare (notinline pair))
+          (values (pair (progn (funcall effect :first) x)
+                        (progn (funcall effect :second) y))))))))
+    (and (= 17 (funcall function 17 '(18) (lambda (x) (push x effects))))
+      (equal effects '(:second :first))
+      (progn (setq effects nil)
+        (handler-case (progn (funcall function 17 18 (lambda (x) (push x effects))) nil)
+          (type-error () (equal effects '(:second :first)))))))`);
 
   // Macro headers are untrusted even when their bodies will be interpreted.
   // Conditions retain the input for inspection without printing cyclic data.
@@ -269,6 +349,73 @@ try {
         (equal (multiple-value-list (funcall function t t)) '(:present :extra))
         (equal (multiple-value-list (funcall function nil t)) '(:missing :extra))))`);
   }
+  // Proper-spine proofs describe current objects, not the CL LIST type.
+  // Canonical constructors retain fresh spines, operand order and all values.
+  for (const safety of [0, 1, 2, 3]) {
+    for (const constructor of [
+      '(list (funcall effect :first) (funcall effect :second))',
+      '(cons (funcall effect :first) (cons (funcall effect :second) nil))',
+    ]) {
+      check(`(let ((effects nil)
+          (function (compile-native '(lambda (effect)
+            (declare (inline list cons) (optimize (safety ${safety}) (debug 0)))
+            (apply (lambda (&rest arguments) (values arguments :extra)) ${constructor})))))
+        (flet ((effect (tag) (push tag effects)
+                 (values (if (eq tag :first) 11 22) :discarded)))
+          (let* ((first (multiple-value-list (funcall function #'effect)))
+                 (second (multiple-value-list (funcall function #'effect))))
+            (and (equal first '((11 22) :extra)) (equal second first)
+              (not (eq (car first) (car second)))
+              (equal effects '(:second :first :second :first))))))`);
+    }
+    // A successful traversal cannot justify another after aliased mutation,
+    // whether the mutator is visible, inline, or an unknown callback.
+    for (const mutation of [
+      '(rplacd alias :dotted)',
+      '(rplacd alias arguments)',
+      '(funcall mutate alias)',
+    ]) {
+      check(`(let* ((arguments (list 1 2))
+          (function (compile-native '(lambda (arguments mutate)
+            (declare (inline list cons rplacd)
+              (optimize (safety ${safety}) (debug 0)))
+            (apply (lambda (&rest checked) (declare (ignore checked)) nil) arguments)
+            (let ((alias arguments)) ${mutation})
+            (apply (lambda (&rest result) result) arguments)))))
+        (and (handler-case
+               (progn (funcall function arguments
+                 (lambda (alias) (rplacd alias :dotted))) nil)
+               (type-error (condition)
+                 (eq (type-error-datum condition)
+                   ${mutation === '(rplacd alias arguments)' ? 'arguments' : ':dotted'})))
+          (progn (rplacd arguments nil)
+            (equal (apply (lambda (&rest result) result) arguments) '(1)))))`);
+    }
+    check(`(let ((function (compile-native '(lambda (arguments)
+        (declare (type list arguments) (optimize (safety ${safety}) (debug 0)))
+        (apply (lambda (&rest result) result) arguments)))))
+      (let ((arguments (cons 1 :dotted)))
+        (handler-case (progn (funcall function arguments) nil)
+          (type-error (condition) (eq (type-error-datum condition) :dotted)))))`);
+    recover();
+  }
+  // The primary value's proof cannot flow to another value or across a join.
+  for (const body of [
+    `(multiple-value-bind (proper arguments) (values (list 1 2) supplied)
+       (declare (ignore proper)) (apply (lambda (&rest result) result) arguments))`,
+    `(let ((arguments (list 1 2)))
+       (when supplied (rplacd arguments :dotted))
+       (apply (lambda (&rest result) result) arguments))`,
+    `(let ((arguments (list 1 2)))
+       (let ((mutate (lambda () (rplacd arguments :dotted))))
+         (funcall mutate))
+       (apply (lambda (&rest result) result) arguments))`,
+  ]) {
+    check(`(let ((function (compile-native '(lambda (supplied)
+        (declare (inline list cons rplacd) (optimize (safety 0) (debug 0))) ${body}))))
+      (handler-case (progn (funcall function :dotted) nil) (type-error () t)))`);
+  }
+
   // ANSI leaves redefining CL primitives undefined. MIRICL explicitly supports
   // it unless an INLINE/sealed contract permits capturing the old definition.
   check(`(let ((function (compile-native '(lambda (v i)
@@ -284,6 +431,10 @@ try {
   check(`(let ((ordinary (compile-native '(lambda (x) (list x))))
       (indirect (compile-native '(lambda (x) (declare (notinline list)) (list x))))
       (captured (compile-native '(lambda (x) (declare (inline list)) (list x))))
+      (ordinary-apply (compile-native '(lambda (x)
+        (apply (lambda (&rest result) result) (list x)))))
+      (captured-apply (compile-native '(lambda (x) (declare (inline list))
+        (apply (lambda (&rest result) result) (list x)))))
       (replacement (compile-native '(lambda (x) (declare (ignore x)) (values :replacement :extra))))
       (*wasm-builtin-codes* (make-hash-table :test 'eq))
       (canonical (native-canonical-builtin-code 'list))
@@ -293,6 +444,9 @@ try {
         (and (equal (multiple-value-list (funcall ordinary 1)) '(:replacement :extra))
           (equal (multiple-value-list (funcall indirect 2)) '(:replacement :extra))
           (equal (multiple-value-list (funcall captured 3)) '((3)))
+          (handler-case (progn (funcall ordinary-apply 4) nil)
+            (type-error (condition) (eq (type-error-datum condition) :replacement)))
+          (equal (funcall captured-apply 5) '(5))
           ;; Query the per-emission eligibility check directly: interpreted
           ;; compiler macros and MEMBER themselves depend on live LIST.
           (not (= (native-builtin-code 'list) canonical))))

@@ -32,7 +32,7 @@
   (:locals ($saved-extra :nullable-object) ($saved-count i32) ($result i32))
   ;; The raw scanner never owns Lisp multiple-value state. Canonical folding
   ;; now calls Lisp through the primary-value ABI, so preserve the caller's.
-  #@(local.set $saved-extra (global.get $extra-values))
+  #@(local.set $saved-extra (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(local.set $result (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
     (call $sequence-character-scan-cl (call $text (local.get $data))

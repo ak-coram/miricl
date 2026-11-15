@@ -305,6 +305,8 @@
       ((#x10 #x12)
        (when (and *native-call-stack-effects* (< (native-op-argument op) (length *native-call-stack-effects*)))
          (let ((effect (svref *native-call-stack-effects* (native-op-argument op))))
+           (when (consp effect)
+             (return-from native-op-stack (values (car effect) (if (= code #x10) (cdr effect) 0))))
            (return-from native-op-stack (values (ash effect -1) (if (= code #x10) (logand effect 1) 0)))))
        (let ((import (nth (native-op-argument op) *native-imports*)))
                (if import (values (length (second import)) (if (and (= code #x10) (third import)) 1 0))
@@ -318,6 +320,9 @@
   ;; particular numeric representation. Typed i64 locals can use it too.
   ;; Arbitrary module effects and non-defaultable refs retain the Lisp pass.
   (when (and (null *native-module-stack-effects*)
+             ;; The native kernel's compact ABI encodes at most one result.
+             ;; Exact multi-result effects use the general shared Lisp pass.
+             (or (null *native-call-stack-effects*) (every #'integerp *native-call-stack-effects*))
              (or (null types) (every (lambda (type) (not (eql (car type) #x64))) types)))
     (unless total
       (setq total (loop for op across ops

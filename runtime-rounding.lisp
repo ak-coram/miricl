@@ -117,7 +117,7 @@
 (define-runtime-function $rational-in-interval
     (($a :nullable-object) ($b :nullable-object) ($inclusive i32)) (:object)
   (:locals ($values :nullable-object) ($count i32) ($result :nullable-object))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (call $check-rational-interval (local.get $a) (local.get $b) (local.get $inclusive))

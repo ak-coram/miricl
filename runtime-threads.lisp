@@ -5,7 +5,7 @@
 
 (defparameter *thread-state*
   (append
-    (loop for name in '($extra-values $dynamic-package $dynamic-variables $handlers $restarts
+    (loop for name in '($extra-values $secondary-value $tertiary-value $dynamic-package $dynamic-variables $handlers $restarts
                        $restart-associations $catches $targets $transfer-target
                        $transfer-values $transfer-function $last-condition $undefined-name
                        $debug-frames $derived-type-environment $format-stream $format-list-stream
@@ -161,7 +161,7 @@
   #@(global.set $thread-budget (i32.sub (global.get $thread-budget) (i32.const 1)))
   #@(if (i32.and (i32.gt_s (global.get $thread-budget) (i32.const 0))
       (ref.is_null (global.get $thread-pending))) (then (return)))
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $thread (call $thread-current))
   #@(if (i32.or (i32.eqz (struct.get $green-thread $started (local.get $thread)))

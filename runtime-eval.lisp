@@ -39,44 +39,118 @@
       (else (call $cons (call $eval (call $car (local.get $args)) (local.get $env))
                         (call $eval-list (call $cdr (local.get $args)) (local.get $env))))))
 
-(define-runtime-function $eval-apply
-    (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
-  (:locals ($function :nullable-object) ($binding :nullable-object) ($rest :nullable-object)
-           ($id i32) ($arity i32) ($result :nullable-object) ($thrown i32)
+(define-runtime-function $eval-small-values
+    (($args :nullable-object) ($env :nullable-object) ($count i32))
+    (:nullable-object :nullable-object :nullable-object i32)
+  (:locals ($a :nullable-object) ($b :nullable-object) ($c :nullable-object))
+  ;; COUNT comes from a checked proper-list probe, at most three. Capture the
+  ;; forms before callbacks can mutate their source spine, then evaluate them
+  ;; left to right and retain only each operand's primary value.
+  #@(local.set $a (call $car (local.get $args)))
+  #@(local.set $b (call $car (call $cdr (local.get $args))))
+  #@(local.set $c (call $car (call $cdr (call $cdr (local.get $args)))))
+  #@(if (local.get $count) (then (local.set $a (call $eval (local.get $a) (local.get $env)))))
+  #@(if (i32.gt_u (local.get $count) (i32.const 1))
+    (then (local.set $b (call $eval (local.get $b) (local.get $env)))))
+  #@(if (i32.gt_u (local.get $count) (i32.const 2))
+    (then (local.set $c (call $eval (local.get $c) (local.get $env)))))
+  #@(local.get $a) #@(local.get $b) #@(local.get $c) #@(local.get $count))
+
+(define-runtime-function $small-value-count (($args :nullable-object)) (i32)
+  (:locals ($scan :nullable-object) ($count i32))
+  #@(local.set $scan (local.get $args))
+  ;; A bounded probe avoids a whole-spine prewalk for overflow calls. The
+  ;; overflow collector validates the remainder while evaluating its forms.
+  #@(loop $next
+    (if (ref.is_null (local.get $scan)) (then (return (local.get $count))))
+    (if (i32.eq (local.get $count) (i32.const 3)) (then (return (i32.const -1))))
+    (local.set $scan (call $cdr (local.get $scan)))
+    (local.set $count (i32.add (local.get $count) (i32.const 1))) (br $next))
+  #@(unreachable))
+
+(define-runtime-function $eval-overflow-values
+    (($args :nullable-object) ($env :nullable-object)) (:nullable-object i32)
+  (:locals ($scan :nullable-object) ($slow :nullable-object) ($head :nullable-object)
+           ($tail :nullable-object) ($cell :nullable-object) ($count i32))
+  #@(local.set $scan (local.get $args))
+  #@(local.set $slow (local.get $args))
+  ;; Build an owned argument spine and its count in one traversal. Validate
+  ;; every source cell and detect cycles before another iteration can recur.
+  #@(block $invalid
+    (block $done (loop $next
+      (br_if $done (ref.is_null (local.get $scan)))
+      (br_if $invalid (i32.ne (call $tag (local.get $scan)) (i32.const 7)))
+      (local.set $cell (call $cons (call $eval (call $car (local.get $scan)) (local.get $env)) (ref.null eq)))
+      (if (ref.is_null (local.get $tail)) (then (local.set $head (local.get $cell)))
+        (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail)) (local.get $cell))))
+      (local.set $tail (local.get $cell))
+      (local.set $scan (call $cdr (local.get $scan)))
+      (local.set $count (i32.add (local.get $count) (i32.const 1)))
+      (if (i32.eqz (i32.and (local.get $count) (i32.const 1)))
+        (then (local.set $slow (call $cdr (local.get $slow)))
+          (br_if $invalid (ref.eq (local.get $scan) (local.get $slow)))))
+      (br $next)))
+    (return (local.get $head) (local.get $count)))
+  #@(call $type-fail (local.get $args) (call $symbol-value ,(clos-library-reference '%proper-list-type))
+    (i32.const ,(runtime-error-code :expected-designator)))
+  #@(unreachable))
+
+;; Keep the first two evaluated arguments in native Wasm results. Follow the
+;; source spine after each evaluation so callbacks retain their mutation order;
+;; larger calls use the checked, owned overflow collector.
+(define-runtime-function $eval-call-arguments
+    (($forms :nullable-object) ($env :nullable-object))
+    (:nullable-object :nullable-object :nullable-object i32)
+  (:locals ($a :nullable-object) ($b :nullable-object) ($tail :nullable-object)
+           ($scan :nullable-object) ($count i32))
+  #@(local.set $scan (local.get $forms))
+  #@(if (i32.eqz (ref.is_null (local.get $scan)))
+    (then
+      (local.set $a (call $eval (call $car (local.get $scan)) (local.get $env)))
+      (local.set $scan (call $cdr (local.get $scan)))
+      (local.set $count (i32.const 1))
+      (if (i32.eqz (ref.is_null (local.get $scan)))
+        (then
+          (local.set $b (call $eval (call $car (local.get $scan)) (local.get $env)))
+          (local.set $scan (call $cdr (local.get $scan)))
+          (local.set $count (i32.const 2))
+          (if (i32.eqz (ref.is_null (local.get $scan)))
+            (then
+              (call $eval-overflow-values (local.get $scan) (local.get $env))
+              (local.set $count) (local.set $tail)
+              (local.set $count (i32.add (local.get $count) (i32.const 2)))))))))
+  #@(local.get $a) #@(local.get $b) #@(local.get $tail) #@(local.get $count))
+
+(define-runtime-function $eval-apply-fixed
+    (($name :nullable-object) ($a :nullable-object) ($b :nullable-object) ($arity i32))
+    (:nullable-object i32)
+  (:locals ($function :nullable-object) ($binding :nullable-object) ($id i32)
+           ($result :nullable-object) ($thrown i32)
            ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object))
   #@(block $fast
     (block $ordinary
-    (br_if $ordinary (global.get $debug-evaluating))
-    (local.set $function (local.get $name))
-    (if (call $symbolp (local.get $name))
-      (then
-        (local.set $id (call $id (local.get $name)))
-        (br_if $ordinary (i32.ge_u (local.get $id) (i32.const ,(length *runtime-symbols*))))
-        (local.set $binding (call $symbol-index-get (global.get $function-bindings) (local.get $id)))
-        (br_if $ordinary (ref.is_null (local.get $binding)))
-        (local.set $function (call $binding-value (local.get $binding)))))
-    ;; Inspect the actual function, including lexical bindings and replaced
-    ;; global definitions. Only single-value builtins may use primary calls.
-    (local.set $id (call $native-builtin-id (local.get $function)))
-    (br_if $ordinary (i32.lt_s (local.get $id) (i32.const 0)))
-    (br_if $ordinary (ref.is_null (local.get $args)))
-    (local.set $rest (call $cdr (local.get $args)))
-    (if (ref.is_null (local.get $rest))
-      (then
-        ,(wat-symbol-case #@(local.get $id)
-          ((car cdr first rest not null identity consp atom symbolp listp stringp integerp
-            numberp rationalp realp complexp floatp 1+ 1- length)
-            #@(local.set $arity (i32.const 1))
-            #@(br $fast)))
-        (br $ordinary)))
-    (br_if $ordinary (i32.eqz (ref.is_null (call $cdr (local.get $rest)))))
-    ,(wat-symbol-case #@(local.get $id)
-      ((eq eql cons + - * / = /= < > <= >=)
-        #@(local.set $arity (i32.const 2))
-        #@(br $fast))))
-    (return_call $apply (local.get $name) (local.get $args)))
-  ;; Fast builtin calls retain the same diagnostic frame as $APPLY0. Restore
-  ;; overwritten ring entries on success and guest nonlocal transfers alike.
+      (br_if $ordinary (global.get $debug-evaluating))
+      (local.set $function (local.get $name))
+      (if (call $symbolp (local.get $name))
+        (then
+          (local.set $id (call $id (local.get $name)))
+          (br_if $ordinary (i32.ge_u (local.get $id) (i32.const ,(length *runtime-symbols*))))
+          (local.set $binding (call $symbol-index-get (global.get $function-bindings) (local.get $id)))
+          (br_if $ordinary (ref.is_null (local.get $binding)))
+          (local.set $function (call $binding-value (local.get $binding)))))
+      (local.set $id (call $native-builtin-id (local.get $function)))
+      (br_if $ordinary (i32.lt_s (local.get $id) (i32.const 0)))
+      (if (i32.eq (local.get $arity) (i32.const 1))
+        (then
+          ,(wat-symbol-case #@(local.get $id)
+            ((car cdr first rest not null identity consp atom symbolp listp stringp integerp
+              numberp rationalp realp complexp floatp 1+ 1- length)
+              #@(br $fast)))
+          (br $ordinary)))
+      (br_if $ordinary (i32.ne (local.get $arity) (i32.const 2)))
+      ,(wat-symbol-case #@(local.get $id)
+        ((eq eql cons + - * / = /= < > <= >=) #@(br $fast))))
+    (return (ref.null eq) (i32.const 0)))
   #@(local.set $backtrace-depth (global.get $backtrace-depth))
   #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
   #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
@@ -86,14 +160,33 @@
   (debug-protected-call
     #@(ref.cast (ref null eq) (any.convert_extern
       (if (result externref) (i32.eq (local.get $arity) (i32.const 1))
-        (then (call $native-call1 (extern.convert_any (local.get $function))
-          (extern.convert_any (call $car (local.get $args)))))
+        (then (call $native-call1 (extern.convert_any (local.get $function)) (extern.convert_any (local.get $a))))
         (else (call $native-call2 (extern.convert_any (local.get $function))
-          (extern.convert_any (call $car (local.get $args)))
-          (extern.convert_any (call $car (local.get $rest))))))))
+          (extern.convert_any (local.get $a)) (extern.convert_any (local.get $b)))))))
     #@(block
       (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
-      (global.set $backtrace-depth (local.get $backtrace-depth)))))
+      (global.set $backtrace-depth (local.get $backtrace-depth))))
+  #@(i32.const 1))
+
+(define-runtime-function $eval-apply
+    (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
+  (:locals ($a :nullable-object) ($b :nullable-object) ($rest :nullable-object)
+           ($arity i32) ($result :nullable-object) ($hit i32))
+  #@(block $ordinary
+    (br_if $ordinary (i32.ne (call $tag (local.get $args)) (i32.const 7)))
+    (local.set $a (call $car (local.get $args)))
+    (local.set $rest (call $cdr (local.get $args)))
+    (local.set $arity (i32.const 1))
+    (if (i32.eqz (ref.is_null (local.get $rest)))
+      (then
+        (br_if $ordinary (i32.ne (call $tag (local.get $rest)) (i32.const 7)))
+        (br_if $ordinary (i32.eqz (ref.is_null (call $cdr (local.get $rest)))))
+        (local.set $b (call $car (local.get $rest)))
+        (local.set $arity (i32.const 2))))
+    (call $eval-apply-fixed (local.get $name) (local.get $a) (local.get $b) (local.get $arity))
+    (local.set $hit) (local.set $result)
+    (if (local.get $hit) (then (return (local.get $result)))))
+  #@(return_call $apply (local.get $name) (local.get $args)))
 
 (define-runtime-function $validate-params (($params :nullable-object)) ()
   (:locals ($seen :nullable-object) ($name :nullable-object) ($id i32))
@@ -270,6 +363,8 @@
     (:nullable-object)
   (:locals ($id i32)
            ($values-count i32)
+           ($secondary :nullable-object) ($tertiary :nullable-object)
+           ($index i32)
            ($args :nullable-object)
            ($name :nullable-object)
            ($value :nullable-object)
@@ -396,12 +491,13 @@
     (multiple-value-prog1
       (wat-arity 1 2147483647)
       #@(local.set $value (call $eval (call $car (local.get $args)) (local.get $env)))
-      #@(local.set $params (global.get $extra-values))
-      #@(local.set $values-count (global.get $value-count))
+      #@(call $capture-values)
+      #@(local.set $values-count) #@(local.set $params)
+      #@(local.set $tertiary) #@(local.set $secondary)
       #@(local.set $args (call $cdr (local.get $args)))
       (wat-list-loop ($args) #@(drop (call $eval (call $car (local.get $args)) (local.get $env))))
-      #@(global.set $extra-values (local.get $params))
-      #@(global.set $value-count (local.get $values-count))
+      #@(call $restore-values (local.get $secondary) (local.get $tertiary)
+        (local.get $params) (local.get $values-count))
       #@(return (local.get $value)))
     (multiple-value-list
       (wat-arity 1)
@@ -414,11 +510,26 @@
       #@(local.set $bindings (call $car (local.get $args)))
       #@(call $validate-params (local.get $bindings))
       #@(local.set $value (call $eval (call $car (call $cdr (local.get $args))) (local.get $env)))
-      #@(local.set $params (call $value-list (local.get $value)))
+      #@(call $capture-values)
+      #@(local.set $values-count) #@(local.set $params)
+      #@(local.set $tertiary) #@(local.set $secondary)
+      #@(local.set $params (call $cdr (call $cdr (local.get $params))))
+      #@(local.set $index (i32.const 0))
       #@(local.set $new-env (local.get $env))
       #@(block $done (loop $next (br_if $done (ref.is_null (local.get $bindings)))
-        (local.set $new-env (call $bind (local.get $new-env) (call $car (local.get $bindings)) (call $car (local.get $params))))
-        (local.set $bindings (call $cdr (local.get $bindings))) (local.set $params (call $cdr (local.get $params))) (br $next)))
+        (local.set $new-env (call $bind (local.get $new-env) (call $car (local.get $bindings))
+          (if (result (ref null eq)) (i32.ge_u (local.get $index) (local.get $values-count))
+            (then (ref.null eq))
+            (else (if (result (ref null eq)) (i32.eqz (local.get $index))
+              (then (local.get $value))
+              (else (if (result (ref null eq)) (i32.eq (local.get $index) (i32.const 1))
+                (then (local.get $secondary))
+                (else (if (result (ref null eq)) (i32.eq (local.get $index) (i32.const 2))
+                  (then (local.get $tertiary)) (else (call $car (local.get $params))))))))))))
+        (if (i32.ge_u (local.get $index) (i32.const 3))
+          (then (local.set $params (call $cdr (local.get $params)))))
+        (local.set $index (i32.add (local.get $index) (i32.const 1)))
+        (local.set $bindings (call $cdr (local.get $bindings))) (br $next)))
       #@(call $activate-bindings (local.get $new-env) (local.get $env))
       #@(return (call $body (call $cdr (call $cdr (local.get $args))) (local.get $new-env) (local.get $env))))
     (nth-value
@@ -426,11 +537,20 @@
       #@(local.set $value (call $eval (call $car (local.get $args)) (local.get $env)))
       #@(local.set $id (call $natural-count (local.get $value)))
       #@(local.set $value (call $eval (call $car (call $cdr (local.get $args))) (local.get $env)))
-      #@(local.set $params (call $value-list (local.get $value)))
-      #@(block $done (loop $next (br_if $done (i32.or (i32.eqz (local.get $id)) (ref.is_null (local.get $params))))
-        (local.set $params (call $cdr (local.get $params))) (local.set $id (i32.sub (local.get $id) (i32.const 1))) (br $next)))
+      #@(call $capture-values)
+      #@(local.set $values-count) #@(local.set $params)
+      #@(local.set $tertiary) #@(local.set $secondary)
+      #@(if (i32.ge_u (local.get $id) (local.get $values-count)) (then (local.set $value (ref.null eq)))
+        (else (if (local.get $id)
+          (then (if (i32.eq (local.get $id) (i32.const 1)) (then (local.set $value (local.get $secondary)))
+            (else (if (i32.eq (local.get $id) (i32.const 2)) (then (local.set $value (local.get $tertiary)))
+              (else
+                (block $done (loop $next (br_if $done (i32.eq (local.get $id) (i32.const 1)))
+                  (local.set $params (call $cdr (local.get $params)))
+                  (local.set $id (i32.sub (local.get $id) (i32.const 1))) (br $next)))
+                (local.set $value (call $car (local.get $params)))))))))))
       #@(call $clear-values)
-      #@(return (call $car (local.get $params)))))
+      #@(return (local.get $value))))
   (wat-symbol-case #@(local.get $id)
     (quote
       (wat-arity 1)
@@ -574,7 +694,43 @@
   #@(if (call $symbolp (local.get $name))
     (then (if (i32.eq (call $tag (local.get $binding)) (i32.const 30))
       (then (local.set $name (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding))))))))
-  #@(local.set $args (call $eval-list (local.get $args) (local.get $env)))
+  #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'values)))
+    (then
+      (local.set $values-count (call $small-value-count (local.get $args)))
+      (if (i32.le_u (local.get $values-count) (i32.const 3))
+        (then
+          (call $eval-small-values (local.get $args) (local.get $env) (local.get $values-count))
+          (local.set $values-count) (local.set $tertiary) (local.set $secondary) (local.set $value)
+          ;; A lexical binding was selected above. Global function lookup
+          ;; retains its ordinary position after operand evaluation.
+          (if (call $symbolp (local.get $name))
+            (then (local.set $name (call $fdefinition (local.get $name)))))
+          (if (if (result i32) (i32.eq (call $tag (local.get $name)) (i32.const 8))
+                (then (i32.eq (call $value-n (local.get $name)) (i32.const ,(1+ (runtime-symbol-id 'values)))))
+                (else (i32.const 0)))
+            (then (return (call $small-values (local.get $value) (local.get $secondary)
+              (local.get $tertiary) (local.get $values-count)))))
+          (local.set $args (ref.null eq))
+          (if (i32.gt_u (local.get $values-count) (i32.const 2))
+            (then (local.set $args (call $cons (local.get $tertiary) (local.get $args)))))
+          (if (i32.gt_u (local.get $values-count) (i32.const 1))
+            (then (local.set $args (call $cons (local.get $secondary) (local.get $args)))))
+          (if (local.get $values-count)
+            (then (local.set $args (call $cons (local.get $value) (local.get $args)))))
+          (return_call $eval-apply (local.get $name) (local.get $args))))
+      (call $eval-overflow-values (local.get $args) (local.get $env))
+      (local.set $values-count) (local.set $args))
+    (else
+      (call $eval-call-arguments (local.get $args) (local.get $env))
+      (local.set $values-count) (local.set $args) (local.set $secondary) (local.set $value)
+      (call $eval-apply-fixed (local.get $name) (local.get $value) (local.get $secondary) (local.get $values-count))
+      (local.set $index) (local.set $tertiary)
+      (if (local.get $index) (then (return (local.get $tertiary))))
+      (if (i32.gt_u (local.get $values-count) (i32.const 1))
+        (then (local.set $args (call $cons (local.get $secondary) (local.get $args)))))
+      (if (local.get $values-count)
+        (then (local.set $args (call $cons (local.get $value) (local.get $args)))))
+      (return_call $apply (local.get $name) (local.get $args))))
   ;; A direct VALUES call owns this freshly evaluated argument spine. Other
   ;; public calls snapshot their values because APPLY may share a user's list.
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'values)))
@@ -583,7 +739,7 @@
       (if (if (result i32) (i32.eq (call $tag (local.get $name)) (i32.const 8))
               (then (i32.eq (call $value-n (local.get $name)) (i32.const ,(1+ (runtime-symbol-id 'values)))))
               (else (i32.const 0)))
-        (then (return (call $return-values (local.get $args)))))))
+        (then (return (call $return-values-count (local.get $args) (local.get $values-count)))))))
   #@(return_call $eval-apply (local.get $name) (local.get $args)))
 
 (define-runtime-function $eval-setf
@@ -644,7 +800,9 @@
   ($operator)
   ($body)
   ($eval-list)
+  ($eval-small-values)
+  ($small-value-count) ($eval-overflow-values)
   ($validate-params)
   ($declared-special-p)
   ($eval0)
-  ($eval1) ($eval-apply))
+  ($eval1) ($eval-apply) ($eval-call-arguments) ($eval-apply-fixed))

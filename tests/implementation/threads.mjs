@@ -62,13 +62,13 @@ await vm.evaluateAsync(`
     (js:callback (lambda (value)
       (incf *external-callback-count*)
       (unless (= *print-base* 10) (error "Callback inherited a parked thread's bindings."))
-      (+ (js:from-js value) 2)))
+      (values (+ (js:from-js value) 2) :callback :extra)))
     (js:callback (lambda () (error "External callback failure."))))
   (defparameter *callback-cleanup-worker*
     (miricl-threads:make-thread (lambda ()
       (let ((*print-base* 16))
         (catch 'callback-cleanup-exit
-          (unwind-protect (throw 'callback-cleanup-exit 42)
+          (unwind-protect (throw 'callback-cleanup-exit (values 42 nil :third :fourth nil))
             (mark-thread-cleanup) (sleep 0.15)))))))
   (values)`);
 const callbackDeadline = performance.now() + 5000;
@@ -81,7 +81,8 @@ for (let transfer = 0; transfer < 8; transfer++) assert.deepEqual(await vm.readF
 assert.equal(callbackFixture.good(40), 42);
 assert.throws(() => callbackFixture.bad(), /External callback failure/);
 assert.equal(callbackFixture.good(41), 43);
-assert.equal((await vm.evaluateAsync('(miricl-threads:join-thread *callback-cleanup-worker*)')).output, '42\n');
+assert.equal((await vm.evaluateAsync('(multiple-value-list (miricl-threads:join-thread *callback-cleanup-worker*))')).output,
+  '(42 NIL :THIRD :FOURTH NIL)\n');
 assert.equal(vm.evaluate('*external-callback-count*').output, '2\n');
 console.log('PASS external callbacks isolate bindings and errors while preserving a parked nonlocal transfer');
 

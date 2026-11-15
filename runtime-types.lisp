@@ -74,7 +74,7 @@
 
 (define-runtime-function $compound-typep-worker (($x :nullable-object) ($type :nullable-object)) (i32)
   (:locals ($saved :nullable-object) ($count i32) ($result i32))
-  #@(local.set $saved (global.get $extra-values)) #@(local.set $count (global.get $value-count))
+  #@(local.set $saved (call $extra-value-list)) #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (local.set $result (call $compound-typep-cl (local.get $x) (local.get $type) (call $compound-type-metadata-function)))
     (global.set $extra-values (local.get $saved)) (global.set $value-count (local.get $count))
@@ -378,7 +378,7 @@
   (:locals ($count i32) ($extra :nullable-object) ($values :nullable-object)
            ($spec :nullable-object) ($optional i32))
   #@(local.set $count (global.get $value-count))
-  #@(local.set $extra (global.get $extra-values))
+  #@(local.set $extra (call $extra-value-list))
   #@(if (i32.eq (call $operator (local.get $type)) (i32.const ,(runtime-symbol-id 'values)))
     (then
       (local.set $values (call $value-list (local.get $value)))

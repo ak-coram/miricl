@@ -1111,7 +1111,7 @@
       (wat-arity 1 2)
       #@(loop $next
         (local.set $a (call $macroexpand-1 (local.get $a) (local.get $b)))
-        (if (ref.is_null (call $car (global.get $extra-values)))
+        (if (ref.is_null (call $secondary-value))
           (then (return (call $two-values (local.get $a) (call $bool (local.get $expanded))))))
         (local.set $expanded (i32.const 1)) (br $next)))
     (register-source-file

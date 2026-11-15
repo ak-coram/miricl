@@ -322,6 +322,87 @@
           (push block (hir-block-predecessors successor)) (setq previous successor)))))
   function)
 
+(defun hir-proper-list-checks (unit calls references barriers)
+  "Prove redundant proper-list checks within one block of the current emission.
+CALLS and REFERENCES identify the canonical operations selected by lowering.
+Facts describe primary values, never declared LIST types or stored HIR types.
+Unknown effects discard mutable spine facts; no fact crosses a block edge."
+  (declare (type hir-unit unit) (type hash-table calls references barriers))
+  (let ((proofs (make-hash-table :test 'eq)) (fuel 65536))
+    (declare (type hash-table proofs) (type (integer 0 65536) fuel))
+    (dolist (function (hir-unit-functions unit))
+      (unless (or (>= (hir-function-debug-level function) 2) (gethash function barriers))
+        (dolist (block (hir-function-blocks function))
+          (let ((facts nil))
+            (declare (type (or null hash-table) facts))
+            (labels ((proper (value)
+                       (or (and facts (gethash value facts))
+                           ;; NIL is immutable and can be recognized again
+                           ;; after an effect without retaining heap facts.
+                           (let ((producer (and value (hir-value-producer value))))
+                             (and (%hir-instruction-p producer)
+                                  (eq (hir-value-kind value) :single)
+                                  (eq (hir-instruction-opcode producer) :constant)
+                                  (null (first (hir-instruction-attributes producer)))))))
+                     (remember (value)
+                       (unless facts (setq facts (make-hash-table :test 'eq)))
+                       (setf (gethash value facts) t)))
+              (dolist (instruction (hir-block-instructions block))
+                (when (zerop fuel) (return-from hir-proper-list-checks proofs))
+                (decf fuel)
+                (let* ((opcode (hir-instruction-opcode instruction))
+                       (inputs (hir-instruction-inputs instruction))
+                       (output (hir-instruction-output instruction))
+                       (kind (and (eq opcode :call) (gethash instruction calls))))
+                  ;; Public HIR can carry value kinds beyond the frontend's
+                  ;; usual shapes. Distinguish a single list value from a
+                  ;; multiple-value packet whose primary may be arbitrary.
+                  (cond
+                    ((and (eq opcode :check-apply-list)
+                          (eq (hir-value-kind (first inputs)) :single))
+                     (when (proper (first inputs))
+                       (setf (gethash instruction proofs) t)
+                       (compiler-statistic :optimization/proper-list-check))
+                     ;; A successful checked traversal establishes the same
+                     ;; fact even when this first check must remain emitted.
+                     (remember (first inputs)))
+                    ((and (eq opcode :check-apply-arguments)
+                          (eq (hir-value-kind (first inputs)) :single))
+                     ;; Retain the exact arity check, including its errors.
+                     (remember (first inputs)))
+                    ((or (and (eq opcode :list) (eq (hir-value-kind output) :single))
+                         (and (eq kind :list) (eq (hir-value-kind output) :multiple)))
+                     (remember output))
+                    ((and (eq kind :cons) (eq (hir-value-kind output) :multiple)
+                          (eq (hir-value-kind (fourth inputs)) :single))
+                     (when (proper (fourth inputs)) (remember output)))
+                    ((or (and (eq opcode :copy)
+                              (eq (hir-value-kind output) :single)
+                              (eq (hir-value-kind (first inputs)) :single))
+                         (and (eq opcode :primary)
+                              (eq (hir-value-kind output) :single)
+                              (eq (hir-value-kind (first inputs)) :multiple))
+                         (and (eq opcode :values)
+                              (eq (hir-value-kind output) :multiple)
+                              (or (null inputs) (eq (hir-value-kind (first inputs)) :single))))
+                     (when (or (and (eq opcode :values) (null inputs))
+                               (proper (first inputs)))
+                       (remember output)))
+                    ((and (eq opcode :value-ref)
+                          (eq (hir-value-kind output) :single)
+                          (eq (hir-value-kind (first inputs)) :multiple))
+                     (when (and (zerop (first (hir-instruction-attributes instruction)))
+                                (proper (first inputs)))
+                       (remember output)))
+                    ((or (member opcode '(:constant :argument :checked-argument
+                                          :truth :cell-new :cell-read))
+                         (and (eq opcode :function-reference) (gethash output references))
+                         (member kind '(:eq :eql :consp :simple-vector-p :vectorp
+                                        :stringp :symbolp :integerp :characterp
+                                        :null :true :false))))
+                    (t (when facts (clrhash facts)))))))))))
+    proofs))
+
 (defun optimize-hir-checked (unit)
   (declare (type hir-unit unit))
   (let ((barriers (hir-optimization-barriers unit)))

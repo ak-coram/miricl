@@ -1,6 +1,111 @@
 ;;;; Flow of primary-value types through HIR, independent of Wasm lowering.
 (in-package :miricl-compiler)
 
+(defun hir-result-callee (value &optional callees)
+  "A function identity established by executable closure data, not local metadata."
+  (or (and callees (gethash value callees))
+   (loop repeat 32 do
+    (let ((origin (hir-value-producer value)))
+      (unless (%hir-instruction-p origin) (return nil))
+      (case (hir-instruction-opcode origin)
+        (:copy (setq value (first (hir-instruction-inputs origin))))
+        (:closure (return (first (hir-instruction-attributes origin))))
+        ;; A cell's LOCAL record is descriptive, not a proof that no write,
+        ;; alias or capture has changed its current function identity.
+        (otherwise (return nil)))))))
+
+(defun hir-result-callees (unit barriers)
+  "Prove read-only lexical function cells from their actual initialization."
+  (let ((callees (make-hash-table :test 'eq)) (fuel 65536))
+    (dolist (function (hir-unit-functions unit))
+      (unless (gethash function barriers)
+        (let ((cells (hir-private-cells function barriers))
+              (writes (make-hash-table :test 'eq)) (targets (make-hash-table :test 'eq)))
+          (dolist (block (hir-function-blocks function))
+            (dolist (instruction (hir-block-instructions block))
+              (when (minusp (decf fuel)) (return-from hir-result-callees callees))
+              (when (eq (hir-instruction-opcode instruction) :cell-write)
+                (push instruction (gethash (first (hir-instruction-inputs instruction)) writes)))))
+          ;; Restrict certificates to initializations executed in the entry
+          ;; block, before its successor edges. A single assignment to a
+          ;; nonescaping cell then dominates all later reachable blocks.
+          (dolist (instruction (hir-block-instructions (hir-function-entry function)))
+            (let* ((inputs (hir-instruction-inputs instruction))
+                   (cell (if (eq (hir-instruction-opcode instruction) :cell-new)
+                             (hir-instruction-output instruction) (first inputs))))
+              (case (hir-instruction-opcode instruction)
+                (:cell-new
+                 (when (and (gethash cell cells) (null (gethash cell writes)))
+                   (setf (gethash cell targets) (hir-result-callee (first inputs)))))
+                (:cell-write
+                 (when (and (gethash cell cells) (null (cdr (gethash cell writes))))
+                   (setf (gethash cell targets) (hir-result-callee (second inputs)))))
+                (:cell-read
+                 (when (gethash cell targets)
+                   (setf (gethash (hir-instruction-output instruction) callees) (gethash cell targets)))))))
+          (dolist (block (hir-function-blocks function))
+            (unless (eq block (hir-function-entry function))
+              (dolist (instruction (hir-block-instructions block))
+                (when (eq (hir-instruction-opcode instruction) :cell-read)
+                  (let ((target (gethash (first (hir-instruction-inputs instruction)) targets)))
+                    (when target (setf (gethash (hir-instruction-output instruction) callees) target))))))))))
+    callees))
+
+(defun hir-result-arities-checked (unit)
+  "Prove exact value counts from validated, current HIR, independently of types.
+NIL means unknown; integer zero is a proof of no values. Cycles and exhausted
+work retain unknown facts. No declarations or replaceable global names certify
+an arity. Recompute after any HIR mutation."
+  (let ((facts (make-hash-table :test 'eq))
+        (incoming (make-hash-table :test 'eq))
+        (barriers (hir-optimization-barriers unit)) (fuel 65536))
+   (let ((callees (hir-result-callees unit barriers)))
+    (labels ((join (sources)
+               (when sources
+                 (let ((count (gethash (first sources) facts)))
+                   (and count (every (lambda (source) (eql count (gethash source facts))) (rest sources)) count)))))
+      (dolist (function (hir-unit-functions unit))
+        (dolist (block (hir-function-blocks function))
+          (let* ((end (hir-block-terminator block)) (opcode (hir-instruction-opcode end))
+                 (target (and (member opcode '(:jump :block-return))
+                              (first (hir-instruction-attributes end)))))
+            (when target
+              (push (if (eq opcode :jump) (first (hir-instruction-inputs end))
+                        (third (hir-instruction-inputs end)))
+                    (gethash (first (hir-block-parameters target)) incoming)))))
+        ;; Structural capture edges, rather than client-maintained capture
+        ;; flags, prevent certifying local-only incoming groups at landing pads.
+        (when (gethash function barriers)
+          (dolist (block (hir-function-blocks function))
+            (dolist (parameter (hir-block-parameters block))
+              (push nil (gethash parameter incoming))))))
+      (dotimes (pass 32)
+        (let ((changed nil))
+          (dolist (function (hir-unit-functions unit))
+            (dolist (value (hir-function-values function))
+              (when (minusp (decf fuel)) (return-from hir-result-arities-checked (values facts callees)))
+              (unless (gethash value facts)
+                (let* ((origin (hir-value-producer value))
+                       (count (cond
+                                ((%hir-instruction-p origin)
+                                 (case (hir-instruction-opcode origin)
+                                   (:values (length (hir-instruction-inputs origin)))
+                                   (:copy (gethash (first (hir-instruction-inputs origin)) facts))
+                                   (:call (gethash (hir-result-callee (second (hir-instruction-inputs origin)) callees) facts))
+                                   (otherwise (unless (eq (hir-value-kind value) :multiple) 1))))
+                                (t (join (gethash value incoming))))))
+                  (when count (setf (gethash value facts) count changed t)))))
+            (unless (gethash function facts)
+              (let ((returns nil))
+                (dolist (block (hir-function-blocks function))
+                  (let ((end (hir-block-terminator block)))
+                    (when (eq (hir-instruction-opcode end) :return)
+                      (push (first (hir-instruction-inputs end)) returns))))
+                (let ((count (join returns)))
+                  (when count (setf (gethash function facts) count changed t))))))
+          (unless changed (return))))
+      (values facts callees)))))
+
 (defvar *hir-inline-definitions* nil
   "Canonical INLINE definitions selected for one analysis/emission.
 Share this snapshot with lowering so a cooperative redefinition cannot turn

@@ -169,7 +169,7 @@
 ;; Keep pending Lisp multiple values intact across native rejection as well.
 (define-runtime-function $format-parse (($digits :digits) ($i i32) ($end i32) ($args :nullable-object) ($scan i32)) (i32 i32 i32 i32 (ref $objects) :nullable-object i32)
   (:locals ($saved-extra :nullable-object) ($saved-count i32) ($after i32) ($code i32) ($colon i32) ($at i32) ($params (ref $objects)) ($remaining :nullable-object) ($count i32))
-  #@(local.set $saved-extra (global.get $extra-values))
+  #@(local.set $saved-extra (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (call $format-parse-raw (local.get $digits) (local.get $i) (local.get $end) (local.get $args) (local.get $scan))
@@ -217,7 +217,7 @@
 ;; Keep pending Lisp multiple values intact across native rejection as well.
 (define-runtime-function $format-close (($digits :digits) ($i i32) ($end i32) ($close i32) ($separator i32)) (i32 i32 i32 i32)
   (:locals ($saved-extra :nullable-object) ($saved-count i32) ($mark i32) ($after i32) ($code i32) ($colon i32))
-  #@(local.set $saved-extra (global.get $extra-values))
+  #@(local.set $saved-extra (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (call $format-close-raw (local.get $digits) (local.get $i) (local.get $end) (local.get $close) (local.get $separator))
@@ -869,7 +869,7 @@
 ;; Keep pending Lisp multiple values intact across native rejection as well.
 (define-runtime-function $format-slash-end (($digits :digits) ($i i32) ($end i32)) (i32)
   (:locals ($saved-extra :nullable-object) ($saved-count i32) ($result i32))
-  #@(local.set $saved-extra (global.get $extra-values))
+  #@(local.set $saved-extra (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (call $format-slash-end-raw (local.get $digits) (local.get $i) (local.get $end))

@@ -135,7 +135,7 @@
       (return (call $report-text (local.get $result)))))
   ;; APPLY restores dynamic scope even when a synchronous JS callback throws
   ;; to a surrounding Lisp target. Preserve the caller's multiple values too.
-  #@(local.set $extra (global.get $extra-values))
+  #@(local.set $extra (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $result (call $apply (local.get $a) (local.get $b)))
   #@(global.set $extra-values (local.get $extra))

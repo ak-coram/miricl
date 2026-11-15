@@ -97,7 +97,7 @@
     (($type :nullable-object) ($coverage i32) ($env :nullable-object)) (:nullable-object :nullable-object i32)
   (:locals ($saved :nullable-object) ($count i32)
            ($lower :nullable-object) ($upper :nullable-object) ($kind i32))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (call $integer-type-interval-wat (local.get $type) (local.get $coverage) (local.get $env))
@@ -275,7 +275,7 @@
            ($lower :nullable-object) ($upper :nullable-object) ($kind i32))
   ;; The checked array-upgrade callback consumes this descriptor transport.
   ;; Keep its ABI while interval/subtype computation uses the native workers.
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (if (i32.eqz (local.get $mode))
@@ -287,7 +287,7 @@
       (else
         (local.set $result (call $integer-subtypep (local.get $a) (local.get $b) (local.get $env)))
         (local.set $result (call $int
-          (if (result i32) (ref.is_null (call $car (global.get $extra-values)))
+          (if (result i32) (ref.is_null (call $secondary-value))
             (then (i32.const 0))
             (else (select (i32.const 2) (i32.const 1) (ref.is_null (local.get $result)))))))))
     (global.set $extra-values (local.get $saved))

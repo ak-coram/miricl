@@ -1160,7 +1160,7 @@
   (:locals ($cell :nullable-object) ($values :nullable-object) ($count i32))
   ;; User hash predicates can return extra values. A primary-only lookup must
   ;; not expose those through a raw runtime caller's pending value packet.
-  #@(local.set $values (global.get $extra-values))
+  #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $cell (call $hash-cell-native (local.get $key) (local.get $table)))
   #@(global.set $extra-values (local.get $values))
@@ -1738,14 +1738,37 @@
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     (call $cons (local.get $a) (ref.null eq)))))
 
+;; A canonical builtin and two actual i31 values prove these operations exact.
+;; Signed i31 addition fits i32; INT retains promotion beyond the i31 range.
+;; Misses leave the ordinary checked dispatcher, including its poll, in place.
+(defun native-small-number-call-wat ()
+  (runtime-wat-sequence
+    #@(block $small-miss (result (ref null eq))
+      (br_if $small-miss (ref.null eq)
+        (i32.and (i32.ne (local.get $id) (i32.const ,(runtime-symbol-id '+)))
+                 (i32.ne (local.get $id) (i32.const ,(runtime-symbol-id '<)))))
+      (local.set $small-left
+        (br_on_cast_fail $small-miss (ref null eq) (ref i31) (local.get $a)))
+      (local.set $small-right
+        (br_on_cast_fail $small-miss (ref null eq) (ref i31) (local.get $b)))
+      (if (global.get $thread-active) (then (call $thread-checkpoint)))
+      (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '+)))
+        (then (return (extern.convert_any (call $int
+          (i32.add (i31.get_s (local.get $small-left)) (i31.get_s (local.get $small-right)))))))
+        (else (return (extern.convert_any (call $bool
+          (i32.lt_s (i31.get_s (local.get $small-left)) (i31.get_s (local.get $small-right)))))))))
+    #@(drop)))
+
 (define-runtime-function $native-call2
     (($function externref) ($left externref) ($right externref)) (externref)
   (:export-raw "native-call2")
   (:locals ($direct-result :nullable-object) ($hit i32) ($id i32) ($at i32) ($bt i32) ($index i32) ($cmp i32)
-           ($a :nullable-object) ($b :nullable-object) ($cell :nullable-object) ($vector (ref $array)))
+           ($a :nullable-object) ($b :nullable-object) ($cell :nullable-object) ($vector (ref $array))
+           ($small-left (ref i31)) ($small-right (ref i31)))
   #@(local.set $a ,(native-object '(local.get $left)))
   #@(local.set $b ,(native-object '(local.get $right)))
   #@(local.set $id (call $native-builtin-id ,(native-object '(local.get $function))))
+  (native-small-number-call-wat)
   #@(local.set $at (call $tag (local.get $a)))
   #@(local.set $bt (call $tag (local.get $b)))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))

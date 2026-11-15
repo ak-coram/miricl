@@ -13,7 +13,7 @@
 (define-runtime-function $check-type-control-structure (($type :nullable-object)) ()
   (:locals ($saved :nullable-object) ($count i32))
   #@(if (i32.ne (call $tag (local.get $type)) (i32.const 7)) (then (return)))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (drop (call $check-type-control-cl (local.get $type) (call $array-type-metadata-function)))
@@ -34,7 +34,7 @@
 (define-runtime-function $array-query
     (($a :nullable-object) ($b :nullable-object) ($mode i32) ($flags i32) ($rank i32) ($env :nullable-object)) (:nullable-object)
   (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (if (i32.eq (local.get $mode) (i32.const 1))

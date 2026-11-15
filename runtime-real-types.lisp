@@ -77,7 +77,7 @@
 (define-runtime-function $real-type-worker
     (($a :nullable-object) ($b :nullable-object) ($mode i32)) (:nullable-object)
   (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (if (i32.ne (local.get $mode) (i32.const 1))
@@ -141,7 +141,7 @@
     (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (:nullable-object)
   (:locals ($result :nullable-object))
   #@(local.set $result (call $integer-subtypep (local.get $a) (local.get $b) (local.get $env)))
-  #@(if (i32.eqz (ref.is_null (call $car (global.get $extra-values)))) (then (return (local.get $result))))
+  #@(if (i32.eqz (ref.is_null (call $secondary-value))) (then (return (local.get $result))))
   #@(call $real-subtypep (local.get $a) (local.get $b)))
 
 (define-runtime-function $subtype-class (($type :nullable-object)) (:nullable-object)
@@ -245,7 +245,7 @@
         (i32.or (ref.is_null (local.get $a)) (ref.eq (local.get $b) (call $symbol (i32.const 1)))))
     (then (return (call $two-values (call $symbol (i32.const 1)) (call $symbol (i32.const 1))))))
   #@(local.set $result (call $numeric-subtypep (local.get $a) (local.get $b) (local.get $env)))
-  #@(if (i32.eqz (ref.is_null (call $car (global.get $extra-values)))) (then (return (local.get $result))))
+  #@(if (i32.eqz (ref.is_null (call $secondary-value))) (then (return (local.get $result))))
   #@(local.set $ca (call $subtype-class (local.get $a)))
   #@(local.set $cb (call $subtype-class (local.get $b)))
   #@(if (i32.eqz (ref.is_null (local.get $ca)))

@@ -36,7 +36,7 @@
 (define-runtime-function $stream-sequence-arguments
     (($args :nullable-object) ($mode i32)) (:nullable-object :nullable-object i32 i32)
   (:locals ($saved :nullable-object) ($count i32) ($packet :nullable-object) ($data (ref $objects)))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     ,(wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 3)) :malformed-form)
@@ -84,7 +84,7 @@
 (define-runtime-function $stream-sequence-text
     (($sequence :nullable-object) ($first i32) ($count i32)) (:nullable-object)
   (:locals ($saved :nullable-object) ($saved-count i32) ($result :nullable-object))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (local.set $result (call $stream-sequence-text-body (local.get $sequence) (local.get $first) (local.get $count)))
@@ -99,7 +99,7 @@
     (($sequence :nullable-object) ($peer :nullable-object) ($first i32) ($stop i32)
      ($from i32) ($mode i32) ($binary i32)) (i32)
   (:locals ($saved :nullable-object) ($count i32) ($result :nullable-object))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     ,(wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 3)) :malformed-form)
@@ -255,7 +255,7 @@
 (define-runtime-function $write-stream-sequence
     (($sequence :nullable-object) ($stream :nullable-object) ($first i32) ($count i32) ($mode i32)) ()
   (:locals ($saved :nullable-object) ($saved-count i32))
-  #@(local.set $saved (global.get $extra-values))
+  #@(local.set $saved (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     ,(wat-fail-when #@(i32.gt_u (i32.sub (local.get $mode) (i32.const 1)) (i32.const 2)) :malformed-form)
