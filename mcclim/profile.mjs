@@ -1,5 +1,7 @@
 // Diagnostic workload, not a demo conformance test. No Lisp evaluation probes.
-// node mcclim/profile.mjs [packaged-site] [output-prefix]
+// node mcclim/profile.mjs [packaged-site] [output-prefix] [cpu-phase=input]
+// Sample one phase, requesting a stop after one second. Long deep-stack profiles
+// can retain huge call trees and disturb the application being measured.
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -8,6 +10,11 @@ import {spawn} from 'node:child_process';
 
 const site = path.resolve(process.argv[2] ?? 'build/mcclim/site');
 const output = process.argv[3] ?? 'mcclim/build/performance';
+const cpuPhase = process.argv[4] ?? 'input';
+if (!['input', 'startup', 'open', 'none'].includes(cpuPhase))
+  throw new Error('CPU phase must be input, startup, open or none.');
+const samplingIntervalUs = 10000, profileWindowMs = 1000;
+const memoryLimitBytes = 512 * 1024 * 1024;
 await fs.mkdir(path.dirname(output), {recursive: true});
 const server = http.createServer(async (request, response) => {
   try {
@@ -27,17 +34,58 @@ const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run',
   '--no-default-browser-check', '--disable-background-networking',
   `--user-data-dir=${directory}`, '--no-startup-window', '--remote-debugging-pipe',
-], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
-const stopped = new Promise(resolve => browser.once('exit', resolve));
-let received = '', nextId = 0, diagnostics = '';
+], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32'});
+// CLOSE also follows spawn failures, for which EXIT is never emitted.
+const stopped = new Promise(resolve => browser.once('close', resolve));
+let received = '', nextId = 0, diagnostics = '', failure;
 const pending = new Map(), exceptions = [], report = {phases: {}, input: []};
 function fail(error) {
+  failure ??= error;
   for (const {reject, timer} of pending.values()) {clearTimeout(timer); reject(error);}
   pending.clear();
 }
+function terminateBrowser(signal = 'SIGTERM') {
+  try {
+    // A dedicated process group includes renderers retaining the CDP pipes
+    // after their parent exits, so escalation also terminates those children.
+    if (process.platform === 'win32') browser.kill(signal);
+    else if (browser.pid) process.kill(-browser.pid, signal);
+  } catch (error) {if (error.code !== 'ESRCH') throw error;}
+}
+// Count only this process and its Chromium descendants. Summing RSS is
+// conservative because shared pages can occur in more than one process.
+let checkingMemory = false;
+const memoryWatch = process.platform === 'linux' ? setInterval(async () => {
+  if (checkingMemory || !browser.pid || browser.exitCode !== null) return;
+  checkingMemory = true;
+  try {
+    const remaining = [browser.pid], owned = new Set();
+    let rss = process.memoryUsage().rss;
+    while (remaining.length) {
+      const pid = remaining.pop();
+      if (owned.has(pid)) continue;
+      owned.add(pid);
+      try {
+        const status = await fs.readFile(`/proc/${pid}/status`, 'utf8');
+        rss += Number(status.match(/^VmRSS:\s+(\d+) kB$/m)?.[1] ?? 0) * 1024;
+        const children = await fs.readFile(`/proc/${pid}/task/${pid}/children`, 'utf8');
+        for (const child of children.trim().split(/\s+/)) if (child) remaining.push(Number(child));
+      } catch (error) {if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error;}
+    }
+    report.peakRssBytes = Math.max(report.peakRssBytes ?? 0, rss);
+    if (rss > memoryLimitBytes) {
+      fail(new Error('Profiler exceeded its 512 MiB process-tree RSS budget.'));
+      for (const pid of owned) {
+        try {process.kill(pid, 'SIGTERM');} catch (error) {if (error.code !== 'ESRCH') throw error;}
+      }
+    }
+  } catch (error) {fail(error); terminateBrowser();}
+  finally {checkingMemory = false;}
+}, 500) : null;
 browser.stderr.on('data', bytes => {diagnostics = (diagnostics + bytes).slice(-4000);});
 browser.on('error', fail);
 browser.on('exit', code => fail(new Error(`Chromium exited ${code}: ${diagnostics}`)));
+for (const pipe of [browser.stderr, browser.stdio[3], browser.stdio[4]]) pipe.on('error', fail);
 browser.stdio[4].on('data', bytes => {
   received += bytes;
   for (let end; (end = received.indexOf('\0')) !== -1;) {
@@ -50,11 +98,12 @@ browser.stdio[4].on('data', bytes => {
     else request.resolve(message.result);
   }
 });
-function send(method, params = {}, sessionId) {
+function send(method, params = {}, sessionId, timeoutMs = 10000) {
+  if (failure) return Promise.reject(failure);
   return new Promise((resolve, reject) => {
     const id = ++nextId, timer = setTimeout(() => {
       pending.delete(id); reject(new Error(`Timed out: ${method}\n${diagnostics}`));
-    }, 60000);
+    }, timeoutMs);
     pending.set(id, {resolve, reject, timer});
     browser.stdio[3].write(JSON.stringify({id, method, params, sessionId}) + '\0');
   });
@@ -117,7 +166,7 @@ function instrument() {
 try {
   const {targetId} = await send('Target.createTarget', {url: 'about:blank'});
   const {sessionId} = await send('Target.attachToTarget', {targetId, flatten: true});
-  const command = (method, params) => send(method, params, sessionId);
+  const command = (method, params, timeoutMs) => send(method, params, sessionId, timeoutMs);
   const js = async expression => {
     const result = await command('Runtime.evaluate', {expression, awaitPromise: true, returnByValue: true});
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
@@ -140,17 +189,33 @@ try {
   await command('Runtime.enable'); await command('Page.enable');
   await command('Emulation.setDeviceMetricsOverride', {width: 1400, height: 1000, deviceScaleFactor: 1, mobile: false});
   await command('Page.addScriptToEvaluateOnNewDocument', {source: `(${instrument})();`});
-  await command('Profiler.enable'); await command('Profiler.setSamplingInterval', {interval: 1000});
+  if (cpuPhase !== 'none') {
+    await command('Profiler.enable');
+    await command('Profiler.setSamplingInterval', {interval: samplingIntervalUs});
+  }
   let previous;
   const delta = (after, before = {}) => Object.fromEntries(Object.entries(after).map(([key, value]) =>
     [key, typeof value === 'number' ? value - (before[key] ?? 0) : delta(value, before[key])]));
   async function profile(name, work) {
-    await command('Profiler.start');
-    try {await work();}
-    finally {
-      const {profile} = await command('Profiler.stop');
-      await fs.writeFile(`${output}-${name}.cpuprofile`, JSON.stringify(profile));
-    }
+    if (name === cpuPhase) {
+      await command('Profiler.start');
+      const started = performance.now();
+      let stopping;
+      const stop = () => stopping ??= command('Profiler.stop', {}, 2000).catch(error => {
+        fail(error); terminateBrowser(); throw error;
+      });
+      const timer = setTimeout(() => {stop().catch(() => {});}, profileWindowMs);
+      try {await work();}
+      finally {
+        clearTimeout(timer);
+        const {profile} = await stop();
+        report.cpuProfile = {phase: name, samplingIntervalUs, profileWindowMs,
+          collectedMs: (profile.endTime - profile.startTime) / 1000,
+          phaseMs: performance.now() - started, nodes: profile.nodes.length,
+          samples: profile.samples?.length ?? 0};
+        await fs.writeFile(`${output}-${name}.cpuprofile`, JSON.stringify(profile));
+      }
+    } else await work();
     const current = await snapshot();
     report.phases[name] = {...current,
       bridge: delta(current.bridge, previous?.bridge),
@@ -204,7 +269,18 @@ try {
   await fs.writeFile(`${output}.png`, Buffer.from(screenshot.data, 'base64'));
   await fs.writeFile(`${output}.json`, JSON.stringify(report, null, 2) + '\n');
 } finally {
-  fail(new Error('Profiling ended')); browser.kill(); await stopped;
-  await new Promise(resolve => server.close(resolve));
-  await fs.rm(directory, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
+  clearInterval(memoryWatch);
+  fail(new Error('Profiling ended')); terminateBrowser();
+  const forceStop = setTimeout(() => terminateBrowser('SIGKILL'), 2000);
+  let deadline;
+  try {
+    await Promise.race([stopped, new Promise((_, reject) => {
+      deadline = setTimeout(() => reject(new Error('Chromium did not close after termination.')), 5000);
+    })]);
+  } finally {
+    clearTimeout(forceStop); clearTimeout(deadline);
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    await fs.rm(directory, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
+  }
 }

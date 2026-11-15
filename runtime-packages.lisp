@@ -88,7 +88,9 @@
 
 (defun $find-global-package-name-cl ()
   (runtime-function-definition '$find-global-package-name-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$find-global-package-name-cl 'miricl-runtime:find-global-package-name))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$find-global-package-name-cl
+      'miricl-runtime:find-global-package-name
+      :fixed-callbacks '((2 %%package-node-ref))))))
 
 (define-runtime-function $find-global-package (($name :nullable-object)) (:nullable-object)
   (:locals ($values :nullable-object) ($result :nullable-object) ($count i32))
@@ -97,7 +99,7 @@
   #@(local.set $count (global.get $value-count))
   #@(local.set $name (call $string-contents (call $string-designator (local.get $name))))
   #@(local.set $result (call $find-global-package-name-cl (local.get $name) (global.get $packages)
-    (call $package-kernel-function (i32.const 0)) (call $package-kernel-function (i32.const 2))))
+    (call $package-entry-function (i32.const 0))))
   #@(global.set $extra-values (local.get $values))
   #@(global.set $value-count (local.get $count))
   #@(local.get $result))
@@ -128,7 +130,16 @@
 
 (define-runtime-function $package-node-ref (($node :nullable-object) ($selector i32) ($index :nullable-object)) (:nullable-object)
   (:locals ($meta :nullable-object) ($table (ref null $objects)) ($id i32) ($slot i64))
-  (wat-fail-when #@(i32.gt_u (local.get $selector) (i32.const 10)) :invalid-package)
+  (wat-fail-when #@(i32.gt_u (local.get $selector) (i32.const 12)) :invalid-package)
+  ;; Canonical saved PACKAGE-NAME and PACKAGE-NICKNAMES semantics, including
+  ;; unnamed deleted package objects. FIND-PACKAGE validates designators.
+  #@(if (i32.ge_u (local.get $selector) (i32.const 11))
+    (then
+      (local.set $node (call $find-package (local.get $node)))
+      ,(wat-fail-when #@(ref.is_null (local.get $node)) :invalid-package)
+      (return (if (result (ref null eq)) (i32.eq (local.get $selector) (i32.const 11))
+        (then (call $car (struct.get $obj $a (ref.cast (ref $obj) (local.get $node)))))
+        (else (call $cdr (struct.get $obj $a (ref.cast (ref $obj) (local.get $node)))))))))
   #@(if (i32.eq (local.get $selector) (i32.const 10))
     (then (return_call $list-length-native (local.get $node))))
   #@(if (i32.eq (local.get $selector) (i32.const 8))
@@ -172,7 +183,7 @@
   (:locals ($code i64))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :invalid-package)
   #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
-  (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 10)) :invalid-package)
+  (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 12)) :invalid-package)
   #@(return_call $package-node-ref (local.get $node) (i32.wrap_i64 (local.get $code)) (local.get $index)))
 
 (defun package-entry-primitive-arity (count)

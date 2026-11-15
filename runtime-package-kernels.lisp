@@ -6,9 +6,9 @@
           check-package-options find-global-package-name find-local-package-name
           find-all-package-symbols))
 
-(defun find-global-package-name (name packages primary nicknames)
+(defun find-global-package-name (name packages metadata)
   "Find a normalized name in the registry, including trusted early startup."
-  (declare (type string name) (type function primary nicknames)
+  (declare (type string name) (type function metadata)
            (optimize (safety 0) (debug 0))
            (inline car cdr eq length char char-code = 1+))
   (values
@@ -16,8 +16,8 @@
      (let ((scan packages))
        (tagbody next
           (if scan nil (return-from found nil))
-          (let* ((package (car scan)) (candidate (funcall primary package))
-                 (names (funcall nicknames package)))
+          (let* ((package (car scan)) (candidate (funcall metadata package 11 nil))
+                 (names (funcall metadata package 12 nil)))
             (tagbody compare
                (if candidate
                    (let ((size (the (integer 0 #x7fffffff) (length name)))
