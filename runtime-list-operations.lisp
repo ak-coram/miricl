@@ -518,7 +518,9 @@
             (call $character-code ,(list-operation-argument 1)) (ref.null eq)))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%sequence-construction)))
     (then (return (call $sequence-construction-primitive (local.get $args)))))
-  (runtime-wat-forms
+  ;; Share the existing compact integer dispatcher with symbol cases. Each
+  ;; adapter retains its checked boundary and evaluates its arguments in order.
+  (wat-integer-dispatch (runtime-wat-sequence #@(local.get $op))
     (loop for (name arity function arguments) in
       '((%check-keys 3 $check-keywords-native (0 1 (:truth 2)))
         (%%list-copy 2 $copy-spine (0 (:index 1)))
@@ -622,15 +624,15 @@
         (%%builtin-macro 2 $direct-function (1 0 (:null) (:constant 7)))
         (%%define-constant 2 $define-constant (0 1))
         (%%define-package 2 $defpackage (0 1)))
-      collect `(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op name)))
-        (then ,(wat-arity arity)
-          (return (call ,function ,@(loop for argument in arguments collect
+      collect (cons (list (clos-primitive-op name))
+        (runtime-wat-sequence (wat-arity arity)
+          (wat-string `(return (call ,function ,@(loop for argument in arguments collect
             (if (integerp argument) (list-operation-argument argument)
               (ecase (car argument)
                 (:null '(ref.null eq))
                 (:constant `(i32.const ,(second argument)))
                 (:index `(call $sequence-index ,(list-operation-argument (second argument))))
-                (:truth `(i32.eqz (ref.is_null ,(list-operation-argument (second argument))))))))))))))
+                (:truth `(i32.eqz (ref.is_null ,(list-operation-argument (second argument)))))))))))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%storage-state)))
     (then ,(wat-arity 0)
       (return (call $three-values

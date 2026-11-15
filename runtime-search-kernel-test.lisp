@@ -10,9 +10,12 @@
             (loop for stop2 from first2 to (length source) do
               (dolist (reverse '(nil t))
                 (dolist (negate '(nil t))
-                  (let ((expected (apply #'search pattern source
-                                    :start1 first1 :end1 stop1 :start2 first2 :end2 stop2
-                                    :from-end reverse (list (if negate :test-not :test) #'eql))))
+                  ;; Derive empty-pattern boundaries directly: ECL 26.5.5
+                  ;; SEARCH incorrectly returns zero with nonzero START2.
+                  (let ((expected (if (= first1 stop1) (if reverse stop2 first2)
+                                      (apply #'search pattern source
+                                        :start1 first1 :end1 stop1 :start2 first2 :end2 stop2
+                                        :from-end reverse (list (if negate :test-not :test) #'eql)))))
                     (is (eql expected
                              (miricl-runtime:search-sequence-value pattern source #'eql
                                (vector nil first1 stop1 first2 stop2

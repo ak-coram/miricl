@@ -15,8 +15,8 @@ const test = (name, ...args) => [`tests/${name}.mjs`, ...args];
 // covered by compiler-runtime, evaluation-policy, native-compilation, the
 // separate cold compiler-input run.
 const readyCompilerTests = new Set([
-  'compiler-types', 'compiler-type-flow', 'compiler-generic-calls', 'compiler-safety', 'compiler-inline-types',
-  'compiler-inline-writes', 'compiler-modules', 'compiler-throughput', 'native-size', 'hir-optimization', 'compiler-integer-predicates', 'compiler-predicate-reuse', 'compiler-loops', 'compiler-licm',
+  'compiler-types', 'compiler-type-flow', 'compiler-nominal-types', 'compiler-generic-calls', 'compiler-safety', 'compiler-inline-types',
+  'compiler-inline-writes', 'compiler-modules', 'compiler-throughput', 'compiler-literal-functions', 'native-size', 'hir-optimization', 'compiler-integer-predicates', 'compiler-predicate-reuse', 'compiler-loops', 'compiler-licm',
   'compilation', 'hir', 'whole-program', 'class-reachability', 'generic-dispatch',
   'native-bundle', 'native-ltv', 'tail-calls', 'native-disassembly',
   'fasl-format', 'fasl-hash-tables', 'fasl-shared-initialization', 'saved-slots',
@@ -26,6 +26,8 @@ const readyCompilerTests = new Set([
 const groups = {
   runtime: [
     test('interpreter-only', image('miricl-interpreter.wasm'), wasm, asdf),
+    test('input-streams', image('miricl-interpreter.wasm')),
+    test('runtime-sequence-dispatch', image('miricl-interpreter.wasm')),
     test('threads', wasm, repl), test('standalone', wasm),
     ['--experimental-wasm-wasmfx', ...test('text-repl', wasm, repl)],
     test('repl-bridge', wasm, repl), test('repl-websocket', wasm, repl),
@@ -61,6 +63,11 @@ const groups = {
     test('compiler-runtime', precompiled, '--precompiled'),
     test('compiler-input', precompiled),
     test('compiler-statistics', precompiled),
+    test('compiler-entry-tables', precompiled),
+    test('compiler-imports', precompiled),
+    test('compiler-cell-folding', precompiled),
+    test('compiler-u32-width', precompiled),
+    test('compiler-literal-pressure', precompiled),
     test('evaluation-policy', wasm, precompiled, repl),
     test('core-image', precompiled),
     test('native-arguments', precompiled),
@@ -79,7 +86,7 @@ const groups = {
       .map(name => test(name, precompiled)),
     test('debugger', precompiled),
     ...['compilation', 'hir', 'hir-optimization', 'compiler-loops', 'compiler-predicate-reuse', 'compiler-licm', 'whole-program', 'class-reachability', 'generic-dispatch', 'compiler-generic-calls',
-      'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-safety', 'compiler-input', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-integer-predicates', 'compiler-modules', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',
+      'native-bundle', 'native-ltv', 'native-compilation', 'compiler-types', 'compiler-type-flow', 'compiler-nominal-types', 'compiler-safety', 'compiler-input', 'compiler-inline-types', 'compiler-inline-writes', 'compiler-integer-predicates', 'compiler-modules', 'compiler-literal-functions', 'tail-calls', 'native-disassembly', 'native-size', 'compiler-throughput',
       'fasl-format', 'fasl-hash-tables', 'fasl-shared-initialization', 'saved-slots', 'file-compilation', 'file-code-sharing', 'nested-backquote',
       'structure-printers', 'ansi-compiler-runner']
       .map(name => test(name, readyCompilerTests.has(name) ? precompiled : wasm)),

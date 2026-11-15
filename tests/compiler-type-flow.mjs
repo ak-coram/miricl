@@ -1,3 +1,4 @@
+import {nativeModuleImports} from './helpers/compiler-imports.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
@@ -92,7 +93,7 @@ try {
         (with-open-file (out "/flow.wasm" :direction :output :if-exists :supersede
                              :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
     const module = await WebAssembly.compile(await vm.readFile('/flow.wasm'));
-    return WebAssembly.Module.imports(module).map(entry => entry.name);
+    return nativeModuleImports(module).map(entry => entry.name);
   };
   // A proven dead arm must not force a surviving single value through an
   // allocated multiple-value packet. Preserve operand effects and CL's exact

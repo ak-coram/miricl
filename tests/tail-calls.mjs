@@ -1,3 +1,4 @@
+import {nativeModuleImports} from './helpers/compiler-imports.mjs';
 // Deep native tail calls must not grow the Wasm stack. Check dispatch and
 // Common Lisp value/extent semantics as well as successful deep recursion.
 import fs from 'node:fs';
@@ -137,7 +138,7 @@ try {
                             :if-exists :supersede) (write-sequence bytes stream)) t)`);
   const code = await vm.readFile('/tail-call.wasm');
   const module = new WebAssembly.Module(code);
-  assert.ok(WebAssembly.Module.imports(module).some(entry => entry.name === 'native-tail-call'));
+  assert.ok(nativeModuleImports(module).some(entry => entry.name === 'native-tail-call'));
   check(`(multiple-value-bind (bytes literals)
       (miricl-compiler:emit-native-module (miricl-compiler:compile-to-hir
         '(lambda (f x) (declare (optimize (debug 2))) (funcall f x))))
@@ -145,6 +146,6 @@ try {
     (with-open-file (stream "/debug-call.wasm" :direction :output :element-type '(unsigned-byte 8)
                             :if-exists :supersede) (write-sequence bytes stream)) t)`);
   const debug = new WebAssembly.Module(await vm.readFile('/debug-call.wasm'));
-  assert.ok(!WebAssembly.Module.imports(debug).some(entry => entry.name === 'native-tail-call'));
+  assert.ok(!nativeModuleImports(debug).some(entry => entry.name === 'native-tail-call'));
   console.log('General native tail calls pass without experimental flags.');
 } finally {vm.close();}

@@ -1,3 +1,4 @@
+import {nativeBundleImports, nativeModuleImports} from './helpers/compiler-imports.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
@@ -12,7 +13,7 @@ try {
         (defparameter *safety-function* (compiler-primitive 17 bytes literals nil))
         (with-open-file (out "/safety.wasm" :direction :output :if-exists :supersede
                              :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
-    return WebAssembly.Module.imports(await WebAssembly.compile(await vm.readFile('/safety.wasm')))
+    return nativeModuleImports(await WebAssembly.compile(await vm.readFile('/safety.wasm')))
       .map(entry => entry.name);
   };
   const vector = policy => `(lambda (v i) (declare ${policy} (type simple-vector v) (type (signed-byte 30) i))
@@ -160,7 +161,8 @@ try {
     (equal (cl-user::safety-file-read #(42) 0) '(42)))`);
   // Native bundles omit per-function disassembly metadata. The emitted module
   // still records its runtime imports, including the proven unchecked access.
-  assert.ok(Buffer.from(await vm.readFile('/safety-native.wasm')).includes(Buffer.from('native-vector-ref-trusted')));
+  assert.ok(nativeBundleImports(await vm.readFile('/safety-native.wasm'))
+    .some(entry => entry.name === 'native-vector-ref-trusted'));
   const fresh = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
   try {
     fresh.mountFile('/safety-file.wasm', await vm.readFile('/safety-file.wasm'));
@@ -168,7 +170,8 @@ try {
       (load "/safety-file.wasm")
       (miricl-compiler:compile-native-bundle "/safety-file.wasm" "/safety-native.wasm" :load t)
       (equal (cl-user::safety-file-read #(42) 0) '(42)))`).output, 'T\n');
-    assert.ok(Buffer.from(await fresh.readFile('/safety-native.wasm')).includes(Buffer.from('native-vector-ref-trusted')));
+    assert.ok(nativeBundleImports(await fresh.readFile('/safety-native.wasm'))
+      .some(entry => entry.name === 'native-vector-ref-trusted'));
   } finally {fresh.close();}
   console.log('Compiler safety: default 1, lexical/global policy, initialization scope, inline definition scope, trusted list/vector access, result assertions, integer promotion, redefinition, and compiler policy isolation pass.');
 } finally {vm.close();}

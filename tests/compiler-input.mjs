@@ -68,6 +68,11 @@ try {
     ["'(lambda (x) (declare (type (integer (0 1) 9) x)) x)", /integer type bound/],
     ["'(lambda (x) (declare (type (signed-byte -1) x)) x)", /byte width/],
     ["'(lambda () (the (mod 0) 0))", /positive integer modulus/],
+    ["'(lambda (x) (declare (type (simple-array t (5) extra) x)) x)", /array type/],
+    ["'(lambda (x) (declare (type (simple-array t (5 . bad)) x)) x)", /array dimensions.*dotted tail/],
+    ["'(lambda (x) (declare (type (array t (-1)) x)) x)", /array dimension/],
+    ["'(lambda (x) (declare (type (vector t (5)) x)) x)", /vector size/],
+    ["'(lambda (x) (declare (type (simple-string -1) x)) x)", /vector type/],
     ["'(lambda () (if t))", /IF form/],
     ["'(lambda () (quote 1 2))", /exactly one argument/],
     ["'(lambda () (setq x))", /variable\/value pairs/],
@@ -106,6 +111,12 @@ try {
   reject(`(let* ((type (list 'or 'integer)))
     (setf (cdr (last type)) type)
     (compile-to-hir (list 'lambda '(x) (list 'declare (list 'type type 'x)) 'x)))`, /circular list/);
+  reject(`(let* ((shape (list 5)) (type (list 'simple-array t shape)))
+    (setf (cdr shape) shape)
+    (compile-to-hir (list 'lambda '(x) (list 'declare (list 'type type 'x)) 'x)))`, /array dimensions.*circular list/);
+  reject(`(let* ((type (list 'array nil '(5))))
+    (setf (second type) type)
+    (compile-to-hir (list 'lambda '(x) (list 'declare (list 'type type 'x)) 'x)))`, /circular type/);
   for (const [mutation, reason] of [
     ['(setf (first (hir-unit-functions unit)) #())', /function record/],
     ['(setf (hir-function-value-count function) -1)', /counts/],

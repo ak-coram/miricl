@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
+import {nativeModuleImports, usesDynamicFunctionLookup} from './helpers/compiler-imports.mjs';
 import {enableCompilationStatistics, disableCompilationStatistics, readCompilationStatistics} from '../scripts/compilation-statistics.mjs';
 const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
@@ -41,7 +42,7 @@ try {
   disableCompilationStatistics(vm);
   assert.ok(maskStats.some(row => row.rule === 'optimization/immediate-integer-box' && row.count > 0));
   assert.ok(maskStats.some(row => row.rule === 'proof/integer-complement-range' && row.count > 0));
-  assert.ok(!WebAssembly.Module.imports(new WebAssembly.Module(maskBytes))
+  assert.ok(!nativeModuleImports(new WebAssembly.Module(maskBytes))
     .some(entry => entry.name === 'native-int64'));
   for (const x of [-(1n << 63n), -1n, 0n, 1n, (1n << 63n) - 1n])
     check(`(equal (multiple-value-list (funcall *unboxed-test-function* ${x})) '(${(~x) & 255n}))`);
@@ -51,8 +52,8 @@ try {
     const bytes = await compile(`(lambda (x) (declare (type ${type} x)
       (optimize (safety 0) (debug 0)) (inline lognot logand))
       (values (logand (lognot x) 255) (lognot x)))`);
-    const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes)).map(entry => entry.name);
-    assert.ok(!imports.includes('native-function-reference'), 'A proven complement needs no function lookup');
+    const imports = nativeModuleImports(new WebAssembly.Module(bytes)).map(entry => entry.name);
+    assert.ok(!usesDynamicFunctionLookup(imports), 'A proven complement needs no function lookup');
     const samples = type === '(signed-byte 31)'
       ? [-1073741824n, -1n, 0n, 1n, 1073741823n]
       : [-(1n << 63n), -1n, 0n, 1n, (1n << 63n) - 1n];

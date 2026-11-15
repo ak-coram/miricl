@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
+import {nativeModuleImports, usesDynamicFunctionLookup} from './helpers/compiler-imports.mjs';
 
 const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
@@ -19,12 +20,12 @@ try {
                            :element-type '(unsigned-byte 8)) (write-sequence bytes out))) (values)`);
     const bytes = await vm.readFile('/predicate.wasm');
     assert.ok(WebAssembly.validate(bytes));
-    return WebAssembly.Module.imports(new WebAssembly.Module(bytes)).map(entry => entry.name);
+    return nativeModuleImports(new WebAssembly.Module(bytes)).map(entry => entry.name);
   };
   for (const [operator, expected] of operators) {
     const imports = await compile(`(lambda (x) (declare (optimize (safety 0)) (fixnum x) (inline ${operator}))
       (${operator} x))`);
-    assert.ok(!imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(imports), operator);
     for (const value of scalars)
       assert.equal(vm.evaluate(`(multiple-value-list (funcall *predicate-function* ${value}))`).output,
         expected(value) ? '(T)\n' : '(NIL)\n', `${operator} ${value}`);
@@ -62,15 +63,15 @@ try {
     for (const safety of [1, 3]) {
       const safe = await compile(`(lambda (x) (declare (optimize (safety ${safety})) (fixnum x) (inline ${operator}))
         (${operator} x))`);
-      assert.ok(safe.includes(operator === 'zerop' ? 'native-zero-inline' : 'native-function-reference'),
+      assert.ok(operator === 'zerop' ? safe.includes('native-zero-inline') : usesDynamicFunctionLookup(safe),
         `${operator} safety ${safety} retains checked numeric behavior`);
       check(`(handler-case (progn (funcall *predicate-function* :bad) nil) (type-error () t))`);
     }
     const dynamic = await compile(`(lambda (x) (declare (optimize (safety 0)) (fixnum x) (notinline ${operator}))
       (${operator} x))`);
-    assert.ok(dynamic.includes('native-function-reference'), `${operator} NOTINLINE`);
+    assert.ok(usesDynamicFunctionLookup(dynamic), `${operator} NOTINLINE`);
     const unrestricted = await compile(`(lambda (x) (declare (optimize (safety 0)) (inline ${operator})) (${operator} x))`);
-    assert.ok(unrestricted.includes(operator === 'zerop' ? 'native-zero-inline' : 'native-function-reference'),
+    assert.ok(operator === 'zerop' ? unrestricted.includes('native-zero-inline') : usesDynamicFunctionLookup(unrestricted),
       `${operator} unknown operands retain checked numeric behavior`);
     for (const value of [-(1n << 160n), -(1n << 160n) + 1n, 1n << 160n, (1n << 160n) + 1n])
       assert.equal(vm.evaluate(`(funcall *predicate-function* ${value})`).output,
@@ -115,8 +116,8 @@ try {
     ['evenp', '(eql 1208925819614629174706176)', '1208925819614629174706176', 'T'],
     ['oddp', '(eql -1208925819614629174706177)', '-1208925819614629174706177', 'T'],
   ]) {
-    assert.ok(!(await compile(`(lambda (x) (declare (optimize (safety 0)) (type ${type} x) (inline ${operator}))
-      (${operator} x))`)).includes('native-function-reference'), `${operator} ${type}`);
+    assert.ok(!usesDynamicFunctionLookup(await compile(`(lambda (x) (declare (optimize (safety 0)) (type ${type} x) (inline ${operator}))
+      (${operator} x))`)), `${operator} ${type}`);
     assert.equal(vm.evaluate(`(funcall *predicate-function* ${value})`).output, `${expected}\n`);
     await compile(`(lambda (x) (declare (optimize (safety 0)) (type ${type} x) (inline ${operator}))
       (if (${operator} x) (values :yes 17) (values :no 23)))`);

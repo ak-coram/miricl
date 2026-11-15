@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
+import {nativeModuleImports, usesDynamicFunctionLookup} from './helpers/compiler-imports.mjs';
 const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
 try {
@@ -13,7 +14,7 @@ try {
           :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
     const bytes = await vm.readFile('/inline.wasm');
     return {bytes: bytes.length,
-      imports: WebAssembly.Module.imports(await WebAssembly.compile(bytes)).map(entry => entry.name)};
+      imports: nativeModuleImports(await WebAssembly.compile(bytes)).map(entry => entry.name)};
   };
   const scalar64 = [-(1n << 63n), -(1n << 31n), -1n, 0n, 1n, 1n << 32n, (1n << 63n) - 1n];
   const scalar32 = [-(1n << 31n), -1n, 0n, 1n, (1n << 31n) - 1n];
@@ -64,7 +65,7 @@ try {
       (progn (push :right events) (values ${right} :extra)))`;
     const result = await compile(`(lambda (x) (declare (optimize (safety 0))
       (inline ${operator}) (type integer x)) (${operator} ${left} ${right}))`);
-    assert.ok(!result.imports.includes('native-function-reference'), expression);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), expression);
     await compile(`(lambda (x) (declare (optimize (safety 0))
       (inline ${operator}) (type integer x))
       (let ((events nil)) (values ${expression} (reverse events))))`);
@@ -76,7 +77,7 @@ try {
   const declaredIdentity = await compile(`(lambda (x zero)
     (declare (optimize (safety 0)) (inline +) (type integer x) (type (mod 1) zero))
     (+ x zero))`);
-  assert.ok(!declaredIdentity.imports.includes('native-function-reference'));
+  assert.ok(!usesDynamicFunctionLookup(declaredIdentity.imports));
   check(`(equal (multiple-value-list (funcall *inline-function* 1267650600228229401496703205376 0))
     '(1267650600228229401496703205376))`);
   // Missing integer proofs must retain operand checks. A shared checked
@@ -89,7 +90,7 @@ try {
     const result = await compile(`(lambda (x) (declare (optimize (safety 0))
       (inline ${operator}) ${declarations}) ${expression})`);
     const checkedEntry = {logand: 'native-logand-general-inline', ash: 'native-ash-general-inline'}[operator];
-    assert.ok(result.imports.includes(checkedEntry ?? 'native-function-reference'), expression);
+    assert.ok(checkedEntry ? result.imports.includes(checkedEntry) : usesDynamicFunctionLookup(result.imports), expression);
     check(`(handler-case (progn (funcall *inline-function* :invalid) nil) (type-error () t))`);
   }
   await compile(`(lambda (x) (declare (optimize (safety 0)) (inline +) (type number x)) (+ x 0))`);
@@ -117,12 +118,12 @@ try {
   for (const [operator, delta] of [['1+', 1n], ['1-', -1n]]) {
     const result = await compile(`(lambda (a) (declare (optimize (safety 0))
       (inline ${operator}) (type (or (signed-byte 32) (eql 4294967295)) a)) (${operator} a))`);
-    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), operator);
     for (const a of [...scalar32, 4294967295n])
       assert.equal(vm.evaluate(`(funcall *inline-function* ${a})`).output, `${a + delta}\n`);
     const wide = await compile(`(lambda (a) (declare (optimize (safety 0))
       (inline ${operator}) (fixnum a)) (${operator} a))`);
-    assert.ok(wide.imports.includes('native-function-reference'));
+    assert.ok(usesDynamicFunctionLookup(wide.imports));
     for (const a of scalar64)
       assert.equal(vm.evaluate(`(funcall *inline-function* ${a})`).output, `${a + delta}\n`);
   }
@@ -132,7 +133,7 @@ try {
   ]) {
     const result = await compile(`(lambda (a) (declare (optimize (safety 0))
       (inline ${operator}) (type ${type} a)) (${operator} a))`);
-    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), operator);
     assert.equal(vm.evaluate(`(funcall *inline-function* ${value})`).output, `${answer}\n`);
   }
   for (const [operator, left, right, args, answer] of [
@@ -142,7 +143,7 @@ try {
   ]) {
     const result = await compile(`(lambda (a b) (declare (optimize (safety 0))
       (inline ${operator}) (type ${left} a) (type ${right} b)) (${operator} a b))`);
-    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), operator);
     assert.equal(vm.evaluate(`(funcall *inline-function* ${args})`).output, `${answer}\n`);
   }
   const nullableVector = await compile(`(lambda (v) (declare (optimize (safety 0))
@@ -195,7 +196,7 @@ try {
   }
   const nullableInteger = await compile(`(lambda (x) (declare (optimize (safety 0))
     (inline 1+) (type (or null (mod 256)) x)) (if x (1+ x) :empty))`);
-  assert.ok(!nullableInteger.imports.includes('native-function-reference'));
+  assert.ok(!usesDynamicFunctionLookup(nullableInteger.imports));
   check(`(and (eq (funcall *inline-function* nil) :empty)
     (= (funcall *inline-function* 0) 1) (= (funcall *inline-function* 255) 256))`);
   for (const mutation of ['(setq v nil)', '(funcall (lambda () (setq v nil)))']) {
@@ -227,7 +228,7 @@ try {
     const result = await compile(`(lambda (a b)
       (declare (optimize (safety 0)) (inline ${operator}) (type (signed-byte ${bits}) a b))
       (${operator} a b))`);
-    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), operator);
     for (const a of inputs) for (const b of inputs) {
       const value = operation(a, b), expected = value === true ? 'T' : value === false ? 'NIL' : String(value);
       assert.equal(vm.evaluate(`(funcall *inline-function* ${a} ${b})`).output, `${expected}\n`, operator);
@@ -245,7 +246,7 @@ try {
   const notinlineSum = await compile(`(lambda (a b)
     (declare (optimize (safety 0)) (inline +) (type (signed-byte 32) a b))
     (locally (declare (notinline +)) (+ a b)))`);
-  assert.ok(notinlineSum.imports.includes('native-function-reference'));
+  assert.ok(usesDynamicFunctionLookup(notinlineSum.imports));
   check(`(= (funcall *inline-function* 40 2) 42)`);
   await compile(`(lambda (a b)
     (declare (optimize (safety 0)) (inline +) (type (signed-byte 32) a b))
@@ -257,7 +258,7 @@ try {
       (optimize (safety 0)) (inline ${operator}))
       (let ((copy input)) (${operator} copy)))`);
     assert.ok(result.imports.includes(entry), operator);
-    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), operator);
     check(`(and (equal (multiple-value-list (funcall *inline-function* nil)) '(nil))
       (eq (funcall *inline-function* '(42 . :tail)) ${operator === 'car' ? '42' : ':tail'}))`);
   }
@@ -268,7 +269,7 @@ try {
     ['not', '(a)', '(not a)', '42', 'nil'],
   ]) {
     const result = await compile(`(lambda ${parameters} (declare (inline ${operator})) ${expression})`);
-    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), operator);
     check(`(equal (multiple-value-list (funcall *inline-function* ${args})) '(${expected}))`);
   }
   for (const [operator, entry, trueInputs, falseInputs] of [
@@ -278,7 +279,7 @@ try {
   ]) {
     const result = await compile(`(lambda (x) (declare (inline ${operator})) (${operator} x))`);
     if (entry) assert.ok(result.imports.includes(entry), operator);
-    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), operator);
     for (const input of trueInputs)
       check(`(equal (multiple-value-list (funcall *inline-function* ${input})) '(t))`);
     for (const input of falseInputs)
@@ -291,7 +292,7 @@ try {
   ]) {
     const result = await compile(`(lambda (x) (declare (inline length) ${declarations}) (length x))`);
     assert.ok(result.imports.includes(entry), declarations);
-    assert.ok(!result.imports.includes('native-function-reference'), declarations);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), declarations);
     check(`(and (equal (multiple-value-list (funcall *inline-function* #())) '(0))
       (= (funcall *inline-function* #(1 2 3)) 3))`);
     if (!declarations) {
@@ -308,7 +309,7 @@ try {
   }
   const consResult = await compile(`(lambda (x y) (declare (inline cons)) (cons x y))`);
   assert.ok(consResult.imports.includes('native-cons'));
-  assert.ok(!consResult.imports.includes('native-function-reference'));
+  assert.ok(!usesDynamicFunctionLookup(consResult.imports));
   check(`(let* ((tail (list 2)) (a (funcall *inline-function* 1 tail))
                (b (funcall *inline-function* 1 tail)))
     (and (not (eq a b)) (eq (cdr a) tail)
@@ -354,7 +355,7 @@ try {
   const unpromisedCons = await compile(`(lambda (x y)
     (declare (optimize (safety 0) (debug 0)) (inline car) (notinline cons))
     (car (cons x y)))`);
-  assert.ok(unpromisedCons.imports.includes('native-function-reference'),
+  assert.ok(usesDynamicFunctionLookup(unpromisedCons.imports),
     'NOTINLINE allocation retains the replaceable constructor call');
   check(`(eq (funcall *inline-function* :head :tail) :head)`);
   await compile(`(lambda (x y)
@@ -366,7 +367,7 @@ try {
     (declare (optimize (safety 0)) (inline cons cdr))
     (let ((cell (cons x y))) (cdr cell)))`);
   assert.ok(!inferredCons.imports.includes('native-cdr-checked'));
-  assert.ok(!inferredCons.imports.includes('native-function-reference'));
+  assert.ok(!usesDynamicFunctionLookup(inferredCons.imports));
   check(`(and (eq (funcall *inline-function* 17 :tail) :tail)
     (null (funcall *inline-function* 17 nil)))`);
   for (const expression of [
@@ -383,7 +384,7 @@ try {
   const guardedVector = await compile(`(lambda (x)
     (declare (optimize (safety 0) (debug 0)) (inline simple-vector-p svref))
     (if (simple-vector-p x) (svref x 0) :other))`);
-  assert.ok(!guardedVector.imports.includes('native-function-reference'), 'A vector predicate proves the private representation');
+  assert.ok(!usesDynamicFunctionLookup(guardedVector.imports), 'A vector predicate proves the private representation');
   check(`(and (eq (funcall *inline-function* #(:first)) :first)
     (eq (funcall *inline-function* "text") :other) (eq (funcall *inline-function* nil) :other))`);
   const mutableCursor = await compile(`(lambda (x)
@@ -403,7 +404,7 @@ try {
     (if (simple-vector-p x)
         (let ((head (svref x 0))) (setq x nil) head)
         :other))`);
-  assert.ok(!mutableVector.imports.includes('native-function-reference'),
+  assert.ok(!usesDynamicFunctionLookup(mutableVector.imports),
     'A later assignment does not invalidate a preceding dominated read');
   check(`(and (eq (funcall *inline-function* #(:first)) :first)
     (eq (funcall *inline-function* 7) :other))`);
@@ -493,7 +494,7 @@ try {
       (defparameter *guarded-cons-entries* entries)
       (with-open-file (out "/guarded-cons-module.wasm" :direction :output :if-exists :supersede
         :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
-    const imports = WebAssembly.Module.imports(await WebAssembly.compile(await vm.readFile('/guarded-cons-module.wasm')));
+    const imports = nativeModuleImports(await WebAssembly.compile(await vm.readFile('/guarded-cons-module.wasm')));
     assert.equal(imports.some(entry => entry.name === 'native-car-inline-checked'), exposeHelper,
       'Only a private helper can inherit every caller\'s CONSP proof');
     check(`(let ((entry (cdr (assoc 'guarded-cons-entry *guarded-cons-entries*))))
@@ -506,7 +507,7 @@ try {
     const lookup = await compile(`(lambda (key table default)
       (declare (inline gethash)) (gethash key table${defaultArgument}))`);
     assert.ok(lookup.imports.includes('native-gethash-inline'));
-    assert.ok(!lookup.imports.includes('native-function-reference'));
+    assert.ok(!usesDynamicFunctionLookup(lookup.imports));
     check(`(let ((table (make-hash-table)))
       (setf (gethash :present table) nil)
       (and (equal (multiple-value-list (funcall *inline-function* :present table :default)) '(nil t))
@@ -549,7 +550,7 @@ try {
     const result = await compile(source);
     assert.ok(result.imports.includes(operator === 'row-major-aref'
       ? 'native-row-major-ref-inline' : 'native-vector-ref-inline'), operator);
-    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), operator);
     assert.ok(!result.imports.includes('native-tail-call'), operator);
     check(`(and (equal (multiple-value-list (funcall *inline-function* #(42))) '(42))
                 (equal (multiple-value-list (funcall *inline-function* #(nil))) '(nil)))`);
@@ -564,7 +565,7 @@ try {
     const result = await compile(`(lambda (v i) (declare (optimize (safety 0))
       (inline svref) (type simple-vector v) (type ${type} i)) (svref v i))`);
     assert.ok(result.imports.includes('native-vector-ref-inline'), type);
-    assert.ok(!result.imports.includes('native-function-reference'), type);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), type);
     check(`(and (= (funcall *inline-function* #(17 42) 1) 42)
       (equal (multiple-value-list (funcall *inline-function* #(nil) 0)) '(nil)))`);
   }
@@ -668,7 +669,7 @@ try {
         (inline ${operator} ${accessor}))
       (${operator} cell value)
       (values cell (${accessor} cell)))`);
-    assert.ok(!emitted.imports.includes('native-function-reference'),
+    assert.ok(!usesDynamicFunctionLookup(emitted.imports),
       `A proven inline ${operator} must use a direct field store`);
     check(`(let* ((cell (list :before)) (value (list :after))
                   (results (multiple-value-list (funcall *inline-function* cell value))))
@@ -719,7 +720,7 @@ try {
       (defparameter *equality-entries* entries)
       (with-open-file (out "/equality-module.wasm" :direction :output :if-exists :supersede
         :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
-    const imports = WebAssembly.Module.imports(await WebAssembly.compile(await vm.readFile('/equality-module.wasm')));
+    const imports = nativeModuleImports(await WebAssembly.compile(await vm.readFile('/equality-module.wasm')));
     // The factory itself calls LIST/CONS, so its generic call imports cannot
     // identify a comparison. EQL has its own distinct runtime entry.
     if (operator === 'eql') assert.equal(imports.some(entry => /^native-eql-(inline|test)$/.test(entry.name)), exposeHelper,
@@ -756,7 +757,7 @@ try {
     const result = await compile(`(lambda (x y)
       (declare (optimize (safety 0) (debug 0)) (inline ${operator})
         (type ${left} x) (type ${right} y)) (${operator} x y))`);
-    assert.ok(!result.imports.includes('native-function-reference'), `${operator}: proven comparison`);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), `${operator}: proven comparison`);
     check(`(equal (multiple-value-list (funcall *inline-function* ${x} ${y})) '(${expected ? 't' : 'nil'}))`);
     await compile(`(lambda (x y)
       (declare (optimize (safety 0) (debug 0)) (inline ${operator})

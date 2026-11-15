@@ -1,3 +1,4 @@
+import {nativeModuleImports} from './helpers/compiler-imports.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
@@ -89,7 +90,7 @@ try {
       (with-open-file (out "/typed.wasm" :direction :output :if-exists :supersede
                            :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
     const module = await WebAssembly.compile(await vm.readFile('/typed.wasm'));
-    return WebAssembly.Module.imports(module).map(entry => entry.name);
+    return nativeModuleImports(module).map(entry => entry.name);
   };
   assert.ok((await imports(`(lambda (x) (declare (type (unsigned-byte 40) x)) (list (+ x 1)))`)).includes('native-unbox-int64'));
   assert.ok((await imports(`(lambda (x) (declare (fixnum x)) (list (+ x 1)))`)).includes('native-add-int64-checked'));

@@ -120,10 +120,8 @@ export async function sessionFromURL(href, application, modes = []) {
   let payload;
   try {
     const binary = atob(encoded.replaceAll('-', '+').replaceAll('_', '/'));
-    let bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
-    if (bytes[0] === 0x1f && bytes[1] === 0x8b)
-      bytes = await readSharedSession(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')));
-    if (bytes.length > sharedSessionLimit) throw new SharedSessionSizeError();
+    const compressed = Uint8Array.from(binary, char => char.charCodeAt(0));
+    const bytes = await readSharedSession(new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip')));
     payload = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
   } catch (error) {
     if (error instanceof SharedSessionSizeError) throw error;

@@ -125,6 +125,41 @@ The third value proves integer membership. Unknown types prove nothing."
         (t (multiple-value-bind (low high integer) (hir-integer-interval type)
              (when (and integer low high (<= low high)) (values low high t))))))
 
+(defun hir-nominal-type-mask (type)
+  "Positive target type facts; never expand an opaque type or inspect a value.
+Bits from low to high: number/real/rational/integer/float, array/vector/simple-array/simple-vector,
+string/simple-string/sequence. Parameterized array element types are invariant."
+  (let ((name (if (consp type) (car type) type)))
+    (case name
+      ((integer fixnum bignum bit signed-byte unsigned-byte mod) 15)
+      ((rational ratio) 7) (real 3)
+      ((float short-float single-float double-float long-float) 19)
+      ((number complex) 1)
+      ((vector bit-vector) 2144)
+      (simple-vector 2528)
+      ((string base-string) 2656)
+      ((simple-string simple-base-string) 3808)
+      (simple-bit-vector 2272)
+      ((list cons null) 2048)
+      ((array simple-array)
+       (let* ((simple (eq name 'simple-array)) (mask (if simple 160 32))
+              (shape (and (consp type) (third type))))
+         ;; A rank specifier of 1 and a one-axis shape both mean VECTOR.
+         ;; Read only this bounded shape, even if a private query is cyclic.
+         (when (or (eql shape 1)
+                   (and (consp shape) (null (cdr shape))
+                        (or (eq (car shape) '*)
+                            (and (integerp (car shape)) (<= 0 (car shape))))))
+           (setq mask (logior mask 2112))
+           (let ((element (second type)))
+             (cond ((eq element t) (when simple (setq mask (logior mask 256))))
+                   ;; These built-in element types upgrade only within the
+                   ;; target's character family. No user DEFTYPE is queried.
+                   ((member element '(character base-char standard-char))
+                    (setq mask (logior mask (if simple 1536 512)))))))
+         mask))
+      (otherwise 0))))
+
 (defun hir-type-proves-p (type required &optional (depth 32) fuel)
   "True only when CL type relationships establish TYPE is within REQUIRED.
 NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
@@ -155,7 +190,6 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
          (some (lambda (part) (hir-type-proves-p part required (1- depth) fuel)) (cdr type)))
         ((and (consp required) (eq (car required) 'or))
          (some (lambda (part) (hir-type-proves-p type part (1- depth) fuel)) (cdr required)))
-        ((eq required 'simple-vector) (and (consp type) (eq (car type) 'simple-vector)))
         ((eq required 'list) (or (member type '(null cons)) (and (consp type) (eq (car type) 'cons))))
         ((eq required 'cons) (and (consp type) (eq (car type) 'cons)))
         ((eq required 'symbol) (member type '(null keyword)))
@@ -166,6 +200,15 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
              (and (consp type)
                   (member (car type) '(cons simple-vector vector array simple-array string simple-string
                                       integer signed-byte unsigned-byte mod function)))))
+        ;; Shared nominal facts prove only unparameterized supertypes.
+        ;; Shape/element constraints and integer bounds keep their own paths;
+        ;; skip this domain altogether for those frequent compound queries.
+        ((and (not (consp required))
+              (let ((mask (case required
+                            (number 1) (real 2) (rational 4) (integer 8) (float 16)
+                            (array 32) (vector 64) (simple-array 128) (simple-vector 256)
+                            (string 512) (simple-string 1024) (sequence 2048))))
+                (and mask (not (zerop (logand mask (hir-nominal-type-mask type))))))) t)
         (t
          (multiple-value-bind (low high integer) (hir-integer-interval type depth fuel)
            (multiple-value-bind (a b target) (hir-integer-interval required depth fuel)

@@ -9,7 +9,7 @@ const evaluate = new Script('vm.evaluate(source).output');
 const check = source => {
   context.source = source;
   try {assert.equal(evaluate.runInContext(context, {timeout: 2000}), 'T\n', source);}
-  catch (error) {vm.vm.unwind(); throw error;}
+  catch (error) {vm.vm.unwind(); throw new Error(`Guest check failed: ${source}`, {cause: error});}
 };
 for (const source of [
   `(with-input-from-string (s "aλ🙂")
@@ -43,6 +43,53 @@ for (const source of [
   `(string= (with-output-to-string (*standard-output*) (write-string "abcde" nil :start 1 :end 4)) "bcd")`,
   `(string= (with-output-to-string (*terminal-io*) (write-line "abcde" t :start 1 :end 4)) "bcd\n")`,
   `(string= (with-output-to-string (s) (write-string (make-array 0 :element-type nil) s)) "")`,
+  `(let ((saved nil))
+    (and (string= (with-output-to-string (s nil :element-type 'base-char)
+                   (declare (special s)) (setq saved s) (write-string "abc" s)) "abc")
+         (not (open-stream-p saved))))`,
+  `(let ((saved nil))
+    (and (= 17 (catch 'done (with-output-to-string (s)
+                 (setq saved s) (throw 'done 17))))
+         (not (open-stream-p saved))))`,
+  `(let ((target (make-array 1 :element-type 'character :adjustable t :fill-pointer 0))
+         (events nil))
+    (and (equal (multiple-value-list
+                  (with-output-to-string
+                      (s (progn (push :string events) target)
+                         :element-type (progn (push :element events) 'character))
+                    (push :body events) (write-string "abc" s) (values 1 2))) '(1 2))
+         (string= target "abc") (equal events '(:body :element :string))))`,
+  `(string= (with-output-to-string (s nil :element-type 'character :element-type 'nil)
+               (write-char #\\a s)) "a")`,
+  `(string= (with-output-to-string (s nil :unknown t :allow-other-keys t)
+               (write-char #\\a s)) "a")`,
+  `(let ((expansions nil) (original *macroexpand-hook*))
+    (let ((*macroexpand-hook*
+            (lambda (function form environment)
+              (if (consp form)
+                  (if (eq (car form) 'with-output-to-string)
+                      (setq expansions (cons form expansions))))
+              (funcall original function form environment))))
+      (macroexpand-1 '(with-output-to-string (s) (write-char #\\a s))))
+    (equal expansions '((with-output-to-string (s) (write-char #\\a s)))))`,
+  `(equal (macrolet ((with-output-to-string (&rest forms) (declare (ignore forms)) ':local))
+            (with-output-to-string (s))) :local)`,
+  `(let ((accepted t))
+    (dolist (form '((with-output-to-string) (with-output-to-string ())
+                   (with-output-to-string (17)) (with-output-to-string (t))
+                   (with-output-to-string (s . bad))
+                   (with-output-to-string (s nil :element-type))
+                   (with-output-to-string (s nil :unknown t))
+                   (with-output-to-string (s nil 17 t :allow-other-keys t))
+                   (with-output-to-string (s nil (bad) t :allow-other-keys t))
+                   (with-output-to-string (s nil :unknown t :allow-other-keys nil :allow-other-keys t))))
+      (unless (handler-case (progn (macroexpand-1 form) nil) (error () t))
+        (setq accepted nil)))
+    (let* ((binding (list 's)) (form (list 'with-output-to-string binding)))
+      (setf (cdr binding) binding)
+      (unless (handler-case (progn (macroexpand-1 form) nil) (error () t))
+        (setq accepted nil)))
+    (and accepted (string= (with-output-to-string (s) (write-string "recovered" s)) "recovered")))`,
   `(let* ((i (make-string-input-stream "123 λ")) (o (make-string-output-stream))
           (s (make-two-way-stream i o)))
     (and (typep s 'two-way-stream) (typep s 'stream) (input-stream-p s) (output-stream-p s)

@@ -199,13 +199,15 @@ explicit labels for nested loops. The list local is consumed."
    #@(if (local.get $thrown) (then (throw $transfer)))
    #@(local.get $result)))
 
-(defun wat-symbol-branch (value symbols body)
+(defun wat-integer-branch (value ids body)
   (let ((condition
           (reduce (lambda (a b) `(i32.or ,a ,b))
-                  (mapcar (lambda (symbol)
-                            `(i32.eq ,value (i32.const ,(runtime-symbol-id symbol))))
-                          symbols))))
+                  (mapcar (lambda (id) `(i32.eq ,value (i32.const ,id))) ids))))
     (wat-fragment (wat-string `(if ,condition (then ,body))))))
+
+(defun wat-symbol-branch (value symbols body)
+  ;; Some runtime generators use a single symbol group without a full CASE.
+  (wat-integer-branch value (mapcar #'runtime-symbol-id symbols) body))
 
 (defun wat-index-dispatch (value entries done)
   "Branch to shared clause labels using compact tables and a sparse search tree."
@@ -229,27 +231,33 @@ explicit labels for nested loops. The list local is consumed."
               (then ,(wat-index-dispatch value (subseq entries 0 middle) done))
               (else ,(wat-index-dispatch value (nthcdr middle entries) done))))))))))
 
-(defun wat-symbol-dispatch (value clauses)
-  "Keep each body once, including when sparse symbol IDs need several tables."
-  (when (< (loop for (symbols . body) in clauses sum (length symbols)) 4)
-    (return-from wat-symbol-dispatch
+(defun wat-integer-dispatch (value clauses)
+  "Dispatch on integer IDs, keeping each body once across sparse tables.
+VALUE must have no side effects. Clauses contain (IDS . BODY), where IDS
+is a nonempty list of distinct IDs and BODY can fall through to the end."
+  (when (< (loop for (ids . body) in clauses sum (length ids)) 4)
+    (return-from wat-integer-dispatch
       (apply #'runtime-wat-sequence
-        (loop for (symbols . body) in clauses collect (wat-symbol-branch value symbols body)))))
+        (loop for (ids . body) in clauses collect (wat-integer-branch value ids body)))))
   (let* ((done (gensym "$dispatch-done"))
          (labels (loop repeat (length clauses) collect (gensym "$dispatch-case")))
          (entries nil)
          (seen (make-hash-table)))
-    (loop for (symbols . body) in clauses for label in labels do
-      (dolist (symbol symbols)
-        (let ((id (runtime-symbol-id symbol)))
-          (when (gethash id seen) (error "Duplicate WAT dispatch symbol ~S." symbol))
-          (setf (gethash id seen) t)
-          (push (cons id label) entries))))
+    (loop for (ids . body) in clauses for label in labels do
+      (dolist (id ids)
+        (when (gethash id seen) (error "Duplicate WAT dispatch integer ~S." id))
+        (setf (gethash id seen) t)
+        (push (cons id label) entries)))
     (let ((dispatch (wat-index-dispatch value (sort entries #'< :key #'car) done)))
-      (loop for (symbols . body) in clauses for label in labels do
+      (loop for (ids . body) in clauses for label in labels do
         (setf dispatch (runtime-wat-sequence
           (wat-string `(block ,label ,dispatch)) body (wat-string `(br ,done)))))
       (wat-fragment (wat-string `(block ,done ,dispatch))))))
+
+(defun wat-symbol-dispatch (value clauses)
+  (wat-integer-dispatch value
+    (loop for (symbols . body) in clauses collect
+      (cons (mapcar #'runtime-symbol-id symbols) body))))
 
 (defmacro wat-symbol-case (value &body clauses)
   "Dispatch on a bootstrap symbol ID. Each clause names a symbol or list.

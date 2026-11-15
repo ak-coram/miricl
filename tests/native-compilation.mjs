@@ -1,3 +1,4 @@
+import {nativeModuleImports} from './helpers/compiler-imports.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl, MiriclError} from '../scripts/miricl.mjs';
@@ -454,8 +455,8 @@ try {
       (write-sequence bytes s)) (and (vectorp bytes) (vectorp literals)))`);
   const bytes = await vm.readFile('/native-code.wasm');
   assert.ok(WebAssembly.validate(bytes));
-  const imports = WebAssembly.Module.imports(await WebAssembly.compile(bytes));
-  assert.ok(imports.length > 0 && imports.every(x => x.module === 'miricl.runtime'));
+  const imports = nativeModuleImports(await WebAssembly.compile(bytes));
+  assert.ok(imports.length > 0 && imports.every(x => x.module === 'm'));
   assert.equal(imports.some(x => /native-cell|native-close|native-capture/.test(x.name)), false,
     'Uncaptured variables must not import heap-cell or closure operations.');
   assert.ok(bytes.length < 600, `Small native module grew to ${bytes.length} bytes.`);
@@ -466,7 +467,7 @@ try {
       (with-open-file (s "/native-captures.wasm" :direction :output :if-exists :supersede
                          :element-type '(unsigned-byte 8)) (write-sequence bytes s)) t)`);
     const module = await WebAssembly.compile(await vm.readFile('/native-captures.wasm'));
-    assert.equal(WebAssembly.Module.imports(module).some(x => /^native-cell/.test(x.name)), false,
+    assert.equal(nativeModuleImports(module).some(x => /^native-cell/.test(x.name)), false,
       'Unassigned captures must carry the original value without allocating or reading binding cells.');
   }
   assert.equal((await vm.evaluateAsync(`(progn (defparameter *native-loop-started* nil)

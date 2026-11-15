@@ -13,8 +13,11 @@
                 (dolist (fold '(nil t))
                   (let ((function (if fold #'char-equal #'char=))
                         (mapper (if fold #'char-upcase nil)))
-                    (is (eql (search a b :start1 first1 :end1 stop1 :start2 first2 :end2 stop2
-                                     :from-end reverse :test function)
+                    ;; An empty pattern matches the first/last source boundary.
+                    ;; ECL 26.5.5 SEARCH ignores START2 for the forward empty case.
+                    (is (eql (if (= first1 stop1) (if reverse stop2 first2)
+                                 (search a b :start1 first1 :end1 stop1 :start2 first2 :end2 stop2
+                                         :from-end reverse :test function))
                              (miricl-runtime:search-character-regions a b
                                (vector first1 stop1 first2 stop2 reverse mapper))))
                     (dolist (negate '(nil t))

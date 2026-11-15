@@ -83,6 +83,7 @@
 (setf *clos-primitives* (append *clos-primitives* '(%%generic-dispatch-metadata)))
 (setf *clos-primitives* (append *clos-primitives* '(%%compound-type-metadata)))
 (setf *clos-primitives* (append *clos-primitives* '(%%array-adjust-metadata)))
+(setf *clos-primitives* (append *clos-primitives* '(%%output-string-expander)))
 (defparameter *native-clos-symbols* '(:initarg-profile))
 
 (assert (<= (length *clos-primitives*) (- 2147483641 +clos-primitive-base+)))
@@ -527,6 +528,9 @@
 (define-runtime-function $clos-primitive (($op i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($a :nullable-object) ($b :nullable-object) ($cell :nullable-object) ($value :nullable-object)
            ($start i32) ($column i32))
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%output-string-expander)))
+    (then ,(wat-arity 2)
+      (return_call $output-string-expansion (call $car (local.get $args)))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%array-adjust-metadata)))
     (then (return_call $array-adjust-metadata-primitive (local.get $op) (local.get $args))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%compound-type-metadata)))

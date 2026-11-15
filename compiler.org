@@ -1313,3 +1313,571 @@ Loading currently decodes all object blocks eagerly. The directory permits
 independent lookup and later decoding, but deferred bodies, external archives
 and dependency fetching are not implemented yet. Initializers remain ordered
 roots; an eventual deferred body must reuse already initialized literal cells.
+
+** Generated-code size campaign (2026-11-15)
+
+This campaign preserves interactive runtime access to definitions. Its scope
+is more compact compilation with measured execution/compilation tradeoffs;
+stripping and new definition-reachability mechanisms are excluded. Independent
+agents investigate composition, implement one optimization per pass, and review
+and test each batch. Implementation agents restart after each pass; reviewers
+restart after each batch, with written measurement and validation handoffs.
+
+The quick loop uses the compiled compiler compiling a fixed original-source
+corpus and Game of Life. Emitted compiler modules are validated and instantiated,
+never installed as successive compiler generations. Full larger-application
+compilations are periodic checkpoints. Raw, gzip and Brotli sizes are distinct
+measurements, and the default browser image retains its 1 MiB raw budget.
+Reducing large application raw images is the final size objective. A modest
+compiler increase is acceptable while its default image remains below the
+1 MiB raw budget. Compiler reductions remain valuable because they make room
+for more broadly useful optimizations. Minor increases in compressed artifacts
+are secondary tradeoffs to record, rather than automatic rejection criteria.
+
+*** Initial composition evidence
+
+Historical native artifacts provide attribution, not a fresh before/after
+baseline. The diagnostic reports include source paths and SHA256 hashes under
+=/tmp/miricl-size-investigation/=. Existing root images predate recent source
+edits; the independent reviewer captured an untouched source snapshot before
+implementation and builds isolated baseline/candidate images from that snapshot.
+
+| Historical artifact | Raw bytes | Gzip bytes | Native function-body bytes |
+|---------------------+-----------+------------+----------------------------|
+| Compiler module     |    342084 |     111697 |                     338056 |
+| Game of Life        |   2997161 |     744705 |                    2116241 |
+| FriCAS              |   5197694 |    1320171 |                    3714099 |
+| Maxima              |  10740880 |    3125246 |                    7537923 |
+| ACL2                |  20506760 |    4947568 |                    9237381 |
+| Coalton             |  12541057 |    3834001 |                    6062030 |
+| McCLIM snapshot     |  17066279 |    8137865 |                    4105138 |
+
+The compiler row is its emitted module, not the complete shipped image. McCLIM
+also has 564995 bytes of outer runtime code; its body column counts embedded
+native modules. Coalton's historical bundle preserves its interactive compiler
+and standard library. No reduction in retained definitions is proposed.
+
+Repeated literal/name lookups and list construction are broad opportunities.
+The historical compiler has 6890 literal lookups and 6590 function-reference
+lookups; Game of Life has 77647 and 66392 respectively. Local traffic is also
+large, but existing coloring and stackification already address much of it.
+Promising followups are adjacent literal/function-reference helper fusion and
+shared helpers for consecutive list-construction operations. Gross opcode-byte
+estimates must be discounted for helper/import costs and interactions with
+earlier passes before deciding whether to retain a change.
+
+*** Proof-engine opportunities
+
+Fresh compiled-compiler queries show missing target relationships:
+SIMPLE-VECTOR within VECTOR, SIMPLE-STRING within STRING,
+=(SIMPLE-ARRAY T (5))= within SIMPLE-VECTOR, and =(INTEGER 0 255)= within NUMBER.
+These are candidate shared target rules for inference, proof queries and
+lowering, with no host SUBTYPEP, DEFTYPE expansion or SATISFIES execution.
+
+Representative complete-module/body probes show a typed rank-one
+=SIMPLE-ARRAY T= SVREF case at 516/92 bytes versus 274/36 for the equivalent
+sized SIMPLE-VECTOR declaration. A typed SIMPLE-VECTOR VECTORP branch costs
+325/63 versus 289/36 when the branch is proved. A guarded integer computation
+using =>= 0= and =< 256= costs 659/149 versus 353/109 with the equivalent
+explicit bounded THE in its guarded arm. These establish optimization
+opportunities, not measured implementation savings. Aggregate application
+incidence and compiler-image cost must still be measured. Binary comparison
+refinement must respect canonical function contracts, effects and fact
+invalidation; unknown relationships and exhausted work budgets keep checks.
+
+Sealed-module and block-compilation opportunities are also in scope: share
+helpers and literals, reduce internal ABI wrappers, and propagate facts across
+closed calls where the selected contracts permit it. Measure actual existing
+module groups before changing their layout. Retain interactive function objects
+and definitions; do not infer closed ownership for exported functions or outside
+callers, or silently strengthen application redefinition contracts.
+
+The audit confirms native bundles already pool each original file/unit into a
+shared module, while ordinary application global calls remain dynamic. Explicit
+file block compilation and compiler bootstrap's sealed LABELS module already
+exist; enabling those contracts implicitly would change interactive behavior.
+In the fresh sealed compiler, 478 direct-worker bodies and 65 generic bodies
+share one 8-byte checked adapter, with no per-worker indexed adapters remaining.
+ABI wrapper sharing is therefore already effective there.
+
+Normalized duplicate bodies across historical application units suggest tens
+to hundreds of KiB of potential sharing, but current unit-local serialization
+would duplicate a naively merged module. This is a deferred format/packaging
+opportunity, distinct from improving stripping, and requires complete image and
+loading-cost measurements before implementation.
+
+*** Pass 1: immutable literal caching in acyclic functions
+
+=native-loop-literals= now considers acyclic functions when repeated literal
+loads repay their initialization and local costs. It caches immutable names,
+not current function definitions or special-variable values. The cost estimate
+uses a conservative local-index width and a local-declaration reserve. Existing
+loop behavior remains in place.
+
+Focused complete-module probes: six repeated CAR calls shrink from 445 to 433
+raw bytes; a case with 140 simultaneously live bindings shrinks from 4108 to
+3542. One to three repeated calls remain unchanged. New regressions cover
+function redefinition, changing special values between references and literal
+identity. The full native-size suite passes with the source compiler, including
+independent reviewer execution. An equivalent individual SBCL function was
+disassembled with aggressive space optimization as a qualitative reference;
+its different representation and binding contracts prevent direct size targets.
+
+Fresh sealed compiler measurement (unchanged runtime/source snapshot except
+this pass): module bytes before linking decrease from 422059 to 418729
+(-3330, 0.79%); the 542 emitted bodies remain present. The complete default
+browser image decreases from 982675 to 979264 raw bytes (-3411, 0.35%). Gzip
+increases from 380586 to 381275 (+689, 0.18%); Brotli increases from 320887 to
+321407 (+520, 0.16%). Raw size improves with a small compressed-size tradeoff.
+
+Independent fresh sealed-image native-size, compiler-input/recovery,
+compiler-modules and compiler-safety/redefinition/policy suites pass.
+Exploratory build timings show interpreted bootstrap 199.4 to 198.5 seconds
+and sealed-module compilation 29.6 to 30.2 seconds; these are build observations,
+not warmed throughput claims. The fixed original corpus (373 source functions,
+identical SHA256 for both runs) emits 415515 to 411812 raw module bytes
+(-3703, 0.89%), gzip 127297 to 127802, and Brotli 102936 to 103218. Both emitted
+modules validate and instantiate. Exploratory frontend medians are 13.515 to
+14.251 seconds and emission medians 26.397 to 25.879 seconds; overlapping ANSI
+and application work prevents attributing a throughput change. Game of Life compiled from the identical
+fixed portable/retained input decreases from 2811442 to 2748074 raw bytes
+(-63368, 2.25%). All 5327 existing definition/initialization nodes remain
+retained by the unchanged reflection-aware profile, so this saving comes from
+generated code rather than dropping definitions. Exploratory native build
+times are 336.8 to 328.0 seconds under overlapping workloads.
+Game of Life gzip changes from 654828 to 669192 (+14364, 2.19%) and Brotli from
+437641 to 447528 (+9887, 2.26%). Raw size remains the primary objective; these
+compressed-size costs are explicit secondary tradeoffs.
+Both variants pass fresh production loads, immutable blinker and ten-step
+R-pentomino results, printable grids, compiler availability and no ASDF/UIOP
+dependency. Separate warmed drivers per seed and variant (three warmups, five
+samples, each advancing 100 fresh worlds ten generations) measure blinker
+2.535 to 2.467 seconds and R-pentomino 6.900 to 6.692 seconds; CPU medians improve
+similarly by 2.73% and 3.31%. These samples show no application slowdown.
+After the ANSI workload finished, the warmed three-round native-compiler
+microbenchmark (small, wide branch, wide handler, wide temporaries and loop)
+shows emission CPU medians 0.75–7.30% lower and frontend-plus-emission CPU
+medians 1.03–9.42% lower. Loop wall time varies slightly (519 to 528 ms for its
+batch) while its CPU median decreases (533 to 529 ms); no material throughput
+regression is evident. Full corpus throughput above remains explicitly noisy.
+
+*** Pass 2: shared literal/function lookup
+
+An emitted adjacent literal lookup followed by function resolution can use one
+shared =native-literal-function= runtime helper. It resolves the same current
+binding at the original program point, before argument effects; cached literal
+paths retain their existing calls. The pass prices actual emitted call pairs,
+import declarations and relocated index widths before selecting the helper.
+The host runtime-kernel linker recognizes the fused form and retains canonical
+builtin resolution for runtime internals.
+
+Focused complete-module probes with 1/2/4/32/140 distinct call names shrink
+380 to 337, 394 to 349, 422 to 373, 816 to 711, and 2405 to 2084 raw bytes.
+Matching-runtime source-compiler regressions pass for redefinition during
+argument evaluation, SETF function names, multiple values, missing-function
+rejection/recovery and closure relocation across index-width boundaries.
+Independent acceptance of the combined fixes is recorded below.
+Independent review reproduced a profitability-model bug: adding one import at
+the 127/128 index boundary can widen many exported aliases and element entries.
+A validated synthetic case with 30 call pairs and 1000 aliases grows from
+14816 to 15798 bytes despite the original planner's positive estimate. The
+reviewer added export/element index costs and a regression: the unprofitable
+boundary case now stays unchanged while a profitable nonboundary case fuses.
+This affects the size decision, not function-resolution semantics.
+
+The corrected isolated pass-2 compiler is 980370 raw bytes versus pass 1's
+979264 (+1106, 0.11%); its sealed module is 419312 versus 418729 (+583).
+Before that pricing correction, fixed-corpus output decreases 411812 to 408113
+raw bytes (gzip 127802 to 127666, Brotli 103218 to 103164), and Game of Life
+decreases 2748074 to 2683986 (-64088, 2.33%), gzip 669192 to 668933 and Brotli
+447528 to 450005. These application measurements use the earlier planner;
+the combined corrected, proof-enhanced and CI-fixed sealed checkpoint is
+recorded below. All 7001 application initializers remain present. The compiler's
+small added raw cost is acceptable under the application-first objective and
+remaining budget. Continue seeking planner simplification opportunities,
+without confusing pre-fix measurements
+with final validation.
+
+*** CI regression followups
+
+Host CI run 43683208587 (4b36069, Linux SBCL) reports six failures in canonical/
+noncanonical INLINE tests because they require the former separate
+=native-function-reference= import. The tests now recognize either dynamic
+lookup ABI while still requiring canonical INLINE lowering to contain neither.
+The two affected host tests and related canonical-setter/linker validation
+tests pass locally (35 checks across four tests); the fused path is exercised.
+
+The integer-primitive redefinition regression also exposed a real compiler
+dependency bug. New literal-cache width pricing calls INTEGER-LENGTH, whose
+live redefinition returned a keyword that subsequently reached CEILING. Shipped
+compiler policy now explicitly captures canonical INLINE INTEGER-LENGTH, as
+it already does ASH and LOGAND. User ordinary/NOTINLINE calls remain dynamic;
+fresh user INLINE compilation still observes replacements. The unchanged
+=compiler-integer-primitives.mjs= suite now passes on the fresh combined
+sealed image, including all definition contracts; source-mode skipping was
+not used. Broader independent batch review passes as recorded below.
+
+CI run 43685866555 (35ec7bed) now passes both full ANSI jobs, compiler
+self-compilation, Game of Life and McCLIM. Host and compiler-integration jobs
+are still running at this observation; do not infer their final result.
+
+Subsequently Linux SBCL and CCL host jobs pass. Compiler integration reaches
+=compiler-inline-types.mjs= and fails an assertion requiring the old dynamic
+lookup import. The generated code uses equivalent fused =native-literal-function=.
+The five related INLINE/predicate/shift/unboxed suites now share a predicate
+recognizing either ABI: positive fallback assertions retain dynamic lookup,
+and negative optimization assertions require both lookup forms to be absent.
+All five suites pass on the sealed pass-4 image, including their unchanged
+runtime result, checked-error and redefinition cases. Independent INLINE/type
+and integer-predicate runs also pass on the pass-5 sealed image. The entire
+remaining compiler CI sequence from that failure onward passes locally,
+including tail calls, disassembly, module sizes/throughput, FASL codecs,
+saved slots, fresh file compilation and ANSI runner regressions. No compiler
+implementation was changed for this assertion correction.
+
+The same CI run passes Linux SBCL/CCL, macOS SBCL and Windows SBCL host jobs.
+ECL 26.5.5 completes with failures confined to two SEARCH reference suites.
+A minimal independent probe reproduces its forward empty-pattern bug:
+=(search '(1) '(0 1) :end1 0 :start2 1)= returns 0, while SBCL and the target
+return 1. Per the SEARCH contract, the empty pattern matches source boundaries;
+the leftmost/rightmost permitted boundary is START2/END2. The two host suites
+now derive that empty case directly rather than trusting the host SEARCH;
+nonempty search, mismatch, test/test-not and runtime checks remain intact.
+Focused SBCL search/character-region suites pass 4871 and 20833 checks. ECL
+26.5.5 independently passes those same complete focused suites after a fresh
+ASDF load. This is a portable test-oracle correction, with no
+runtime behavior change or host-specific conditional in the tests.
+
+The complete local SBCL host suite on the combined batch-2 source checkpoint
+also passes all discovered 250503 checks, zero failures. Newer dispatch/import
+host changes additionally receive fresh-process cold-image construction and
+their focused executable host regressions; older persistent definitions must
+not substitute for a clean host load.
+
+The combined corrected passes 1–3, ANSI expander and compiler policy fixes
+produce a 984582-byte default compiler image, leaving 63994 bytes below the
+1 MiB raw budget. Its compiler module before linking is 421979 bytes versus
+the original baseline's 422059 (-80), while the complete image grows 1907 bytes
+from 982675. This is an acceptable application-first tradeoff; continue seeking
+compiler reductions alongside the much larger application code opportunities.
+
+The newly available agent is investigating hand-written interpreter code size
+to create additional compiler budget. Attribute actual emitted runtime bodies
+to their WAT/Common Lisp generators, then rank shared helpers, compact dispatch
+and equivalent instruction sequences by raw savings and performance impact.
+Retain runtime definitions and the compiler-free image; this is implementation
+compaction rather than stripping.
+
+Independent batch-2 review now passes all focused sealed compiler, malformed
+input/recovery, redefinition and related host regressions. Full native compiler
+ANSI completes with 21954 passes, zero failures/timeouts/load errors, the same
+CI seed and unchanged ten-second deadline. Combined corrected output for the
+fixed original compiler corpus is 408106 raw bytes (gzip 127672, Brotli 103165),
+validated and instantiated without installing another compiler generation.
+Game of Life is 2683986 raw bytes, 127456 smaller than the original baseline,
+with all 7001 initializers retained; its output matches the earlier pass-2 SHA.
+Warmed compiler microbenchmarks remain exploratory: a separate host-suite
+process consumed one CPU throughout the samples. Its unflushed output appeared
+stalled at DERIVED-TYPE-DEFINITIONS, but that test independently passes all 29
+checks; buffered output prevents identifying the exact active test. The first
+full run was interrupted; a complete repeat with bridge-boundary output flushes
+now passes all 250503 host checks with zero failures. No actual hang was
+established. Quiet-window throughput measurements are recorded below.
+
+The full FriCAS checkpoint compares the original compiler with corrected pass
+2, using identical frozen portable input and all 1562 hashed resources. Its
+image decreases from 4547133 to 4322679 raw bytes (-224454, 4.94%), while gzip
+increases 1220906 to 1246766 (+25860) and Brotli 774524 to 809373 (+34849).
+All 13303 initializers and 105 native modules remain; compiled BOOT parser,
+arithmetic, persistent definitions, history and help smoke checks pass on both.
+Native body payload decreases 2788989 to 2560889 bytes. This is the intended
+raw-size improvement with a documented compression tradeoff, not stripping.
+Compilation/runtime performance was not evaluated under concurrent builds.
+
+The current compiler-free named-image diagnostic attributes 299821 body bytes:
+194287 hand-written WAT, 97412 compiled Common Lisp kernels, and 8122 other
+generated bodies. The first interpreter dispatch compaction reduces the
+LIST-PRIMITIVE body by 448 bytes and the complete compiler-free image from
+504220 to 503772 raw bytes. Gzip decreases 151 bytes; Brotli increases 73.
+There are no added helpers/imports or removed definitions. Focused validation
+and independent review pass as recorded in the batch-3 checkpoint below.
+
+*** Pass 3: shared nominal type proofs
+
+A compact target-family classifier now supplies positive numeric, array,
+vector, string and sequence relationships to the existing inference/proof/
+lowering query. Only rank-one arrays prove VECTOR; SIMPLE-VECTOR additionally
+requires SIMPLE-ARRAY with exact element type T. Opaque element types stay
+unknown and parameterized required types retain their existing proof paths.
+Compiler boundaries validate the newly consumed array/vector shape structure,
+including dotted/cyclic dimension lists, before unchecked lowering.
+
+Focused source-compiler nominal, malformed-input/recovery and existing type-flow
+suites pass. Typed VECTORP and STRINGP branches each decrease from 325 to 267
+raw bytes; rank-one general-array SVREF decreases from 480 to 274 with the
+current backend. Typed string LENGTH arithmetic grows from 411 to 437 because
+the new bounded fact selects scalar arithmetic with extra import cost. Keep
+the sound shared fact; measure aggregate image and application effects rather
+than suppressing useful proof information to fit an isolated import inventory.
+Closed-module coverage folds a private helper's predicate while preserving the
+outside-call branch when that helper is exported. The final pass folds the
+required-family dispatch into the existing query and skips it for compound
+required types. Its classifier standalone module is 1968 bytes; the existing
+query grows from 3955 to 4449 standalone bytes. Combined sealed cost and
+correctness are recorded above; native throughput remains to be measured
+without contention.
+
+*** Pass 4: compact native bundle entry tables (reviewed)
+
+Explicit multi-entry native bundles can replace repeated initializer/direct
+export names with one fixed funcref table and compact versioned metadata.
+Function objects, literal vectors, entry order, direct workers and saved-image
+function indices remain distinct and accessible. Sole factory modules and
+legacy readers retain their existing format; host runtime-kernel translators
+explicitly request named exports. The emitter compares complete alternative
+section sizes and chooses the table only when smaller.
+
+Focused full-module output decreases from 1494 to 1239 raw bytes. Coverage
+includes arities 0–4, unused-argument masks, optional/no-direct entries, DEBUG,
+closure/literal ownership, repeated loads, redefinition and saved images.
+Version/count/mode/descriptor/table bounds are validated before attachment;
+small native signature checks use REF.TEST before unchecked casts. Malformed
+metadata/signature/start fixtures signal catchable Lisp errors and subsequent
+valid installs recover. Native-bundle broad regression passes with the matching
+source compiler; independent sealed review passes as recorded below. The
+standalone layout-helper module is 4536 bytes,
+not an incremental whole-compiler cost.
+
+Fresh Game of Life has 218606 bytes of entry export sections. Static complete
+table/metadata/element accounting estimates 189302 bytes of selective raw
+savings before compiler/loader growth and FASL framing. This is a measured
+opportunity, not a final application result.
+
+The independent sealed pass-4 build is 987082 raw bytes (gzip 384771, Brotli
+324727), +2500 raw versus batch 2 and still 61494 below budget. Its compiler
+module grows 421979 to 424178 bytes. The compiler-free runtime is 504220 raw,
+113 larger than batch 2. The JavaScript adapter additionally grows 5511 raw /
+1398 gzip / 1208 Brotli bytes; this separate deployment cost must be included
+when assessing the overall tradeoff. Sealed entry-table rejection/recovery,
+actual exported-table mutation between cached installs, native bundles,
+snapshots, modules and unchanged integer-primitive definition contracts pass.
+Independent application and fixed-corpus size measurements are recorded below.
+
+Actual fixed-input Game of Life now decreases 2683986 to 2494683 raw bytes
+(-189303, 7.05% versus batch 2), gzip 668933 to 626111 (-42822), and Brotli
+450005 to 439523 (-10482). All 7001 initializers remain. Total raw improvement
+versus the original 2811442-byte image is 316759 bytes (11.27%). The fixed
+original compiler-source corpus remains byte-identical to batch 2 at 408106
+raw / 127672 gzip / 103165 Brotli bytes: its single-factory module does not use
+the new multi-entry table layout. Both emitted corpus modules validate and
+instantiate without installing another compiler generation.
+Relative to the original application, gzip is 28717 bytes smaller and Brotli
+is still 1882 bytes larger (+0.43%). Fresh production smoke passes with each
+matching pass-4 compiler, pass-5 compiler and compiler-free pass-5 runtime:
+immutable blinker generations, ten-step R-pentomino, printable grid and no
+ASDF/UIOP dependency.
+
+The reviewed pass-5 interpreter dispatch compaction then reduces the full
+compiler image from 987082 to 986634 raw bytes (gzip -123, Brotli +61), leaving
+61942 bytes below budget. Its compiler-free image remains 503772 raw bytes.
+Independent actual-Wasm dispatch, input/proof, native-size and stream checks
+pass, alongside the unchanged entry-table and integer definition contracts.
+
+A coordinated quiet-window native compiler benchmark pauses the root host
+suite and other build/test jobs. Three fresh-VM rounds alternate variant order
+and warm each case before sampling. Batch medians below are emission /
+frontend-plus-emission milliseconds; small repeats 100 times, loop 50, and
+each wide case three times.
+
+| Case             | Pass 1    | Batch 2   | Pass 4    |
+|------------------+-----------+-----------+-----------|
+| Small            | 726 / 806 | 776 / 863 | 790 / 884 |
+| Wide branch      | 721 / 866 | 703 / 877 | 713 / 880 |
+| Wide handler     | 574 / 692 | 571 / 709 | 567 / 683 |
+| Wide temporaries | 717 / 875 | 717 / 870 | 725 / 912 |
+| Loop             | 536 / 698 | 563 / 716 | 593 / 746 |
+
+CPU samples show similar directions. Small output shrinks 596 to 558 bytes;
+other probe outputs stay unchanged. The tiny case costs approximately 0.78 ms
+more per compilation than pass 1. Pass 4 adds roughly 2.4% small-case and 4.2%
+loop frontend/emission time versus batch 2; remaining cases range -3.7% to
++4.8%. This modest compiler throughput cost is explicit and accepted for the
+much larger application raw savings. Replacing repeated generic ULEB-width
+pricing arithmetic with a compact checked/internal unsigned-width helper is
+a promising followup for both compiler size and planner overhead. These
+measurements do not establish application runtime performance.
+
+The same quiet window independently measures actual interpreter list-dispatch
+workers with separate fixed-operation Wasm drivers. Each fixture/branch is
+warmed before eleven alternating samples, with allocation outside the timed
+loop and consumed checksums. Early LIST-LENGTH decreases 9.548 to 9.208 ms
+(-3.55%), middle OBJECT-IDENTITY 16.035 to 8.958 (-44.13%), and late LIST-EQ
+24.209 to 17.730 (-26.77%), each over 500000 calls. Storage fallback decreases
+4.223 to 3.338 ms (-20.97%) over 50000 calls. Signed unsupported dispatch holes
+and subsequent recovery also pass. This is direct dispatch evidence, not an
+application-wide speedup claim. The 448-byte runtime saving introduces no
+observed performance loss in these representative early/middle/late cases.
+
+Batch-3 independent review approves both changes and the associated CI test
+correction. A decoded hash comparison additionally confirms all 58 Game of
+Life native code sections are byte-identical between batch 2 and pass 4; the
+189303-byte gain is entry encoding. The paired dispatch diagnostic changes
+only LIST-PRIMITIVE; driver/fixture/hole bodies have identical bytes and indices.
+
+*** Pass 6: reuse retained cell allocation helper (awaiting sealed review)
+
+The backend recognizes actual adjacent extern-NULL / CONS instruction pairs
+and replaces them with the existing equivalent CELL helper. It requires CELL
+already retained, fewer than 128 surviving runtime imports and fewer than 120
+ABI signatures; no new helper/import is introduced. Main relocation vectors
+remain reference-only. Only live bodies containing ordinary CONS calls need
+an additional instruction-boundary decode, avoiding unsafe raw byte matching.
+
+Focused source-compiler suites pass for 127/128/140 import tiers, old wide
+indices after pruning, heap-type/immediate negatives, missing helpers, dead
+code, fresh identity, escaping mutable closures, operand effects, multiple
+values, loops and nonlocal returns. A minimal complete module shrinks 125 to
+123 bytes; named and table entry fixtures each save 12 bytes. Whole compiler,
+fixed-corpus and application effects await fresh independent sealed review.
+A partial hot reload into the existing sealed compiler retained its callers'
+old binding and is explicitly discarded as size evidence.
+
+*** Pass 7: compact runtime import encoding (under review)
+
+Native modules can encode runtime imports in namespace =m= with the common
+=native-= field prefix omitted. The adapter constructs a null-prototype alias
+map once per runtime, retaining the actual Wasm function and exception-tag
+objects. Legacy =miricl.runtime= imports, entries, snapshots and interactive
+definitions remain supported. Profitability pricing uses the actual serialized
+names. Tooling normalizes semantic names at its boundaries while public
+disassembly retains the actual wire representation. The host kernel linker and
+bootstrap worker translator both accept the two encodings.
+
+Fresh-host review found two integration omissions before accepting images.
+The host kernel translator also consumed raw disassembly import fields and
+needed namespace-based normalization/cache invalidation. Separately, pass 5
+renamed a host DSL helper while three symbol-group callers still used its old
+name; overlay reloads retained that old host binding and masked its absence.
+A host-only wrapper restores those callers with no shipped-byte change.
+Executable compact/legacy worker and symbol-group regressions pass. A genuinely
+fresh SBCL process builds cold/interpreter images byte-identical to the overlay
+inputs before the required interpreted compiler bootstrap proceeds.
+
+Combined passes 6–7 produce a 985352-byte default compiler image, 1282 raw
+bytes smaller than pass 5, with 63224 bytes of remaining budget. Gzip grows
+330 bytes to 384978; Brotli grows 221 to 325009. The compiler module decreases
+424178 to 421467 raw bytes (-2711). Compiler-free output is unchanged at
+503772 raw / 228544 gzip / 201457 Brotli. The cold source-compiler image grows
+553 raw bytes to 627491, which is separately tracked from the default image.
+
+The fixed original 373-function compiler corpus emits 403977 raw / 127469 gzip
+/ 103149 Brotli bytes, saving 4129 raw / 203 gzip / 16 Brotli versus batch 3.
+It validates and instantiates without installing another compiler generation.
+Game of Life decreases 2494683 to 2426654 raw bytes (-68029, 2.73%), gzip
+626111 to 622992, and Brotli 439523 to 439126, retaining all 7001 initializers.
+Total original-to-current raw saving is 384788 bytes (13.69%). Thirteen focused
+sealed suites pass, including compact/legacy/tag/prototype boundaries,
+snapshots, cell reference-width cases, mutable closures, native bundles,
+malformed input/recovery, nominal facts and unchanged integer definition
+contracts. Fresh compiler and compiler-free production smoke passes. A separate
+cold-image native-compilation integration run also passes its true first-use
+bootstrap, disassembly, cells/rest/multiple values, live redefinition, error
+recovery and cooperative thread preemption cases.
+
+The coordinated quiet compiler checkpoint measures frontend/emission batch
+medians before/after: small 867/862 ms, wide branch 866/881, wide handler
+672/690, wide temporaries 866/893, loop 722/732. The larger probes cost roughly
+1–3% more compiler time; small is unchanged. Separate warmed Game of Life
+drivers improve blinker 2587.55 to 2497.25 ms (-3.49%) and R-pentomino 6952.11
+to 6757.86 (-2.79%), with similar CPU changes. Each seed/variant has its own VM
+and native driver, three full-workload warmups and five alternating samples,
+each advancing 100 fresh worlds ten generations and validating a checksum.
+
+The next full FriCAS checkpoint now passes with the exact earlier frozen input
+and all 1562 hash-verified resources. Raw image size decreases from the original
+4547133 to 3857053 bytes (-690080, 15.18%); versus corrected pass 2's 4322679,
+this batch saves another 465626 (10.77%). All 13303 initializers, 105 modules
+and 12819 native bodies remain versus pass 2, with no scan/decode failures.
+Incremental byte accounting is exact: CELL bodies -44732, code headers -62,
+entry layout -350604, imports -70221 and FASL framing -7. Native BOOT,
+READY/IMAGE, arithmetic, persistent variables/functions, history and help
+smokes pass. Gzip is 1154153 bytes (-66753 versus original); Brotli is 796014
+(+21490 versus original). Timings from this overlapping build are exploratory.
+
+*** Artifact compatibility policy and next batch
+
+The user explicitly removes any cross-compiler-version compatibility obligation
+for artifacts, images, snapshots, FASLs, native modules or serialized compiler
+data; this is now recorded in AGENTS.md. Remove obsolete namespace/export
+fallbacks and format acceptance paths and their compatibility tests, while
+retaining current-version validation, loading, save/restore and recovery.
+Active named factories, named host-kernel exports and named layouts selected
+because smaller are current formats, independent of older-module support.
+Cleanup size measurements and fresh review are pending.
+
+*** Further measured candidates
+
+Existing NATIVE-CELL implements CONS(value,NIL). Reusing it for emitted
+REF.NULL/CONS wrapping needs no new runtime helper. Static existing-import
+sites account for roughly 2746 compiler-corpus and 29934 Game of Life bytes.
+An initial conservative implementation can require an already retained CELL
+import and fewer than 128 imports, avoiding new imports and widened operands;
+complete output validation is still necessary. This is queued separately.
+
+A compact import namespace and removal of the repeated NATIVE- field prefix
+could use a generic adapter mapping while retaining the legacy namespace.
+Static import-section opportunities are 1340 compiler-corpus and 37042 Game
+of Life bytes, with larger estimates in Maxima, Coalton and McCLIM. Compiler,
+adapter, diagnostic and cost-model changes must be counted before acceptance.
+
+Persistent SBCL DISASSEMBLE and actual target disassembly compare unsigned-32
+ULEB-width calculations under SPACE 3 / SPEED 1. The existing
+=MAX(1,CEILING(INTEGER-LENGTH(n),7))= formula has a 37-byte SBCL body and a
+427-byte standalone Wasm module / 56-byte worker. Constant-threshold branches
+produce 70 SBCL / 387 module / 128 worker bytes: fewer standalone imports do
+not compensate for their larger worker where imports are already shared.
+A shift-by-seven loop produces 34 SBCL / 345 module / 56 worker bytes and
+passes thirteen target boundaries from zero through 4294967295. The original
+target formula still invokes generic CEILING/MAX and allocates its argument
+packet, while SBCL uses integer bit scanning/division and a conditional move.
+The bounded shift loop is the next planner-size/throughput candidate; audit
+all input domains and measure the sealed compiler before claiming aggregate
+improvement. Standalone import savings are not whole-image measurements.
+
+Secondary-value return facts are another proof-engine candidate. Closed calls
+currently preserve primarily the first result type. A private fixed-value
+multiple-return probe is 783 module / 130 body bytes versus 537 / 83 with a
+valid explicit singleton declaration on the second value. Real integer-bound
+helpers also correlate their bounds with a third known flag; ordinal summaries
+alone cannot replace those correlations. Any implementation must bound queried
+slots, handle missing values as NIL, preserve unknown/rest cardinality, and
+retain conservative exported/captured/mutable-state contracts.
+
+*** Parallel ANSI timeout investigation
+
+CI run 43680246366 at commit 99cf188 reports five interpreter timeouts at the
+unchanged 10000 ms per-test limit: FORMATTER.C.1A, FORMATTER.C.2A,
+FORMATTER.C.4A, FORMAT.A.8 and FORMAT.S.8. The compiler ANSI suite passes.
+The preceding completed run 43620644768 reports FORMAT.S.8 timing out.
+The affected tests each traverse up to 65536 character codes. Isolated runs
+against the exact current CI interpreter pass locally in roughly 5–6 seconds;
+profiling finds substantial repeated interpreted macro-expansion work,
+especially WITH-OUTPUT-TO-STRING. The change cross-compiles the expansion algorithm as an ordinary Common
+Lisp runtime kernel behind checked source/header boundaries. It retains
+MACROEXPAND-HOOK, MACROLET, declaration scope, target-string evaluation order,
+multiple values, and guaranteed stream closure. Malformed and cyclic headers
+are rejected before unchecked internals, with subsequent-use recovery tested.
+
+The five isolated upstream timeout cases now pass in approximately 1.0–1.8
+seconds, versus 5–6 seconds against the exact original CI image on this host.
+All 16 upstream WITH-OUTPUT-TO-STRING tests, 29 FORMAT runtime checks, and the
+expanded input-stream regression suite pass. The refreshed compiler-free image
+is about 1 KiB larger. The full upstream interpreter suite now passes all 21954
+discovered tests with zero failures, timeouts or load errors, using CI's failing
+seed =(1694693557 62182078 3320375621 4063355884)= and the unchanged 10000 ms
+per-test deadline. =check-ansi-results.mjs= accepts the report. Fresh-process
+current-source input-stream, composite-stream and FORMAT checks pass as well.
+The isolated ANSI measurement before the final nonsymbol-keyword guard costs
+1041 raw / 363 gzip / 337 Brotli bytes in the compiler-free image (502832 to
+503873 raw). Independent focused checks also pass after that guard. Final
+combined sealed-compiler integration remains required at the next checkpoint.

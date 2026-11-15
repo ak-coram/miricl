@@ -20,6 +20,16 @@ more useful as declared and inferred type information improves.
 
 Full ANSI Common Lisp compliance is important.
 
+# Artifact compatibility
+
+Compatibility between compiler versions is not required for any generated
+artifacts, images, snapshots, FASLs, native modules, or serialized compiler
+data. Keep only the formats produced and consumed by the current compiler
+and runtime; remove obsolete readers, adapters, migration paths, and
+compatibility tests. Rebuild artifacts with matching compiler and runtime
+versions when formats change. Preserve input validation and current-version
+loading, save/restore, round-trip, and rejection/recovery tests.
+
 # Type proofs for optimization
 
 Build a small, compiler-integrated proof engine around Common Lisp type

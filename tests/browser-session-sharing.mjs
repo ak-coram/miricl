@@ -230,14 +230,10 @@ try {
       {source: '(print "λ🙂")\n'.repeat(4000), outputs: [{text: 'Large output 世界\n'.repeat(4000)}], state: 'complete'},
     ]};
     const largeLink = await sharedSessionURL(large, base, key);
-    const legacyLink = new URL('#session=' + Buffer.from(JSON.stringify({version: 1, application: key,
-      session: {...newSession(), name: `${app} legacy notebook`}})).toString('base64url'), base).href;
     await command('Page.navigate', {url:largeLink});
     await waitFor(`document.querySelector('#session-name').value === ${JSON.stringify(large.name)}`);
     assert.equal(await js('document.querySelector("#history .input").textContent'), large.entries[0].source);
     assert.equal(await js('evaluations.length'), 0, 'Large compressed imports never execute input automatically.');
-    await command('Page.navigate', {url:legacyLink});
-    await waitFor(`document.querySelector('#session-name').value === ${JSON.stringify(`${app} legacy notebook`)}`);
     // Delay the first decode so a later navigation finishes first. Only the
     // newest request may change the session, even after the old stream resumes.
     await js(`globalThis.originalDecompressionStream = DecompressionStream;
@@ -263,7 +259,7 @@ try {
       new Promise(resolve => setTimeout(resolve, 100))`);
     assert.equal(await js('document.querySelector("#session-name").value'), latest.name,
       'An older asynchronous decode must not overwrite the latest navigation.');
-    console.log(`PASS ${app}: native gzip links, large/legacy imports, decode races, clipboard, replay, prompts, invalid links, storage fallback and mobile layout.`);
+    console.log(`PASS ${app}: native gzip links, large imports, decode races, clipboard, replay, prompts, invalid links, storage fallback and mobile layout.`);
   }
   assert.ok(requests.every(url => !url.includes('#session=')), 'Shared transcript stays in the URL fragment.');
 } finally {

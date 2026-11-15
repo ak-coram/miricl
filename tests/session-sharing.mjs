@@ -38,21 +38,17 @@ const payloadURL = value => new URL('#session=' + Buffer.from(JSON.stringify(val
 const bytesURL = bytes => new URL('#session=' + Buffer.from(bytes).toString('base64url'), href).href;
 const compressedURL = value => bytesURL(gzipSync(JSON.stringify(value)));
 const payload = {version: 1, application, session};
-assert.deepEqual((await sessionFromURL(payloadURL(payload), application, modes)).entries, restored.entries,
-  'Previously shared uncompressed URLs still load.');
-for (const encode of [payloadURL, compressedURL]) {
-  await assert.rejects(sessionFromURL(encode({...payload, version: 2}), application, modes), /version/u);
-  for (const name of [null, 42, {}])
-    await assert.rejects(sessionFromURL(encode({...payload, session: {...session, name}}), application, modes), /Invalid shared session/u);
-  for (const entry of [null, {}, {...first, source: []}, {...first, replies: [42]}, {...first, answers: {}},
-    {...first, outputs: [{text: {}}]}, {...first, state: 'unknown'}, {...first, mode: 'unknown'}])
-    await assert.rejects(sessionFromURL(encode({...payload, session: {...session, entries: [entry]}}), application, modes), /Invalid shared session/u);
-}
+await assert.rejects(sessionFromURL(compressedURL({...payload, version: 2}), application, modes), /version/u);
+for (const name of [null, 42, {}])
+  await assert.rejects(sessionFromURL(compressedURL({...payload, session: {...session, name}}), application, modes), /Invalid shared session/u);
+for (const entry of [null, {}, {...first, source: []}, {...first, replies: [42]}, {...first, answers: {}},
+  {...first, outputs: [{text: {}}]}, {...first, state: 'unknown'}, {...first, mode: 'unknown'}])
+  await assert.rejects(sessionFromURL(compressedURL({...payload, session: {...session, entries: [entry]}}), application, modes), /Invalid shared session/u);
 for (const encoded of ['', '!!!', 'A', '____', Buffer.from('{').toString('base64url')])
   await assert.rejects(sessionFromURL(new URL('#session=' + encoded, href).href, application, modes), /encoding/u);
 const corrupt = Buffer.from(compressed); corrupt[corrupt.length - 5] ^= 1;
 for (const bytes of [compressed.subarray(0, compressed.length - 1), corrupt,
-  Buffer.concat([compressed, Buffer.of(0)]), gzipSync('not JSON'), gzipSync(Buffer.of(255))])
+  Buffer.concat([compressed, Buffer.of(0)]), Buffer.from(JSON.stringify(payload)), gzipSync('not JSON'), gzipSync(Buffer.of(255))])
   await assert.rejects(sessionFromURL(bytesURL(bytes), application, modes), /encoding/u);
 // Limit expanded data while streaming, before constructing an unbounded JSON
 // string or importing the transcript. A failed decode must not poison reuse.
@@ -67,7 +63,6 @@ const largeURL = await sharedSessionURL(large, href, application);
 const largePlainURL = payloadURL({version: 1, application, session: large});
 assert.ok(largeURL.length < largePlainURL.length / 100, 'Repetitive large transcripts should produce much shorter URLs.');
 assert.equal((await sessionFromURL(largeURL, application)).entries[0].source, large.entries[0].source);
-assert.equal((await sessionFromURL(largePlainURL, application)).entries[0].source, large.entries[0].source);
 
 let stored;
 const store = sessionStore({getItem: () => stored, setItem: (_, value) => {stored = value;}}, assert.fail);
@@ -75,4 +70,4 @@ store.save(session); store.save(restored);
 assert.equal(store.list().length, 2, 'Import preserves the original session, even when its name matches.');
 assert.equal(store.current().id, restored.id);
 assert.equal(sessionStore({getItem: () => stored}, assert.fail).current().name, session.name);
-console.log(`Session sharing: native gzip, legacy links, Unicode, transcript metadata, modes, prompts, new IDs, persistence, corrupt/oversized input and recovery pass; large URL ${largePlainURL.length} -> ${largeURL.length} characters.`);
+console.log(`Session sharing: native gzip, Unicode, transcript metadata, modes, prompts, new IDs, persistence, corrupt/oversized input and recovery pass; large URL ${largePlainURL.length} -> ${largeURL.length} characters.`);

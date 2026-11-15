@@ -1,3 +1,4 @@
+import {nativeModuleImports} from './helpers/compiler-imports.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
@@ -83,7 +84,7 @@ try {
       const bytes = await vm.readFile('/loop-test.wasm');
       assert.ok(WebAssembly.validate(bytes), name);
       moduleSize = bytes.length;
-      if (structured) assert.ok(WebAssembly.Module.imports(new WebAssembly.Module(bytes))
+      if (structured) assert.ok(nativeModuleImports(new WebAssembly.Module(bytes))
         .some(entry => entry.name === 'native-poll'), `${name}: backedges retain scheduling polls`);
       for (const [args, expected] of calls)
         assert.equal(vm.evaluate(`(multiple-value-list (funcall *loop-test-function* ${args}))`).output,

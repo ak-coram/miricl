@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {Miricl} from './miricl.mjs';
+import {isRuntimeImport, runtimeImportName} from './native-imports.mjs';
 import {collectCompilationStatistics} from './compilation-statistics.mjs';
 
 const [bootstrap, output] = process.argv.slice(2);
@@ -112,8 +113,9 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
     if (kind === 2) {
       const count = unsigned();
       for (let i = 0; i < count; i++) {
-        assert.equal(name(), 'miricl.runtime');
-        const field = name(); assert.match(field, /^native-[a-z0-9-]+$/);
+        const entry = {module: name(), name: name()};
+        assert.ok(isRuntimeImport(entry), 'Unsupported native runtime namespace');
+        const field = runtimeImportName(entry); assert.match(field, /^native-[a-z0-9-]+$/);
         assert.equal(byte(), 0); unsigned(); imports.push(field);
       }
     } else if (kind === 7) {

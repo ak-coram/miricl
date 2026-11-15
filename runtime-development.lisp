@@ -192,6 +192,22 @@
   #@(call $check-apply-list (local.get $form))
   #@(call $values-expansion-cl (local.get $form)))
 
+(defun $output-string-expansion-cl ()
+  (runtime-function-definition '$output-string-expansion-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$output-string-expansion-cl
+      'miricl-runtime:expand-output-string-form))))
+
+(define-runtime-function $output-string-expansion (($form :nullable-object)) (:nullable-object)
+  (:locals ($args :nullable-object) ($binding :nullable-object))
+  #@(call $check-apply-list (local.get $form))
+  #@(local.set $args (call $cdr (local.get $form)))
+  (wat-arity 1 2147483647)
+  #@(local.set $binding (call $car (local.get $args)))
+  #@(call $check-apply-list (local.get $binding))
+  #@(call $arity (local.get $binding) (i32.const 1) (i32.const 2147483647))
+  #@(call $check-variable (call $car (local.get $binding)))
+  #@(call $output-string-expansion-cl (local.get $form) ,(clos-library-reference '%%string-stream)))
+
 (define-runtime-function $modifier-expansion
     (($form :nullable-object) ($env :nullable-object) ($decrement i32)) (:nullable-object)
   (:locals ($args :nullable-object) ($place :nullable-object)
@@ -1428,7 +1444,7 @@
   #@(global $source-files (mut (ref null eq)) (ref.null eq))
   ($compiler-macro-access) ($setf-expander-access) ($make-symbol-macro-binding) ($symbol-macro-binding) ($define-symbol-macro)
   ($eval-compiled) ($fasl-cons-new) ($fasl-atom) ($fasl-object) ($fasl-cons) ($fasl-execute) ($fasl-dependencies) ($compile-primitive)
-  ($function-environment) ($lexical-function-id) ($lexical-function) ($set-macro) ($macro-function) ($constant-function) ($constant-macro-function) ($macroexpand-1) ($values-expansion-cl) ($values-expansion)
+  ($function-environment) ($lexical-function-id) ($lexical-function) ($set-macro) ($macro-function) ($constant-function) ($constant-macro-function) ($macroexpand-1) ($values-expansion-cl) ($values-expansion) ($output-string-expansion-cl) ($output-string-expansion)
   ($modifier-expansion) ($if-form) ($logical-expansion-cl) ($logical-expansion) ($conditional-expansion-cl) ($conditional-expansion) ($case-expansion) ($selection-expansion-cl) ($selection-expansion) ($eval-case) ($native-place-p) ($capture-place) ($captured-place-function) ($read-captured-place) ($write-captured-place) ($parallel-place-expansion) ($psetq-expansion) ($eval-parallel-places) ($development-eval)
   ($local-source-file) ($source-file) ($path-component-match-cl) ($path-component-match) ($path-directory-end-cl) ($path-directory-end) ($path-name-end-cl) ($path-name-end)
   ($path-directories-match-cl) ($path-directories-match) ($source-path-match) ($directory-add) ($directory-path) ($directory-native)

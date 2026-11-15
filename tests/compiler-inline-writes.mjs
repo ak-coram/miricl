@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
+import {nativeModuleImports, usesDynamicFunctionLookup} from './helpers/compiler-imports.mjs';
 const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
 try {
@@ -13,14 +14,14 @@ try {
           :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
     const bytes = await vm.readFile('/inline.wasm');
     return {bytes: bytes.length,
-      imports: WebAssembly.Module.imports(await WebAssembly.compile(bytes)).map(entry => entry.name)};
+      imports: nativeModuleImports(await WebAssembly.compile(bytes)).map(entry => entry.name)};
   };
   for (const operator of ['svref', 'aref', 'row-major-aref']) {
     const source = `(lambda (v x) (declare (type simple-vector v) (optimize (safety 0))
       (inline (setf ${operator}))) (setf (${operator} v 0) x))`;
     const result = await compile(source);
     assert.ok(result.imports.includes('native-vector-set-inline'), operator);
-    assert.ok(!result.imports.includes('native-function-reference'), operator);
+    assert.ok(!usesDynamicFunctionLookup(result.imports), operator);
     check(`(let* ((v (vector nil)) (alias v) (item (list 42))
                   (returned (multiple-value-list (funcall *inline-function* v item))))
       (and (eq v alias) (= (length returned) 1) (eq (car returned) item)

@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {Miricl} from './miricl.mjs';
+import {runtimeImportName} from './native-imports.mjs';
 import {measureWasm} from './wasm-size.mjs';
 
 const [output, before, after] = process.argv.slice(2);
@@ -41,7 +42,7 @@ try {
         const bytes = await vm.readFile('/predicate-kernel.wasm');
         assert.ok(WebAssembly.validate(bytes));
         await fs.writeFile(path.join(output, `${name}-${index}.wasm`), bytes);
-        const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes)).map(entry => entry.name);
+        const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes)).map(runtimeImportName);
         const call = `(${symbol} ${value} ${iterations})`;
         assert.equal(timed(vm, call).output, `${iterations}\n`);
         record.kernels.push({operator, type, source, call, bytes: bytes.length, imports, compilation, samples: []});

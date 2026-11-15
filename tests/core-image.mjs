@@ -6,6 +6,14 @@ import {Miricl} from '../scripts/miricl.mjs';
 
 const runtime = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
 const source = await Miricl.instantiate(runtime);
+const nativeCode = [];
+const installNative = source.nativeModules.set;
+source.nativeModules.set = function (storage, compiled) {
+  const kind = source.vm['core-object-type'](compiled.code);
+  const read = source.vm[`core-read:${kind}`];
+  nativeCode.push(Uint8Array.from({length: compiled.length}, (_, index) => read(compiled.code, index)));
+  return installNative.call(this, storage, compiled);
+};
 let saved;
 try {
   source.mountFile('/persistent.bin', Uint8Array.of(0, 128, 255));
@@ -120,6 +128,29 @@ const snapshot = data => {
   const section = concat(word(name.length), name, data);
   return concat(runtime, Uint8Array.of(0), word(section.length), section);
 };
+// Native code is byte storage in current snapshots. Convert those arrays to
+// the ordinary i32 representation, which remains valid for wide user arrays,
+// and require rejection before the obsolete native-code reconstruction path.
+const codeArrays = new Map();
+for (const code of nativeCode) {
+  const encoded = concat(word(code.length), Uint8Array.of(1), code);
+  let start = 0;
+  while ((start = Buffer.from(payload).indexOf(encoded, start)) >= 0) {
+    codeArrays.set(start, {end: start + encoded.length,
+      unpacked: concat(word(code.length), Uint8Array.of(0), ...Array.from(code, value => word(value)))});
+    start += encoded.length;
+  }
+}
+assert.ok(codeArrays.size > 0, 'Saved native closures retain their byte storage');
+const unpackedParts = [];
+let previous = 0;
+for (const [start, {end, unpacked}] of [...codeArrays].sort((a, b) => a[0] - b[0])) {
+  assert.ok(start >= previous, 'Code array fixtures do not overlap');
+  unpackedParts.push(payload.subarray(previous, start), unpacked);
+  previous = end;
+}
+unpackedParts.push(payload.subarray(previous));
+await assert.rejects(Miricl.instantiate(snapshot(concat(...unpackedParts))), /Native code must use packed byte storage/);
 for (const format of [1, 3]) {
   const previousFormat = payload.slice();
   previousFormat[0] = format;

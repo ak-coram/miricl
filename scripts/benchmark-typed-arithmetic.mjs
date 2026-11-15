@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {Miricl} from './miricl.mjs';
+import {runtimeImportName} from './native-imports.mjs';
 import {measureWasm} from './wasm-size.mjs';
 
 const [output, before, after] = process.argv.slice(2);
@@ -42,7 +43,7 @@ try {
         assert.equal(compilation.output, '');
         const bytes = await vm.readFile('/kernel.wasm');
         await fs.writeFile(path.join(output, `${name}-${index}.wasm`), bytes);
-        const imports = WebAssembly.Module.imports(await WebAssembly.compile(bytes)).map(entry => entry.name);
+        const imports = WebAssembly.Module.imports(await WebAssembly.compile(bytes)).map(runtimeImportName);
         const call = `(${symbol} 7 9 ${iterations})`, expected = `${answer}\n`;
         assert.equal(timed(vm, call).output, expected); // Warmup, excluded.
         const kernel = {operator, type, inline, source, bytes: bytes.length, imports, compilation, samples: []};

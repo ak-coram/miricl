@@ -916,7 +916,80 @@ function captureCore(vm, base, weakTables) {
   return output;
 }
 
-function coreNativeEntries(vm, bytes, indices) {
+function compactNativeEntries(module, bytes) {
+  const sections = WebAssembly.Module.customSections(module, 'miricl.entries');
+  const fail = reason => {throw new Error(`Invalid native entry metadata: ${reason}.`);};
+  if (!sections.length) {
+    if (WebAssembly.Module.exports(module).some(entry => entry.name === 'entries' && entry.kind === 'table'))
+      fail('missing section for entries table');
+    return null;
+  }
+  if (sections.length !== 1) fail('duplicate section');
+  const reader = new CoreReader(new Uint8Array(sections[0]));
+  const word = () => {
+    const start = reader.position, value = reader.word();
+    if (reader.position > start + 1 && reader.bytes[reader.position - 1] === 0)
+      fail('noncanonical integer');
+    return value;
+  };
+  if (word() !== 1) fail('unsupported version');
+  const count = word(), mode = reader.take(1)[0];
+  if (!count || count > bytes.length) fail('entry count exceeds module bounds');
+  if (mode > 1) fail('unknown descriptor mode');
+  if (reader.bytes.length - reader.position !== (mode ? count : 0)) fail('descriptor extent');
+  const descriptors = mode ? reader.take(count) : new Uint8Array(count);
+  let directCount = 0;
+  for (const descriptor of descriptors) {
+    const arityCode = descriptor & 7, usageCode = descriptor >>> 3;
+    if (!arityCode) {if (descriptor) fail('usage without direct entry'); continue;}
+    if (arityCode > 5) fail('direct arity exceeds four arguments');
+    if (usageCode && usageCode - 1 >= 2 ** (arityCode - 1)) fail('argument usage exceeds arity');
+    directCount++;
+  }
+  const size = count + directCount;
+  if (size > bytes.length) fail('table size exceeds module bounds');
+  // Our protocol has one fixed funcref table and no start function. Validate
+  // those limits before instantiation can allocate storage or execute code.
+  let table;
+  for (const section of wasmSections(bytes)) {
+    if (section.kind === 8) fail('start function is not permitted');
+    if (section.kind !== 4) continue;
+    if (table) fail('duplicate table section');
+    const input = new CoreReader(section.payload);
+    if (input.word() !== 1 || input.take(1)[0] !== 0x70 || input.word() !== 1 ||
+        input.word() !== size || input.word() !== size || input.position !== input.bytes.length)
+      fail('expected one fixed funcref table matching the entries');
+    table = true;
+  }
+  if (!table || WebAssembly.Module.imports(module).some(entry => entry.kind === 'table'))
+    fail('entry table must be defined by the module');
+  if (!WebAssembly.Module.exports(module).some(entry => entry.name === 'entries' && entry.kind === 'table'))
+    fail('missing entries table export');
+  return {count, size, descriptors};
+}
+
+function bindCompactNativeEntries(layout, instance, vm) {
+  if (!layout) return null;
+  const table = instance.exports.entries;
+  if (!(table instanceof WebAssembly.Table) || table.length !== layout.size)
+    throw new Error('Invalid native entry metadata: exported table does not match its layout.');
+  const functions = [], direct = [];
+  for (let index = 0; index < table.length; index++) {
+    const entry = table.get(index), worker = index >= layout.count;
+    if (typeof entry !== 'function' || !vm['native-entry-valid'](entry, worker ? 1 : 0))
+      throw new Error(`Invalid native entry metadata: entry ${index} has the wrong function signature.`);
+    functions.push(entry);
+  }
+  let slot = layout.count;
+  for (const descriptor of layout.descriptors)
+    direct.push(descriptor ? {entry: functions[slot++], arity: (descriptor & 7) - 1,
+      usage: (descriptor >>> 3) ? (descriptor >>> 3) - 1 : undefined} : null);
+  // Own the references rather than retaining a mutable table as the entry
+  // authority. An earlier initializer cannot change a later installation.
+  return {functions: functions.slice(0, layout.count), direct};
+}
+
+function coreNativeEntries(vm, bytes, indices, runtimeImports) {
   for (const {kind, payload, start, end} of wasmSections(bytes)) {
     if (kind !== 7) continue;
     const previous = new CoreReader(payload);
@@ -937,14 +1010,17 @@ function coreNativeEntries(vm, bytes, indices) {
     patched.word(exports.position);
     patched.append(exports.result());
     patched.append(bytes.subarray(end));
-    const module = new WebAssembly.Module(patched.result());
-    const instance = new WebAssembly.Instance(module, {'miricl.runtime': vm});
+    const code = patched.result();
+    const module = new WebAssembly.Module(code);
+    const layout = compactNativeEntries(module, code);
+    const instance = new WebAssembly.Instance(module, runtimeImports);
+    bindCompactNativeEntries(layout, instance, vm);
     return new Map([...indices].map(index => [index, instance.exports[`core-entry-${index}`]]));
   }
   throw new Error('A saved native module has no export section.');
 }
 
-function restoreCore(vm, payload) {
+function restoreCore(vm, payload, runtimeImports) {
   const {roots, types} = coreLayout(vm);
   const reader = new CoreReader(payload);
   const descriptor = (type, mask, prefix) => {
@@ -1027,13 +1103,8 @@ function restoreCore(vm, payload) {
         throw new Error('Invalid native code reference in Miricl image.');
       reader.position = offsets[id];
       const array = reader.array('i');
-      const bytes = array.bytes ?? new Uint8Array(array.length);
-      if (!array.bytes) for (let i = 0; i < bytes.length; i++) {
-        const value = coreUnsigned(reader.word());
-        if (value < 0 || value > 255) throw new Error('Invalid native code byte in Miricl image.');
-        bytes[i] = value;
-      }
-      native.set(code, coreNativeEntries(vm, bytes, indices));
+      if (!array.bytes) throw new Error('Native code must use packed byte storage in Miricl image.');
+      native.set(code, coreNativeEntries(vm, array.bytes, indices, runtimeImports));
     }
   }
   function field(type, value, values, owner = 0) {
@@ -1114,6 +1185,12 @@ function restoreCore(vm, payload) {
 export class Miricl {
   constructor(instance, {imports = {}, onOutput, onThreadError, onDebugger} = {}, payload) {
     this.vm = instance.exports;
+    // Keep actual Wasm functions and tags, shared by every native module and
+    // saved entry in this runtime. Null prototypes expose only owned exports.
+    const runtimeImports = Object.create(null);
+    runtimeImports.m = Object.create(null);
+    for (const [name, value] of Object.entries(this.vm))
+      if (name.startsWith('native-')) runtimeImports.m[name.slice(7)] = value;
     this.onOutput = onOutput;
     this.onThreadError = onThreadError;
     this.onDebugger = onDebugger;
@@ -1132,24 +1209,39 @@ export class Miricl {
       this.vm['host-services'].set(0, bridge.exports.service);
     }
     this.vm.initialize();
-    const restoredWeak = payload ? restoreCore(this.vm, new Uint8Array(payload)) : [];
+    const restoredWeak = payload ? restoreCore(this.vm, new Uint8Array(payload), runtimeImports) : [];
     if (this.vm['native-services']) {
       this.nativeModules = new WeakMap();
       const bridge = new WebAssembly.Instance(nativeCompilerBridge, {host: {service: (code, literals, name) => {
-        const storage = this.vm['native-code-storage']?.(code) ?? code;
+        try {
+        const storage = this.vm['native-code-storage'](code);
         let compiled = this.nativeModules.get(storage);
         if (!compiled) {
           const [start, length] = this.vm['native-code-bytes'](code);
-          const module = new WebAssembly.Module(new Uint8Array(this.vm.memory.buffer, start, length));
-          compiled = {instance: new WebAssembly.Instance(module, {'miricl.runtime': this.vm}), length,
+          const bytes = new Uint8Array(this.vm.memory.buffer, start, length);
+          const module = new WebAssembly.Module(bytes);
+          const layout = compactNativeEntries(module, bytes);
+          const instance = new WebAssembly.Instance(module, runtimeImports);
+          compiled = {instance, entries: bindCompactNativeEntries(layout, instance, this.vm), length,
             code: this.vm['core-native-code']?.(storage, start, length) ?? null};
           this.nativeModules.set(storage, compiled);
         }
-        const index = this.vm['native-code-entry']?.(code) ?? -1;
-        const install = this.vm['core-native-function'] ?? this.vm['native-function'];
+        const index = this.vm['native-code-entry'](code);
         const exportName = index < 0 ? 'entry' : `entry${index}`;
-        let function_ = install(compiled.instance.exports[exportName],
+        if (compiled.entries && (!Number.isInteger(index) || index < 0 || index >= compiled.entries.functions.length))
+          throw new Error(`Invalid native entry metadata: requested entry ${index} is outside the table.`);
+        const entry = compiled.entries ? compiled.entries.functions[index] : compiled.instance.exports[exportName];
+        if (typeof entry !== 'function') throw new Error(`Missing native entry ${exportName}.`);
+        let function_ = this.vm['core-native-function'](entry,
           literals, name, compiled.length, compiled.code);
+        if (compiled.entries) {
+          const direct = compiled.entries.direct[index];
+          if (direct) {
+            function_ = this.vm['native-attach-direct-root'](function_, direct.entry, direct.arity);
+            if (direct.usage !== undefined) function_ = this.vm['native-set-argument-usage'](function_, direct.usage);
+          }
+          return function_;
+        }
         for (let arity = 0; arity <= 4; arity++) {
           const direct = compiled.instance.exports[`direct-${exportName}-${arity}`];
           if (direct) {
@@ -1160,6 +1252,14 @@ export class Miricl {
           }
         }
         return function_;
+        } catch (error) {
+          if (error instanceof WebAssembly.Exception) throw error;
+          // Translate rejected serialized metadata into an ordinary guest
+          // condition, so HANDLER-CASE and subsequent loads keep working.
+          if (this.javascript)
+            return this.vm['native-module-error'](this.javascript.makeText(String(error.message).slice(0, 1024)));
+          throw error;
+        }
       }}});
       this.vm['native-services'].set(0, bridge.exports.service);
     }

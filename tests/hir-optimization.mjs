@@ -1,3 +1,4 @@
+import {nativeModuleImports} from './helpers/compiler-imports.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
@@ -190,7 +191,7 @@ try {
         ${expression} :done)))
       (with-open-file (out "/pure-call.wasm" :direction :output :if-exists :supersede
                            :element-type '(unsigned-byte 8)) (write-sequence bytes out))) (values)`);
-    const imports = WebAssembly.Module.imports(new WebAssembly.Module(await vm.readFile('/pure-call.wasm')));
+    const imports = nativeModuleImports(new WebAssembly.Module(await vm.readFile('/pure-call.wasm')));
     assert.ok(!imports.some(entry => entry.name === `native-${operator}-inline`
       || operator === 'cons' && entry.name === 'native-cons'), expression);
   }

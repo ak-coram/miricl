@@ -100,6 +100,31 @@ try {
           `${source}: ${args}, optimize standard`);
     }
   }
+  // Repeated literal names may share a cached object; each function and
+  // special-variable access must still observe its original live binding.
+  vm.evaluate('(defun size-live-function () :before)');
+  vm.evaluate(`(defparameter *size-function* (miricl-compiler:compile-native
+    '(lambda ()
+       (values (size-live-function) (size-live-function) (size-live-function)
+         (progn (setf (symbol-function 'size-live-function) (lambda () :after))
+                (size-live-function))
+         (size-live-function) (size-live-function)))))`);
+  assert.equal(vm.evaluate('(funcall *size-function*)').output,
+    ':BEFORE\n:BEFORE\n:BEFORE\n:AFTER\n:AFTER\n:AFTER\n');
+  vm.evaluate(`(defparameter *size-function* (miricl-compiler:compile-native
+    '(lambda ()
+       (let ((*size-live-special* :before))
+         (declare (special *size-live-special*))
+         (values *size-live-special* *size-live-special* *size-live-special*
+           (progn (setq *size-live-special* :after) *size-live-special*)
+           *size-live-special* *size-live-special*)))))`);
+  assert.equal(vm.evaluate('(funcall *size-function*)').output,
+    ':BEFORE\n:BEFORE\n:BEFORE\n:AFTER\n:AFTER\n:AFTER\n');
+  vm.evaluate(`(defparameter *size-function* (miricl-compiler:compile-native
+    '(lambda ()
+       (let ((first '#1=(1)))
+         (values (eq first '#1#) (eq '#1# '#1#) (car '#1#))))))`);
+  assert.equal(vm.evaluate('(funcall *size-function*)').output, 'T\nT\n1\n');
   // Public HIR need not place its entry block first. Rotating a cyclic CFG
   // keeps IDs dense while requiring a nonzero initial dispatcher index.
   {

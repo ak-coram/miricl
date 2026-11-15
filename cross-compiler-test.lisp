@@ -248,7 +248,7 @@
   ;; including endpoints outside the immediate integer representation.
   (let* ((bytes (wt:wat-to-wasm
                   "(module
-                     (import \"miricl\" \"native-literal\" (func (param externref i32) (result externref)))
+                     (import \"m\" \"literal\" (func (param externref i32) (result externref)))
                      (func (export \"worker\")
                        (param externref externref externref externref externref) (result externref)
                        local.get 0 i32.const 0 call 0))"))
@@ -272,6 +272,14 @@
     (dolist (value (list (ash 1 64) "requires a literal graph"))
       (signals error (miricl-cross::kernel-worker-wat bytes index "$invalid" 0 :object nil (vector value))))))
 
+(defun cross-dynamic-function-lookup-p (imports)
+  ;; Both lookup helpers resolve the current definition. Literal/function fusion only
+  ;; combines the immutable name lookup with that same dynamic resolution.
+  (some (lambda (import)
+          (member (miricl-cross::kernel-import-name import) '("native-function-reference" "native-literal-function")
+                  :test #'equal))
+        (coerce imports 'list)))
+
 (test canonical-inline-analysis-and-lowering
   ;; Model a definition changing after analysis selected its INLINE body.
   ;; The same emission must retain that body, while a fresh emission must
@@ -294,10 +302,10 @@
                     (apply original operation arguments))))
             (let ((bytes (miricl-cross:compile-lambda source)))
               (check-cross-module bytes)
-              (is (not (find "native-function-reference" (imports bytes) :key #'second :test #'equal))))
+              (is (not (cross-dynamic-function-lookup-p (imports bytes)))))
             (let ((bytes (miricl-cross:compile-lambda source)))
               (check-cross-module bytes)
-              (is (not (null (find "native-function-reference" (imports bytes) :key #'second :test #'equal))))))
+              (is (not (null (cross-dynamic-function-lookup-p (imports bytes)))))))
         (setf (fdefinition 'miricl-compiler::compiler-primitive) original)))))
 
 (test target-canonical-setter-cross-compilation
@@ -344,7 +352,9 @@
                       (miricl-compiler::make-native-op #x41 0 2 4)
                       (miricl-compiler::make-native-op #x10 0 4 6)
                       (miricl-compiler::make-native-op #x10 1 6 8)))
-         (imports #(("miricl" "native-literal") ("miricl" "native-function-reference"))))
+         ;; KERNEL-LITERAL-PLAN consumes canonical names after the wire ABI
+         ;; has been normalized by KERNEL-WORKER-WAT.
+         (imports #(("m" "native-literal") ("m" "native-function-reference"))))
     (multiple-value-bind (replacements skipped)
         (miricl-cross::kernel-literal-plan ops imports #((setf svref)))
       (is (equal (cons :setter-function (miricl::runtime-symbol-id 'svref)) (gethash 0 replacements)))
@@ -393,7 +403,7 @@
                    (imports (nth-value 1 (miricl-compiler::native-disassembly-body bytes
                               (miricl-cross::kernel-export-index bytes "entry")))))
               (check-cross-module bytes)
-              (is (not (null (find "native-function-reference" imports :key #'second :test #'equal))))))
+              (is (not (null (cross-dynamic-function-lookup-p imports))))))
         (setf (fdefinition 'miricl-compiler::compiler-primitive) original)))))
 
 (test compiled-runtime-kernels
@@ -1083,3 +1093,33 @@
                      (list -1 4 (ash 1 100) 1/2 :bad))
               (= 2 (position 3 '(1 2 3) :from-end t))
               (equal (subseq '(1 2 3) 1) '(2 3)))"))))))
+
+(test runtime-kernel-import-wire-abi
+  ;; Preserve raw wire names in disassembly and adapt at the host linker.
+  (let* ((abi '("m" "primary"))
+         (bytes (wt:wat-to-wasm
+                  (format nil "(module
+                    (import ~S ~S (func (param externref) (result externref)))
+                    (func (export ~S)
+                      (param externref externref externref externref externref)
+                      (result externref) local.get 1 call 0))"
+                    (first abi) (second abi) "worker")))
+         (index (miricl-cross::kernel-export-index bytes "worker"))
+         (imports (nth-value 1 (miricl-compiler::native-disassembly-body bytes index)))
+         (worker (miricl-cross::kernel-worker-wat bytes index "$abi-primary" 1 :object nil))
+         (module (wt:wat-to-wasm
+                   (format nil "(module
+                     (func $car (param (ref null eq)) (result (ref null eq)) local.get 0)
+                     ~A
+                     (func (export ~S) (result i32)
+                       i32.const 42 ref.i31 call $abi-primary
+                       ref.cast (ref i31) i31.get_s))" worker "probe"))))
+    (is (equal (aref imports 0) abi))
+    (wt:with-engine (engine)
+      (wt:with-store ((store context) engine)
+        (let ((compiled (wt:compile-module engine module)))
+          (unwind-protect
+              (wt:with-instance (instance context compiled)
+                (is (= 42 (wt:instance-call context instance "probe"))))
+            (wt::wasmtime-module-delete compiled))))))
+  (signals error (miricl-cross::kernel-import-name '("unsupported.runtime" "primary"))))

@@ -33,7 +33,7 @@ try {
       (let ((text (with-output-to-string (*standard-output*) (setq result (disassemble 'inspectable)))))
         (and (null result) (eq fn #'inspectable)
           (search "Wasm instructions for function" text)
-          (search "local.get" text) (search "call $native-" text)
+          (search "local.get" text) (search "call $return" text)
           (equal (multiple-value-list (inspectable 10)) '(11 9)))))`);
   } finally { services.forEach((table, i) => table.set(0, saved[i])); }
   evaluate(`(defparameter *original-listing*

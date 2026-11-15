@@ -1,3 +1,4 @@
+import {nativeModuleImports} from './helpers/compiler-imports.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {createCompilerTestVM} from './compiler-test-vm.mjs';
@@ -12,7 +13,7 @@ async function compile(source, name = '*guarded*') {
       (with-open-file (out "/generic-call.wasm" :direction :output :if-exists :supersede
                            :element-type '(unsigned-byte 8))
         (write-sequence bytes out))) (values)`, {eof: true});
-  return WebAssembly.Module.imports(new WebAssembly.Module(await vm.readFile('/generic-call.wasm')))
+  return nativeModuleImports(new WebAssembly.Module(await vm.readFile('/generic-call.wasm')))
     .some(entry => entry.name === 'native-generic-call');
 }
 try {

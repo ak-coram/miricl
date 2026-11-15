@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
+import {nativeModuleImports, usesDynamicFunctionLookup} from './helpers/compiler-imports.mjs';
 const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const check = source => assert.equal(vm.evaluate(source).output, 'T\n', source);
 try {
@@ -12,13 +13,13 @@ try {
         :element-type '(unsigned-byte 8)) (write-sequence bytes out)))`);
     const bytes = await vm.readFile('/shift-test.wasm');
     const module = await WebAssembly.compile(bytes);
-    return {bytes, imports: WebAssembly.Module.imports(module).map(entry => entry.name)};
+    return {bytes, imports: nativeModuleImports(module).map(entry => entry.name)};
   };
   const signed = [-(1n << 63n), -(1n << 31n), -129n, -1n, 0n, 1n, 129n, (1n << 63n) - 1n];
   for (const count of [-1n, -7n, -63n, -64n, -65n, -1000n, -(1n << 100n)]) {
     const {imports} = await compile(`(lambda (x) (declare (type (signed-byte 64) x)
       (optimize (safety 0) (debug 0)) (inline ash)) (ash x ${count}))`);
-    assert.ok(!imports.includes('native-function-reference'));
+    assert.ok(!usesDynamicFunctionLookup(imports));
     assert.ok(!imports.includes('native-ash-int64'));
     assert.ok(!imports.includes('native-literal'), 'An encoded constant count needs no literal pool');
     if (count <= -63n)
@@ -44,7 +45,7 @@ try {
   ]) {
     const {imports} = await compile(`(lambda (x) (declare (type ${type} x)
       (optimize (safety 0) (debug 0)) (inline ash)) (ash x ${count}))`);
-    assert.ok(!imports.includes('native-function-reference'));
+    assert.ok(!usesDynamicFunctionLookup(imports));
     for (const x of values) check(`(= (funcall *shift-test-function* ${x}) ${x << count})`);
   }
   // A possible left-shift overflow and counts beyond Wasm's width retain CL

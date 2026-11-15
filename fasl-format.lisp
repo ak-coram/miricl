@@ -296,8 +296,8 @@
     (write-byte 0 stream) (write-padded-uleb 0 stream) (write-byte 11 stream)
     (loop for character across "miricl.fasl" do (write-byte (char-code character) stream))
     (dolist (byte '(77 73 82 70)) (write-byte byte stream))
-    ;; Advertise byte-valued strings (bit 2) and dense slots (bit 1), so older
-    ;; readers reject unsupported units before executing any initializer.
+    ;; Bit 2 identifies the current byte-valued string grammar; bit 1 records
+    ;; dense slots and bit 0 records optional metadata.
     (write-u32 (logior 4 (if metadata 1 0) (if (find 11 records :key #'first) 2 0)) stream)
     (write-u32 (length records) stream)
     (write-u32 chunks stream) (write-u32 +fasl-block-size+ stream)
@@ -326,7 +326,7 @@
     (unless (= byte (read-byte stream)) (error "Invalid binary FASL magic.")))
   (let ((flags (read-u32 stream)) (records (read-u32 stream))
         (count (read-u32 stream)) (block-size (read-u32 stream)) (entries nil))
-    (unless (and (<= flags 7) (= block-size +fasl-block-size+)
+    (unless (and (<= 4 flags 7) (= block-size +fasl-block-size+)
                  (<= records #x7fffffff) (<= count (floor (- end start 20) 16))
                  (<= records (- end start 20 (* count 16))))
       (error "Unsupported binary FASL header."))

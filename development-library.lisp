@@ -977,18 +977,7 @@
 (defun proclaim (declaration-specifier)
   (%proclaim-all (list declaration-specifier)))
 
-(defmacro with-output-to-string ((var &optional (string nil stringp) &key (element-type ''character)) &body body)
-  (let* ((declarations nil) (target (and stringp string)) (temp (and target (gensym "STRING-"))))
-    (%%while (and (consp (car body)) (eq (caar body) 'declare))
-      (push (car body) declarations) (setq body (cdr body)))
-    (cons 'let* (cons (if target
-        (list (list temp string) (list var (list '%%string-stream 0 element-type temp)))
-        (list (list var (list 'make-string-output-stream :element-type element-type))))
-      (append (reverse declarations)
-        (list (list 'unwind-protect
-          (if target (cons 'progn body)
-            (list 'progn (cons 'progn body) (list 'get-output-stream-string var)))
-          (list 'close var))))))))
+(setf (macro-function 'with-output-to-string) #'%%output-string-expander)
 
 (defmacro with-input-from-string ((var string &key (start 0) end (index nil indexp)) &body body)
   (let ((declarations nil))

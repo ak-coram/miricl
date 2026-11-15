@@ -399,6 +399,26 @@
             (then (return (extern.convert_any (local.get $value)))))))))
   #@(extern.convert_any (call $fdefinition ,(native-object '(local.get $name)))))
 
+(define-runtime-function $native-literal-function (($function externref) ($index i32)) (externref)
+  (:export-raw "native-literal-function")
+  ;; Resolve the live function binding at the same point as the unfused pair.
+  #@(return_call $native-function-reference
+    (call $native-literal (local.get $function) (local.get $index))))
+
+(define-runtime-function $native-entry-valid (($entry funcref) ($direct i32)) (i32)
+  (:export-raw "native-entry-valid")
+  #@(if (result i32) (local.get $direct)
+    (then (ref.test (ref $native-direct-entry) (local.get $entry)))
+    (else (ref.test (ref $native-entry) (local.get $entry)))))
+
+(define-runtime-function $native-module-error (($message externref)) (externref)
+  (:export-raw "native-module-error")
+  #@(drop (call $apply
+    (call $canonical-builtin-function (i32.const ,(runtime-symbol-id 'error)) (i32.const 0))
+    (call $cons ,(wat-text-literal "~A")
+      (call $cons ,(native-object '(local.get $message)) (ref.null eq)))))
+  #@(unreachable))
+
 (define-runtime-function $native-cons (($a externref) ($b externref)) (externref)
   (:export-raw "native-cons")
   #@(extern.convert_any (call $cons ,(native-object '(local.get $a)) ,(native-object '(local.get $b)))))
@@ -1949,7 +1969,7 @@
   ($native-restore-environment) ($native-bind)
   ($native-block-enter) ($native-block-environment) ($native-block-return) ($native-block-match) ($native-block-values)
   ($native-control) ($native-restart-signal) ($native-throw)
-  ($native-global-read) ($native-global-write) ($native-function-reference)
+  ($native-global-read) ($native-global-write) ($native-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
   ($native-cons) ($native-cell) ($native-primary) ($native-cell-read) ($native-cell-write)
   ($native-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1)

@@ -132,11 +132,11 @@ try {
   // shared entries retain redefinition guards without duplicating each guard
   // in the caller; a generic native-call2 does not satisfy this check.
   for (const [operator, width, instruction, entry, a, b, expected] of [
-    ['*', 31, 'i64.mul', 'native-mul-int64', 1073741823n, -1073741824n, -1152921503533105152n],
-    ['*', 32, 'i64.mul', 'native-mul-int64', -(1n << 31n), -(1n << 31n), 1n << 62n],
-    ['+', 63, 'i64.add', 'native-add-int64', (1n << 62n) - 1n, (1n << 62n) - 1n, (1n << 63n) - 2n],
-    ['-', 63, 'i64.sub', 'native-sub-int64', -(1n << 62n), (1n << 62n) - 1n, -(1n << 63n) + 1n],
-    ['<', 64, 'i64.lt_s', 'native-lt-int64', -(1n << 63n), (1n << 63n) - 1n, 't'],
+    ['*', 31, 'i64.mul', 'mul-int64', 1073741823n, -1073741824n, -1152921503533105152n],
+    ['*', 32, 'i64.mul', 'mul-int64', -(1n << 31n), -(1n << 31n), 1n << 62n],
+    ['+', 63, 'i64.add', 'add-int64', (1n << 62n) - 1n, (1n << 62n) - 1n, (1n << 63n) - 2n],
+    ['-', 63, 'i64.sub', 'sub-int64', -(1n << 62n), (1n << 62n) - 1n, -(1n << 63n) + 1n],
+    ['<', 64, 'i64.lt_s', 'lt-int64', -(1n << 63n), (1n << 63n) - 1n, 't'],
   ]) {
     evaluate(`(defparameter *tier-typed* (miricl-compiler:compile-native
       '(lambda (a b) (declare (optimize (debug 2)))

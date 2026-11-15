@@ -104,6 +104,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (get 'native-value-table 'miricl::runtime-inline-macro) t)
 (defparameter *native-imports*
   '(("native-literal" (:object :i32) :object)
+    ("native-literal-function" (:object :i32) :object)
     ("native-generic-call" (:object :object :object :i32) :object)
     ("native-tail-call" (:object :object) :object)
     ("native-tail-direct" (:object) :i32)
@@ -247,6 +248,19 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (wasm-byte (logior (logand number 127) (if (> number 127) 128 0)))
     (setq number (ash number -7)) (when (zerop number) (return-from wasm-u32 nil)))
   (compiler-input-fail "Wasm unsigned operand" number "operand did not terminate within five bytes"))
+(defun wasm-u32-width (number)
+  ;; Callers establish the unsigned format range before pricing. Four shifts
+  ;; suffice even when bit 31 is set; no host fixnum representation is assumed.
+  (declare (type (unsigned-byte 32) number))
+  (let ((width 1))
+    (declare (type (integer 1 5) width))
+    (tagbody next
+       (if (< number 128) (go done))
+       (setq number (ash number -7)
+             width (the (integer 1 5) (1+ width)))
+       (go next)
+     done)
+    width))
 (defun wasm-s32 (number)
   (declare (type (signed-byte 32) number))
   (loop
@@ -2718,28 +2732,70 @@ exhausted work budgets keep every incoming value group."
                          plan (svref plan 1))) (native-optimize-body body))
             (t body)))))
 
-(defun native-loop-literals (blocks forward)
+(defun native-loop-literals (blocks forward &optional (local-start 0))
   ;; Literal identity is stable for the lifetime of this function object.
-  ;; Load loop operands and global *names* once per invocation; the function
-  ;; definitions themselves are still resolved at each original call site.
-  (when (null forward)
-    (let ((seen (make-hash-table :test 'eq)) (literals nil))
-      (dolist (block blocks)
-        (dolist (instruction (hir-block-instructions block))
-          (when (and (member (hir-instruction-opcode instruction)
-                            '(:constant :function-reference :global-read :global-write :dynamic-bind))
-                     (not (and (native-removable-p instruction)
-                               (not (native-value-slot *wasm-live-values* (hir-instruction-output instruction))))))
-            (let ((value (first (hir-instruction-attributes instruction))))
-              ;; Immediate literals bypass the cache in WASM-LITERAL. Giving
-              ;; them cache slots adds unused prologue work and locals.
-              (when (and value (not (and (integerp value) (<= -1073741824 value 1073741823))))
-                (unless (gethash value seen) (push value literals))
-                (incf (gethash value seen 0)))))))
-      ;; A one-site cache adds a prologue load, store and local to save a
-      ;; single static lookup. Share repeated literals so code size pays for
-      ;; the cache as well as repeated execution benefiting from it.
-      (remove-if (lambda (literal) (< (gethash literal seen) 2)) (nreverse literals)))))
+  ;; Cache repeated operands and global *names*, never their live bindings.
+  ;; Acyclic bodies must recover the prologue and local costs in static bytes;
+  ;; loops also benefit from avoiding a lookup on every iteration.
+  ;; All caches occupy frame slots from ENTRY, even before their first use.
+  ;; Do not grow frames retained across potentially reentrant calls: caching
+  ;; names used only after recursion still reduces the available stack depth.
+  (unless (and (integerp local-start) (<= 0 local-start #xffffffff))
+    (return-from native-loop-literals nil))
+  (let ((seen (make-hash-table :test 'eq)) (literals nil))
+    (dolist (block blocks)
+      (dolist (instruction (hir-block-instructions block))
+        (when (and (member (hir-instruction-opcode instruction)
+                           '(:call :multiple-value-call :control-call :restart-signal))
+                   (not (member instruction *wasm-tail-calls* :test #'eq))
+                   (not (and (eq (hir-instruction-opcode instruction) :call)
+                             *wasm-inline-simple-calls*
+                             (gethash instruction *wasm-inline-simple-calls*)
+                             (native-removable-p instruction))))
+          (return-from native-loop-literals nil))
+        (when (and (member (hir-instruction-opcode instruction)
+                          '(:constant :function-reference :global-read :global-write :dynamic-bind))
+                   (not (and (native-removable-p instruction)
+                             (not (native-value-slot *wasm-live-values* (hir-instruction-output instruction))))))
+          (let ((value (first (hir-instruction-attributes instruction))))
+            ;; Immediate literals bypass the cache in WASM-LITERAL. Giving
+            ;; them cache slots adds unused prologue work and locals.
+            (when (and value (not (and (integerp value) (<= -1073741824 value 1073741823))))
+              (unless (gethash value seen) (push value literals))
+              (incf (gethash value seen 0)))))))
+    ;; Leaf/tail-only functions cannot accumulate these roots recursively.
+    ;; Still bound the extra frame pressure to eight references, sharing a
+    ;; 32-slot working allowance with the already planned locals. Rematerialize
+    ;; cheap operands when that allowance is exhausted, including inside loops.
+    (let* ((budget (min 8 (max 0 (- 32 local-start))))
+           (limit (+ local-start (min budget (length literals)))))
+      ;; A projected local index need not fit just because both addends do.
+      ;; Unknown/out-of-format costs keep the ordinary uncached lowering.
+      (when (> limit #xffffffff)
+        (return-from native-loop-literals nil))
+      (let* ((local-cost (1+ (wasm-u32-width limit)))
+             (profitable (remove-if
+               (lambda (literal)
+                 (let* ((uses (gethash literal seen))
+                        ;; Lower bounds include one-byte import/literal indices.
+                        ;; T uses NATIVE-BOOLEAN rather than the literal bank.
+                        (load-cost (if (eq literal t) 4 6))
+                        (keep (if forward
+                                  (> (* uses (- load-cost local-cost))
+                                     (+ load-cost local-cost 2))
+                                  (>= uses 2))))
+                   ;; Price indices at the maximum possible cache/local slot,
+                   ;; since coloring may reorder slots. Reserve two bytes.
+                   (not keep)))
+               (nreverse literals))))
+        ;; Use the limited roots where they avoid the most rematerialization;
+        ;; stable ordering gives equal-benefit literals their source order.
+        (setq profitable (stable-sort profitable #'> :key
+          (lambda (literal)
+            (let ((load-cost (if (eq literal t) 4 6)))
+              (- (* (gethash literal seen) (- load-cost local-cost))
+                 load-cost local-cost 2)))))
+        (subseq profitable 0 (min budget (length profitable)))))))
 
 (defun native-loop-dominates-p (definition header query)
   (declare (type simple-vector definition header query))
@@ -3256,10 +3312,6 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
               (setf (gethash end *wasm-branch-tests*) (list (first test) nil nil))))) *wasm-branch-tests*))
       (setq *wasm-live-values* (native-live-values function *wasm-dynamic-bindings* blocks)
             prefixes (native-finalize-loop-hoists function blocks *wasm-hoisted-values*)))
-    ;; Reuse the earlier CFG query; captured landing targets can force dispatch
-    ;; even when the entry's graph is acyclic. Use the final live-value set.
-    (setq literals (native-loop-literals blocks
-                     (or forward (and targets (native-forward-blocks function)))))
     ;; Keep i32 condition locals before object locals, like the existing
     ;; dispatcher local. Native bytecode decoding treats this prefix as pinned.
     (when prefixes
@@ -3271,6 +3323,12 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
       (native-plan-unboxed-values function blocks (+ (if direct 2 3) raw-count)))
     (multiple-value-setq (locals count)
       (native-local-layout function blocks (+ (if direct 2 3) raw-count wide-count)))
+    ;; Reuse the earlier CFG query; captured landing targets can force dispatch
+    ;; even when the entry's graph is acyclic. Price caches after local layout
+    ;; so their actual index widths enter the static size estimate.
+    (setq literals (native-loop-literals blocks
+                     (or forward (and targets (native-forward-blocks function)))
+                     (+ (if direct 2 3) raw-count wide-count count)))
     (loop for tail on blocks do
       (setf (svref next-blocks (the (unsigned-byte 32) (hir-block-id (car tail)))) (cadr tail)))
     (dolist (literal literals)
@@ -3649,6 +3707,157 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
               (let ((entry (aref representatives index)))
                 (native-relocate-body (car entry) (cdr entry) original-indices))) order)))
 
+(defun native-fuse-literal-functions (bodies decoded live functions used entries)
+  ;; Work on actual adjacent calls, after local optimization and liveness.
+  ;; Literal locals already avoid the first call and keep their existing path.
+  (let* ((imports (coerce *native-imports* 'vector)) (size (length imports))
+         (literal (position "native-literal" imports :key #'first :test #'equal))
+         (reference (position "native-function-reference" imports :key #'first :test #'equal))
+         (fused (position "native-literal-function" imports :key #'first :test #'equal))
+         (counts (make-array size :initial-element 0))
+         (actual (make-array size :initial-element 0))
+         (replacements (make-hash-table :test 'eq)) (removed (make-hash-table :test 'eq)) (pairs 0))
+    ;; Relocated function offsets are assigned below LENGTH(FUNCTIONS) by the
+    ;; module planner. Guard their sum with imports before unchecked u32 pricing.
+    (when (> (+ size (length functions)) #x100000000)
+      (return-from native-fuse-literal-functions nil))
+    (unless (and literal reference fused (aref used literal) (aref used reference))
+      (return-from native-fuse-literal-functions nil))
+    ;; The helper reuses LITERAL's signature. This ABI has fewer than 128
+    ;; distinct signatures, so reordered type indices retain their byte width.
+    (when (>= (length (remove-duplicates (mapcar #'cdr *native-imports*) :test #'equal)) 120)
+      (return-from native-fuse-literal-functions nil))
+    (dotimes (i size) (setf (aref counts i) (gethash (first (aref imports i)) *wasm-import-counts* 0)))
+    (dotimes (i (length decoded))
+      (when (aref live i)
+        (let ((previous nil))
+          (loop for op across (aref decoded i) for index = (native-op-argument op) do
+            (when (< index size) (incf (aref actual index)))
+            (when (and (eql (native-op-code op) #x10) (= index reference)
+                       previous (eql (native-op-code previous) #x10)
+                       (= (native-op-argument previous) literal)
+                       (= (native-op-end previous) (native-op-start op)))
+              (setf (gethash previous replacements) t (gethash op removed) t)
+              (incf pairs))
+            (setq previous op)))))
+    (when (zerop pairs) (return-from native-fuse-literal-functions nil))
+    (let ((next-used (copy-seq used)) (next-counts (copy-seq counts)))
+      (setf (aref next-used fused) t
+            (aref next-used literal) (> (aref actual literal) pairs)
+            (aref next-used reference) (> (aref actual reference) pairs))
+      (decf (aref next-counts literal) pairs) (decf (aref next-counts reference) pairs)
+      (incf (aref next-counts fused) pairs)
+      (labels ((layout (retained frequencies)
+                 (let* ((order (stable-sort (loop for i below size when (aref retained i) collect i)
+                                 #'> :key (lambda (i) (aref frequencies i))))
+                        (mapping (make-array size)))
+                   (loop for i in order for index from 0 do (setf (aref mapping i) index))
+                   (values mapping (length order))))
+               (declarations (retained)
+                 (loop for i below size when (aref retained i)
+                   ;; One-byte namespace/name/type lengths, namespace M, and
+                   ;; the ABI's ASCII NATIVE- prefix omitted from each field.
+                   sum (- (length (first (aref imports i))) 2))))
+        (multiple-value-bind (before before-count) (layout used counts)
+          (multiple-value-bind (after after-count) (layout next-used next-counts)
+            ;; Include every relocated call/REF.FUNC operand, body length and
+            ;; import declaration. Reserve eight bytes for section headers and
+            ;; import-count LEB boundaries. Function/data roots stay unchanged.
+            (let ((saving (- (declarations used) (declarations next-used) 8)))
+              (loop for body in bodies for i from 0 when (aref live i) do
+                (let ((old-size (length body)) (new-size (length body)))
+                  (loop for op across (aref decoded i) for index = (native-op-argument op)
+                        for original-size = (- (native-op-end op) (native-op-start op)) do
+                    (incf old-size (- (1+ (wasm-u32-width (if (< index size) (aref before index)
+                                                (+ before-count (aref functions (- index size)))))) original-size))
+                    (incf new-size
+                      (- (if (gethash op removed) 0
+                             (1+ (wasm-u32-width (if (gethash op replacements) (aref after fused)
+                                            (if (< index size) (aref after index)
+                                                (+ after-count (aref functions (- index size))))))))
+                         original-size)))
+                  ;; Relocation changes lengths mathematically. An oversized
+                  ;; projected body supplies no size proof and is left alone.
+                  (unless (and (<= 0 old-size #xffffffff) (<= 0 new-size #xffffffff))
+                    (return-from native-fuse-literal-functions nil))
+                  (incf saving (+ (- old-size new-size)
+                                  (- (wasm-u32-width old-size) (wasm-u32-width new-size))))))
+              ;; Export aliases may all name one shared adapter. Crossing an
+              ;; import-index tier then changes every alias, not just its body.
+              (let ((exported (if entries
+                                  (mapcar (lambda (entry) (gethash entry *native-function-indices*)) entries)
+                                  '(0))))
+                (dolist (entry (or entries (list (first *native-functions*))))
+                  (let* ((worker (gethash entry *wasm-direct-workers*))
+                         (index (and worker (gethash worker *native-function-indices*))))
+                    (when (and index (aref live index)) (push index exported))))
+                (dolist (index exported)
+                  (let ((offset (aref functions index)))
+                    (incf saving (- (wasm-u32-width (+ before-count offset))
+                                    (wasm-u32-width (+ after-count offset)))))))
+              ;; Declarative element entries follow the same relocation, but
+              ;; unlike exports the emitted segment deduplicates shared bodies.
+              (dolist (index (remove-duplicates
+                              (loop for function in *wasm-referenced-functions*
+                                    for old = (gethash function *native-function-indices*)
+                                    when (and old (aref live old)) collect (aref functions old))))
+                (incf saving (- (wasm-u32-width (+ before-count index))
+                                (wasm-u32-width (+ after-count index)))))
+              (when (plusp saving)
+                (maphash (lambda (op ignored) (declare (ignore ignored))
+                           (setf (native-op-argument op) fused)) replacements)
+                (maphash (lambda (op ignored) (declare (ignore ignored))
+                           (setf (native-op-code op) nil)) removed)
+                (replace used next-used)
+                (dotimes (i size)
+                  (setf (gethash (first (aref imports i)) *wasm-import-counts*) (aref next-counts i)))
+                (compiler-statistic :optimization/literal-function-fusion nil pairs)
+                t))))))))
+
+(defun native-fold-cells (bodies decoded live used)
+  (declare (type list bodies) (type simple-vector decoded live used))
+  ;; CELL is precisely CONS(value,NIL). Reuse an already retained helper;
+  ;; with one-byte final import/type indices this can only shrink the module,
+  ;; including relocations, section lengths and either entry layout.
+  (let* ((cell (position "native-cell" *native-imports* :key #'first :test #'equal))
+         (cons (position "native-cons" *native-imports* :key #'first :test #'equal))
+         (remaining 0) (pairs 0))
+    (declare (type (integer 0 *) remaining pairs))
+    (unless (and cell cons (aref used cell) (aref used cons)
+                 (< (loop for retained across used count retained) 128)
+                 (< (length (remove-duplicates (mapcar #'cdr *native-imports*) :test #'equal)) 120))
+      (return-from native-fold-cells nil))
+    (loop for body in bodies for i from 0 when (aref live i) do
+      (let ((references (aref decoded i)) (candidate nil))
+        (declare (type simple-vector references))
+        (loop for op across references when (and (native-op-code op) (= (native-op-argument op) cons)) do
+          (incf remaining)
+          (when (eql (native-op-code op) #x10) (setq candidate t)))
+        (when candidate
+          ;; The reference-only decoder omits NULL. Decode actual instruction
+          ;; boundaries: matching bytes before a call could be an immediate.
+          (let ((ops (native-read-ops body)) (cursor 0))
+            (declare (type simple-vector ops) (type (unsigned-byte 32) cursor))
+            (loop for op across references when (and (eql (native-op-code op) #x10)
+                                                     (= (native-op-argument op) cons)) do
+              (loop while (< (native-op-start (aref ops cursor)) (native-op-start op)) do (incf cursor))
+              (let ((previous (and (plusp cursor) (aref ops (1- cursor)))))
+                (when (and previous (eql (native-op-code previous) #xd0)
+                           (eql (native-op-argument previous) #x6f)
+                           (= (native-op-end previous) (native-op-start op)))
+                  ;; The relocation now covers NULL plus CALL. Every other
+                  ;; record remains a function reference, including fusion's
+                  ;; removed records; their consumers need no new op kind.
+                  (setf (native-op-start op) (native-op-start previous)
+                        (native-op-argument op) cell)
+                  (incf pairs) (decf remaining))))))))
+    (when (plusp pairs)
+      (setf (aref used cons) (plusp remaining))
+      (incf (gethash "native-cell" *wasm-import-counts* 0) pairs)
+      (decf (gethash "native-cons" *wasm-import-counts* 0) pairs)
+      (compiler-statistic :optimization/cell-folding nil pairs)
+      t)))
+
 (defun native-prune-module (bodies entries &optional (prune-functions t))
   ;; RemoveUnusedModuleElements after branch/DCE cleanup. No calls or closure
   ;; entries are renumbered until body sharing and function layout are final.
@@ -3663,7 +3872,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                            for worker = (and *wasm-direct-workers* (gethash entry *wasm-direct-workers*))
                            when worker collect (gethash worker *native-function-indices*)))
                    (loop for i below (length bodies) collect i)))
-         (imports nil) (next 0))
+         (imports nil) (next 0) (fused-p nil))
     ;; Only exports and function references in reachable code are roots. The
     ;; declarative element segment grants REF.FUNC permission, not reachability.
     (loop while work for index = (pop work) do
@@ -3674,6 +3883,10 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
             (let ((target (native-op-argument op)))
               (if (< target old-count) (setf (aref used target) t)
                   (push (- target old-count) work)))))))
+    (dotimes (i (length bodies))
+      (when (aref live i) (setf (aref functions i) function-count) (incf function-count)))
+    (setq fused-p (native-fuse-literal-functions bodies decoded live functions used entries))
+    (when (native-fold-cells bodies decoded live used) (setq fused-p t))
     ;; Emit once against the complete ABI, then choose compact import indices
     ;; from the actual surviving instructions. Frequency order keeps common
     ;; calls within the one-byte LEB tier, including in large application units.
@@ -3683,13 +3896,11 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                     :key (lambda (i) (gethash (first (aref all-imports i)) *wasm-import-counts* 0))))
       (dolist (i order)
         (setf (aref mapping i) next) (incf next) (push (aref all-imports i) imports)))
-    (dotimes (i (length bodies))
-      (when (aref live i) (setf (aref functions i) function-count) (incf function-count)))
     (when (< next old-count)
       (compiler-statistic :optimization/removed-imports nil (- old-count next)))
     (when (< function-count (length bodies))
       (compiler-statistic :optimization/removed-functions nil (- (length bodies) function-count)))
-    (when (and (= next old-count) (= function-count (length bodies))
+    (when (and (not fused-p) (= next old-count) (= function-count (length bodies))
                (loop for i below old-count always (= i (aref mapping i))))
       (return-from native-prune-module bodies))
     (setq *native-imports* (nreverse imports))
@@ -3706,10 +3917,11 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                 (let ((cursor 0))
                  (loop for op across ops for code = (native-op-code op) do
                       (wasm-append body cursor (native-op-start op))
-                      (let ((index (native-op-argument op)))
-                        (wasm-byte code)
-                        (wasm-u32 (if (< index old-count) (aref mapping index)
-                                      (+ next (aref functions (- index old-count))))))
+                      (when code
+                        (let ((index (native-op-argument op)))
+                          (wasm-byte code)
+                          (wasm-u32 (if (< index old-count) (aref mapping index)
+                                        (+ next (aref functions (- index old-count)))))))
                       (setq cursor (native-op-end op)))
                  (wasm-append body cursor)))))))
 
@@ -3745,8 +3957,10 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                   (push (hir-instruction-output instruction) roots))))))))
     roots))
 
-(defun emit-native-module (unit &key entries)
-  "Return Wasm bytes and literal objects; do not instantiate or run application code."
+(defun emit-native-module (unit &key entries (entry-tables t))
+  "Return Wasm bytes and literals, without running application code.
+ENTRY-TABLES permits compact entry tables for explicit ENTRIES; NIL retains
+the named-entry format for hosts that translate individual Wasm workers."
   (declare (optimize (safety 3)))
   (compiler-list-length entries "native entry points")
   (ensure-compiler)
@@ -3754,9 +3968,73 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
   (dolist (entry entries)
     (unless (member entry (hir-unit-functions unit) :test #'eq)
       (compiler-input-fail "native entry point" entry "entry does not belong to this HIR unit")))
-  (emit-native-module-checked unit entries))
+  (emit-native-module-checked unit entries entry-tables))
 
-(defun emit-native-module-checked (unit entries)
+(defun native-entry-sections (entries direct-exports argument-usages entry-tables)
+  ;; Physical entry layout never changes the definitions or their order.
+  ;; Named factories and small bundles use the same current entry convention.
+  (let* ((offset (length *native-imports*))
+         (references (remove-duplicates
+                       (mapcar (lambda (function) (+ offset (gethash function *native-function-indices*)))
+                               *wasm-referenced-functions*)))
+         (named
+           (with-wasm-bytes
+             (when argument-usages
+               (wasm-section 6 (with-wasm-bytes
+                 (wasm-u32 (length argument-usages))
+                 (dolist (usage argument-usages)
+                   (wasm-type :i32) (wasm-byte 0) (wasm-integer (second usage)) (wasm-byte #x0b)))))
+             (wasm-section 7 (with-wasm-bytes
+               (wasm-u32 (+ (if entries (length entries) 1) (length direct-exports) (length argument-usages)))
+               (if entries
+                   (loop for entry in entries for index from 0 do
+                     (wasm-name (format nil "entry~D" index)) (wasm-byte 0)
+                     (wasm-u32 (+ offset (gethash entry *native-function-indices*))))
+                   (progn (wasm-name "entry") (wasm-byte 0) (wasm-u32 offset)))
+               (dolist (entry direct-exports)
+                 (wasm-name (first entry)) (wasm-byte 0)
+                 (wasm-u32 (+ offset (gethash (second entry) *native-function-indices*))))
+               (loop for usage in argument-usages for i from 0 do
+                 (wasm-name (first usage)) (wasm-byte 3) (wasm-u32 i))))
+             (when references
+               (wasm-section 9 (with-wasm-bytes
+                 (wasm-u32 1) (wasm-u32 3) (wasm-byte 0) (wasm-u32 (length references))
+                 (dolist (index references) (wasm-u32 index))))))))
+    (unless (and entries entry-tables) (return-from native-entry-sections (values nil named)))
+    (let* ((count (length entries)) (size (+ count (length direct-exports)))
+           (table (with-wasm-bytes
+                    (wasm-section 4 (with-wasm-bytes
+                      (wasm-u32 1) (wasm-type :function) (wasm-byte 1)
+                      (wasm-u32 size) (wasm-u32 size)))))
+           (compact
+             (with-wasm-bytes
+               (wasm-section 7 (with-wasm-bytes
+                 (wasm-u32 1) (wasm-name "entries") (wasm-byte 1) (wasm-u32 0)))
+               (wasm-section 9 (with-wasm-bytes
+                 (wasm-u32 (if references 2 1))
+                 (wasm-u32 0) (wasm-byte #x41) (wasm-s32 0) (wasm-byte #x0b) (wasm-u32 size)
+                 (dolist (entry entries) (wasm-u32 (+ offset (gethash entry *native-function-indices*))))
+                 (dolist (entry direct-exports)
+                   (wasm-u32 (+ offset (gethash (second entry) *native-function-indices*))))
+                 (when references
+                   (wasm-u32 3) (wasm-byte 0) (wasm-u32 (length references))
+                   (dolist (index references) (wasm-u32 index)))))
+               ;; Version 1: count, mode, then one packed direct descriptor
+               ;; per entry in mode 1. Zero means no direct worker; otherwise
+               ;; low three bits are arity+1 and high bits are usage-mask+1.
+               (wasm-section 0 (with-wasm-bytes
+                 (wasm-name "miricl.entries") (wasm-u32 1) (wasm-u32 count)
+                 (wasm-byte (if direct-exports 1 0))
+                 (when direct-exports
+                   (let ((descriptors (make-array count :initial-element 0)))
+                     (dolist (entry direct-exports)
+                       (setf (aref descriptors (fifth entry))
+                             (+ (1+ (third entry)) (if (fourth entry) (ash (1+ (fourth entry)) 3) 0))))
+                     (loop for descriptor across descriptors do (wasm-byte descriptor)))))))))
+      (if (< (+ (length table) (length compact)) (length named))
+          (values table compact) (values nil named)))))
+
+(defun emit-native-module-checked (unit entries &optional (entry-tables t))
   "Emit a verified unit. Internal callers must retain ownership until emission."
   (declare (type hir-unit unit) (type list entries))
   (let* ((*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
@@ -3816,12 +4094,13 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                  for worker = (gethash entry *wasm-direct-workers*)
                  when (and worker (gethash worker *native-function-indices*))
                  collect (list (format nil "direct-~A-~D" (if entries (format nil "entry~D" i) "entry")
-                                      (native-fixed-arity entry)) worker)))
+                                      (native-fixed-arity entry)) worker (native-fixed-arity entry)
+                               (native-argument-usage entry) i)))
          (argument-usages
-           (loop for entry in (or entries (list (first *native-functions*))) for i from 0
-                 for worker = (gethash entry *wasm-direct-workers*)
-                 for usage = (and worker (gethash worker *native-function-indices*) (native-argument-usage entry))
-                 when usage collect (list (format nil "argument-usage-~A" (if entries (format nil "entry~D" i) "entry")) usage)))
+           (loop for entry in direct-exports when (fourth entry)
+                 collect (list (format nil "argument-usage-~A"
+                                       (if entries (format nil "entry~D" (fifth entry)) "entry")) (fourth entry))))
+         (entry-sections (multiple-value-list (native-entry-sections entries direct-exports argument-usages entry-tables)))
          (body-types (make-array (length bodies) :initial-element nil))
          (type-prefix (if *wasm-object-types* 2 0))
          (signatures (remove-duplicates
@@ -3844,41 +4123,23 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
            (wasm-section 2 (with-wasm-bytes
              (wasm-u32 (+ (length *native-imports*) (if *wasm-exceptions* 1 0)))
              (dolist (import *native-imports*)
-               (wasm-name "miricl.runtime") (wasm-name (first import)) (wasm-byte 0)
+               (wasm-name "m")
+               ;; Runtime helper names have the ASCII prefix NATIVE-. Skip
+               ;; its encoded bytes without allocating another Lisp string.
+               (let ((name (utf8-bytes (first import))))
+                 (wasm-u32 (- (length name) 7)) (wasm-append name 7))
+               (wasm-byte 0)
                (wasm-u32 (+ type-prefix (position (cdr import) signatures :test #'equal))))
              (when *wasm-exceptions*
-               (wasm-name "miricl.runtime") (wasm-name "native-transfer") (wasm-byte 4) (wasm-byte 0)
+               (wasm-name "m") (wasm-name "transfer") (wasm-byte 4) (wasm-byte 0)
                (wasm-u32 (+ type-prefix (position '(nil nil) signatures :test #'equal))))))
            (wasm-section 3 (with-wasm-bytes
              (wasm-u32 (length bodies))
              (dotimes (i (length bodies))
                (wasm-u32 (+ type-prefix (position (if (aref body-types i)
                  '((:object :object :object :object :object) :object) '((:object :object) :object)) signatures :test #'equal))))))
-           (when argument-usages
-             (wasm-section 6 (with-wasm-bytes
-               (wasm-u32 (length argument-usages))
-               (dolist (usage argument-usages)
-                 (wasm-type :i32) (wasm-byte 0) (wasm-integer (second usage)) (wasm-byte #x0b)))))
-           (wasm-section 7 (with-wasm-bytes
-             (wasm-u32 (+ (if entries (length entries) 1) (length direct-exports) (length argument-usages)))
-             (if entries
-                 (loop for entry in entries for index from 0 do
-                   (wasm-name (format nil "entry~D" index)) (wasm-byte 0)
-                   (wasm-u32 (+ (length *native-imports*) (gethash entry *native-function-indices*))))
-                 (progn (wasm-name "entry") (wasm-byte 0) (wasm-u32 (length *native-imports*))))
-             (dolist (entry direct-exports)
-               (wasm-name (first entry)) (wasm-byte 0)
-               (wasm-u32 (+ (length *native-imports*) (gethash (second entry) *native-function-indices*))))
-             (loop for usage in argument-usages for i from 0 do
-               (wasm-name (first usage)) (wasm-byte 3) (wasm-u32 i))))
-           (when *wasm-referenced-functions*
-             (let ((indices (remove-duplicates
-                              (mapcar (lambda (function)
-                                        (+ (length *native-imports*) (gethash function *native-function-indices*)))
-                                      *wasm-referenced-functions*))))
-               (wasm-section 9 (with-wasm-bytes
-                 (wasm-u32 1) (wasm-u32 3) (wasm-byte 0) (wasm-u32 (length indices))
-                 (dolist (index indices) (wasm-u32 index))))))
+           (when (first entry-sections) (wasm-append (first entry-sections)))
+           (wasm-append (second entry-sections))
            (wasm-section 10 (with-wasm-bytes
              (wasm-u32 (length bodies))
              (dolist (body bodies) (wasm-u32 (length body)) (wasm-append body))))))))
@@ -3943,7 +4204,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
 
 (defparameter *native-compiler-seeds*
   '(compiler-primitive record-compilation-statistic compilation-statistics-report
-                   wasm-byte wasm-append wasm-u32 wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call
+                   wasm-byte wasm-append wasm-u32 wasm-u32-width wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call
                    wasm-remember-local wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
                    emit-native-tag-test
                    ;; These small constructors and declaration readers are
@@ -3970,14 +4231,14 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    emit-native-cons-access native-fixed-arity emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    emit-native-structured-target emit-native-structured-jump emit-native-structured-region
                    hir-capture hir-cell-for-binding
-                   hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
+                   hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
                    hir-type-without-null hir-copy-source hir-type-truth-premise hir-type-branch-guards
                    hir-inline-primitive hir-integer-identity hir-integer-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked
                    hir-dispatch-candidate
                    hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells
                    hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-refresh-predecessors optimize-hir-checked optimize-hir
                    hir-inline-environment hir-function-result-type hir-inline-size hir-inline-candidate hir-inline-body hir-shadow-specials
-                   compiler-source-policy
+                   compiler-source-policy native-entry-sections
                    hir-bind-value hir-read-variable hir-write-variable hir-function-reference
                    hir-small-membership hir-membership-branches hir-call-arguments hir-literal-apply-form hir-case-form hir-macro-environment hir-assert-form
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
@@ -3991,7 +4252,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-to-hir compile-module-to-hir compile-native-module
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
-                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-prune-module
+                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
                    definition-info namespace form-written-variables form-references
                    miricl::%normalize-lambda-1 miricl::%normalize-lambda
@@ -4031,9 +4292,9 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
   ;; Each block starts at its first seed. Only its own definitions are sealed;
   ;; calls into later bootstrap stages retain their global bindings. The
   ;; interpreter still installs and executes ordinary global definitions.
-  '((wasm-byte wasm-append wasm-u32 wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call)
+  '((wasm-byte wasm-append wasm-u32 wasm-u32-width wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call)
     (hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant hir-clear-source)
-    (hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell)
+    (hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell)
     (hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells)
     (miricl::%file-lexical-name miricl::%file-lexical-specials miricl::%file-lexical-bind
      miricl::%file-lexical-reference miricl::%file-code-cons miricl::%file-lexical-forms
@@ -4049,7 +4310,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     (list* (car source) (second source)
       (append documentation (list '(declare (optimize (safety 0) (debug 0))
         (inline svref aref row-major-aref (setf svref) (setf aref) (setf row-major-aref)
-                length logand logior logxor lognot ash car first cdr rest eq eql null not cons
+                length integer-length logand logior logxor lognot ash car first cdr rest eq eql null not cons
                 gethash (setf gethash) consp simple-vector-p zerop minusp plusp evenp oddp
                 1+ 1- + - * < > <= >= = /=))) body))))
 

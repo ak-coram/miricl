@@ -1,3 +1,4 @@
+import {nativeModuleImports} from './helpers/compiler-imports.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Miricl} from '../scripts/miricl.mjs';
@@ -5,7 +6,7 @@ import {Miricl} from '../scripts/miricl.mjs';
 const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const entryBody = bytes => {
   let position = 8, entry, worker;
-  const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes))
+  const imports = nativeModuleImports(new WebAssembly.Module(bytes))
     .filter(entry => entry.kind === 'function').length;
   const word = () => {let value = 0, scale = 1, byte; do {byte = bytes[position++]; value += (byte & 127) * scale; scale *= 128;} while (byte & 128); return value;};
   while (position < bytes.length) {
@@ -143,10 +144,10 @@ try {
               :element-type '(unsigned-byte 8)) (write-sequence bytes out)))) (values)`);
       const bytes = Buffer.from(await vm.readFile('/licm.wasm')); assert.ok(WebAssembly.validate(bytes), name); variants.push(bytes);
       if (['entry type proof', 'two cached branch tests', 'stable tag', 'literal identity'].includes(name))
-        assert.ok(!WebAssembly.Module.imports(new WebAssembly.Module(bytes))
+        assert.ok(!nativeModuleImports(new WebAssembly.Module(bytes))
           .some(entry => entry.name === 'native-boolean'), `${name}: branch-only results stay unboxed`);
       if (name === 'stable tag') {
-        const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes)).filter(entry => entry.kind === 'function');
+        const imports = nativeModuleImports(new WebAssembly.Module(bytes)).filter(entry => entry.kind === 'function');
         const index = imports.findIndex(entry => entry.name === 'native-consp-test');
         vm.mountFile('/licm-body.bin', entryBody(bytes));
         assert.equal(vm.evaluate(`(with-open-file (in "/licm-body.bin" :element-type '(unsigned-byte 8))
@@ -187,7 +188,7 @@ try {
           :element-type '(unsigned-byte 8)) (write-sequence bytes out)))) (values)`);
   const capturedBytes = await vm.readFile('/capture.wasm');
   assert.ok(WebAssembly.validate(capturedBytes));
-  const captureImport = WebAssembly.Module.imports(new WebAssembly.Module(capturedBytes))
+  const captureImport = nativeModuleImports(new WebAssembly.Module(capturedBytes))
     .filter(entry => entry.kind === 'function').findIndex(entry => entry.name === 'native-capture');
   assert.ok(captureImport >= 0, 'Fixture retains a capture-slot read');
   vm.mountFile('/capture-body.bin', entryBody(capturedBytes));

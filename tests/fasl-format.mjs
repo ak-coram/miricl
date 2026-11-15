@@ -287,6 +287,8 @@ try {
         (miricl-compiler::read-unit-payload s (file-length s) :metadata ${metadata ? 't' : 'nil'}) nil)
       (error () t))`);
   };
+  for (const flags of [0, 1, 2, 3, 8, 0xffffffff])
+    await reject(`unsupported-flags-${flags}`, data => data.setUint32(4, flags, true));
   await reject('large-count', data => data.setUint32(8, 0x7fffffff, true));
   await reject('overlap', data => data.setUint32(entries[1].at + 8, entries[0].offset, true));
   await reject('out-of-range', data => data.setUint32(entries[0].at + 8, 0xffffffff, true));

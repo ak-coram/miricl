@@ -40,6 +40,37 @@ The exhaustive start/end matrix is covered by upstream ANSI tests."
   (is (equalp (wt:wat-to-wasm "(module)") #(0 97 115 109 1 0 0 0))))
 (test trivial-compile-error (signals wt:wasmtime-error (wt:wat-to-wasm "(module")))
 
+(test runtime-integer-dispatch
+  ;; Exercise shared bodies, dense-table holes, sparse branches and signed
+  ;; boundaries. Unmatched IDs and completed clauses continue after dispatch.
+  (dolist (groups '(((-3 -1) (4))
+                    ((-4 -2) (0 1) (3) (7 8) (10))
+                    ((-2147483648) (-100000 -99999) (-3 0) (1 2)
+                     (100000) (2147483647))))
+    (let* ((dispatch (m::wat-integer-dispatch
+                      (m::wat-fragment "(local.get $id)")
+                      (loop for ids in groups for answer from 0 collect
+                        (cons ids (m::wat-fragment
+                          (format nil "(local.set $answer (i32.const ~D))" answer))))))
+           (bytes (wt:wat-to-wasm
+             (format nil "(module (func (export ~S) (param $id i32) (result i32)
+               (local $answer i32) (local.set $answer (i32.const -1)) ~A
+               (local.get $answer)))" "dispatch" (m::wat-fragment-text dispatch)))))
+      (wt:with-engine (engine)
+        (wt:with-store ((store context) engine)
+          (let ((module (wt:compile-module engine bytes)))
+            (unwind-protect
+                (wt:with-instance (instance context module)
+                  (dolist (id (remove-duplicates
+                    (loop for group in groups append
+                      (loop for id in group append
+                        (remove-if-not (lambda (value) (<= -2147483648 value 2147483647))
+                                       (list (1- id) id (1+ id)))))))
+                    (is (= (or (position-if (lambda (group) (member id group)) groups) -1)
+                           (wt:instance-call context instance "dispatch" id))
+                        "Dispatch input ~D with groups ~S" id groups)))
+              (wt::wasmtime-module-delete module))))))))
+
 (test host-integer-transport
   (m:with-interpreter (vm)
     (dolist (number (list (1- most-negative-fixnum) most-negative-fixnum
@@ -561,3 +592,22 @@ The exhaustive start/end matrix is covered by upstream ANSI tests."
     (dolist (form '((defun invalid (&optional &optional x) x) (defun duplicate (x x) x)
                     (defun keyword (:x) :x) (let ((:x 1)) :x)))
       (signals m:interpreter-error (m:evaluate vm form)))))
+
+(test runtime-symbol-branch
+  ;; Runtime evaluator/declaration generators also need the single-group API.
+  (let* ((symbols '(inline notinline optimize))
+         (ids (mapcar #'m::runtime-symbol-id symbols))
+         (branch (m::wat-symbol-branch '(local.get $id) symbols
+                   (m::wat-fragment "(return (i32.const 1))")))
+         (bytes (wt:wat-to-wasm
+                  (format nil "(module (func (export ~S) (param $id i32) (result i32)
+                    ~A (i32.const 0)))" "probe" (m::wat-fragment-text branch)))))
+    (wt:with-engine (engine)
+      (wt:with-store ((store context) engine)
+        (let ((module (wt:compile-module engine bytes)))
+          (unwind-protect
+              (wt:with-instance (instance context module)
+                (dolist (id (cons -1 ids))
+                  (is (= (if (member id ids) 1 0)
+                         (wt:instance-call context instance "probe" id)))))
+            (wt::wasmtime-module-delete module)))))))

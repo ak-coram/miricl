@@ -90,6 +90,7 @@ as COMPILE-LAMBDA."
   ;; stays unchanged. Cache against the actual host definitions, not a build
   ;; timestamp, and discard old generations instead of retaining their code.
   (list (fdefinition 'kernel-worker-wat) (fdefinition 'kernel-literal-plan)
+    (fdefinition 'kernel-import-name)
     (fdefinition 'kernel-closed-helper-unit) (fdefinition 'kernel-helper-group-wat)
     (fdefinition 'kernel-link-helper-group)
     (fdefinition 'kernel-macroexpand-hook)
@@ -142,6 +143,12 @@ as COMPILE-LAMBDA."
         (setf (miricl-compiler::wasm-input-position input) end))))
   (error "Missing compiled runtime export ~S." name))
 
+(defun kernel-import-name (import)
+  "Return a current runtime helper's canonical name."
+  (unless (string= (first import) "m")
+    (error "Unsupported native runtime import namespace: ~S." (first import)))
+  (concatenate 'string "native-" (second import)))
+
 (defun kernel-literal-plan (ops imports literals)
   "Resolve bootstrap symbols, setter references and integers without a pool."
   (let ((replacements (make-hash-table)) (skipped (make-hash-table))
@@ -149,13 +156,16 @@ as COMPILE-LAMBDA."
     (loop for op across ops for i from 0
           when (and (= (miricl-compiler::native-op-code op) #x10)
                     (< (miricl-compiler::native-op-argument op) (length imports))
-                    (string= (second (aref imports (miricl-compiler::native-op-argument op))) "native-literal")) do
+                    (member (second (aref imports (miricl-compiler::native-op-argument op)))
+                      '("native-literal" "native-literal-function") :test #'equal)) do
       (unless (and (>= i 2)
                    (= (miricl-compiler::native-op-code (aref ops (- i 2))) #x20)
                    (zerop (miricl-compiler::native-op-argument (aref ops (- i 2))))
                    (= (miricl-compiler::native-op-code (aref ops (1- i))) #x41))
         (error "Runtime kernel has a nonconstant literal lookup."))
-      (let* ((slot (miricl-compiler::native-op-argument (aref ops (1- i))))
+      (let* ((fused (string= (second (aref imports (miricl-compiler::native-op-argument op)))
+                              "native-literal-function"))
+             (slot (miricl-compiler::native-op-argument (aref ops (1- i))))
              (literal (and (<= 0 slot) (< slot (length literals)) (aref literals slot)))
              (id (and (symbolp literal) (<= 0 slot) (< slot (length literals))
                       (position literal miricl::*runtime-symbols*)))
@@ -166,20 +176,21 @@ as COMPILE-LAMBDA."
                              (symbolp (second literal))
                              (position (second literal) miricl::*runtime-symbols*)))
              (setter-reference
-               (and setter-id (< (1+ i) (length ops))
+               (and setter-id (or fused (and (< (1+ i) (length ops))
                     (let ((next (aref ops (1+ i))))
                       (and (= (miricl-compiler::native-op-code next) #x10)
                            (< (miricl-compiler::native-op-argument next) (length imports))
                            (string= (second (aref imports (miricl-compiler::native-op-argument next)))
-                                    "native-function-reference"))))))
+                                    "native-function-reference"))))))))
         (unless (or id setter-reference
                     (and (integerp literal) (<= -9223372036854775808 literal 9223372036854775807)))
           (error "Runtime kernel requires a bootstrap literal at slot ~S: ~A." slot
             (let ((*print-circle* t) (*print-length* 10) (*print-level* 5))
               (write-to-string literal))))
-        (when setter-reference (setf (gethash (1+ i) skipped) t))
+        (when (and setter-reference (not fused)) (setf (gethash (1+ i) skipped) t))
         (setf (gethash (- i 2) replacements)
-                (cond (id (cons :symbol id)) (setter-reference (cons :setter-function setter-id))
+                (cond (id (cons (if fused :function :symbol) id))
+                      (setter-reference (cons :setter-function setter-id))
                       (t (cons :integer literal)))
               (gethash (1- i) skipped) t (gethash i skipped) t
               ;; Remove only the proved constant lookup's closure dependency
@@ -195,7 +206,9 @@ as COMPILE-LAMBDA."
     (declare (ignore offset))
     (unless (equal signature '(("externref" "externref" "externref" "externref" "externref") ("externref")))
       (error "Unsupported runtime worker signature: ~S." signature))
-    (let* ((ops (miricl-compiler::native-read-ops body))
+    (let* ((imports (map 'vector (lambda (import)
+                                  (list (first import) (kernel-import-name import))) imports))
+           (ops (miricl-compiler::native-read-ops body))
            (input (miricl-compiler::wasm-input body)) (locals nil) (raw-truth nil)
            (vector-read nil) (vector-write nil) (vector-index nil) (vector-object nil) (vector-value nil)
            (call-slots 0) (call-base 0) (integer-call nil) (integer-left 0) (integer-right 0))
@@ -276,6 +289,7 @@ as COMPILE-LAMBDA."
              (let ((replacement (gethash index literal-replacements)))
                (ecase (car replacement)
                  (:symbol (format out "i32.const ~D call $symbol~%" (cdr replacement)))
+                 (:function (format out "i32.const ~D call $symbol call $kernel-function-reference~%" (cdr replacement)))
                  (:setter-function
                   (format out "i32.const ~D call $kernel-setter-function-reference~%" (cdr replacement)))
                  (:integer (format out "i64.const ~D call $int64~%" (cdr replacement))))))
@@ -651,7 +665,7 @@ as COMPILE-LAMBDA."
            (*kernel-worker-preserve-abi* t)
            (*kernel-module-workers* (make-hash-table))
            (records nil))
-      (multiple-value-bind (bytes literals) (miricl-compiler:emit-native-module unit :entries children)
+      (multiple-value-bind (bytes literals) (miricl-compiler:emit-native-module unit :entries children :entry-tables nil)
         (loop for function in children for slot from 0 for pool in literals
               for arity = (miricl-compiler::native-fixed-arity function)
               for index = (kernel-export-index bytes (format nil "direct-entry~D-~D" slot arity))
@@ -701,7 +715,7 @@ Unsupported dependencies and captures are errors, never fallbacks."
                            (let ((arity (miricl-compiler::native-fixed-arity (first children))))
                              (unless arity (error "Runtime kernel requires fixed arity: ~S." entry))
                              (multiple-value-bind (bytes literals)
-                                 (miricl-compiler:emit-native-module unit :entries children)
+                                 (miricl-compiler:emit-native-module unit :entries children :entry-tables nil)
                                (kernel-worker-wat bytes
                                  (kernel-export-index bytes (format nil "direct-entry0-~D" arity))
                                  (miricl:wat-string wat-name) arity result interruptible (first literals))))))))))))
