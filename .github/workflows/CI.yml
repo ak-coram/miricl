@@ -19,22 +19,21 @@ concurrency:
 
 jobs:
   host:
-    name: Host / ${{ matrix.lisp }} / ${{ matrix.os }}
+    name: Host compilation / ${{ matrix.lisp }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           - {os: ubuntu-latest, lisp: sbcl-bin}
-          - {os: ubuntu-latest, lisp: ccl-bin/1.13}
           - {os: ubuntu-latest, lisp: ecl/26.5.5}
+          - {os: ubuntu-latest, lisp: ccl-bin/1.13}
           - {os: windows-latest, lisp: sbcl-bin}
           - {os: macos-latest, lisp: sbcl-bin}
     env:
       LISP: ${{ matrix.lisp }}
-      # Keep Lisp sources LF, including submodules and Roswell dependencies.
-      # CRLF breaks FORMAT's ~<newline> directives on Windows SBCL.
+      # Preserve FORMAT's newline directives on every checkout.
       GIT_CONFIG_COUNT: '1'
       GIT_CONFIG_KEY_0: core.autocrlf
       GIT_CONFIG_VALUE_0: 'false'
@@ -42,9 +41,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
-      # The host suite only needs ASDF. ACL2 contains trailing-space filenames
-      # that Windows cannot check out; its application job runs on Linux.
-      - name: Checkout host test dependencies
+      # The host only needs ASDF; avoid application submodules on Windows.
+      - name: Checkout host build dependency
         shell: bash
         run: git submodule update --init -- vendor/asdf
       - uses: ./.github/actions/setup-miricl
@@ -52,22 +50,9 @@ jobs:
           lisp: 'true'
           c-api: 'true'
           node: 'false'
-          just: ${{ runner.os == 'Windows' && 'true' || 'false' }}
-      - name: Host regressions
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          ros install neil-lindquist/ci-utils
-          asdf-register-project
-          run-fiveam -e t -l miricl/test :miricl
-      - name: Host regressions (Windows)
-        if: runner.os == 'Windows'
-        shell: msys2 {0}
-        run: |
-          # Exercise each justfile's Bash shell before the Lisp script recipe.
-          just
-          just --justfile game-of-life/justfile
-          just test-sbcl-roswell
+      - name: Compile and load the bootstrap system
+        shell: ${{ runner.os == 'Windows' && 'msys2 {0}' || 'bash' }}
+        run: ros -L "$LISP" --load scripts/check-host-compilation.lisp
 
   runtime:
     name: Build shared runtime and standalone pages
@@ -89,6 +74,13 @@ jobs:
         run: |
           ros -L sbcl-bin run -- --load scripts/build-wasm.lisp --load scripts/build-html.lisp --load scripts/build-todo.lisp --quit
           node scripts/build-asdf.mjs build/asdf miricl.wasm miricl-asdf.wasm
+      - name: Check TODO and shared application UI
+        env:
+          CHROMIUM: google-chrome
+        run: |
+          node tests/browser-todo.mjs todo.html
+          node tests/session-sharing.mjs
+          node tests/browser-session-sharing.mjs miricl.html
       - uses: actions/upload-artifact@v4
         with:
           name: miricl-runtime
@@ -128,38 +120,25 @@ jobs:
           path: build/compiler-statistics/*.json
           if-no-files-found: warn
 
-  integration:
-    name: Integration / ${{ matrix.group }}
+  core-checks:
+    name: Core checks beyond ANSI
     needs: runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [runtime, compiler, asdf, browser]
-    env:
-      CHROMIUM: google-chrome
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - uses: ./.github/actions/setup-miricl
         with:
           cli: 'true'
-          just: 'true'
       - uses: actions/download-artifact@v4
         with:
           name: miricl-runtime
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-support
-      - uses: actions/download-artifact@v4
-        if: matrix.group == 'browser'
-        with:
-          name: runtime-pages
-      # Fixed-port bridge fixtures remain sequential within each isolated runner.
-      - name: Run integration group
-        run: node scripts/test-integration.mjs '${{ matrix.group }}'
+      - name: Check soundness beyond ANSI conformance
+        run: node tests/soundness.mjs miricl.wasm
+      - name: Check optimization capabilities on Node
+        run: node tests/optimizations.mjs miricl.wasm
+      - name: Check Node and WASI implementation behavior
+        run: node tests/implementation.mjs miricl.wasm miricl-repl.wasm
 
   applications:
     name: Application / ${{ matrix.app }}
@@ -195,6 +174,7 @@ jobs:
         run: |
           ros -L sbcl-bin run -- --load "$HOME/.roswell/lisp/quicklisp/setup.lisp" --script scripts/setup-application.lisp "$PWD/game-of-life" game-of-life "$PWD" node
           just --justfile game-of-life/justfile build
+          node tests/application-setup.mjs
           node tests/browser-game-of-life.mjs game-of-life/build/index.html
           node tests/browser-game-of-life.mjs game-of-life/dev.html --dev
       - name: Cache native application image and compiled algebra
@@ -588,44 +568,9 @@ jobs:
           path: reports/
           if-no-files-found: error
 
-  compiler-benchmark:
-    name: Compiler / self-compilation
-    needs: runtime
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      MIRICL_COMPILER_STATISTICS_DIRECTORY: ${{ github.workspace }}/build/compiler-statistics
-      MIRICL_STATISTICS_JOB: compiler-benchmark
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '26'
-      - uses: actions/download-artifact@v4
-        with:
-          name: miricl-runtime
-      - name: Measure the compiled compiler on a fixed original-source corpus
-        run: |
-          node scripts/benchmark-self-compiler.mjs build/compiler-corpus miricl-cold.wasm --extract
-          node scripts/benchmark-self-compiler.mjs build/compiler-benchmark miricl.wasm build/compiler-corpus/sources.lisp --module --statistics
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: compiler-statistics-benchmark
-          path: build/compiler-statistics/*.json
-          if-no-files-found: warn
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: compiler-benchmark
-          path: |
-            build/compiler-benchmark/results.json
-            build/compiler-benchmark/statistics.json
-          if-no-files-found: warn
-
   browser-examples:
-    name: Assemble tested browser examples and size report
-    needs: [runtime, integration, applications, acl2, coalton]
+    name: Assemble browser examples and size report
+    needs: [host, runtime, core-checks, applications, acl2, coalton]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -687,7 +632,7 @@ jobs:
 
   compiler-report:
     name: Collect compiler and prover report
-    needs: [host, runtime, integration, applications, acl2, coalton, ansi-reports, browser-examples, compiler-benchmark]
+    needs: [host, runtime, core-checks, applications, acl2, coalton, ansi-reports, browser-examples]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 10

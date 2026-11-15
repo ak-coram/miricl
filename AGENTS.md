@@ -208,6 +208,46 @@ loops. Use the interpreter for functions where its performance impact
 is negligible. Follow the project's Common Lisp WAT integration style
 for direct Wasm implementations.
 
+# Testing
+
+Keep ANSI tests as the language conformance suite in both interpreter and
+compiler modes. Preserve application-specific tests. Keep the additional
+local core suite small and focused on contracts ANSI does not already cover;
+check existing ANSI coverage before adding or recovering a test.
+
+Core coverage has three categories:
+
+- Basic soundness: validation of untrusted compiler inputs, public IR and
+  serialized data; useful conditions and recovery after rejection; sound
+  optimization proofs, mutation/redefinition contracts, and current-format
+  serialization round trips.
+- Implementation-specific behavior: green threads, scheduling, synchronization,
+  interruption and cleanup; Wasm and host adapter integration; virtual,
+  mounted and development filesystems; platform boundaries and error recovery.
+- Compiler optimization capabilities: general observable assumptions such as
+  deep tail calls without stack exhaustion, preservation of values and effects,
+  and safe inlining and retained recursive frames. Prefer behavioral checks
+  over MIRICL-specific IR layouts, opcode/import/local inventories, exact
+  instruction counts or timing thresholds.
+
+WASI cannot load generated code at runtime and is exempt from all compiler
+optimization tests, including TCO requirements. Keep applicable WASI runtime
+and implementation tests separate from compiler optimization checks.
+
+Use matching compiler, runtime and adapter artifacts. Local core checks run
+against existing builds; rebuild explicitly when needed rather than making
+every test command repeat compiler bootstrap. Use the persistent source
+compiler loop for focused diagnosis and confirm changes in the matching
+precompiled image. Keep running relevant tests and fix failures without
+weakening their behavioral requirements; distinguish stale artifacts and
+test setup mistakes from implementation defects.
+
+Do not add benchmarks or benchmark infrastructure to the repository. The
+applications and their existing benchmarks are sufficient for now. Keep
+one-off measurement scripts and results in temporary directories; continue
+reporting runtime/application performance and raw/compressed image sizes
+without restoring the removed compiler/interpreter microbenchmark suite.
+
 # Style
 
 Test intended behavior and success criteria, not incidental details of the

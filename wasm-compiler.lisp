@@ -2732,7 +2732,7 @@ exhausted work budgets keep every incoming value group."
                          plan (svref plan 1))) (native-optimize-body body))
             (t body)))))
 
-(defun native-loop-literals (blocks forward &optional (local-start 0))
+(defun native-loop-literals (blocks forward &optional (local-start 0) checked-entry)
   ;; Literal identity is stable for the lifetime of this function object.
   ;; Cache repeated operands and global *names*, never their live bindings.
   ;; Acyclic bodies must recover the prologue and local costs in static bytes;
@@ -2744,14 +2744,25 @@ exhausted work budgets keep every incoming value group."
     (return-from native-loop-literals nil))
   (let ((seen (make-hash-table :test 'eq)) (literals nil))
     (dolist (block blocks)
+      (let ((end (hir-block-terminator block)))
+        (unless (or (member (hir-instruction-opcode end) '(:branch :jump :return :unreachable))
+                    (and (eq (hir-instruction-opcode end) :block-return)
+                         (hir-instruction-attributes end)))
+          (return-from native-loop-literals nil)))
       (dolist (instruction (hir-block-instructions block))
-        (when (and (member (hir-instruction-opcode instruction)
-                           '(:call :multiple-value-call :control-call :restart-signal))
-                   (not (member instruction *wasm-tail-calls* :test #'eq))
-                   (not (and (eq (hir-instruction-opcode instruction) :call)
-                             *wasm-inline-simple-calls*
-                             (gethash instruction *wasm-inline-simple-calls*)
-                             (native-removable-p instruction))))
+        ;; Signaling helpers can reenter through Lisp condition handlers too.
+        ;; Use the existing non-signaling proof and private packet operations;
+        ;; a live global function/variable lookup supplies no such proof.
+        (unless (or (and (native-removable-p instruction)
+                         (or (not (eq (hir-instruction-opcode instruction) :function-reference))
+                             (not (native-value-slot *wasm-live-values*
+                                    (hir-instruction-output instruction)))))
+                    (member (hir-instruction-opcode instruction)
+                            '(:rest-argument :values-list :cell-write :environment-restore))
+                    (member instruction *wasm-tail-calls* :test #'eq)
+                    ;; Direct workers strip this check; ordinary entries must
+                    ;; retain their small checked wrapper outside the worker.
+                    (and checked-entry (eq (hir-instruction-opcode instruction) :check-arguments)))
           (return-from native-loop-literals nil))
         (when (and (member (hir-instruction-opcode instruction)
                           '(:constant :function-reference :global-read :global-write :dynamic-bind))
@@ -3328,7 +3339,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
     ;; so their actual index widths enter the static size estimate.
     (setq literals (native-loop-literals blocks
                      (or forward (and targets (native-forward-blocks function)))
-                     (+ (if direct 2 3) raw-count wide-count count)))
+                     (+ (if direct 2 3) raw-count wide-count count)
+                     (and *wasm-direct-workers* (gethash function *wasm-direct-workers*))))
     (loop for tail on blocks do
       (setf (svref next-blocks (the (unsigned-byte 32) (hir-block-id (car tail)))) (cadr tail)))
     (dolist (literal literals)
@@ -3656,6 +3668,15 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                  (when source
                    (let* ((body (native-direct-worker-body source (gethash source *wasm-direct-raw-bodies*)))
                           (*wasm-current-function* function))
+                     (unless body
+                       ;; A failed rewrite retains the checked generic entry.
+                       ;; Its argument error can invoke Lisp handlers, so it
+                       ;; cannot retain speculative worker-only cache roots.
+                       (let ((plan (gethash source *wasm-function-plans*)))
+                         (when (svref plan 12)
+                           (decf (svref plan 10) (length (svref plan 12)))
+                           (clrhash (svref plan 11)) (setf (svref plan 12) nil)
+                           (setf (gethash source full) (emit-native-function source)))))
                      ;; Remap arguments before register allocation can reuse
                      ;; the old argument-packet parameter as an ordinary local.
                      (when body

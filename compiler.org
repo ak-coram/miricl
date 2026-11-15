@@ -675,14 +675,7 @@ public HIR boundaries before inference enters unchecked kernels.
 Scalar arithmetic entries accept proven =i64= operands and share the actual
 built-in function guard. Redefined functions use the ordinary Lisp call path.
 The overflow checks are shared in the runtime rather than copied at each call
-site. =scripts/benchmark-typed-arithmetic.mjs OUTPUT BEFORE AFTER= compares
-these paths with narrow and unrestricted operand controls, recording emitted
-bytes, imports and CPU timings. This microbenchmark supplements the larger
-application measurements; it does not establish an application-level speedup.
-=scripts/benchmark-typed-vectors.mjs OUTPUT BEFORE AFTER= compares reads,
-writes and copies with untyped, typed and explicitly inlined controls. It
-alternates the images across five measured rounds and records kernel sizes,
-imports, compilation time and execution CPU time.
+site.
 
 =safety= defaults to =1=, retaining the existing checked access and promoting
 arithmetic paths. =(declare (optimize (safety 0)))= enables trusted operations
@@ -743,24 +736,6 @@ entry functions remain exposed and shared code avoids duplicating their bodies.
 Identical native bodies can share code while keeping distinct literal/capture
 contexts. Known lexical tail callees use direct Wasm =return_call= instructions,
 with the existing debugger dispatch fallback and scheduling checkpoints.
-
-=just benchmark-self-compiler= builds the precompiled compiler image, captures
-the original source, then measures that compiler compiling the source. Reports
-record separate frontend, emission, and Wasm instantiation timings over three
-rounds after warmup. The measured output is validated and
-instantiated without installing it as another compiler generation. Reports
-include corpus and image hashes, emitted module bytes, and raw/gzip/Brotli
-sizes. Module bytes exclude literals and differ from linked distribution size.
-When comparing compiler revisions, keep the first captured =SOURCES.lisp= and
-supply it to every run. Compare frozen compiler images between revisions;
-the compiler has one unconditional optimization pipeline.
-
-=node scripts/check-compiler-determinism.mjs OUTPUT COLD-IMAGE PRECOMPILED-IMAGE SOURCES.lisp=
-compares the cold self-compiled compiler with the sealed precompiled compiler.
-It fixes the macro-generation counter, compares exact Wasm bytes and serialized
-literal graphs, and validates and instantiates the output without installing a
-further compiler generation. The self-compilation timing benchmark uses the
-same fixed counter for each round.
 
 First-use bootstrap compiles the small HIR constructors and declaration readers
 immediately after the byte-emission primitives. They are used while compiling
@@ -1006,35 +981,6 @@ and frame evaluation are implemented. This is a temporary compatibility path;
 retained code and richer debugging support should follow the design constraints
 above, with size and performance validation at each migration step.
 
-=node scripts/benchmark-hir-bootstrap.mjs OUTPUT IMAGE= compares cold source
-bootstrap with prepared HIR bootstrap, reporting preparation and installation
-separately. Both resulting compilers then compile the original compiler sources
-again; the resulting module is instantiated but never installed as another
-compiler generation. The benchmark checks byte-identical output. A separate
-=hir-code-only.wasm= size measurement excludes the source corpus kept solely
-for that second benchmark.
-An optional fourth positional argument, =PRECOMPILED-IMAGE=, prepares current
-kernel sources with an already compiled compiler instead of repeating cold
-source bootstrap. The report leaves that skipped timing empty; HIR bootstrap
-still runs in a fresh source image, and fixed original-source output must match.
-
-=node scripts/benchmark-hir-interpreter.mjs OUTPUT IMAGE PREPARED-HIR ORIGINALS=
-measures prepared-code loading, HIR compiler bootstrap, and compilation of a
-fixed original-source corpus in fresh runtimes. =MIRICL_BENCHMARK_ROUNDS= sets
-the sample count; =--profile= records the first bootstrap's CPU profile.
-An optional =--compare IMAGE PREPARED-HIR= alternates two runtimes in AB/BA
-order, records instruction and output hashes, and delays compression
-measurements until all timed samples have finished.
-Prepare the payload for its image with =benchmark-hir-bootstrap.mjs=; names
-for bootstrap-local gensyms can differ between image builds. The execution
-benchmark records an instruction hash separately from those diagnostic names,
-so a comparison can establish that it executes the same instruction corpus.
-Each variant must repeat its instruction stream. A shared payload also requires
-matching instructions across runtimes. When comparing an intentional HIR change,
-use distinct prepared payloads: the report records whether their instructions
-match, while still requiring byte-identical output for the fixed original-source
-corpus. It never installs another compiler generation.
-
 ** Indexed FASL format
 
 Each =miricl.fasl= custom section contains one independent unit, identified by
@@ -1139,8 +1085,7 @@ before serializing resolved code. Equivalent macro expansions can consequently
 share immutable subgraphs even when they originally used different gensyms.
 Special bindings, lexical scopes, local function blocks and quoted objects
 retain their semantics; this pass does not depend on application packages or
-library names. =tests/file-code-sharing.mjs= checks independent programs and a
-size comparison retaining all functions, separately from tree shaking.
+library names.
 Production totals exclude the REPL. The application build uses the native
 backend after pruning. Each compilation unit shares one module with separate
 initializer entries and literal vectors. Object reconstruction and initialization
@@ -1292,10 +1237,6 @@ unsupported encodings. Stackification indexes candidates by local number and
 invalidates them with epochs at control boundaries, avoiding hash lookups and
 table clearing in its instruction loop.
 
-Compare compiler throughput with
-=node scripts/benchmark-native-compiler.mjs BEFORE.wasm AFTER.wasm=.
-Compare immediate evaluation with
-=node scripts/benchmark-evaluation.mjs BEFORE.wasm AFTER.wasm=.
 For ACL2, =scripts/benchmark-acl2-startup.mjs IMAGE CORE REPORT= measures loading
 and world initialization without proof tests. Add =--profile= for attributed
 CPU samples or =--save-image= to record the initialized image size.
@@ -1724,7 +1665,7 @@ Life native code sections are byte-identical between batch 2 and pass 4; the
 189303-byte gain is entry encoding. The paired dispatch diagnostic changes
 only LIST-PRIMITIVE; driver/fixture/hole bodies have identical bytes and indices.
 
-*** Pass 6: reuse retained cell allocation helper (awaiting sealed review)
+*** Pass 6: reuse retained cell allocation helper (reviewed)
 
 The backend recognizes actual adjacent extern-NULL / CONS instruction pairs
 and replaces them with the existing equivalent CELL helper. It requires CELL
@@ -1738,20 +1679,21 @@ indices after pruning, heap-type/immediate negatives, missing helpers, dead
 code, fresh identity, escaping mutable closures, operand effects, multiple
 values, loops and nonlocal returns. A minimal complete module shrinks 125 to
 123 bytes; named and table entry fixtures each save 12 bytes. Whole compiler,
-fixed-corpus and application effects await fresh independent sealed review.
+fixed-corpus and application measurements passed independent sealed review
+in the combined checkpoint below.
 A partial hot reload into the existing sealed compiler retained its callers'
 old binding and is explicitly discarded as size evidence.
 
-*** Pass 7: compact runtime import encoding (under review)
+*** Pass 7: compact runtime import encoding (reviewed)
 
 Native modules can encode runtime imports in namespace =m= with the common
 =native-= field prefix omitted. The adapter constructs a null-prototype alias
 map once per runtime, retaining the actual Wasm function and exception-tag
-objects. Legacy =miricl.runtime= imports, entries, snapshots and interactive
-definitions remain supported. Profitability pricing uses the actual serialized
+objects. The initial pass retained older import encodings; the artifact-policy
+cleanup below subsequently removed them. Profitability pricing uses the actual serialized
 names. Tooling normalizes semantic names at its boundaries while public
 disassembly retains the actual wire representation. The host kernel linker and
-bootstrap worker translator both accept the two encodings.
+bootstrap worker translator normalize the current wire names too.
 
 Fresh-host review found two integration omissions before accepting images.
 The host kernel translator also consumed raw disassembly import fields and
@@ -1804,31 +1746,40 @@ READY/IMAGE, arithmetic, persistent variables/functions, history and help
 smokes pass. Gzip is 1154153 bytes (-66753 versus original); Brotli is 796014
 (+21490 versus original). Timings from this overlapping build are exploratory.
 
-*** Artifact compatibility policy and next batch
+*** Artifact compatibility cleanup
 
 The user explicitly removes any cross-compiler-version compatibility obligation
 for artifacts, images, snapshots, FASLs, native modules or serialized compiler
-data; this is now recorded in AGENTS.md. Remove obsolete namespace/export
-fallbacks and format acceptance paths and their compatibility tests, while
-retaining current-version validation, loading, save/restore and recovery.
+data; this is recorded in AGENTS.md. Obsolete namespace/export fallbacks,
+format acceptance paths and their compatibility tests have been removed,
+while retaining current-version validation, loading, save/restore and recovery.
 Active named factories, named host-kernel exports and named layouts selected
 because smaller are current formats, independent of older-module support.
-Cleanup size measurements and fresh review are pending.
+The runtime import namespace is now =m= only. Native-code snapshots require
+the current packed representation; FASLs require the current header flags,
+and session links use the current compressed encoding. Current tagged entry
+tables and profitable named factories remain supported. Focused validation,
+corruption/recovery, snapshot and session-sharing checks pass. Isolated adapter
+cleanup saves 470 raw / 127 gzip / 86 Brotli bytes; shared-session code saves
+111 / 23 / 26 bytes. Wasm effects are negligible (cold -6 raw, compiler-free
++1), so this cleanup does not claim meaningful recovery of the Wasm budget.
+The combined corrected checkpoint's final sizes appear below.
 
-*** Further measured candidates
+*** Measured experiments and remaining candidates
 
-Existing NATIVE-CELL implements CONS(value,NIL). Reusing it for emitted
-REF.NULL/CONS wrapping needs no new runtime helper. Static existing-import
+Existing NATIVE-CELL implements CONS(value,NIL). Pass 6 now reuses it for
+emitted REF.NULL/CONS wrapping without introducing a runtime helper. Initial static existing-import
 sites account for roughly 2746 compiler-corpus and 29934 Game of Life bytes.
 An initial conservative implementation can require an already retained CELL
 import and fewer than 128 imports, avoiding new imports and widened operands;
-complete output validation is still necessary. This is queued separately.
+complete output validation passed as recorded in the combined checkpoint.
 
-A compact import namespace and removal of the repeated NATIVE- field prefix
-could use a generic adapter mapping while retaining the legacy namespace.
-Static import-section opportunities are 1340 compiler-corpus and 37042 Game
-of Life bytes, with larger estimates in Maxima, Coalton and McCLIM. Compiler,
-adapter, diagnostic and cost-model changes must be counted before acceptance.
+Pass 7 implements the compact import namespace and removal of the repeated
+NATIVE- field prefix. The initial static import-section estimates were 1340
+compiler-corpus and 37042 Game of Life bytes, with larger estimates in Maxima,
+Coalton and McCLIM. These are implemented opportunities, not additional pending
+gains; measured complete outputs count the compiler, adapter and cost model.
+Only the current namespace remains after artifact compatibility cleanup.
 
 Persistent SBCL DISASSEMBLE and actual target disassembly compare unsigned-32
 ULEB-width calculations under SPACE 3 / SPEED 1. The existing
@@ -1840,9 +1791,13 @@ A shift-by-seven loop produces 34 SBCL / 345 module / 56 worker bytes and
 passes thirteen target boundaries from zero through 4294967295. The original
 target formula still invokes generic CEILING/MAX and allocates its argument
 packet, while SBCL uses integer bit scanning/division and a conditional move.
-The bounded shift loop is the next planner-size/throughput candidate; audit
-all input domains and measure the sealed compiler before claiming aggregate
-improvement. Standalone import savings are not whole-image measurements.
+Pass 8 implements the bounded shift loop at both backend pricing sites, with
+unsigned-32 bounds and conservative fallback for overflowed projected sizes.
+Boundary/sample checks against actual serialization pass; six emitted user
+modules remain byte-identical. Standalone import savings are not whole-image
+measurements. Pass 9 also merges equivalent handwritten sequence-dispatch
+branches, saving 176 raw bytes without adding a helper or changing dispatch
+indices; mixed-operation, error/recovery and sequence-family checks pass.
 
 Secondary-value return facts are another proof-engine candidate. Closed calls
 currently preserve primarily the first result type. A private fixed-value
@@ -1881,3 +1836,111 @@ The isolated ANSI measurement before the final nonsymbol-keyword guard costs
 1041 raw / 363 gzip / 337 Brotli bytes in the compiler-free image (502832 to
 503873 raw). Independent focused checks also pass after that guard. Final
 combined sealed-compiler integration remains required at the next checkpoint.
+
+*** Checkpoint correction: literal rematerialization and browser stack pressure
+
+Entry-wide literal caching made a recursive regression's direct worker grow
+from one local to 79. The uncached baseline completed recursion depth 1024;
+the cached worker overflowed there. Limiting caches to eight or sixteen roots
+still reduced the depth available at 2048, so a fixed positive cap alone does
+not protect retained recursive frames.
+
+The revised backend rematerializes literals in functions with retained calls
+or potentially signaling operations, including live function and special
+variable lookups. Condition handlers can reenter Lisp and must count as calls
+for this decision. A small cache remains available only for proven eligible
+direct workers behind a separate checked entry, bounded by eight references
+and a 32-local allowance, with the most profitable literals selected first.
+If direct-worker rewriting fails, the generic body is emitted again without
+the speculative cache; argument-error handlers must not retain those roots.
+
+Focused source-compiler checks pass for bounded/ranked constants, checked
+entries, retained calls, undefined functions, unbound specials, CHECK-TYPE,
+dynamic bindings and recursive effects. The recursive worker returns to one
+local and completes depth 2048. A real valid-HIR rewrite-fallback case emits
+zero generic locals and eight literal reloads, preserving its result. These
+are focused regression results, not yet proof of the full ACL2 world build.
+The independently frozen, fresh interpreted-bootstrap build passes. Its
+default compiler image is 997126 raw / 376995 gzip / 316563 Brotli bytes,
+leaving 51450 raw bytes below the 1048576-byte budget. This is 11507 raw bytes
+larger than the preceding unsafe-cache build. The compiler-free image is
+504596 raw / 227027 gzip / 200030 Brotli bytes. Bootstrap timings were recorded
+under contention and are not performance comparisons. The full compiler CI
+group passed on the preceding image; the corrected image's compiler and host
+suites, fixed original corpus, Game of Life emission and ACL2 native rebuild
+are running. Full ACL2 world confirmation remains pending. Test/CI removals
+made concurrently outside this work are left untouched while their intent is
+clarified.
+
+The exact corrected image passes the complete ready compiler group, 90468
+integer-tier checks and the 2048-level recursive probe with all 1310720
+effects preserved. The probe emits a 7288-byte direct worker with one local;
+actual handler reentry and failed-worker fallback checks also pass. The fixed
+373-function original corpus validates and instantiates without installation:
+412686 raw / 119880 gzip / 95425 Brotli bytes, 8709 raw bytes above the preceding
+unsafe-cache output, and 2829 raw bytes below the original 415515-byte output.
+
+The newly reorganized soundness suite passes on the corrected image. Its
+implementation transport fixture initially failed on both preceding and
+corrected ready images: automatic native evaluation was enabled in a raw
+instance without a native-module installation service. The current fixture
+uses the matching compiler-free companion for the hostless evaluation probe.
+It still checks import-free raw instantiation of the supplied ready image,
+and adapter transport checks use that image and its ordinary policy. The
+original JavaScript-unavailable assertion is preserved. Matching WASI checks
+remain pending.
+
+The retained soundness suite now includes the non-tail recursion/effect case
+and actual condition-handler reentry, without inspecting local counts or body
+sizes. It reproduces Maximum call stack size exceeded on the preceding sealed
+image and passes on the corrected image with the ordinary async adapter and
+default stack. The current implementation suite also passes on the corrected
+ready and compiler-free images after the companion-fixture update.
+
+The fixed-input Game of Life rebuild completes all 7001 callbacks and validates:
+2449671 raw / 587984 gzip / 411559 Brotli bytes. It is 23017 raw bytes (0.95%)
+larger than the unsafe-cache 2426654-byte output, but still saves 361771 raw
+bytes (12.87%) against the original 2811442-byte image. Both fresh gameplay
+smokes pass with the corrected compiler and compiler-free runtimes. All 58
+modules remain; emitted bodies coalesce from 8051 to 8038. Bodies grow 24091
+bytes, while import sections shrink 1089 bytes and local declarations shrink
+253 bytes. Rematerialized lookups enable more existing literal/function fusion:
+33381 ordinary function-reference calls fall to nine while fused literal-function
+calls grow from 32956 to 66328. These are complete output measurements, not
+claims that every affected function became smaller. Full ACL2 compilation and
+world initialization remain outstanding.
+
+The full pre-correction ACL2 world run now reproduces the CI stack overflow,
+not just the synthetic regression: FDEFINITION, %%SEARCH-LIST, EV-REC and
+EV-REC-LST followed by deeply recursive TRANSLATE11. Captured emitted bodies
+have 78, 30 and 24 locals for TRANSLATE11, EV-REC and EV-REC-LST respectively;
+the historical uncached counterparts had 35, 20 and 20. The failed run used
+the immutable matched compiler/native-core pair and default Node stack, with
+no bounded initialization or stack-size flags. The corrected rebuild must
+still pass the full CI prover test, including initialized-image restore and
+proof/rejection/recovery checks, before this failure can be marked fixed.
+
+The corrected ACL2 native build completes all 21752 initializers from the same
+30776013-byte portable input, retaining the complete dynamic prover interface
+with STRIP NIL. Output is 18278585 raw / 4533288 gzip / 3213409 Brotli bytes,
+versus 17806828 / 4688748 / 3342628 before the stack correction. Safer code
+costs 471757 raw bytes (2.65%); compression saves 155460 gzip and 129219 Brotli
+bytes. Compilation overlapped other checks and supplies no speed comparison.
+
+Actual corrected ACL2 frames restore TRANSLATE11 to 35 locals, EV-REC to 20,
+and EV-REC-LST to 20, matching their historical uncached counts. Their emitted
+bodies are 71761, 4753 and 909 bytes. The matched compiler/core checksums pass
+the full prover test's input validation; world initialization is now running,
+followed by checkpoint restore and the ordinary proof checks. An initial test
+launch found missing host-adapter files in the frozen test snapshot before
+loading ACL2; the complete matched adapter directory was added and its imports
+verified. No production code or native output changed for that harness fix.
+
+The complete fresh-host ASDF suite passes all 250552 discovered checks with
+zero skips or failures. Expected negative compiler fixtures emit warnings but
+do not fail the request. The matching WASI image is built from the retained
+compiler payload without repeating bootstrap. The current implementation
+suite passes with corrected ready/WASI images, including Wasmtime green
+threads, idle input and shutdown with a background worker. The earlier
+apparently stalled host output was buffering; the suite was not interrupted.
+Full ACL2 world/checkpoint/proof validation remains the outstanding CI gate.

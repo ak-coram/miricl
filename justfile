@@ -38,11 +38,6 @@ size: build
 runtime-rewrite-progress output='build/runtime-rewrite-progress.json':
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/runtime-rewrite-progress.lisp {{ quote(output) }}
 
-# Compile the compiler once, then measure it compiling the original source.
-benchmark-self-compiler output='build/compiler-benchmark': build
-    {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'corpus') }} {{ quote(cold) }} --extract
-    {{ quote(node) }} scripts/benchmark-self-compiler.mjs {{ quote(output / 'native') }} {{ quote(precompiled) }} {{ quote(output / 'corpus/sources.lisp') }} --module
-
 # Build a self-contained browser REPL (miricl.html), including the interpreter.
 build-html:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-html.lisp {{ quote(build_dir) }}
@@ -92,6 +87,29 @@ build-sizes: build build-asdf build-html build-todo build-game-of-life build-max
 test-size-html:
     {{ quote(node) }} tests/size-html.mjs
 
+# Run the compact core checks against existing matching build artifacts.
+test: test-soundness test-implementation test-optimizations
+
+# Compile and load the bootstrap host system afresh with SBCL.
+test-host:
+    {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/check-host-compilation.lisp
+
+# Check compiler boundaries, serialization recovery and optimization soundness.
+test-soundness:
+    {{ quote(node) }} tests/soundness.mjs {{ quote(precompiled) }}
+
+# Check general optimization capabilities, including TCO on the Node target.
+test-optimizations:
+    {{ quote(node) }} tests/optimizations.mjs {{ quote(precompiled) }}
+
+# Check target-specific threading, object transport and virtual filesystems.
+test-implementation:
+    {{ quote(node) }} tests/implementation.mjs {{ quote(precompiled) }}
+
+# Include the native WASI stack-switching adapter in the platform checks.
+test-implementation-wasi:
+    {{ quote(node) }} tests/implementation.mjs {{ quote(precompiled) }} {{ quote(wasi_repl) }}
+
 # Start a local terminal REPL without network listeners.
 repl: build
     {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }}
@@ -130,142 +148,17 @@ dev-server-repl-bridge directory='.' : build
 dev-server-repl-bridge-wasi directory='.' : build
     {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y -S inherit-network=y --dir {{ quote(directory + '::.') }} {{ quote(wasi_repl) }} --dev-server --repl-bridge
 
-# Exercise all four browser-connected modes, including custom ports.
-test-repl-bridge: build
-    {{ quote(node) }} tests/repl-bridge.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
-    {{ quote(node) }} tests/repl-websocket.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
-    {{ quote(node) }} tests/dev-filesystem-server.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
-
-test-browser-dev: build build-asdf
-    {{ quote(node) }} tests/browser-dev-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }} {{ quote(build_dir / 'build/asdf/asdf.lisp') }}
-
 # Start the Common Lisp host REPL backed by Wasmtime.
 repl-host:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --eval '(require :asdf)' --eval '(asdf:load-asd (truename "miricl.asd"))' --eval '(ql:quickload :miricl)' --eval '(miricl:repl)' --quit
-
-# Run all Common Lisp project tests (FiveAM through ASDF).
-test:
-    {{ quote(sbcl) }} --noinform --non-interactive --load {{ quote(quicklisp) }} --eval '(require :asdf)' --eval '(asdf:load-asd (truename "miricl.asd"))' --eval '(ql:quickload :miricl/test)' --eval '(asdf:test-system :miricl)'
-
-# Use Roswell's SBCL and Quicklisp, including in Windows CI. Disable the
-# debugger before Roswell loads Quicklisp, so startup errors fail the job.
-[script('ros', '-L', 'sbcl-bin', 'run', '--', '--non-interactive', '--load')]
-test-sbcl-roswell:
-    (require :asdf)
-    (asdf:load-asd (truename "miricl.asd"))
-    (ql:quickload :miricl/test)
-    (asdf:test-system :miricl)
-
-# Run integration groups shared with CI; ANSI owns broad language conformance.
-test-js group='all': build build-asdf build-html build-todo
-    {{ quote(node) }} scripts/test-integration.mjs {{ quote(group) }} {{ quote(build_dir) }}
-
-# Check the shared green-thread scheduler in Node.
-test-threads: build
-    {{ quote(node) }} tests/threads.mjs {{ quote(interpreter) }}
-
-# Also check the native stack-switching adapter in Wasmtime.
-test-threads-wasi: build
-    {{ quote(node) }} tests/threads.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
-
-# Check the standalone module's object transport.
-test-standalone: build
-    {{ quote(node) }} tests/standalone.mjs {{ quote(interpreter) }}
-
-# Check text evaluation and both Node and WASI REPLs.
-test-text: build
-    {{ quote(node) }} --experimental-wasm-wasmfx tests/text-repl.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }}
-
-# Check the standalone HTML offline in headless Chromium (CHROMIUM overrides the executable).
-test-browser: build-html
-    {{ quote(node) }} tests/browser-repl.mjs {{ quote(build_dir / 'miricl.html') }}
 
 # Check TODO interactions, persistence, offline startup, and mobile layout.
 test-todo: build-todo
     {{ quote(node) }} tests/browser-todo.mjs {{ quote(build_dir / 'todo.html') }}
 
-# Compatibility name; test-text already exercises both terminal hosts.
-alias test-wasmtime := test-text
-
-# Check macros, source loading, and guest development facilities.
-test-development: build
-    {{ quote(node) }} tests/development.mjs {{ quote(interpreter) }}
-
-test-compilation: build
-    {{ quote(node) }} scripts/test-integration.mjs compiler {{ quote(build_dir) }}
-
-test-hash: build
-    {{ quote(node) }} tests/hash-structural.mjs {{ quote(interpreter) }}
-
 # Exercise both standalone production variants in Chromium, offline.
 test-game-of-life: build-game-of-life
     {{ quote(node) }} tests/browser-game-of-life.mjs game-of-life/build/index.html
-
-test-environment: build
-    {{ quote(node) }} tests/environment.mjs {{ quote(interpreter) }}
-
-test-character-case: build
-    {{ quote(node) }} tests/character-case.mjs {{ quote(interpreter) }}
-
-# Check guest reader labels, sharing, cycles, and nested read scopes.
-test-reader-labels: build
-    {{ quote(node) }} tests/reader-labels.mjs {{ quote(interpreter) }}
-
-test-reader-buffer: build
-    {{ quote(node) }} tests/reader-buffer.mjs {{ quote(interpreter) }}
-
-test-vector-reader: build
-    {{ quote(node) }} tests/vector-reader.mjs {{ quote(interpreter) }}
-
-test-array-reader: build
-    {{ quote(node) }} tests/array-reader.mjs {{ quote(interpreter) }}
-
-test-print-circle: build
-    {{ quote(node) }} tests/print-circle.mjs {{ quote(interpreter) }}
-
-test-output-buffer: build
-    {{ quote(node) }} tests/output-buffer.mjs {{ quote(interpreter) }}
-
-test-input-streams: build
-    {{ quote(node) }} tests/input-streams.mjs {{ quote(interpreter) }}
-
-# Check portable file streams and physical pathname semantics.
-test-filesystem: build
-    {{ quote(node) }} tests/filesystem.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/dev-filesystem.mjs {{ quote(interpreter) }}
-
-test-composite-streams: build
-    {{ quote(node) }} tests/composite-streams.mjs {{ quote(interpreter) }}
-
-test-pathnames: build
-    {{ quote(node) }} tests/pathnames.mjs {{ quote(interpreter) }}
-    {{ quote(node) }} tests/logical-pathnames.mjs {{ quote(interpreter) }}
-
-test-declarations: build
-    {{ quote(node) }} tests/declarations.mjs {{ quote(interpreter) }}
-
-test-time: build
-    {{ quote(node) }} tests/time.mjs {{ quote(interpreter) }}
-
-test-float-properties: build
-    {{ quote(node) }} tests/float-properties.mjs {{ quote(interpreter) }}
-
-test-derived-types: build
-    {{ quote(node) }} tests/derived-types.mjs {{ quote(interpreter) }}
-
-test-sequence-transformations: build
-    {{ quote(node) }} tests/sequence-transformations.mjs {{ quote(interpreter) }}
-
-test-random: build
-    {{ quote(node) }} tests/random.mjs {{ quote(interpreter) }}
-
-# Check optional JavaScript interop, callbacks, and typed bindings.
-test-javascript: build
-    {{ quote(node) }} tests/javascript.mjs {{ quote(interpreter) }}
-
-# Check bounded Lisp error traces and stack restoration across nonlocal exits.
-test-backtrace: build
-    {{ quote(node) }} tests/backtrace.mjs {{ quote(interpreter) }}
 
 # Check ANSI accounting and recovery from load errors and hanging tests.
 test-ansi-runner: build
@@ -371,12 +264,6 @@ test-fricas: build-fricas
 build-asdf: build
     {{ quote(node) }} scripts/build-asdf.mjs {{ quote(build_dir / 'build/asdf') }} {{ quote(interpreter) }} {{ quote(build_dir / 'miricl-asdf.wasm') }}
 
-# Check patch preparation, system loading, and production FASL bundles.
-test-asdf: build build-asdf
-    {{ quote(node) }} tests/asdf-build.mjs
-    {{ quote(node) }} tests/asdf.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/asdf/asdf.lisp') }}
-    {{ quote(node) }} tests/asdf-bundle.mjs {{ quote(interpreter) }} {{ quote(build_dir / 'build/asdf/asdf.lisp') }}
-
 # Run the default ANSI profile, or pass upstream paths and runner options.
 [positional-arguments]
 ansi *files: build
@@ -411,15 +298,3 @@ test-ansi-html:
 [positional-arguments]
 ansi-cons +files: build
     {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter_only) }} --helpers=cons "$@"
-
-# Run project tests, Node integration tests, and the default ANSI profile.
-check: test test-js ansi
-
-# Build ASDF FASL bundles through both terminal hosts, without a browser.
-test-bundle: build build-asdf
-    {{ quote(node) }} tests/bundle-command.mjs {{ quote(interpreter) }} {{ quote(wasi_repl) }} {{ quote(build_dir / 'miricl-asdf.wasm') }}
-
-# Compile and execute Lisp in Chromium using the built-in compiler.
-test-browser-compiler: build
-    {{ quote(node) }} tests/browser-compiler.mjs {{ quote(cold) }} {{ quote(build_dir / "miricl.js") }}
-    {{ quote(node) }} tests/browser-compiler.mjs {{ quote(precompiled) }} {{ quote(build_dir / "miricl.js") }} --precompiled

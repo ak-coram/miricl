@@ -11,7 +11,7 @@ permissions:
   contents: read
   actions: read
 
-# Build and conformance work lives in CI; Pages only publishes its static files.
+# Builds, ANSI conformance and application checks live in CI; Pages publishes their static files.
 concurrency:
   group: pages
   cancel-in-progress: false
