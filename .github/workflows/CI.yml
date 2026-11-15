@@ -21,6 +21,9 @@ jobs:
   host:
     name: Host compilation / ${{ matrix.lisp }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -51,7 +54,6 @@ jobs:
           c-api: 'true'
           node: 'false'
       - name: Compile and load the bootstrap system
-        shell: ${{ runner.os == 'Windows' && 'msys2 {0}' || 'bash' }}
         run: ros -L "$LISP" --load scripts/check-host-compilation.lisp
 
   runtime:

@@ -102,8 +102,14 @@ try {
     assert.equal(await js('!!document.querySelector("#history li:last-child .error")'), failed);
     return js('[...document.querySelectorAll("#history li:last-child pre:not(.input)")].map(node => node.textContent).join("\\n")');
   };
-  assert.match(await run('(+ 20 22)', 'lisp'), /42/u);
-  assert.match(await run('(values 20 22) (values) (values 42)', 'lisp'), /20\s+22\s+42/u);
+  assert.equal((await run('(+ 20 22)', 'lisp')).trim(), '42');
+  assert.equal((await run('(+ 20 22)', 'expression')).trim(), '42');
+  assert.equal((await run('(values 20 22) (values) (values 42)', 'lisp')).trim(), '20\n22\n42');
+  assert.equal((await run('(values 42 42)', 'lisp')).trim(), '42\n42',
+    'Distinct returned values are preserved even when their text matches.');
+  assert.equal((await run(`(progn (write-line "before-suspension") (sleep 0.02)
+    (write-line "after-suspension") (values))`, 'lisp')).trim(),
+    'before-suspension\nafter-suspension', 'Streamed and returned output each appear once.');
   await run('(defun browser-square (x) (* x x))', 'lisp');
   assert.match(await run('(browser-square 12)', 'lisp'), /144/u);
   await run('(defpackage :browser-lisp (:use :cl)) (in-package :browser-lisp)', 'lisp');

@@ -194,12 +194,12 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
         ((eq required 'cons) (and (consp type) (eq (car type) 'cons)))
         ((eq required 'symbol) (member type '(null keyword)))
         ((equal required '(not null))
-         (or (member type '(cons simple-vector vector array simple-array string simple-string
-                            character number integer rational real float complex function compiled-function
-                            hash-table package readtable keyword bit fixnum signed-byte unsigned-byte))
-             (and (consp type)
-                  (member (car type) '(cons simple-vector vector array simple-array string simple-string
-                                      integer signed-byte unsigned-byte mod function)))))
+         ;; Reuse the target's numeric/array families, including specialized
+         ;; vectors and numeric subtypes. The sequence bit alone is insufficient:
+         ;; NIL is a list. Opaque types do not supply any nominal facts.
+         (or (member type '(cons character function compiled-function hash-table package readtable keyword))
+             (and (consp type) (member (car type) '(cons function)))
+             (not (zerop (logand 33 (hir-nominal-type-mask type))))))
         ;; Shared nominal facts prove only unparameterized supertypes.
         ;; Shape/element constraints and integer bounds keep their own paths;
         ;; skip this domain altogether for those frequent compound queries.
@@ -526,7 +526,7 @@ A budget limits cost; stopping early only loses optimization opportunities."
          (name (first attributes)))
     ;; INLINE is the contract that permits relying on the definition selected
     ;; at compilation. Ordinary calls retain their unrestricted result types.
-    (when (and (eq (second attributes) 'inline) (member name '(char char-code code-char sbit row-major-aref length integer-length mod truncate cons consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor lognot ash)))
+    (when (and (eq (second attributes) 'inline) (member name '(char char-code code-char sbit row-major-aref length integer-length mod truncate cons list consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor lognot ash)))
       (multiple-value-bind (canonical found) (gethash name cache)
         (unless found
           (setq canonical
@@ -674,6 +674,8 @@ numbers, including bignums, and is never proved true by this rule."
               ((hir-type-proves-p type negative) 'null) (t 'boolean)))))
   (when (and (eq name 'cons) (= (length types) 2))
     (return-from hir-inline-result-type 'cons))
+  (when (eq name 'list)
+    (return-from hir-inline-result-type (if types 'cons 'null)))
   (when (and (member name '(1+ 1-)) (= (length types) 1))
     (return-from hir-inline-result-type
       (hir-inline-result-type (if (eq name '1+) '+ '-) (list (first types) '(integer 1 1)))))

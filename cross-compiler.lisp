@@ -101,6 +101,7 @@ as COMPILE-LAMBDA."
 
 (defparameter *kernel-source-files*
   '("runtime-kernel-library.lisp" "runtime-character-kernels.lisp"
+    "runtime-iteration-expansion-kernels.lisp"
     "runtime-list-mapping-kernels.lisp" "runtime-reader-kernels.lisp"
     "runtime-integer-field-kernels.lisp" "runtime-reduce-kernels.lisp"
     "runtime-sequence-edit-kernels.lisp" "runtime-count-kernels.lisp"
@@ -337,6 +338,8 @@ as COMPILE-LAMBDA."
                  ((string= target "native-eql-inline") (write-line "call $eql call $bool" out))
                  ((string= target "native-eql-test") (write-line "call $eql" out))
                  ((string= target "native-cons") (write-line "call $cons" out))
+                 ((string= target "native-cons2") (write-line "call $cons2" out))
+                 ((string= target "native-list2") (write-line "ref.null eq call $cons2" out))
                  ((string= target "native-function-reference") (write-line "call $kernel-function-reference" out))
                  ((string= target "native-environment") (write-line "ref.null eq" out))
                  ((string= target "native-check-apply-list") (write-line "call $check-apply-list" out))

@@ -529,3 +529,4 @@
 (setf *extension-symbols* (append *extension-symbols* '(float-bits bits-float)))
 (setf *runtime-symbols* (append *runtime-symbols* '(float-bits bits-float)))
 (setf *runtime-functions* (append *runtime-functions* '(float-bits bits-float)))
+(setf *runtime-symbols* (append *runtime-symbols* '(:index)))

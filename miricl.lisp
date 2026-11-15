@@ -132,14 +132,14 @@ DEBUG-NAMES retains native debugging names."
     ((not compiler)
       (unless *interpreter-only-wasm*
         (let ((raw (miricl-compiler::optimize-wasm-module
-                    (wt:wat-to-wasm (interpreter-wat :compiler nil)))))
+                    (wt:wat-to-wasm (runtime-prune-wat (interpreter-wat :compiler nil))))))
           (setf *interpreter-only-wasm* (list raw (wasm-without-debug-names raw)))))
       (copy-seq (if debug-names (first *interpreter-only-wasm*) (second *interpreter-only-wasm*))))
     (wasi
       (let* ((image (ensure-native-compiler-image))
              (*native-compiler-image* image)
              (bytes (miricl-compiler::optimize-wasm-module
-                      (wt:wat-to-wasm (interpreter-wat :wasi wasi)))))
+                      (wt:wat-to-wasm (runtime-prune-wat (interpreter-wat :wasi wasi))))))
         (if debug-names bytes (wasm-without-debug-names bytes))))
     (native-compiler
       (let ((image (ensure-native-compiler-image)))
@@ -148,14 +148,15 @@ DEBUG-NAMES retains native debugging names."
         (unless (eq image (car *interpreter-native-compiler-wasm*))
           (let* ((*native-compiler-image* image)
                  (raw (miricl-compiler::optimize-wasm-module
-                        (wt:wat-to-wasm (interpreter-wat)))))
+                        (wt:wat-to-wasm (runtime-prune-wat (interpreter-wat))))))
             (setf *interpreter-native-compiler-wasm*
               (list image raw (wasm-without-debug-names raw)))))
         (copy-seq (if debug-names (second *interpreter-native-compiler-wasm*)
                                 (third *interpreter-native-compiler-wasm*)))))
     (t (let* ((*native-compiler-image* nil)
              (raw (or *interpreter-wasm* (setf *interpreter-wasm*
-                    (miricl-compiler::optimize-wasm-module (wt:wat-to-wasm (interpreter-wat)))))))
+                    (miricl-compiler::optimize-wasm-module
+                      (wt:wat-to-wasm (runtime-prune-wat (interpreter-wat))))))))
         (copy-seq (if debug-names raw
           (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
             (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw)))))))))))

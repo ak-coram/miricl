@@ -23,6 +23,7 @@
                (:file "wasm-disassembly")
                (:file "wasm-module-optimizer")
                (:file "runtime-kernel-library")
+               (:file "runtime-iteration-expansion-kernels")
                (:file "runtime-character-kernels")
                (:file "runtime-list-mapping-kernels")
                (:file "runtime-reader-kernels")

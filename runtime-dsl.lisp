@@ -71,6 +71,130 @@ Keep source order within each index range to preserve compression locality."
           (stable-sort (copy-seq definitions) #'>
             :key (lambda (entry) (if (find entry short :test #'eq) 1 0))))))))
 
+(defun runtime-prune-wat (text)
+  "Remove unreferenced named functions from a generated core WAT module.
+Keep all non-function fields byte-for-byte. Every symbolic function name in
+those fields is a root; every matching name in a function is an edge. This
+deliberately overestimates references through identifier namespace collisions.
+Anonymous and imported definitions are retained; numeric references keep TEXT.
+This private host pass accepts trusted generated text, not arbitrary user WAT;
+the assembler still validates its output."
+  (check-type text string)
+  (let* ((size (length text)) (position 0) (depth 0) (frames nil)
+         (functions (make-hash-table :test 'equal)) (roots nil) (records nil)
+         (owner nil) (pending-reference nil) (module-seen nil))
+    (labels ((unsupported () (return-from runtime-prune-wat (values text nil nil)))
+             (spacep (char) (find char '(#\Space #\Tab #\Newline #\Return #\Page)))
+             (namedp (token) (and (> (length token) 1) (char= (char token 0) #\$)))
+             (reference (token)
+               (if owner (push token (svref owner 3)) (push token roots)))
+             (atom-token (token)
+               (let* ((frame (car frames)) (head (and frame (svref frame 0))))
+                 (unless frame (unsupported))
+                 (when pending-reference
+                   (unless (namedp token) (unsupported))
+                   (setf pending-reference nil))
+                 (cond
+                   ((null head)
+                    (setf (svref frame 0) token)
+                    (when (= depth 1)
+                      (unless (and (not module-seen) (string= token "module")) (unsupported))
+                      (setf module-seen t))
+                    (when (and (= depth 2) (string= token "func"))
+                      (setf owner (vector nil (svref frame 1) nil nil nil))
+                      (push owner records))
+                    (when (and owner (member token '("export" "import") :test #'string=))
+                      (setf (svref owner 4) t)))
+                   ((and (= depth 2) (string= head "func") (null (svref owner 0)))
+                    (if (namedp token)
+                        (progn
+                          (when (gethash token functions) (unsupported))
+                          (setf (svref owner 0) token (gethash token functions) owner))
+                        (setf (svref owner 0) :anonymous))))
+                 (when (namedp token) (reference token))
+                 (when (member token '("call" "return_call" "ref.func" "start") :test #'string=)
+                   (setf pending-reference t))
+                 ;; Function descriptors in explicit export fields and old
+                 ;; bare element lists may use numeric indices. Do not alter
+                 ;; indices without a complete binary relocation pass.
+                 (when (and (string= token "func") (cdr frames)
+                            (string= (or (svref (second frames) 0) "") "export"))
+                   (setf pending-reference t))
+                 (when (and (string= (or head "") "elem")
+                            (plusp (length token))
+                            (or (digit-char-p (char token 0)) (find (char token 0) "+-")))
+                   (unsupported)))))
+      (loop while (< position size) for char = (char text position) do
+        (cond
+          ((spacep char) (incf position))
+          ((and (char= char #\;) (< (1+ position) size)
+                (char= (char text (1+ position)) #\;))
+           (setf position (or (position #\Newline text :start (+ position 2)) size)))
+          ((and (char= char #\() (< (1+ position) size)
+                (char= (char text (1+ position)) #\;))
+           (incf position 2)
+           (let ((comments 1))
+             (loop while (plusp comments) do
+               (when (>= position size) (unsupported))
+               (cond
+                 ((and (< (1+ position) size) (char= (char text position) #\()
+                       (char= (char text (1+ position)) #\;))
+                  (incf comments) (incf position 2))
+                 ((and (< (1+ position) size) (char= (char text position) #\;)
+                       (char= (char text (1+ position)) #\)))
+                  (decf comments) (incf position 2))
+                 (t (incf position))))))
+          ((char= char #\")
+           (when pending-reference (unsupported))
+           (incf position)
+           (loop
+             (when (>= position size) (unsupported))
+             (let ((value (char text position)))
+               (incf position)
+               (cond ((char= value #\\) (incf position))
+                     ((char= value #\") (return))))))
+          ((char= char #\()
+           (when pending-reference (unsupported))
+           (when (and owner (= depth 2) (null (svref owner 0)))
+             (setf (svref owner 0) :anonymous))
+           (push (vector nil position) frames) (incf depth) (incf position))
+          ((char= char #\))
+           (when (or pending-reference (zerop depth)) (unsupported))
+           (when (and owner (= depth 2))
+             (unless (svref owner 0) (setf (svref owner 0) :anonymous))
+             (setf (svref owner 2) (1+ position) owner nil))
+           (pop frames) (decf depth) (incf position))
+          ((char= char #\;) (unsupported))
+          (t
+           (let ((start position))
+             (loop while (and (< position size)
+                              (not (spacep (char text position)))
+                              (not (find (char text position) "();\""))) do (incf position))
+             (when (= start position) (unsupported))
+             (atom-token (subseq text start position))))))
+      (when (or (not module-seen) (plusp depth) owner pending-reference) (unsupported))
+      (let ((live (make-hash-table :test 'equal)) (pending roots) (removed nil))
+        (dolist (record records)
+          (if (eq (svref record 0) :anonymous)
+              (dolist (callee (svref record 3)) (push callee pending))
+              (when (svref record 4) (push (svref record 0) pending))))
+        (loop while pending for name = (pop pending) do
+          (unless (gethash name live)
+            (setf (gethash name live) t)
+            (let ((function (gethash name functions)))
+              (when function (dolist (callee (svref function 3)) (push callee pending))))))
+        (dolist (record records)
+          (unless (or (eq (svref record 0) :anonymous)
+                      (gethash (svref record 0) live)) (push record removed)))
+        (values
+          (with-output-to-string (out)
+            (let ((start 0))
+              (dolist (record removed)
+                (write-string text out :start start :end (svref record 1))
+                (setf start (svref record 2)))
+              (write-string text out :start start)))
+          (mapcar (lambda (record) (svref record 0)) removed) t)))))
+
 (defmacro define-runtime-function (name parameters results &body body)
   "Define a host generator with the same $NAME as its guest function.
 PARAMETERS and :LOCALS contain (name type) pairs; RESULTS is a list of

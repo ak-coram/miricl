@@ -7,6 +7,10 @@
     (:object)
   #@(call $node (i32.const 7) (i32.const 0) (local.get $a) (local.get $b) (ref.null eq)))
 
+(define-runtime-function $cons2
+    (($a :nullable-object) ($b :nullable-object) ($tail :nullable-object)) (:object)
+  #@(call $cons (local.get $a) (call $cons (local.get $b) (local.get $tail))))
+
 (define-runtime-function $car
     (($x :nullable-object))
     (:nullable-object)
@@ -102,7 +106,7 @@
     (else (call $read-list-path (local.get $x) (call $int (local.get $code))))))
 
 (define-runtime-section list-runtime-wat ()
-  ($cons)
+  ($cons) ($cons2)
   ($car)
   ($cdr)
   ($length)

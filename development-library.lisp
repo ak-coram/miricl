@@ -659,47 +659,6 @@
 (defmacro prog1 (first &body body)
   (let ((temp (gensym))) (list* 'let (list (list temp first)) (append body (list temp)))))
 (defmacro prog2 (first second &body body) (list 'progn first (list* 'prog1 second body)))
-(defun %iteration-expansion (var source result body counting)
-  (let ((state (gensym)) (counter (gensym))
-        (declarations nil) (scan body) (tags nil) (forms nil))
-    (%%while (and (consp (car scan)) (eq (caar scan) 'declare))
-      (push (car scan) declarations) (setq scan (cdr scan)))
-    (setq declarations (reverse declarations))
-    (setq forms scan)
-    (%%while forms (unless (consp (car forms)) (setq tags t)) (setq forms (cdr forms)))
-    (when (eq counting :symbols)
-      (return-from %iteration-expansion
-        (list 'block nil
-          (cons 'let (cons (list (list state source) (list var nil))
-            (append declarations
-              (list (list* '%%symbol-iterate var state
-                      (if tags (list (cons 'tagbody scan)) scan))
-                    (list 'setq var nil) result)))))))
-    (let ((expansion (if (or declarations tags)
-      (list 'block nil
-        (list 'let (if counting (list (list state (list 'the 'integer source)) (list counter 0))
-                               (list (list state source)))
-          (list '%%while (if counting (list '< counter state) state)
-            (cons 'let (cons (list (list var (if counting counter (list 'car state))))
-              (append declarations (list (cons (if tags 'tagbody 'progn) scan)))))
-            (list 'setq (if counting counter state)
-              (list (if counting '1+ 'cdr) (if counting counter state))))
-          (if result (cons 'let (cons (list (list var (if counting counter nil)))
-                           (append declarations (list result)))) nil)))
-      (list 'block nil
-        (list 'let (list (list state (if counting (list 'the 'integer source) source))
-                        (list var (if counting 0 nil)))
-          (cons '%%while (append (list (if counting (list '< var state) state))
-            (unless counting (list (list 'setq var (list 'car state))))
-            (list (cons 'progn body) (list 'setq (if counting var state)
-              (list (if counting '1+ 'cdr) (if counting var state))))))
-          (if counting result (list 'progn (list 'setq var nil) result)))))))
-      (unless counting
-        ;; DOLIST's private traversal cursor always denotes a remaining list
-        ;; tail. Preserve that type through its assignments and macro temps.
-        (let ((binding (third expansion)))
-          (setf (cddr binding) (cons (list 'declare (list 'type 'list state)) (cddr binding)))))
-      expansion)))
 (defmacro dolist ((var list &optional result) &body body)
   (%iteration-expansion var list result body nil))
 (defmacro dotimes ((var count &optional result) &body body)
@@ -710,49 +669,22 @@
   (%iteration-expansion var (list '%%package-symbol-list package 1) result body :symbols))
 (defmacro do-all-symbols ((var &optional result) &body body)
   (%iteration-expansion var (list '%%package-symbol-list nil 2) result body :symbols))
-(defun %parallel-assignment (pairs)
-  (let ((bindings nil) (assignments nil))
-    (%%while pairs
-      (unless (cdr pairs) (error 'program-error))
-      (let ((var (car pairs)) (temp (gensym)))
-        (unless (symbolp var) (error 'program-error))
-        (push (list temp (cadr pairs)) bindings)
-        (push (list 'setq var temp) assignments))
-      (setq pairs (cddr pairs)))
-    (cons 'let (cons (reverse bindings) (append (reverse assignments) (list nil))))))
 (setf (macro-function 'psetq) #'%%psetq-expander)
-(defun %do-expansion (variables end-test results body sequential)
-  (let ((bindings nil) (steps nil) (declarations nil) (scan body) (tags nil) (forms nil))
-    (%%while variables
-      (let ((spec (car variables)))
-        (if (symbolp spec) (push (list spec nil) bindings)
-          (progn
-            (unless (and (consp spec) (<= 1 (length spec) 3) (symbolp (car spec))) (error 'program-error))
-            (push (list (car spec) (cadr spec)) bindings)
-            (when (cddr spec) (push (car spec) steps) (push (caddr spec) steps)))))
-      (setq variables (cdr variables)))
-    (%%while (and (consp (car scan)) (eq (caar scan) 'declare))
-      (push (car scan) declarations) (setq scan (cdr scan)))
-    (setq forms scan)
-    (%%while forms (unless (consp (car forms)) (setq tags t)) (setq forms (cdr forms)))
-    (setq steps (reverse steps))
-    (list 'block nil
-      (cons (if sequential 'let* 'let) (cons (reverse bindings)
-        (append (reverse declarations)
-          (list (list '%%while (list 'not end-test)
-                  (cons (if tags 'tagbody 'progn) scan)
-                  (if sequential (cons 'setq steps) (%parallel-assignment steps)))
-                (cons 'progn results))))))))
-(defmacro do (variables (end-test &rest results) &body body)
-  (%do-expansion variables end-test results body nil))
-(defmacro do* (variables (end-test &rest results) &body body)
-  (%do-expansion variables end-test results body t))
-(defun %prog-expansion (variables body sequential)
-  (let ((declarations nil))
-    (%%while (and (consp (car body)) (eq (caar body) 'declare))
-      (push (car body) declarations) (setq body (cdr body)))
-    (list 'block nil (cons (if sequential 'let* 'let)
-      (cons variables (append (reverse declarations) (list (cons 'tagbody body))))))))
+(define-condition %macro-structure-error (program-error simple-condition) ())
+(defparameter %iteration-body-error-controls
+  (vector "Iteration: expected a proper body list."
+          "Iteration: circular body list."
+          "Iteration: expected a nonconstant variable name."))
+(defparameter %iteration-expansion-error-controls
+  (vector "DO/DO*: expected a proper list."
+    "DO/DO*: circular list."
+    "DO/DO*: expected variable and termination clauses."
+    "DO/DO*: binding must contain one to three parts."
+    "DO/DO*: termination clause must contain an end test."
+    "DO/DO*: expected a nonconstant variable name.")
+  "Fixed diagnostics retain the offending input without printing it.")
+(setf (macro-function 'do) #'%%do-expander
+      (macro-function 'do*) #'%%do*-expander)
 (defmacro prog (variables &body body) (%prog-expansion variables body nil))
 (defmacro prog* (variables &body body) (%prog-expansion variables body t))
 (defmacro with-standard-io-syntax (&body forms)
@@ -979,16 +911,21 @@
 
 (setf (macro-function 'with-output-to-string) #'%%output-string-expander)
 
-(defmacro with-input-from-string ((var string &key (start 0) end (index nil indexp)) &body body)
-  (let ((declarations nil))
-    (%%while (and (consp (car body)) (eq (caar body) 'declare))
-      (push (car body) declarations) (setq body (cdr body)))
-    (cons 'let (cons (list (list var (list 'make-string-input-stream string start end)))
-      (append (reverse declarations)
-        (list (list 'unwind-protect
-          (if indexp (list 'multiple-value-prog1 (cons 'progn body)
-            (list 'setf index (list '%%input-position var))) (cons 'progn body))
-          (list 'close var))))))))
+(defparameter %input-string-error-controls
+  (vector "WITH-INPUT-FROM-STRING: form must be a proper list."
+    "WITH-INPUT-FROM-STRING: circular form list."
+    "WITH-INPUT-FROM-STRING: expected a stream variable and string form."
+    "WITH-INPUT-FROM-STRING: binding must be a proper list."
+    "WITH-INPUT-FROM-STRING: circular binding list."
+    "WITH-INPUT-FROM-STRING: expected a nonconstant variable name."
+    "WITH-INPUT-FROM-STRING: keyword is missing its value form."
+    "WITH-INPUT-FROM-STRING: keyword name must be a symbol."
+    "WITH-INPUT-FROM-STRING: unrecognized keyword without allowance."
+    ;; Carry this private identity without adding a public bootstrap symbol.
+    '%macro-structure-error)
+  "Fixed diagnostics; the first format argument retains the offending input.")
+
+(setf (macro-function 'with-input-from-string) #'%%input-string-expander)
 
 (defmacro define-symbol-macro (name expansion)
   (list '%%define-symbol-macro (list 'quote name) (list 'quote expansion)))

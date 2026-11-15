@@ -1944,3 +1944,729 @@ suite passes with corrected ready/WASI images, including Wasmtime green
 threads, idle input and shutdown with a background worker. The earlier
 apparently stalled host output was buffering; the suite was not interrupted.
 Full ACL2 world/checkpoint/proof validation remains the outstanding CI gate.
+
+The corrected ACL2 full prover test now passes. It completes logical-world
+initialization, saves and restores its initialized image, runs mini-proveall,
+admits the valid theorem, rejects the false theorem and recovers for subsequent
+arithmetic. Compiler/core checksums match the recorded corrected artifacts.
+The 89603978-byte initialized checkpoint restores in 4133 ms in this run;
+startup was 1400842 ms, recorded as a workload observation rather than a
+before/after speed comparison. Together with the matched pre-correction run's
+same CI overflow and the restored 35/20/20 application locals, this confirms
+the literal-cache stack correction on the actual failing application.
+
+*** Runtime migration experiments: stream expansion and FASL traversal
+
+Retention requires a measured interpreter benefit, with the default ready
+image below 1048576 raw bytes. Modest growth can buy a substantial speed win;
+keep raw, gzip and Brotli measurements separate. Reject substantial slowdowns.
+The frozen current-source baseline is 997126 / 376995 / 316563 bytes for the
+ready image, 628941 / 289841 / 254992 cold, and 504596 / 227027 / 200030
+compiler-free. Its full interpreted compiler bootstrap takes 219.847 seconds;
+the subsequent sealed native module/manifest phase takes 33.908 seconds on
+this host. These are observations, not a before/after speed comparison.
+
+The WITH-INPUT-FROM-STRING expander moves interpreted destructuring and form
+construction into a checked, sealed ordinary CL runtime worker. Both variants
+pass all 25 relevant upstream ANSI tests. Seven warmed samples with separate
+interpreted drivers, 1000 warmup iterations and 3000 measured iterations give:
+
+| Interpreter workload | Original ms | CL expander ms |
+|----------------------+-------------+----------------|
+| Plain MACROEXPAND | 282.47 | 5.26 |
+| Keyword/index/declaration expansion | 296.06 | 5.99 |
+| Evaluated reads | 310.34 | 23.67 |
+| Evaluated index update | 316.21 | 26.59 |
+
+The first implementation adds 1133 raw / 228 gzip / 54 Brotli bytes to the
+compiler-free image. It was initially rejected under a strict no-growth rule;
+the revised budget permits this measured speed/space tradeoff. Its actual
+Wasm worker is 1036 body bytes, versus 1600 bytes in SBCL DISASSEMBLE of the
+equivalent CL; these different instruction sets are not a speed comparison.
+
+Disassembly identifies a generic compiler opportunity: canonical INLINE LIST
+still performs repeated function lookups and CALL1/2/3/4 transport. Bounded
+direct construction can reuse the backend's existing cons-spine emitter,
+preserving operand evaluation, primary-value arguments, fresh identity and
+exactly one result. Ordinary and NOTINLINE calls must retain redefinition and
+multiple-value contracts. Direct construction handles all validated arities:
+large generic calls already emit the same argument spine before LIST copies
+it, so eliminating transport does not add code or analysis growth. CONS/NULL
+result facts use the target type rules and agree with lowering coverage; an
+unsupported dynamically dispatched fallback must not inherit canonical facts
+that justify unchecked access. With
+the stream expander restored, the combined compiler-free trial is 504372 /
+226978 / 199786 bytes, saving 224 raw bytes against the original baseline;
+cold is 628747 / 289831 / 255223. Full sealed integration remains pending.
+
+The FASL dependency traversal experiment retains the original WAT. The CL
+worker traverses the same record graph without new metadata callbacks, but
+adds 796 raw / 230 gzip bytes to the compiler-free image (Brotli saves 49).
+Repeated loading of a cyclic/shared graph takes 1367.85 versus 1357.05 ms per
+100 loads, median of seven warmed samples, with overlapping sample ranges:
+no meaningful end-to-end benefit is established. Both variants pass cyclic
+cons/array/instance sharing and corrupt-header, directory-offset and truncated
+payload rejection with subsequent successful reload. The main worker is 805
+body bytes, with separately retained 8/224/113-byte helpers; its 908-byte SBCL
+main body alone therefore cannot establish total output size.
+
+Useful next mechanisms from these listings, rather than application-specific
+rewrites, are compact canonical allocation/services for private hash tables,
+raw scalar transport through checked vector services, and removal of repeated
+structural checks only under validated ownership and mutation facts. Repeated
+boxed predicates and deeply nested control blocks also merit size experiments.
+Their benefits are hypotheses until matched code and workload measurements
+confirm them. Do not infer speed from a shorter individual worker.
+
+The persistent source compiler also confirms that bounded variable ASH still
+uses the shared general helper: both a nonnegative 24-bit value shifted by
+0..31 and a signed-64 value shifted by -63..0 emit a 192-byte module with a
+10-byte direct worker calling ASH-GENERAL-INLINE. INTEGER-LENGTH on a signed-64
+argument emits a 189-byte module with an 8-byte helper-calling worker. These
+are code-generation observations, not timings. Bounded variable shifts and
+scalar bit-measure lowering could help future character classifiers, but must
+preserve negative shifts, sign extension and arbitrary-precision fallback.
+Literal MEMBER already lowers groups of at most eight elements to ordered
+EQL comparisons; a compact bitset rule must preserve matching-tail identity
+in value contexts and the applicable definition/INLINE contracts.
+
+Detailed temporary sources, images and disassemblies are in
+=/tmp/miricl-implement-batch1/=, =/tmp/miricl-validation-batch1/=,
+=/tmp/miricl-implement-batch2/=, =/tmp/miricl-validation-batch2/= and
+=/tmp/miricl-parent-batch1/=. No benchmark infrastructure is added to the tree.
+
+The next reader experiment retains the native #A dimension loop and improves
+its existing CL ARRAY-CONTENTS-COUNT helper. Explicitly inlining VECTORP,
+LENGTH, EQ and NOT removes generic predicate/function transport: its actual
+worker shrinks from 270 to 260 bytes, while SBCL DISASSEMBLE remains 194 bytes.
+The standalone module grows from 568 to 598 bytes because of imports, but the
+complete compiler-free and cold images each shrink by 75 raw bytes. Their
+gzip savings are 3/4 bytes and Brotli savings 77/176 bytes, respectively.
+This is another reason to price complete emitted images rather than workers
+or standalone modules alone.
+
+Seven warmed samples of 4000 READ-FROM-STRING operations give list arrays
+54.33 to 50.67 ms, vector arrays 43.01 to 36.97 ms, and deeply nested arrays
+32.88 to 23.12 ms. Scalar and zero-dimension controls remain close (9.05 to
+8.89 and 10.22 to 8.72 ms). All 35 relevant upstream reader/suppression tests
+and seven malformed/cyclic/ragged/rank rejection-and-recovery checks pass.
+The separate CL dimension-loop experiment adds 658 raw bytes and, with the
+original helper, has smaller gains; it is not retained. A combined CL loop
+plus improved helper has not been measured, so these results do not isolate
+the two loop implementations under identical helper optimization. Listings
+and measurements are in =/tmp/miricl-implement-batch3/= and the batch-2
+validation directory above.
+
+The retained stream port also validates macro headers before unchecked CL
+access. An implementation condition is both PROGRAM-ERROR and SIMPLE-CONDITION:
+fixed reason text stays bounded and never invokes hostile PRINT-OBJECT, while
+the exact offending object remains inspectable in its format arguments.
+Focused tests cover cycles, dotted headers, keyword errors and subsequent-use
+recovery. Full ANSI exposed an initial bootstrap registration mistake that
+exported this implementation class from COMMON-LISP. The class now belongs to
+the private object library and reaches the worker through its explicit control
+vector, preserving target symbol identity without exporting it or adding a
+compiler dependency to the lightweight image. The two unchanged ANSI export/
+class-name tests detect the old mistake; neither expectation is weakened.
+
+*** Binaryen size audit and additional headroom
+
+Installed wasm-opt version 133 (=version_133-159-ga9141c8ccd=) was measured
+separately from implementation inspection of official Binaryen checkout
+=5d31e56e852dd5ae2ce1f772e532755c59509436= at =build/tools/binaryen-audit=.
+The baseline ready image above is the common input. Only its existing stable
+features are enabled; no closed-world, ignored-trap or fast-math assumptions.
+
+| Output | Raw | gzip | Brotli | Retained recursion |
+|--------+-----+------+--------+--------------------|
+| MIRICL baseline | 997126 | 376995 | 316563 | passes |
+| Binaryen no-pass roundtrip | 1013433 | 392618 | 328270 | passes |
+| Binaryen -Oz | 906889 | 357716 | 304577 | fails at depth 2048 |
+| -Oz without inline/similar-function passes | 915688 | 359442 | 305467 | fails at depth 2048 |
+
+The apparent 90237-byte raw saving is not deployable: the unchanged behavioral
+recursion regression fails. Disabling inlining alone, local CSE/cast passes,
+SSA/heap2local, or local subtyping/coalescing also fails. CALL1 has four locals
+in the original runtime, fifteen after no-pass roundtrip, and eleven after
+-Oz; CALL2 has seven/nineteen/fourteen. This supports retained-frame pressure
+as a diagnosis, without establishing the exact JIT cause. Outputs validate
+as Wasm and preserve the REPL bridge custom section, which is insufficient to
+establish runtime correctness. Do not weaken the regression or raise stack
+limits to accept smaller output.
+
+The most concrete additional mechanism is host-only reachability over the
+assembled runtime's named WAT functions. Existing NATIVE-PRUNE-MODULE handles
+emitted compiler/application modules; OPTIMIZE-WASM-MODULE optimizes runtime
+bodies while preserving every function index. Conservatively rooting exports,
+start, module-level REF.FUNC and every active/passive/declarative element
+finds 2035 of 2068 runtime functions reachable, matching Binaryen's 33 removed
+definitions. Their original bodies total 2282 bytes; final savings also depend
+on section entries and relocated index widths. Declarative elements retain
+552 compiler entries and must not be omitted. A host-only implementation can
+recover these bytes without adding optimizer code to the shipped image.
+
+The integrated host pass scans only trusted generated runtime WAT, preserving
+nonfunction text and all table slots verbatim. Exports, imports, start and all
+symbolic references outside functions root reachability; anonymous functions
+are retained. Strings and nested comments are lexed separately. Numeric
+function references or uncertain syntax retain the original text rather than
+guessing relocation. Assembly remains responsible for checking emitted Wasm.
+The exact checkpoint-1 WAT reassembles byte-identically; removing its 31 dead
+named functions changes ready output 995766 / 376676 / 316203 to 993422 /
+375750 / 315658 bytes, saving 2344 raw / 926 gzip / 545 Brotli. Unlike broad
+-Oz, the prototype passes retained recursion, Node snapshots, transport,
+filesystem and thread checks. Final matching WASI integration is still a
+separate gate. Focused host composition tests cover roots, imports, literal/
+comment boundaries and conservative fallbacks in the ordinary host check.
+
+The subsequent all-arity LIST/private-condition/reachability checkpoint emits
+a 502999 / 226507 / 199360-byte compiler-free image, 1597 raw bytes below the
+original baseline, and 627367 / 289355 / 254605 cold. Full native/ANSI and
+application checkpoint results remain pending at this point.
+
+Further priorities from implementation inspection are stack-aware common-tail
+folding and block results (CodeFolding/SimplifyLocals), profitable constant or
+callee parameterization beyond exact body sharing (MergeSimilarFunctions),
+wider modular integer simplification (OptimizeInstructions), and reuse of
+existing type/cast facts without retained caches (OptimizeCasts). Isolated
+code-folding/similar-function passes save 1444/1493 bytes against Binaryen's
+own roundtrip, not necessarily against MIRICL's original bytes. Price the new
+compiler logic, helpers and frame effects against complete output before
+implementing these mechanisms.
+
+Binaryen's no-pass roundtrip introduces 4002 scratch locals and 16346 body
+bytes. Most isolated SimplifyLocals savings undo that inflation; they are not
+evidence of a missing 15 KiB MIRICL optimization. Likewise, do not copy the
+tree-IR rule removing final BR 0 directly into linear bytecode: a branch may
+discard extra stack operands. The 25 such sites in this image need stack-height
+proofs. Final non-loop BR_IF 0 to DROP has a different safety argument, but no
+opportunities were found here. Effects, traps, exception edges, multiple values
+and scheduler polls remain requirements for any new control-flow rule.
+
+Primary implementation references are Binaryen's
+[[https://github.com/WebAssembly/binaryen/blob/main/src/passes/RemoveUnusedModuleElements.cpp][RemoveUnusedModuleElements]],
+[[https://github.com/WebAssembly/binaryen/blob/main/src/passes/CodeFolding.cpp][CodeFolding]],
+[[https://github.com/WebAssembly/binaryen/blob/main/src/passes/SimplifyLocals.cpp][SimplifyLocals]],
+[[https://github.com/WebAssembly/binaryen/blob/main/src/passes/MergeSimilarFunctions.cpp][MergeSimilarFunctions]],
+[[https://github.com/WebAssembly/binaryen/blob/main/src/passes/OptimizeInstructions.cpp][OptimizeInstructions]],
+[[https://github.com/WebAssembly/binaryen/blob/main/src/passes/OptimizeCasts.cpp][OptimizeCasts]] and
+[[https://github.com/WebAssembly/binaryen/blob/main/src/passes/RemoveUnusedBrs.cpp][RemoveUnusedBrs]].
+Exact commands, ablations, listings and baseline distinctions are in
+=/tmp/miricl-binaryen-size-audit/findings.org= and its companion JSON files.
+
+Checkpoint scope: these corrected artifacts and approvals use backend SHA256
+=d554298ef6e7d55bcafebaec18f979276adbf9f039b8d3119943e3e416023903=.
+Concurrent work subsequently added a canonical small-LIST specialization and
+compiler source-policy changes in the shared working tree. That newer work
+is left untouched and is not covered by this checkpoint's build, sizes or
+validation. It needs its own measurements and review before inheriting these
+results.
+
+With all local build/test jobs complete, the final warmed performance check
+compares the accepted pre-correction batch with this corrected checkpoint.
+Each Game of Life seed/variant has a separate VM and native driver, three
+full-workload warmups and five alternating samples over 100 fresh worlds and
+ten generations. Blinker median is 2582.13 to 2572.58 ms; R-pentomino is
+6935.75 to 6933.50 ms, with similarly flat CPU times. These small differences
+show no observed regression in the sampled workloads, rather than an
+application-wide speedup claim.
+
+The native compiler microbenchmark uses three fresh-VM rounds per variant,
+warms each case and validates stable output within each variant. Bootstrap and
+loading are excluded. Median frontend plus emission batch times are:
+
+| Case             | Before ms | Corrected ms |
+|------------------+-----------+--------------|
+| Small            |       913 |          898 |
+| Wide branch      |       900 |          917 |
+| Wide handler     |       729 |          753 |
+| Wide temporaries |       922 |          915 |
+| Loop             |       767 |          755 |
+
+Changes range from -1.64% to +3.29%; emission-only wide-handler cost increases
+581 to 612 ms. The size/stack correction therefore has a modest compilation
+cost in some cases, with no measured application-runtime penalty in the two
+sampled seeds. These measurements use the frozen d554 backend, independently
+of the newer LIST experiment.
+
+Fresh CI result artifacts for run 43698698360 use the same d554 backend but a
+different complete runtime build (SHA256 365f59a875605efb2e0521b0ba4ac899d676dec32081583b4434b202bbbf2b40).
+Record them as absolute CI measurements rather than matched-input gains:
+
+| CI artifact                 | Raw bytes | Gzip bytes | Brotli bytes |
+|-----------------------------+-----------+------------+--------------|
+| Default compiler/runtime    |    997650 |     382973 |       317086 |
+| FriCAS native               |   3892241 |    1112474 |       751352 |
+| Maxima native               |   8367577 |    2241312 |      1544908 |
+| Coalton native              |  10498385 |    2933245 |            - |
+| Coalton initialized image   |  36855402 |   20993045 |            - |
+
+CI's default image has 50926 raw bytes of remaining budget. FriCAS and Maxima
+retain 13303 and 27126 initializers respectively; all three native reports
+specify complete interactive interfaces and STRIP NIL. Coalton core gzip is
+derived from its reported runtime-plus-core gzip total minus runtime gzip.
+The initialized image includes runtime/state and is tracked separately from
+the native bundle. CI input hashes differ from the fixed local benchmarks,
+so no before/after percentage is inferred from this table.
+
+*** Reviewed checkpoint: all CI jobs pass
+
+[[https://github.com/ak-coram/miricl/actions/runs/43698698360][CI run 43698698360]]
+for commit =58af88ed5e494f73599fca40fea702e5ca76559f= completes successfully,
+including both ANSI suites, core checks, Game of Life, Maxima, McCLIM, FriCAS,
+Coalton, ACL2's restored prover in Chromium, and final site/size-report
+assembly. This was verified on 2026-11-15 at 10:47 UTC. The known compiler,
+runtime, host and stack-overflow failures are fixed and independently reviewed.
+
+Optimization work stops at this checkpoint per the user's request. Approval
+and measurements cover backend =d554298e...= and its recorded artifacts;
+the concurrent newer LIST experiment remains outside this validation.
+
+*** Subsequent runtime-migration checkpoint: locally validated
+
+The newer LIST/runtime work now has its own frozen build and local validation;
+it does not inherit the preceding CI approval. Backend SHA256 is
+=04e234027d9708316a6a8c6f4aadc68194b51079ed7ccec52f597f8aab9058ff=;
+ready-image SHA256 is
+=85ded7053b07e0e5e72cdc2296bf3a049730a8aadfaecabb06d6871aa9a2e617=.
+It retains the fast CL input-stream expander with bounded private diagnostics,
+canonical LIST construction at all validated arities, the existing array
+helper's predicate inlining, and host-only runtime WAT reachability. The FASL
+dependency and new #A traversal experiments remain uninstalled.
+
+| Image | Raw | gzip | Brotli | Raw change from frozen baseline |
+|-------+-----+------+--------+---------------------------------|
+| Ready compiler | 993380 | 375755 | 315340 | -3746 |
+| Compiler-free | 502999 | 226507 | 199360 | -1597 |
+| Cold compiler | 627367 | 289355 | 254605 | -1574 |
+| WASI REPL | 1992518 | 752062 | 394715 | not compared |
+
+The default ready image has 55196 raw bytes below the 1048576-byte budget.
+Both full ANSI modes pass all 21954 discovered tests with zero failures,
+timeouts or load errors, using the same recorded seed and deadlines. Host
+compilation/reachability, soundness, retained-recursion, Node integration and
+matching Wasmtime/WASI thread checks pass. The private-condition change fixes
+the preceding trial's two export/class-name failures without weakening tests.
+
+The final seven-sample warmed stream experiment, again with 1000 warmup and
+3000 measured iterations per separate driver, gives 276.33 to 4.43 ms for
+MACROEXPAND, 288.77 to 4.89 for keyword/index/declaration expansion, 309.36 to
+21.34 for evaluated reads, and 304.55 to 23.32 for index updates. This confirms
+the substantial focused interpreter benefit after diagnostics and final
+integration; it is not a whole-interpreter speedup claim.
+
+An identical original compiler-source corpus and explicit policy are compiled
+by the two ready compilers, validating and instantiating the output without
+installing definitions. This particular frozen corpus has 233 definitions
+and source SHA256 =c51b9c2bd780c397f7c233543eaef725c5d63a4997db7ad2f4e51b3df51033ad=;
+it is distinct from earlier 373-function measurements. Output decreases from
+237705 / 71133 / 57420 to 235791 / 70427 / 56992 bytes. Three post-warmup
+samples have median wall times 21108 to 20363 ms and CPU times 21605 to 21010
+ms. Samples trend and overlap other work, so the small timing difference is
+exploratory, not a robust native-throughput gain. Both source and policy hashes
+match, and installed compiler function identities remain unchanged.
+
+The application checkpoint rebuilds from identical frozen portable inputs and
+retains the complete dynamic Maxima/FriCAS interfaces with STRIP NIL. Maxima's
+obsolete input was rebuilt from source rather than adapted. All paired fresh
+load/calculation checks pass. Generated application bundles are byte-identical
+between compilers, so this batch makes no application-code speed/size claim:
+
+| Application | Initializers | Raw | gzip | Brotli |
+|-------------+--------------+-----+------+--------|
+| Game of Life | 7001 | 2449671 | 587984 | 411559 |
+| Maxima | 27126 | 8367577 | 2222053 | 1544375 |
+| FriCAS | 13303 | 3885714 | 1099494 | 748506 |
+
+Full bootstrap remains interpreter-to-native: the final observed interpreted
+stage is 218.463 seconds, followed by 34.319 seconds for the sealed module and
+manifest. Application builds and other checks overlapped, so these and the
+application build times are workload observations, not fair speed comparisons.
+Detailed reports and frozen sources are in =/tmp/miricl-parent-checkpoint2/=
+and =/tmp/miricl-checkpoint-report/aggregate.json=. One-off measurement tooling
+remains outside the repository.
+
+*** Runtime migration: DO expansion and compact bootstrap subforms
+
+The source-matched starting point differs from the preceding validated image:
+it includes a PROG port whose newly appended primitive was captured by an
+open-ended package dispatcher. The baseline full ANSI initialization exposed
+this with =(MACROEXPAND-1 '(PROG NIL))=. Package, JavaScript and standard CLOS
+dispatch now use bounded family intervals. That correction adds nine raw
+bytes per image and restores PROG/PROG*. Original and corrected baseline
+artifacts are kept separately; no ANSI expectation is weakened.
+
+DO/DO* construction is now ordinary CL in
+=runtime-iteration-expansion-kernels.lisp=. Its checked native boundary
+validates complete form, binding and termination spines before the SAFETY 0
+worker, retaining the offending object in bounded PROGRAM-ERROR diagnostics.
+The worker preserves parallel/sequential initialization and stepping,
+declarations, tags, termination results and multiple values. The old
+interpreted expansion bodies are removed. The private loop operator is
+supplied through LOOP-LIBRARY-REFERENCE rather than a host/private namesake.
+Persistent host and source-Wasm REPL checks exercised actual emission and
+explicit COMPILE-NATIVE. CL DISASSEMBLE gives a 2359-byte SBCL main body;
+the actual target worker is 1039 bytes in a 1353-byte standalone module.
+These are different machine representations, not a cross-platform speed claim.
+
+The module/block audit finds the existing path already active. In the
+starting interpreter, 193 kernels reduce to one worker each and two retained
+private-helper groups use sealed, closure-free direct calls and assembly-wide
+helper sharing. Normalized single-worker and runtime-body comparisons do not
+justify adding another exact-body merger. The new DO helper is explicitly
+inlined within that existing closed-module path; public dynamic bindings keep
+their ordinary redefinition contracts.
+
+Bootstrap packing now assigns postorder IDs to completed, profitable raw
+subtrees of at most 128 encoded bytes. A reference re-decodes its target into
+fresh conses and strings. Eligible targets contain no subform reference and
+introduce no string-table entries; replay suppresses dictionary insertion.
+The decoder checks completed IDs, bounds total literal work, rejects nested
+replay, and resets temporary tables between streams. The temporary dictionary
+capacity in the size-only experiment is 128 KiB cold and 64 KiB compiler-free;
+references are cleared before library evaluation and storage is reclaimed by
+GC. Only the current private bootstrap format
+is retained; public FASL/native-module formats are unchanged.
+
+The host check now exercises the production serializer/decoder through a
+temporary image. It covers fresh objects, string-table stability, 32-element
+and longer/dotted lists, the ID 127/128 width transition, invalid/unfinished
+targets, reference-containing parents, overflow, truncated strings, exhausted
+work, rejection and recovery. Test exports are absent from distributed images.
+Absolute offsets and backward distances were measured and rejected in favor
+of completed IDs. Raw space improves while gzip/Brotli increase; report both.
+
+The non-NIL proof rule reuses HIR-NOMINAL-TYPE-MASK's numeric/array bits rather
+than duplicating their type inventories. This adds proofs for bignums, ratios,
+specialized bit vectors and base strings while remaining conservative for
+LIST, SYMBOL, SEQUENCE, unions containing NULL and opaque types. No DEFTYPE or
+SATISFIES evaluation is introduced. Source-compiler probes shrink a canonical
+NULL branch from 203 module / 36 worker bytes to 182 / 15; effect and multiple
+value checks pass. The semantic reference is the HyperSpec's
+[[https://www.lispworks.com/documentation/HyperSpec/Body/t_null.htm][NULL type]] and the target's existing numeric/array rules.
+
+A measured followup is applying the shared truth proof to direct conditional
+tests: at SAFETY 0, a BIT-VECTOR =(IF X ...)= still costs 202 module / 35 worker
+bytes, while equivalent canonical INLINE NULL costs 182 / 15. NATIVE-PROVEN-TRUTH
+and NATIVE-TYPE-ROOTS would need a bounded fact path respecting declarations,
+invalidation, effects, safety and multiple-value joins. This remains a
+candidate, not an installed optimization; price compiler cost and complete
+outputs before extending it.
+
+A fresh decoded-output audit rejects adding exact empty-block cleanup for
+now. There are no =(BLOCK; BR 0; END)= void sequences in the complete ready
+image, the fixed original compiler corpus, or the previous validated Maxima
+and FriCAS bundles. The ready scan includes its linked compiler functions.
+The typed NULL example alone would save five bytes. General final BR 0 sites
+contain real computations and still require stack-height proofs; do not remove
+them by analogy with the empty example. Findings and decoders remain in
+=/tmp/miricl-next-size-audit/=. No new shipped optimizer is added for zero
+measured deployment benefit.
+
+The frozen integration source has root Lisp/ASD aggregate SHA256
+=bfb7587afdde9e13ef37262bfab2f68d4e1359241ecdee5dd913107a5f6a6a3a=.
+Ready-image SHA256 is
+=265f2253a7137dd0fb8fab04f601c6afed87cd6503489b1aabd9f7ad548a3aaf=.
+The following changes use a fresh source-matched baseline with the dispatch
+correction above, rather than inheriting older checkpoint measurements:
+
+| Image | Raw | gzip | Brotli | Raw change |
+|-------+-----+------+--------+------------|
+| Ready compiler | 984466 | 378322 | 318367 | -9205 |
+| Compiler-free | 493283 | 229286 | 203004 | -10006 |
+| Cold compiler | 605542 | 293279 | 260017 | -22105 |
+| Matching WASI REPL | 1974691 | 756655 | 397724 | not compared |
+
+The ready image leaves 64110 raw bytes below 1 MiB, versus 54905 before this
+batch. It costs 2466 more gzip and 2805 more Brotli bytes. Compiler-free
+download sizes grow by 2694/3483 bytes, cold by 3823/5435. This deliberately
+buys raw compiler space at a modest download-size cost; compression does not
+replace the raw budget. Size-only ablations, separately from the DO/proof
+changes, are in =/tmp/miricl-size-batch1/=.
+
+Both full ANSI modes pass every discovered test: 21954 each, with zero
+failures, blocks, timeouts or load errors, using the same seed and deadlines
+as the baseline. Repository report validation confirms the compiled mode
+actually compiled each test. Fresh SBCL host compilation, production codec,
+soundness, retained recursion, JavaScript transport/filesystems/threads and
+matching Wasmtime/WASI checks pass. The Node child launcher could not spawn
+Wasmtime in this tool environment; direct Wasmtime execution runs every
+unchanged shared thread assertion plus idle-input/shutdown checks successfully.
+That setup failure is recorded separately, without weakening a requirement or
+claiming the failed launcher command passed.
+
+The full bootstrap still runs the compiler interpreted inside Wasm before
+native compilation: 218.207 seconds followed by 33.654 seconds for its sealed
+module/manifest. Other checks overlapped, so these are observations rather
+than a controlled throughput comparison. Matching artifacts, frozen sources,
+hashes and full reports are in =/tmp/miricl-migration-batch1-checkpoint/=.
+
+The application checkpoint recompiles identical current-format portable inputs
+with both corrected-baseline and final native compilers. Maxima and FriCAS
+preserve the complete dynamic interfaces with STRIP NIL; every paired build
+and fresh-session calculation/validation passes. Their emitted native bundles
+are byte-identical between compilers, so this batch claims no application-code
+size or runtime gain from these rebuilds:
+
+| Application | Initializers | Raw | gzip | Brotli |
+|-------------+--------------+-----+------+--------|
+| Maxima | 27126 | 8367577 | 2222053 | 1544375 |
+| FriCAS | 13303 | 3885714 | 1099494 | 748506 |
+
+Maxima's current portable input is the rebuilt 22318666-byte file retained
+from the preceding checkpoint, not the obsolete input at its usual build
+path. Both compiler variants consume its same hash. Build/validation timings
+overlap other work and include lazy algebra compilation; they support
+correctness and complete interfaces, not a native-throughput speed claim.
+Game of Life's current-format 2449671-byte native bundle is reused for
+fresh-runtime correctness and measurement, without an application rebuild or
+code-size claim. Existing local ACL2/Coalton native bundles use an obsolete
+import namespace and are not adapted or counted as current validation; full
+rebuilds of those applications are deferred to another periodic checkpoint.
+
+Final measurements run serially after the application jobs and independent
+compression audit finish. Each DO case uses its own VM/native driver and
+10000 warmup iterations of that exact case before collecting samples. Earlier
+short-warmup and overlapped observations remain separate from these medians:
+
+| Case | Measured iterations | Before ms | After ms | Speedup |
+|------+---------------------+-----------+----------+---------|
+| DO simple MACROEXPAND | 3000 | 89.956 | 9.128 | 9.9x |
+| DO declarations/tags MACROEXPAND | 1000 | 120.865 | 10.789 | 11.2x |
+| DO small-form EVAL | 3000 | 104.391 | 27.407 | 3.8x |
+| DO* simple MACROEXPAND | 3000 | 58.811 | 3.860 | 15.2x |
+| DO* declarations/tags MACROEXPAND | 1000 | 74.137 | 2.749 | 27.0x |
+| DO* small-form EVAL | 3000 | 71.686 | 16.875 | 4.2x |
+
+These measure focused interpreter macro expansion and repeated evaluation,
+not a whole-interpreter or application speedup. Final ready startup is
+159.349 to 159.107 ms, compiler-free 118.279 to 119.031, and cold 150.293 to
+149.238: effectively flat wall times. Compiler-free startup CPU increases
+157.370 to 161.976 ms; the other two CPU medians decrease. The isolated older
+size-only startup experiment overlapped work and is not substituted for these
+final matched observations.
+
+The fixed original 233-definition compiler corpus has source SHA256
+=c51b9c2bd780c397f7c233543eaef725c5d63a4997db7ad2f4e51b3df51033ad=.
+Source and explicit policy hashes match across compilers, output validates and
+instantiates without installing another compiler generation, and installed
+compiler function identities remain unchanged. Output is byte-identical at
+235791 / 70427 / 56992 bytes. Three post-warmup samples give median wall
+19735.507 to 19832.499 ms and CPU 20396.582 to 20497.246, about +0.5% with
+overlapping samples: no native-throughput gain is established.
+
+Precompiled-engine typed probes confirm the non-NIL optimization, including
+module validation, instantiation and execution: BIGNUM, RATIO, BIT-VECTOR,
+sized SIMPLE-BIT-VECTOR and BASE-STRING each shrink 203/36 to 182/15 complete
+module/worker bytes. =(SIMPLE-ARRAY BIT (8))= was already 182/15 on baseline
+and remains a control rather than a new gain.
+
+Game of Life uses separate warmed drivers, 20 fresh worlds and ten generations
+per sample. Blinker wall median is 517.862 to 534.772 ms (+3.3%), CPU 516.999
+to 534.084; R-pentomino is 1416.393 to 1424.917 ms (+0.6%), CPU 1414.976 to
+1417.118 (+0.15%). These sampled minor regressions accompany the raw-space
+gain; no application runtime speedup is claimed. Compact canonical results
+are in =/tmp/miricl-migration-batch1-checkpoint/summary.json=, with full input,
+artifact, policy, sample and validation evidence in =report.json=.
+
+*** Runtime migration: iteration construction, truth proofs and shared list spines
+
+The DOLIST, DOTIMES and package-symbol iteration constructor now runs as
+ordinary Common Lisp in a sealed runtime kernel. Its four-argument worker
+receives a checked body spine, mode and the target's private operators in an
+options vector. The public primitive rejects dotted/circular bodies and
+constant or invalid variables before the SAFETY 0 worker. Diagnostics retain
+the offending datum without recursively printing it. Nested source forms are
+retained rather than traversed. Declaration order, tags, gensym order, result
+bindings and the private DOLIST cursor declaration are preserved.
+
+The initial WAT declaration-scanner port was rejected because its compiled CL
+worker increased code size without a convincing deployment benefit. The
+iteration constructor instead removes a repeatedly interpreted constructor.
+Sixty-three host comparisons cover list/count/symbol modes, declarations,
+tags and result forms, modulo gensym identities. Actual DEBUG 0 Wasm worker
+code and equivalent SBCL DISASSEMBLE listings were inspected through persistent
+REPLs; byte counts across the two instruction sets are structural evidence,
+not a speed comparison. The final native-module and application measurements
+below establish the deployed cost.
+
+Direct conditional tests now reuse HIR-TYPE-PROVES-P's bounded NULL/non-NIL
+facts under the branch consumer's SAFETY 0 contract. HIR-TERMINATE records the
+lexical safety policy, just as ordinary instructions do; previously every
+terminator defaulted to SAFETY 1. Native type roots include these branch
+operands. The same truth query supplies condition emission and value-count
+join reachability, leaving operand effects in their original blocks. It does
+not expand DEFTYPE or execute SATISFIES. Unknown types and exhausted reasoning
+keep the runtime test. Higher-safety consumers do not use unchecked type
+assertions from lower-safety producers.
+
+Focused checks cover effects, nonlocal exits, zero/multiple values, mutations,
+private snapshots, captures, exported/escaping functions, safety scopes and
+opaque types. The direct BIT-VECTOR IF probe shrinks from 202 module / 35
+worker bytes to 186 / 19; NULL shrinks to 182 / 15. Nullable LIST, SYMBOL,
+SEQUENCE and =(OR NULL BIT-VECTOR)= retain their tests. The 4-byte residual
+scope in the non-NIL probe does not justify another scope-cleanup pass.
+The reference semantics are [[https://www.lispworks.com/documentation/HyperSpec/Body/s_if.htm][IF]] and the target's existing type rules.
+
+The expanded roots add 6310 facts on the fixed original 233-definition corpus.
+Six warmed isolated native-solver samples show 1060.20 to 1235.68 ms wall
+(+175.48 ms), roughly 0.9% of the previous complete compilation time. This is
+an inference-cost experiment, not a whole-compiler throughput measurement;
+serial final compiler samples below price the complete change.
+
+WASM-LIST now shares tail-first construction across argument packets, multiple
+value groups and canonical inline LIST. The initial pair uses NATIVE-LIST2;
+remaining pairs use NATIVE-CONS2, and an odd remaining element uses CONS.
+Operands retain their original evaluation order, cells remain fresh and
+inner cells are allocated before outer cells. The host kernel linker reuses
+one typed CONS2 helper. The externref wrappers are a small representation
+substrate; no user-facing primitive or redefinition contract is changed.
+The semantic references are [[https://www.lispworks.com/documentation/HyperSpec/Body/f_cons.htm][CONS]] and [[https://www.lispworks.com/documentation/HyperSpec/Body/f_list_.htm][LIST]].
+
+A first size audit counted all adjacent CONS pairs, a superset of WASM-LIST
+sites. Existing CELL folding already removes the innermost NIL/CONS, so that
+gross count overstates savings from CONS2 alone. A preserved CONS2-only build
+and the final LIST2/CONS2 build price the interaction. Module imports,
+helper bodies, type signatures and compressed sizes are included in the final
+measurements, rather than extrapolating pair counts into deployment claims.
+
+The proof-module audit also rejects another tempting size change. Grouping
+four truth helpers saves 1199 complete module bytes but only 79 body bytes;
+five integer helpers save 1478 module bytes while their bodies grow 12.
+The production payload already recompiles the entire compiler as one sealed
+module, so those transient bootstrap overhead savings would not carry into
+the ready image. No bootstrap group-list change is installed. Future whole
+module selection for shared list helpers may avoid import costs in tiny
+modules, but needs to earn its own planner/image cost.
+
+The final frozen root Lisp/ASD source aggregate SHA256 is
+=70c9c7f62d5a16f443ca5d357c01850ee19166d38bc05836972685394b7ed826=. The exact preceding checkpoint supplies the
+baseline; stale root images were excluded. Complete matching build products
+and size/section/hash reports are retained in =/tmp/miricl-migration-batch2-validation/=.
+
+| Image | Raw | gzip | Brotli | Raw change | gzip change | Brotli change |
+|-------+-----+------+--------+------------+-------------+---------------|
+| miricl-cold.wasm | 606696 | 293755 | 260463 | +1154 | +476 | +446 |
+| miricl-interpreter.wasm | 494272 | 229729 | 203038 | +989 | +443 | +34 |
+| miricl.wasm | 980231 | 378464 | 318476 | -4235 | +142 | +109 |
+| miricl-repl.wasm | 1966211 | 757089 | 356208 | -8480 | +434 | -41516 |
+
+The ready image leaves 68345 raw bytes below 1 MiB. The compiler-free
+image grows 989 raw bytes and cold grows 1154; these modest base-image costs
+accompany the compiled constructor and proof support. Ready download sizes
+grow 142 gzip / 109 Brotli bytes. The preserved CONS2-only ablation is
+982506 raw / 378571 gzip / 318408 Brotli; LIST2 adds a further 2275-byte raw
+reduction after the interaction with CELL folding is included. This is
+complete deployment accounting, not a sum of local opcode savings.
+
+The required full bootstrap still executes the compiler interpreted in Wasm
+before native compilation. Observed phase times are 202.013 and 33.563 seconds.
+ANSI initialization overlapped, so these are correctness/build observations
+rather than a controlled bootstrap speed comparison. The host adapter is
+byte-identical to the baseline.
+
+Both full ANSI modes pass every discovered test: 21954 each, with zero
+failures, blocks, timeouts or load errors under the unchanged seed and
+300-second load / 10-second test deadlines. Repository report validation
+confirms actual compilation in native mode. Fresh SBCL compilation, runtime
+WAT reachability, production bootstrap codec, soundness, optimization and
+JavaScript implementation checks pass. The ordinary Node-to-Wasmtime launcher
+again fails with the environment's =spawnSync wasmtime EPERM=; its failed
+status and log are retained separately. Direct matching Wasmtime execution
+passes all 34 unchanged shared thread assertions plus LOOP/DOLIST/DOTIMES,
+idle-input scheduling and shutdown checks. No requirement or deadline was
+weakened to accommodate the launcher.
+
+Final precompiled-engine probes emit, validate, instantiate and execute direct
+IF tests for BIGNUM, RATIO, BIT-VECTOR, sized SIMPLE-BIT-VECTOR, BASE-STRING and
+=(SIMPLE-ARRAY BIT (8))=. Each shrinks from 202 module / 35 worker bytes to
+186 / 19. This confirms the optimization in the sealed compiler, independently
+of source-compiler REPL experiments.
+
+The final production host kernel is 2059 module / 1641 worker bytes. A
+same-session guest comparison changes only WASM-LIST: 2187 / 1791 becomes
+2057 / 1641, a 150-byte worker reduction; the two-byte host/guest module
+metadata difference is kept separate. Actual DEBUG 0 function indices come
+from the export table. Both DISASSEMBLE and DISASSEMBLE-NATIVE were used,
+without changing policy to obtain a listing. Twelve native mode/body
+comparisons pass. Equivalent SBCL DISASSEMBLE shows similar control flow and
+GENSYM/REVERSE/APPEND calls, while SBCL allocates inline and MIRICL shares
+construction helpers. Its 5196 native bytes are a different ISA and do not
+establish a speed comparison. Evidence is in
+=/tmp/miricl-final-disassembly-b5-summary.json= and its associated listings.
+
+The existing current-format Game of Life bundle also passes fresh-runtime
+blinker, R-pentomino, generation and grid checks. It is reused as a runtime
+control, without a rebuild or application-code size claim. Older ACL2/Coalton
+native artifacts still use an obsolete import namespace; they are neither
+adapted nor counted as current validation. Their full source rebuilds remain
+for a future application checkpoint.
+
+Maxima and FriCAS recompile the same complete current-format portable inputs
+as the exact baseline, with STRIP NIL and unchanged dynamic interfaces. Both
+rebuilt bundles pass fresh-session validation: Maxima manual mathematics,
+definitions and session state; FriCAS differentiation, integration, series
+and its session checks. All 27126 / 13303 initializers are retained.
+
+| Application | Raw before | Raw after | Raw change | gzip after | gzip change | Brotli after | Brotli change |
+|-------------+------------+-----------+------------+------------+-------------+--------------+---------------|
+| maxima | 8367577 | 8303756 | -63821 | 2219914 | -2139 | 1543283 | -1092 |
+| fricas | 3885714 | 3853475 | -32239 | 1098064 | -1430 | 747961 | -545 |
+
+These are combined compiler-batch improvements, not isolated LIST2-only
+application gains: applications were not rebuilt under the CONS2 ablation.
+Portable-input and baseline-core hashes are checked before each build.
+Correctness jobs overlap, so observed application build/validation timings
+are not used for a throughput comparison. Full reports and retained artifacts
+are in =/tmp/miricl-migration-batch2-validation/apps/=.
+
+Final measurements run serially after all correctness/application jobs. Each
+iteration case has its own fresh VM and equivalent native driver, 10000
+warmup iterations of that exact branch, then seven samples. Wall medians:
+
+| Case | Iterations | Before ms | After ms | Speedup |
+|------+------------+-----------+----------+---------|
+| dolist-expand-simple | 3000 | 79.744 | 43.481 | 1.83x |
+| dolist-expand-declarations-tags | 1000 | 30.575 | 14.713 | 2.08x |
+| dotimes-expand-simple | 3000 | 66.685 | 41.717 | 1.60x |
+| dotimes-expand-declarations-tags | 1000 | 27.937 | 13.876 | 2.01x |
+| do-symbols-expand-simple | 3000 | 83.288 | 43.197 | 1.93x |
+| do-symbols-expand-declarations-tags | 1000 | 30.706 | 14.692 | 2.09x |
+| do-external-symbols-expand-simple | 3000 | 80.357 | 42.543 | 1.89x |
+| do-external-symbols-expand-declarations-tags | 1000 | 31.853 | 15.065 | 2.11x |
+| do-all-symbols-expand-simple | 3000 | 81.339 | 38.234 | 2.13x |
+| do-all-symbols-expand-declarations-tags | 1000 | 30.957 | 12.531 | 2.47x |
+| dolist-eval-small | 3000 | 136.018 | 89.636 | 1.52x |
+| dotimes-eval-small | 3000 | 94.587 | 65.621 | 1.44x |
+
+All ten expansion cases also improve in CPU time (1.60–2.46x). Small-form
+DOLIST EVAL improves 1.52x wall / 1.51x CPU and DOTIMES 1.44x / 1.44x. These
+are focused constructor/interpreter measurements, not whole-application
+speedups.
+
+| Startup image | Wall before ms | Wall after ms | CPU before ms | CPU after ms |
+|---------------+----------------+---------------+---------------+--------------|
+| ready | 165.031 | 165.466 | 222.490 | 222.246 |
+| interpreter | 118.531 | 119.588 | 160.458 | 162.793 |
+| cold | 151.782 | 152.056 | 206.481 | 219.957 |
+
+Startup alternates images after three whole-VM warmups, then seven samples
+each. Wall medians are effectively flat; interpreter startup CPU rises 1.46%
+and cold startup CPU rises 6.53%. CPU includes concurrent JIT work and is not
+interchangeable with wall time. No general startup improvement is claimed.
+
+The fixed original 233-definition compiler corpus and explicit policy hashes
+match across compilers. Output validates and instantiates, remains stable
+across samples, and installed compiler function identities remain unchanged;
+no emitted compiler generation is installed. Output decreases from
+235791 / 70427 / 56992 raw/gzip/Brotli bytes to 232266 / 70215 / 56844
+(-3525 / -212 / -148). Three samples after one warmup give native wall
+medians 20.048 to 19.845 seconds and CPU 20.748 to 20.420: roughly 1.0% /
+1.6% faster. This modest observed change should not be generalized beyond
+these samples.
+
+Canonical final provenance, source/image/input hashes, sizes, all samples,
+validations and setup failures are in
+=/tmp/miricl-migration-batch2-validation/report.json=; concise medians are in
+=benchmark-summary.json= beside it. The ready image SHA256 is
+=f97609576e69a39875c6be7b1c4b45f3bba48d572e208ac442e3d1931a988bbc=.

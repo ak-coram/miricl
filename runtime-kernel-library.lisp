@@ -997,6 +997,83 @@ The native boundary checks LIST before entering this sealed worker."
                          (list 'progn (cons 'progn body) (list 'get-output-stream-string variable)))
                      (list 'close variable))))))))))
 
+(export '(expand-prog-body expand-input-string-form))
+
+(defun expand-prog-body (variables body sequential)
+  "Construct PROG's block and bindings around a checked declaration/body spine."
+  (declare (optimize (safety 0) (debug 0))
+           (inline car cdr consp eq cons list reverse append))
+  (values
+   (let ((declarations nil))
+     (tagbody declaration
+       (if body nil (go done))
+       (let ((form (car (the cons body))))
+         (if (if (consp form) (eq (car (the cons form)) 'declare))
+             (setq declarations (cons form declarations) body (cdr (the cons body)))
+             (go done)))
+       (go declaration)
+      done)
+     (list 'block nil
+       (cons (if sequential 'let* 'let)
+         (cons variables
+           (append (reverse declarations) (list (cons 'tagbody body)))))))))
+
+(define-condition miricl::%macro-structure-error (program-error simple-condition) ())
+
+(defun expand-input-string-form (form position-operation controls)
+  "Expand a checked WITH-INPUT-FROM-STRING form, preserving its result values."
+  (declare (type simple-vector controls) (optimize (safety 0) (debug 0))
+           (inline car cdr consp symbolp eq list cons reverse append svref checked-path-car checked-path-cdr))
+  (values
+   (let* ((arguments (cdr (the cons form)))
+          (binding (car (the cons arguments))) (variable (car (the cons binding)))
+          (source (car (the cons (cdr (the cons binding)))))
+          (options (cdr (the cons (cdr (the cons binding)))))
+          (start 0) (end nil) (index nil) (start-seen nil) (end-seen nil) (index-seen nil)
+          (allow-seen nil) (allow nil) (unknown nil)
+          (declarations nil) (body (cdr (the cons arguments))))
+     (tagbody next-option
+        (if options nil (go options-done))
+        (let ((key (car (the cons options))) (rest (cdr (the cons options))))
+          (if rest nil
+              (error (svref controls 9) :format-control (svref controls 6)
+                     :format-arguments (list options)))
+          (if (symbolp key) nil
+              (error (svref controls 9) :format-control (svref controls 7)
+                     :format-arguments (list key)))
+          (if (eq key :start)
+              (if start-seen nil (setq start (car (the cons rest)) start-seen t))
+              (if (eq key :end)
+                  (if end-seen nil (setq end (car (the cons rest)) end-seen t))
+                  (if (eq key :index)
+                      (if index-seen nil (setq index (car (the cons rest)) index-seen t))
+                      (if (eq key :allow-other-keys)
+                          (if allow-seen nil (setq allow (car (the cons rest)) allow-seen t))
+                          (setq unknown t)))))
+          (setq options (cdr (the cons rest))))
+        (go next-option)
+      options-done)
+     (if unknown (if allow nil
+         (error (svref controls 9) :format-control (svref controls 8)
+                :format-arguments (list binding))))
+     (tagbody declaration
+        (if (if (consp (checked-path-car body))
+                (eq (car (the cons (car (the cons body)))) 'declare))
+            (progn (setq declarations (cons (car (the cons body)) declarations)
+                         body (cdr (the cons body))))
+            (go declarations-done))
+        (go declaration)
+      declarations-done)
+     (cons 'let
+       (cons (list (list variable (list 'make-string-input-stream source start end)))
+         (append (reverse declarations)
+           (list (list 'unwind-protect
+                   (if index-seen
+                       (list 'multiple-value-prog1 (cons 'progn body)
+                         (list 'setf index (list position-operation variable)))
+                       (cons 'progn body))
+                   (list 'close variable)))))))))
+
 (defun expand-logical-form (form)
   (declare (optimize (safety 0) (debug 0))
            (inline checked-path-car checked-path-cdr eq list if-expression))
@@ -1669,7 +1746,7 @@ The native boundary translates a false result into its checked arity condition."
         (setq index (the (integer 0 255) (1+ index))) (go next))))))
 (defun array-contents-count (contents reader)
   (declare (optimize (safety 0) (debug 0))
-           (inline consp cdr 1+))
+           (inline consp cdr 1+ vectorp length eq not))
   (values (block done
     (if reader nil (return-from done (length contents)))
     (if (vectorp contents) (return-from done (length contents)))

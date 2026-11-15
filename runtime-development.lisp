@@ -184,6 +184,19 @@
 ;; Keep these as ordinary macro functions: MACROLET and *MACROEXPAND-HOOK*
 ;; still use the standard expansion path. Variable places need no temporary
 ;; bindings or interpreted lambda-list destructuring on every iteration.
+(defun $prog-expansion-cl ()
+  (runtime-function-definition '$prog-expansion-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$prog-expansion-cl
+      'miricl-runtime:expand-prog-body))))
+
+(define-runtime-function $prog-expansion
+    (($variables :nullable-object) ($body :nullable-object) ($sequential :nullable-object)) (:nullable-object)
+  ;; The worker only traverses the body spine and observes declaration heads.
+  ;; Bindings and nested forms retain the ordinary LET/TAGBODY validation path.
+  #@(call $check-apply-list (local.get $variables))
+  #@(call $check-apply-list (local.get $body))
+  #@(call $prog-expansion-cl (local.get $variables) (local.get $body) (local.get $sequential)))
+
 (defun $values-expansion-cl ()
   (runtime-function-definition '$values-expansion-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$values-expansion-cl 'miricl-runtime:expand-values-form))))
@@ -207,6 +220,129 @@
   #@(call $arity (local.get $binding) (i32.const 1) (i32.const 2147483647))
   #@(call $check-variable (call $car (local.get $binding)))
   #@(call $output-string-expansion-cl (local.get $form) ,(clos-library-reference '%%string-stream)))
+
+(defun $input-string-expansion-cl ()
+  (runtime-function-definition '$input-string-expansion-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$input-string-expansion-cl
+      'miricl-runtime:expand-input-string-form))))
+
+(define-runtime-function $macro-structure-error
+    (($datum :nullable-object) ($controls :nullable-object) ($reason i32)) ()
+  (:locals ($condition :nullable-object))
+  ;; Format controls contain no object directives. Retain the exact input for
+  ;; inspection without printing cyclic graphs or invoking user PRINT-OBJECT.
+  #@(local.set $condition (call $make-condition
+    ,(clos-library-reference '%macro-structure-error)
+    (call $cons (call $symbol (i32.const ,(runtime-symbol-id :format-control)))
+      (call $cons (array.get $objects
+        (call $vector-data (local.get $controls))
+        (local.get $reason))
+        (call $cons (call $symbol (i32.const ,(runtime-symbol-id :format-arguments)))
+          (call $cons (call $cons (local.get $datum) (ref.null eq)) (ref.null eq)))))))
+  #@(call $signal-condition (local.get $condition))
+  #@(call $debug-condition (local.get $condition))
+  #@(unreachable))
+
+(define-runtime-function $input-string-error (($datum :nullable-object) ($reason i32)) ()
+  #@(call $macro-structure-error (local.get $datum)
+    (call $symbol-value ,(clos-library-reference '%input-string-error-controls)) (local.get $reason)))
+
+(defun $do-expansion-cl ()
+  (runtime-function-definition '$do-expansion-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$do-expansion-cl 'miricl-runtime:expand-do-form))))
+
+(defun $iteration-expansion-cl ()
+  (runtime-function-definition '$iteration-expansion-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat
+                   '$iteration-expansion-cl 'miricl-runtime:expand-iteration-form))))
+
+(define-runtime-function $iteration-expansion
+    (($variable :nullable-object) ($source :nullable-object) ($result :nullable-object)
+     ($body :nullable-object) ($mode :nullable-object)) (:nullable-object)
+  (:locals ($count i64))
+  ;; The worker traverses only the body spine; nested forms are retained.
+  #@(local.set $count (call $scalar-integer-value
+    (ref.as_non_null (call $compiler-list-length (local.get $body)))))
+  #@(if (i64.lt_s (local.get $count) (i64.const 0))
+    (then (call $macro-structure-error (local.get $body)
+      (call $symbol-value ,(clos-library-reference '%iteration-body-error-controls))
+      (select (i32.const 1) (i32.const 0) (i64.eq (local.get $count) (i64.const -2))))))
+  #@(if (if (result i32) (call $symbolp (local.get $variable))
+        (then (call $constant-symbol-p (local.get $variable))) (else (i32.const 1)))
+    (then (call $macro-structure-error (local.get $variable)
+      (call $symbol-value ,(clos-library-reference '%iteration-body-error-controls)) (i32.const 2))))
+  #@(call $iteration-expansion-cl (local.get $variable) (local.get $source) (local.get $result)
+    (call $vector-new (array.new_fixed $objects 4
+      (local.get $body)
+      (call $int (if (result i32) (ref.eq (local.get $mode) ,(clos-library-reference :symbols))
+        (then (i32.const 2)) (else (i32.eqz (ref.is_null (local.get $mode))))))
+      ,(loop-library-reference '%%while) ,(clos-library-reference '%%symbol-iterate)))))
+
+(define-runtime-function $do-expansion-list
+    (($datum :nullable-object) ($minimum i64) ($maximum i64) ($reason i32)) ()
+  (:locals ($count i64))
+  #@(local.set $count (call $scalar-integer-value
+    (ref.as_non_null (call $compiler-list-length (local.get $datum)))))
+  #@(if (i64.lt_s (local.get $count) (i64.const 0))
+    (then (call $macro-structure-error (local.get $datum)
+      (call $symbol-value ,(clos-library-reference '%iteration-expansion-error-controls))
+      (select (i32.const 1) (i32.const 0) (i64.eq (local.get $count) (i64.const -2))))))
+  #@(if (i32.or (i64.lt_u (local.get $count) (local.get $minimum))
+                (i64.gt_u (local.get $count) (local.get $maximum)))
+    (then (call $macro-structure-error (local.get $datum)
+      (call $symbol-value ,(clos-library-reference '%iteration-expansion-error-controls)) (local.get $reason)))))
+
+(define-runtime-function $do-expansion (($form :nullable-object) ($sequential i32)) (:nullable-object)
+  (:locals ($arguments :nullable-object) ($variables :nullable-object) ($spec :nullable-object)
+           ($variable :nullable-object))
+  ;; Each unchecked traversal in the CL worker has a proper, acyclic spine.
+  ;; Nested init/step/body forms remain forms for ordinary evaluator validation.
+  #@(call $do-expansion-list (local.get $form) (i64.const 3) (i64.const 2147483647) (i32.const 2))
+  #@(local.set $arguments (call $cdr (local.get $form)))
+  #@(local.set $variables (call $car (local.get $arguments)))
+  #@(call $do-expansion-list (local.get $variables) (i64.const 0) (i64.const 2147483647) (i32.const 2))
+  #@(call $do-expansion-list (call $car (call $cdr (local.get $arguments)))
+    (i64.const 1) (i64.const 2147483647) (i32.const 4))
+  #@(block $done (loop $next
+    (br_if $done (ref.is_null (local.get $variables)))
+    (local.set $spec (call $car (local.get $variables)))
+    (local.set $variable (local.get $spec))
+    (if (i32.eqz (call $symbolp (local.get $spec)))
+      (then
+        (call $do-expansion-list (local.get $spec) (i64.const 1) (i64.const 3) (i32.const 3))
+        (local.set $variable (call $car (local.get $spec)))))
+    (if (if (result i32) (call $symbolp (local.get $variable))
+          (then (call $constant-symbol-p (local.get $variable))) (else (i32.const 1)))
+      (then (call $macro-structure-error (local.get $variable)
+        (call $symbol-value ,(clos-library-reference '%iteration-expansion-error-controls)) (i32.const 5))))
+    (local.set $variables (call $cdr (local.get $variables)))
+    (br $next)))
+  #@(call $do-expansion-cl (local.get $form) (call $bool (local.get $sequential))
+    ,(loop-library-reference '%%while)))
+
+(define-runtime-function $input-string-expansion (($form :nullable-object)) (:nullable-object)
+  (:locals ($args :nullable-object) ($binding :nullable-object) ($variable :nullable-object) ($count i64))
+  #@(local.set $count (call $scalar-integer-value (ref.as_non_null (call $compiler-list-length (local.get $form)))))
+  #@(if (i64.lt_s (local.get $count) (i64.const 0))
+    (then (call $input-string-error (local.get $form)
+      (select (i32.const 1) (i32.const 0) (i64.eq (local.get $count) (i64.const -2))))))
+  #@(if (i64.lt_u (local.get $count) (i64.const 2))
+    (then (call $input-string-error (local.get $form) (i32.const 2))))
+  #@(local.set $args (call $cdr (local.get $form)))
+  #@(local.set $binding (call $car (local.get $args)))
+  #@(local.set $count (call $scalar-integer-value (ref.as_non_null (call $compiler-list-length (local.get $binding)))))
+  #@(if (i64.lt_s (local.get $count) (i64.const 0))
+    (then (call $input-string-error (local.get $binding)
+      (select (i32.const 4) (i32.const 3) (i64.eq (local.get $count) (i64.const -2))))))
+  #@(if (i64.lt_u (local.get $count) (i64.const 2))
+    (then (call $input-string-error (local.get $binding) (i32.const 2))))
+  #@(local.set $variable (call $car (local.get $binding)))
+  #@(if (i32.eqz (call $symbolp (local.get $variable)))
+    (then (call $input-string-error (local.get $variable) (i32.const 5))))
+  #@(if (call $constant-symbol-p (local.get $variable))
+    (then (call $input-string-error (local.get $variable) (i32.const 5))))
+  #@(call $input-string-expansion-cl (local.get $form) ,(clos-library-reference '%%input-position)
+    (call $symbol-value ,(clos-library-reference '%input-string-error-controls))))
 
 (define-runtime-function $modifier-expansion
     (($form :nullable-object) ($env :nullable-object) ($decrement i32)) (:nullable-object)
@@ -1444,7 +1580,9 @@
   #@(global $source-files (mut (ref null eq)) (ref.null eq))
   ($compiler-macro-access) ($setf-expander-access) ($make-symbol-macro-binding) ($symbol-macro-binding) ($define-symbol-macro)
   ($eval-compiled) ($fasl-cons-new) ($fasl-atom) ($fasl-object) ($fasl-cons) ($fasl-execute) ($fasl-dependencies) ($compile-primitive)
-  ($function-environment) ($lexical-function-id) ($lexical-function) ($set-macro) ($macro-function) ($constant-function) ($constant-macro-function) ($macroexpand-1) ($values-expansion-cl) ($values-expansion) ($output-string-expansion-cl) ($output-string-expansion)
+  ($function-environment) ($lexical-function-id) ($lexical-function) ($set-macro) ($macro-function) ($constant-function) ($constant-macro-function) ($macroexpand-1) ($prog-expansion-cl) ($prog-expansion) ($values-expansion-cl) ($values-expansion) ($output-string-expansion-cl) ($output-string-expansion) ($input-string-expansion-cl) ($macro-structure-error) ($input-string-error) ($input-string-expansion)
+  ($do-expansion-cl) ($do-expansion-list) ($do-expansion)
+  ($iteration-expansion-cl) ($iteration-expansion)
   ($modifier-expansion) ($if-form) ($logical-expansion-cl) ($logical-expansion) ($conditional-expansion-cl) ($conditional-expansion) ($case-expansion) ($selection-expansion-cl) ($selection-expansion) ($eval-case) ($native-place-p) ($capture-place) ($captured-place-function) ($read-captured-place) ($write-captured-place) ($parallel-place-expansion) ($psetq-expansion) ($eval-parallel-places) ($development-eval)
   ($local-source-file) ($source-file) ($path-component-match-cl) ($path-component-match) ($path-directory-end-cl) ($path-directory-end) ($path-name-end-cl) ($path-name-end)
   ($path-directories-match-cl) ($path-directories-match) ($source-path-match) ($directory-add) ($directory-path) ($directory-native)

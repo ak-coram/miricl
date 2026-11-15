@@ -423,6 +423,16 @@
   (:export-raw "native-cons")
   #@(extern.convert_any (call $cons ,(native-object '(local.get $a)) ,(native-object '(local.get $b)))))
 
+(define-runtime-function $native-cons2 (($a externref) ($b externref) ($tail externref)) (externref)
+  (:export-raw "native-cons2")
+  #@(extern.convert_any (call $cons2 ,(native-object '(local.get $a))
+    ,(native-object '(local.get $b)) ,(native-object '(local.get $tail)))))
+
+(define-runtime-function $native-list2 (($a externref) ($b externref)) (externref)
+  (:export-raw "native-list2")
+  #@(extern.convert_any (call $cons2 ,(native-object '(local.get $a))
+    ,(native-object '(local.get $b)) (ref.null eq))))
+
 (define-runtime-function $native-cell (($value externref)) (externref)
   (:export-raw "native-cell")
   #@(extern.convert_any (call $cons ,(native-object '(local.get $value)) (ref.null eq))))
@@ -1970,7 +1980,7 @@
   ($native-block-enter) ($native-block-environment) ($native-block-return) ($native-block-match) ($native-block-values)
   ($native-control) ($native-restart-signal) ($native-throw)
   ($native-global-read) ($native-global-write) ($native-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
-  ($native-cons) ($native-cell) ($native-primary) ($native-cell-read) ($native-cell-write)
+  ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-read) ($native-cell-write)
   ($native-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1)
   ($native-int64) ($native-unbox-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)

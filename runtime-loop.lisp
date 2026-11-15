@@ -391,7 +391,7 @@
 
 (define-runtime-function $initialize-loop () ()
   (:locals ($names (ref $bootstrap-bytes)) ($forms :nullable-object) ($scan :nullable-object))
-  #@(call $reset-library-strings)
+  #@(call $reset-library-reader)
   #@(local.set $names (array.new_data $bootstrap-bytes $loop-name-data
     (i32.const 0) (i32.const ,(length (bootstrap-private-symbol-bytes *loop-library-symbols*)))))
   #@(data.drop $loop-name-data)
@@ -402,10 +402,11 @@
   #@(call $reserve (global.get $limit))
   #@(memory.init $loop-library-data (i32.const 0) (i32.const 0) (global.get $limit))
   #@(data.drop $loop-library-data)
+  #@(call $prepare-library-reader)
   #@(block $done (loop $next
     (br_if $done (i32.ge_u (global.get $cursor) (global.get $limit)))
     (local.set $forms (call $cons (call $read-library-literal) (local.get $forms))) (br $next)))
-  #@(call $reset-library-strings)
+  #@(call $reset-library-reader)
   #@(local.set $scan (call $reverse-onto (local.get $forms) (ref.null eq) (i32.const 0)))
   (wat-list-loop ($scan)
     #@(drop (call $eval (call $car (local.get $scan)) (ref.null eq))))

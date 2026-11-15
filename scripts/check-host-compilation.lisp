@@ -1,4 +1,5 @@
-;;;; Compile and load the bootstrap system; do not build guest images or run regressions.
+;;;; Compile and load the bootstrap system and check its host WAT composition.
+;;;; Guest image builds and runtime suites are separate checkpoints.
 (require :asdf)
 (handler-case
     (let* ((root (uiop:pathname-parent-directory-pathname
@@ -17,6 +18,8 @@
       (if (find-package :ql)
           (uiop:symbol-call :ql :quickload :miricl :verbose t)
           (asdf:load-system :miricl))
+      (load (merge-pathnames "tests/runtime-wat-reachability.lisp" root))
+      (load (merge-pathnames "tests/runtime-library-codec.lisp" root))
       (format t "~&MIRICL host compilation and loading passed on ~A ~A.~%"
               (lisp-implementation-type) (lisp-implementation-version))
       (uiop:quit 0))

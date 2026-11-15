@@ -219,13 +219,15 @@ Entries retain symbol and namespace identities, rather than table offsets."
 
 (defun runtime-library-bytes (forms symbols private-tag &optional loop-symbols)
   "Pack library literals using byte tags, LEB128 payloads, and ZigZag integers.
-Tags 32..63 encode proper lists of 1..32 elements; 128..255 encode common
+Tags 32..62 encode proper lists of 1..31 elements; 128..255 encode common
 symbols from the public and private tables. Tag 7 carries a counted spine and a dotted-tail flag.
+Tag 63 replays an earlier complete subform into fresh objects.
 Tag 127 references earlier string contents; decoding still creates a fresh string.
 Other tags abbreviate proper list prefixes or frequent integer constants
 from *RUNTIME-LIBRARY-PREFIXES*."
   (let ((bytes (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
-        (strings (make-hash-table :test 'equal)))
+        (strings (make-hash-table :test 'equal))
+        (subforms (make-hash-table :test 'equal)) (references 0) (next-subform 0))
     (labels ((emit-byte (n) (vector-push-extend n bytes))
              (u32 (n) (dotimes (i 4) (emit-byte (ldb (byte 8 (* 8 i)) n))))
              (uleb (n)
@@ -233,6 +235,23 @@ from *RUNTIME-LIBRARY-PREFIXES*."
                (loop do (emit-byte (logior (logand n 127) (if (>= n 128) 128 0)))
                         (setf n (ash n -7)) while (plusp n)))
              (emit (form)
+               (let ((previous (and (consp form) (gethash form subforms))))
+                 (if previous
+                     (progn (incf references) (emit-byte 63) (uleb previous))
+                     (let ((start (length bytes)) (string-count (hash-table-count strings))
+                           (reference-count references))
+                       (emit-original form)
+                       ;; Replaying a raw subtree must neither introduce string
+                       ;; IDs nor follow another subform reference. These same
+                       ;; completion conditions are checked by the decoder.
+                       (when (and (consp form) (= string-count (hash-table-count strings))
+                                  (= reference-count references)
+                                  (<= (- (length bytes) start) 128)
+                                  (> (- (length bytes) start)
+                                     (1+ (max 1 (ceiling (integer-length next-subform) 7)))))
+                         (setf (gethash form subforms) next-subform)
+                         (incf next-subform))))))
+             (emit-original (form)
                (cond ((null form) (emit-byte 0))
                      ((consp form)
                       (let ((length 0) (tail form))
@@ -244,7 +263,7 @@ from *RUNTIME-LIBRARY-PREFIXES*."
                                                        (runtime-library-prefix-namespace-p entry symbols private-tag loop-symbols)))
                                                 *runtime-library-prefixes*))))
                           (cond (prefix (emit-byte (first prefix)) (setf form (cdr form)))
-                                ((and (null tail) (<= length 32)) (emit-byte (+ 31 length)))
+                                ((and (null tail) (<= length 31)) (emit-byte (+ 31 length)))
                                 (t (emit-byte 7) (uleb (+ (* 2 length) (if tail 1 0))))))
                         (loop while (consp form) do (emit (car form)) (setf form (cdr form)))
                         (when tail (emit tail))))

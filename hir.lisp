@@ -164,7 +164,7 @@
            (type simple-vector *hir-block*))
   (when (hir-block-terminator *hir-block*) (error "Duplicate HIR terminator."))
   (setf (hir-block-terminator *hir-block*)
-    (make-hir-instruction-record opcode inputs nil attributes *hir-origin* :control)))
+    (make-hir-instruction-record opcode inputs nil attributes *hir-origin* :control *hir-safety-level*)))
 
 (defun hir-single (value)
   (declare (type simple-vector value))

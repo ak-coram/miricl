@@ -191,6 +191,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-global-write" (:object :object :object) :object)
     ("native-function-reference" (:object) :object)
     ("native-cons" (:object :object) :object)
+    ("native-cons2" (:object :object :object) :object)
+    ("native-list2" (:object :object) :object)
     ("native-cell" (:object) :object)
     ("native-primary" (:object) :object)
     ("native-cell-read" (:object) :object)
@@ -442,8 +444,16 @@ Bind to NIL to interpret forms, including forms without native lowering.")
         (wasm-local 0) (wasm-integer index) (wasm-call "native-literal")))))
 (defun wasm-list (values)
   (declare (type list values))
-  (dolist (value values) (wasm-get value)) (wasm-null)
-  (dotimes (i (length values)) (wasm-call "native-cons")))
+  (dolist (value values) (wasm-get value))
+  ;; Operands are already evaluated left to right. Build the same fresh
+  ;; spine from its tail, sharing pairs of allocations across call packets,
+  ;; value groups and canonical inline LIST calls.
+  (let ((count (length values)))
+    (if (>= count 2)
+        (progn (wasm-call "native-list2") (decf count 2))
+        (wasm-null))
+    (dotimes (i (ash count -1)) (wasm-call "native-cons2"))
+    (when (oddp count) (wasm-call "native-cons"))))
 
 (defun native-removable-p (instruction)
   (declare (type simple-vector instruction))
@@ -463,7 +473,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
            (let ((kind (gethash instruction *wasm-inline-simple-calls*)))
              (or (integerp kind)
                  (member kind '(:eq :eql :consp :simple-vector-p :vectorp :stringp :symbolp :integerp :null :true :false
-                                :left :right :cons :car :cdr :car-cons :cdr-cons :vector-length :evenp :oddp)))))
+                                :left :right :cons :list :car :cdr :car-cons :cdr-cons :vector-length :evenp :oddp)))))
       (member (hir-instruction-opcode instruction)
         ;; The checked entry validates arguments independently. An unused
         ;; parameter read or closure allocation has no additional observable
@@ -1054,9 +1064,17 @@ Liveness can then remove an allocation whose identity is never observed."
           (dolist (source (native-value-slot sources value)) (push source work)))))
     full))
 
-(defun native-proven-truth (value)
+(defun native-proven-truth (value safety)
   "Return primary truth and a proof flag, without evaluating user code."
-  (declare (type simple-vector value))
+  (declare (type simple-vector value) (type (integer 0 3) safety))
+  ;; Declarations can justify removing this test only under its safety
+  ;; contract. The inferred facts already account for writes, escaping
+  ;; functions and closed calls; opaque types supply no proof.
+  (when (and (zerop safety) *wasm-inferred-types*)
+    (let ((type (gethash value *wasm-inferred-types* t)))
+      (unless (eq type t)
+        (cond ((hir-type-proves-p type '(not null)) (return-from native-proven-truth (values t t)))
+              ((hir-type-proves-p type 'null) (return-from native-proven-truth (values nil t)))))))
   (loop repeat 32 do
     (let ((producer (hir-value-producer value)))
       (unless (%hir-instruction-p producer) (return))
@@ -1082,7 +1100,8 @@ exhausted work budgets keep every incoming value group."
   (unless (some (lambda (block)
                   (let ((end (hir-block-terminator block)))
                     (and (eq (hir-instruction-opcode end) :branch)
-                         (nth-value 1 (native-proven-truth (first (hir-instruction-inputs end)))))))
+                         (nth-value 1 (native-proven-truth (first (hir-instruction-inputs end))
+                                                          (hir-instruction-safety-level end))))))
                 (hir-function-blocks function))
     (return-from native-proof-reachable-blocks nil))
   (let ((alive (make-array (hir-function-block-count function) :initial-element nil))
@@ -1096,7 +1115,8 @@ exhausted work budgets keep every incoming value group."
           (setf (svref alive id) t)
           (let* ((end (hir-block-terminator block)) (arms (hir-instruction-attributes end)))
             (if (eq (hir-instruction-opcode end) :branch)
-                (multiple-value-bind (truth known) (native-proven-truth (first (hir-instruction-inputs end)))
+                (multiple-value-bind (truth known)
+                    (native-proven-truth (first (hir-instruction-inputs end)) (hir-instruction-safety-level end))
                   (if known
                       (progn (compiler-statistic :proof/branch-reachability truth)
                              (push (if truth (first arms) (second arms)) pending))
@@ -1122,7 +1142,7 @@ exhausted work budgets keep every incoming value group."
                              ;; GETHASH retains its two-value representation.
                              (or (integerp kind)
                                  (member kind '(:eq :eql :consp :simple-vector-p :vectorp :stringp :symbolp :integerp :characterp :null :true :false
-                                                :left :right :cons :car :cdr :car-cons :cdr-cons
+                                                :left :right :cons :list :car :cdr :car-cons :cdr-cons
                                                 :checked-car :checked-cdr :rplaca-cons :rplacd-cons :length :list-length :vector-length
                                                 :evenp :oddp :puthash :character-ref :character-set :simple-character-set :code-character :make-character-vector :make-string :make-simple-vector :character-code :character-code-at
                                                 :integer-length :ash-general :logand-general :mod-general :truncate-primary
@@ -1178,7 +1198,7 @@ exhausted work budgets keep every incoming value group."
              (unless (or (gethash instruction *wasm-inline-vector-calls*)
                          (integerp kind)
                          (member kind '(:eq :eql :consp :simple-vector-p :vectorp :stringp :symbolp :integerp :null :true :false
-                                        :left :right :cons :car :cdr :car-cons :cdr-cons
+                                        :left :right :cons :list :car :cdr :car-cons :cdr-cons
                                         :checked-car :checked-cdr :length :vector-length :evenp :oddp)))
                (return-from native-simple-callee-p nil))))
           (otherwise (return-from native-simple-callee-p nil))))
@@ -1670,6 +1690,11 @@ exhausted work budgets keep every incoming value group."
                                       (not (or (numberp literal) (characterp literal))))))) (cddr inputs))
                            :eq :eql)))
                      (cons (and (= (length inputs) 4) :cons))
+                     ;; Canonical LIST needs only its fresh result spine.
+                     ;; Large ordinary calls already emit that same spine as
+                     ;; argument transport, so this never expands their code.
+                     ;; HIR operands preserve source evaluation order.
+                     (list :list)
                      (consp (and (= (length inputs) 3) :consp))
                      (simple-vector-p (and (= (length inputs) 3) :simple-vector-p))
                      (vectorp (and (= (length inputs) 3) :vectorp))
@@ -1746,7 +1771,7 @@ exhausted work budgets keep every incoming value group."
                       (= (native-builtin-code name) (native-canonical-builtin-code name))))
                     (setf (gethash name checked) canonical))
                   (when canonical
-                    (when (eq kind :cons) (setq allocated t))
+                    (when (member kind '(:cons :list)) (setq allocated t))
                     (when (and allocated *wasm-cons-forward-blocks*
                                (member kind '(:car :cdr :car-cons :cdr-cons :checked-car :checked-cdr)))
                       (setf (gethash block *wasm-cons-forward-blocks*) t))
@@ -2214,6 +2239,7 @@ exhausted work budgets keep every incoming value group."
              ((eq kind :false) (wasm-null))
              ((eq kind :left) (wasm-get (third inputs)))
              ((eq kind :right) (wasm-get (fourth inputs)))
+             ((eq kind :list) (wasm-list (cddr inputs)))
              ((eq kind :consp)
               (emit-native-tag-test (third inputs) 7) (wasm-call "native-boolean"))
              ((eq kind :symbolp)
@@ -2470,6 +2496,11 @@ exhausted work budgets keep every incoming value group."
 
 (defun emit-native-condition (end truep)
   (declare (type simple-vector end))
+  (multiple-value-bind (truth known)
+      (native-proven-truth (first (hir-instruction-inputs end)) (hir-instruction-safety-level end))
+    (when known
+      (wasm-integer (if (eq truth truep) 1 0))
+      (return-from emit-native-condition nil)))
   (let* ((test (and *wasm-branch-tests* (gethash end *wasm-branch-tests*)))
          (call (second test)) (kind (third test)))
     (if call
@@ -3953,6 +3984,10 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
   (let ((roots nil))
     (dolist (function (hir-unit-functions unit))
       (dolist (block (hir-function-blocks function))
+        (let ((end (hir-block-terminator block)))
+          (when (and (eq (hir-instruction-opcode end) :branch)
+                     (zerop (hir-instruction-safety-level end)))
+            (push (first (hir-instruction-inputs end)) roots)))
         (dolist (instruction (hir-block-instructions block))
           (when (eq (hir-instruction-opcode instruction) :call)
             (let* ((inputs (hir-instruction-inputs instruction))
@@ -4331,7 +4366,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     (list* (car source) (second source)
       (append documentation (list '(declare (optimize (safety 0) (debug 0))
         (inline svref aref row-major-aref (setf svref) (setf aref) (setf row-major-aref)
-                length integer-length logand logior logxor lognot ash car first cdr rest eq eql null not cons
+                length integer-length logand logior logxor lognot ash car first cdr rest eq eql null not cons list
                 gethash (setf gethash) consp simple-vector-p zerop minusp plusp evenp oddp
                 1+ 1- + - * < > <= >= = /=))) body))))
 
