@@ -26,9 +26,14 @@
 (define-runtime-function $compiler-image-function
     (($index i32) ($literals :nullable-object) ($name :nullable-object)) (:nullable-object)
   (if *native-compiler-image*
-      #@(ref.cast (ref null eq) (any.convert_extern
-        (call $native-function (table.get $compiler-entries (local.get $index))
-          (extern.convert_any (local.get $literals)) (extern.convert_any (local.get $name)) (i32.const 0))))
+      (runtime-wat-sequence
+        ;; Only the leading factory entries accept the packet ABI. The rest
+        ;; of the table also retains typed workers for image serialization.
+        (wat-fail-when #@(i32.ge_u (local.get $index)
+          (i32.const ,(length (third *native-compiler-image*)))) :malformed-form)
+        #@(ref.cast (ref null eq) (any.convert_extern
+          (call $native-function (table.get $compiler-entries (local.get $index))
+            (extern.convert_any (local.get $literals)) (extern.convert_any (local.get $name)) (i32.const 0)))))
       (runtime-wat-sequence (wat-fail :unsupported) #@(unreachable))))
 
 (define-runtime-function $native-function
@@ -296,7 +301,13 @@
   (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
   #@(local.set $value ,(native-object '(local.get $args)))
   #@(if (ref.test (ref $objects) (local.get $value))
-    (then (local.set $value (call $vector-new (ref.cast (ref $objects) (local.get $value))))))
+    ;; Raw packets already expose their checked representation. Read them
+    ;; without allocating a temporary Lisp vector or boxing the index.
+    (then
+      (if (i32.ge_u (local.get $index) (array.len (ref.cast (ref $objects) (local.get $value))))
+        (then (return (ref.null extern))))
+      (return (extern.convert_any (array.get $objects
+        (ref.cast (ref $objects) (local.get $value)) (local.get $index))))))
   #@(extern.convert_any (call $native-argument-cl (local.get $value) (call $int (local.get $index)))))
 
 (defun $native-check-arguments-cl ()

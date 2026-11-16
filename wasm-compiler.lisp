@@ -52,6 +52,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-last-local* nil)
 (defvar *wasm-single-use-entry* nil)
 (defvar *compiler-bootstrapping* nil)
+(defvar *wasm-bootstrap-direct-workers* nil)
 (defvar *wasm-used-imports*)
 (defvar *wasm-import-counts* nil)
 (defvar *native-import-indices* nil)
@@ -3720,9 +3721,14 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
   ;; These entries are private to this module. Public entries and exported
   ;; function objects retain the checked two-argument convention.
   (let ((forward (make-hash-table :test 'eq)) (reverse (make-hash-table :test 'eq)) (workers nil))
-    (unless *compiler-bootstrapping*
+    (when (or (not *compiler-bootstrapping*) *wasm-bootstrap-direct-workers*)
       (dolist (function functions)
-        (when (and (< (hir-function-debug-level function) 2)
+        (when (and
+                   ;; The linked image loader creates the root factory through
+                   ;; its ordinary packet entry, without direct-entry metadata.
+                   ;; Its children attach their workers in the factory itself.
+                   (or (not *compiler-bootstrapping*) (hir-function-parent function))
+                   (< (hir-function-debug-level function) 2)
                    (native-fixed-arity function))
           (let ((worker (copy-seq function)))
             (setf (gethash function forward) worker (gethash worker reverse) function)

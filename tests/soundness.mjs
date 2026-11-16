@@ -11,6 +11,116 @@ const check = source => assert.equal(evaluate(source), 'T\n', source);
 const recover = () => assert.equal(evaluate("(funcall (compile-native '(lambda (x) (+ x 1))) 41)"), '42\n');
 try {
   evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
+  // The private native ABI accepts raw mutable eqref arrays. These standalone
+  // stable WasmGC types canonicalize to that packet type across modules; the
+  // fixture constructs packets without depending on runtime layout indices.
+  const section = (id, bytes) => [id, bytes.length, ...bytes];
+  const body = bytes => [bytes.length + 1, 0, ...bytes];
+  const packets = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.from([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    ...section(1, [3, 0x5e, 0x6d, 1,
+      0x60, 2, 0x6f, 0x6f, 1, 0x6f, 0x60, 0, 1, 0x6f]),
+    ...section(3, [2, 1, 2]),
+    ...section(7, [2, 4, 109, 97, 107, 101, 0, 0,
+      5, 101, 109, 112, 116, 121, 0, 1]),
+    ...section(10, [2,
+      ...body([0x20, 0, 0xfb, 0x1a, 0xfb, 0x17, 0x6d,
+        0x20, 1, 0xfb, 0x1a, 0xfb, 0x17, 0x6d,
+        0xfb, 8, 0, 2, 0xfb, 0x1b, 0x0b]),
+      ...body([0x41, 0, 0xfb, 7, 0, 0xfb, 0x1b, 0x0b])]),
+  ]))).exports;
+  const elements = [vm.javascript.makeText('packet element'), null];
+  const rejectArgument = (arguments_, index) => {
+    assert.throws(() => {
+      try {vm.vm['native-argument'](arguments_, index);}
+      catch (cause) {
+        assert.ok(cause instanceof WebAssembly.Exception, 'Reject through a Lisp condition, without a Wasm trap.');
+        throw vm.failure(cause);
+      }
+    }, error => error.code > 0 && error.message.length > 0);
+    recover();
+  };
+  for (const [arguments_, expected] of [[packets.make(...elements), elements],
+    [packets.empty(), []], [vm.vm['native-list2'](...elements), elements]]) {
+    expected.forEach((value, index) => assert.equal(vm.vm['native-argument'](arguments_, index), value));
+    for (const index of [expected.length, 0x7fffffff])
+      assert.equal(vm.vm['native-argument'](arguments_, index), null, 'Absent arguments return NIL.');
+    for (const index of [-1, -0x80000000]) rejectArgument(arguments_, index);
+  }
+  rejectArgument(vm.vm['native-cons'](elements[0], elements[0]), 1);
+  console.log('Soundness: raw native packets preserve elements and reject invalid reads with recovery.');
+
+  // The image factory keeps its packet ABI while its children may use fixed
+  // workers. Exercise that build policy without installing another compiler.
+  check(`(let ((compiler (symbol-function 'compile-native))
+      (policy *wasm-bootstrap-direct-workers*))
+    (multiple-value-bind (entries bytes)
+        (let ((*compiler-bootstrapping* t) (*wasm-bootstrap-direct-workers* t))
+          (compile-native-module
+            '((defun image-worker-check (x)
+                (declare (optimize (debug 0))) (values (1+ x) :second))
+              (defun image-worker-tail (x)
+                (declare (optimize (debug 0))) (image-worker-check x))
+              (defun image-worker-captures (initial)
+                (declare (optimize (debug 0)))
+                (let ((counter initial))
+                  (values (lambda (delta) (incf counter delta))
+                          (lambda () counter))))
+              (defun image-worker-wide (a b c d e)
+                (declare (optimize (debug 0))) (values a b c d e)))
+            :inline nil))
+      (let ((fixed (cdr (assoc 'image-worker-check entries)))
+            (tail (cdr (assoc 'image-worker-tail entries)))
+            (captures (cdr (assoc 'image-worker-captures entries)))
+            (wide (cdr (assoc 'image-worker-wide entries))))
+        (and (plusp (length bytes))
+          (every (lambda (entry) (compiled-function-p (cdr entry))) entries)
+          (equal (multiple-value-list (funcall fixed 41)) '(42 :second))
+          (equal (multiple-value-list (funcall tail 41)) '(42 :second))
+          (handler-case (progn (funcall fixed) nil) (program-error () t))
+          (handler-case (progn (funcall fixed 1 2) nil) (program-error () t))
+          (equal (multiple-value-list (funcall fixed 42)) '(43 :second))
+          (multiple-value-bind (advance observe) (funcall captures 10)
+            (multiple-value-bind (other-advance other-observe) (funcall captures 100)
+              (and (= (funcall advance 2) 12) (= (funcall observe) 12)
+                (= (funcall other-observe) 100) (= (funcall other-advance 3) 103)
+                (= (funcall observe) 12))))
+          (equal (multiple-value-list (funcall wide 1 nil 3 4 5)) '(1 nil 3 4 5))
+          (eq compiler (symbol-function 'compile-native))
+          (eq policy *wasm-bootstrap-direct-workers*)))))`);
+  console.log('Soundness: image worker factories preserve arity, values, captures and compiler bindings.');
+
+  const compilerEntries = vm.vm['core-compiler-functions'];
+  const workerIndex = Array.from({length: compilerEntries.length}, (_, index) => index)
+    .find(index => vm.vm['native-entry-valid'](compilerEntries.get(index), 1));
+  for (const index of [compilerEntries.length, ...(workerIndex === undefined ? [] : [workerIndex])]) {
+    check(`(handler-case (progn (compiler-primitive 20 ${index} nil nil) nil)
+      (program-error () t))`);
+    recover();
+  }
+  if (workerIndex !== undefined) {
+    // Saved images reconstruct native objects through these checked readers
+    // and constructors. An existing entry index must also have the right type.
+    const native = vm.vm['core-native-function'](compilerEntries.get(0), null, null, 0, null);
+    const type = vm.vm['core-object-type'](native);
+    const reader = Object.keys(vm.vm).find(name => name.startsWith(`core-read:${type}:`));
+    const signature = reader.split(':')[2], fields = vm.vm[reader](native);
+    const args = fields.filter((_, index) => signature[index] === signature[index].toLowerCase());
+    const entry = Array.from(signature.slice(0, signature.indexOf('e')))
+      .filter(kind => kind === kind.toLowerCase()).length;
+    const invalid = args.slice();
+    invalid[entry] = compilerEntries.get(workerIndex);
+    assert.throws(() => {
+      try {vm.vm[`core-new:${type}`](...invalid);}
+      catch (cause) {
+        assert.ok(cause instanceof WebAssembly.Exception, 'Reject the wrong entry type through a Lisp condition.');
+        throw vm.failure(cause);
+      }
+    }, error => error.code > 0);
+    assert.ok(vm.vm[`core-new:${type}`](...args), 'A rejected entry must not poison subsequent restoration.');
+    recover();
+  }
+
   const reject = (source, reason) => {
     const output = evaluate(`(handler-case (progn ${source} :unexpected-acceptance)
       (compiler-input-error (condition) (princ-to-string condition)))`);

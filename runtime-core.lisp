@@ -60,7 +60,10 @@
 
 (defun core-field-write (type expression)
   (case (core-field-code type)
-    (#\e `(ref.cast ,type ,expression))
+    (#\e `(block (result ,type)
+            ,(wat-fail-when
+              (wat-fragment (wat-string `(i32.eqz (ref.test ,type ,expression)))) :malformed-form)
+            (ref.cast ,type ,expression)))
     (#\r `(ref.cast ,type (any.convert_extern ,expression)))
     (otherwise (if (and (symbolp type) (string-equal type 'f64))
                    `(f64.reinterpret_i64 ,expression) expression))))

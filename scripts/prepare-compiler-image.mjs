@@ -31,7 +31,8 @@ try {
         (dolist (entry *image-sources*)
           (push (list (and (symbol-package (first entry)) (package-name (symbol-package (first entry))))
                       (symbol-name (first entry))) names))
-        (let ((unit (compile-module-to-hir
+        (let* ((*wasm-bootstrap-direct-workers* t)
+               (unit (compile-module-to-hir
                       (mapcar (lambda (entry) (list* 'defun (first entry) (cdr (second entry)))) *image-sources*)
                       :inline nil)))
           (multiple-value-bind (code literals) (emit-native-module unit)
@@ -92,14 +93,44 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
     return shift < 32 && (next & 64) ? value | (-1 << shift) : value;
   };
   const name = () => {const size = unsigned(); const value = new TextDecoder().decode(bytes.subarray(position, position + size)); position += size; return value;};
-  const imports = [], bodies = [];
+  const imports = [], bodies = [], types = [], functionTypes = [];
   const functionName = index => index < imports.length ? `$${imports[index]}` : `$compiler-${moduleIndex}-${index - imports.length}`;
   const valueType = () => {
     const type = byte();
     if (type === 0x7f) return 'i32';
     if (type === 0x7e) return 'i64';
     if (type === 0x6f) return 'externref';
+    if (type === 0x70) return 'funcref';
     throw new Error(`Unexpected native local type ${type}`);
+  };
+  // Keep the compiler's canonical GC types in the index space, while
+  // recording function signatures for the checked entries and private workers.
+  const storageType = () => {
+    const type = byte();
+    if (type === 0x63 || type === 0x64) unsigned();
+    else assert.ok([0x7f, 0x7e, 0x7d, 0x7c, 0x70, 0x6f, 0x6e, 0x6d, 0x6c, 0x78, 0x77].includes(type),
+      'Unsupported native storage type');
+  };
+  const fieldType = () => {storageType(); assert.ok(byte() <= 1, 'Invalid native field mutability');};
+  const subtype = () => {
+    let kind = byte();
+    if (kind === 0x4f || kind === 0x50) {
+      for (let count = unsigned(); count > 0; count--) unsigned();
+      kind = byte();
+    }
+    if (kind === 0x60) {
+      const parameters = [], results = [];
+      for (let count = unsigned(); count > 0; count--) parameters.push(valueType());
+      for (let count = unsigned(); count > 0; count--) results.push(valueType());
+      types.push({parameters, results});
+    } else {
+      if (kind === 0x5e) fieldType();
+      else {
+        assert.equal(kind, 0x5f, 'Unsupported native composite type');
+        for (let count = unsigned(); count > 0; count--) fieldType();
+      }
+      types.push(null);
+    }
   };
   const blockType = () => {
     const type = byte();
@@ -110,7 +141,14 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
   };
   while (position < bytes.length) {
     const kind = byte(), size = unsigned(), end = position + size;
-    if (kind === 2) {
+    if (kind === 1) {
+      for (let count = unsigned(); count > 0; count--) {
+        if (bytes[position] === 0x4e) {
+          byte();
+          for (let members = unsigned(); members > 0; members--) subtype();
+        } else subtype();
+      }
+    } else if (kind === 2) {
       const count = unsigned();
       for (let i = 0; i < count; i++) {
         const entry = {module: name(), name: name()};
@@ -118,11 +156,14 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
         const field = runtimeImportName(entry); assert.match(field, /^native-[a-z0-9-]+$/);
         assert.equal(byte(), 0); unsigned(); imports.push(field);
       }
+    } else if (kind === 3) {
+      for (let count = unsigned(); count > 0; count--) functionTypes.push(unsigned());
     } else if (kind === 7) {
       assert.equal(unsigned(), 1); assert.equal(name(), 'entry'); assert.equal(byte(), 0);
       entries.push(functionName(unsigned()));
     } else if (kind === 10) {
       const count = unsigned();
+      assert.equal(functionTypes.length, count, 'Native function and code counts differ');
       for (let i = 0; i < count; i++) {
         const size = unsigned(), bodyEnd = position + size, locals = [], instructions = [];
         const localGroups = unsigned();
@@ -219,7 +260,14 @@ function nativeModuleToWat(bytes, moduleIndex, declarations, entries, callCounts
         assert.equal(position, bodyEnd);
         const function_ = `$compiler-${moduleIndex}-${i}`;
         declarations.push(function_);
-        bodies.push(`(func ${function_} (type $native-entry) (param externref externref) (result externref)\n${locals.join('\n')}\n${instructions.join('\n')}\n)`);
+        const signature = types[functionTypes[i]];
+        assert.ok(signature && [2, 5].includes(signature.parameters.length) &&
+          signature.parameters.every(type => type === 'externref'), 'Unsupported compiler entry parameters');
+        assert.deepEqual(signature.results, ['externref'], 'Compiler entries return one Lisp value');
+        if (entries.includes(function_))
+          assert.equal(signature.parameters.length, 2, 'Compiler factory keeps its checked packet entry');
+        const entryType = signature.parameters.length === 2 ? '$native-entry' : '$native-direct-entry';
+        bodies.push(`(func ${function_} (type ${entryType}) (param ${signature.parameters.join(' ')}) (result externref)\n${locals.join('\n')}\n${instructions.join('\n')}\n)`);
       }
     }
     position = end;
