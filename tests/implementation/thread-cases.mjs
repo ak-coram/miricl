@@ -205,11 +205,14 @@ export const threadCases = [
       (miricl-threads:wait-on-semaphore ready)
       (miricl-threads:interrupt-thread worker (lambda () (throw 'comparison-exit :interrupted)))
       (eq (miricl-threads:join-thread worker) :interrupted)))`],
-  ['destroy before startup', `(let ((ran nil))
-    (let ((worker (miricl-threads:make-thread (lambda () (setq ran t)))))
-      (miricl-threads:destroy-thread worker)
-      (and (handler-case (progn (miricl-threads:join-thread worker) nil) (miricl-threads:abnormal-exit () t))
-        (not ran))))`],
+  ['destroy before startup', `(let ((ran nil) (worker nil))
+    ;; Queue destruction before an implicit scheduling checkpoint can start
+    ;; the worker. Scheduling between separate calls is otherwise permitted.
+    (miricl-threads:without-interrupts
+      (setq worker (miricl-threads:make-thread (lambda () (setq ran t))))
+      (miricl-threads:destroy-thread worker))
+    (and (handler-case (progn (miricl-threads:join-thread worker) nil) (miricl-threads:abnormal-exit () t))
+      (not ran)))`],
   ['destroy runs cleanup', `(let ((ready (miricl-threads:make-semaphore)) (cleaned nil))
     (let ((worker (miricl-threads:make-thread (lambda ()
         (unwind-protect (progn (miricl-threads:signal-semaphore ready) (loop (miricl-threads:thread-yield))) (setq cleaned t))))))

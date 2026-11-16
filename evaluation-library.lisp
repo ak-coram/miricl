@@ -16,7 +16,7 @@
         (let* ((miricl-compiler::*hir-debug-info-enabled* t)
                (miricl-compiler::*hir-debug-write-types* t)
                (expanded (miricl-compiler::lower-source-to-hir form name)))
-          (miricl-compiler:load-hir-code (miricl-compiler:emit-hir-code expanded)))
+          (miricl-compiler::hir-unit-function expanded))
         (let ((miricl-compiler::*wasm-single-use-entry* (null name)))
           (miricl-compiler:compile-native form :name name)))))
 

@@ -309,19 +309,6 @@
               (hir-instruction-attributes end) (list (first (hir-instruction-attributes end))))))))
   function)
 
-(defun hir-refresh-predecessors (function)
-  ;; Only edges changed: identities, allocation counts and ownership still
-  ;; have their checked meanings. Rebuild the affected analysis in O(blocks).
-  (declare (type simple-vector function))
-  (dolist (block (hir-function-blocks function))
-    (setf (hir-block-predecessors block) nil))
-  (dolist (block (hir-function-blocks function))
-    (let ((previous nil))
-      (dolist (successor (hir-instruction-attributes (hir-block-terminator block)))
-        (unless (eq successor previous)
-          (push block (hir-block-predecessors successor)) (setq previous successor)))))
-  function)
-
 (defun hir-proper-list-checks (unit calls references barriers)
   "Prove redundant proper-list checks within one block of the current emission.
 CALLS and REFERENCES identify the canonical operations selected by lowering.
@@ -420,6 +407,4 @@ Unknown effects discard mutable spine facts; no fact crosses a block edge."
   (verify-hir unit)
   (verify-hir-code-operands unit)
   (verify-hir-code-dominance unit)
-  (optimize-hir-checked unit)
-  (verify-hir unit)
-  unit)
+  (optimize-hir-checked unit))

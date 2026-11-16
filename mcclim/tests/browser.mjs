@@ -14,6 +14,32 @@ await fs.mkdir(new URL('../build/', import.meta.url), {recursive: true});
 const backend = ['package', 'port', 'input', 'windows', 'medium', 'fonts', 'bitmaps'];
 for (const name of backend) files.set(`/${name}.lisp`, await fs.readFile(new URL(`../backend/${name}.lisp`, import.meta.url)));
 const frame = `(in-package :cl-user)
+  (dolist (case '(((0 3 8 10) (4 0 12 9) (4 3 8 9))
+                  ((0 0 10 10) (20 20 30 30) nil)
+                  ((0 0 10 10) (10 0 20 10) nil)
+                  ((0 0 10 10) (10 10 20 20) nil)
+                  ((0 0 0 10) (0 0 10 10) nil)
+                  ((0 0 10 10) (1/3 2/3 11/3 17/3) (1/3 2/3 11/3 17/3))))
+    (destructuring-bind (left right expected) case
+      (let* ((a (apply #'clim:make-bounding-rectangle left))
+             (b (apply #'clim:make-bounding-rectangle right))
+             (result (multiple-value-list (clim:region-intersection a b))))
+        (assert (= (length result) 1))
+        (assert (clim:region-equal (first result)
+                  (if expected (apply #'clim:make-rectangle* expected) clim:+nowhere+)))
+        (assert (equal left (multiple-value-list (clim:rectangle-edges* a))))
+        (assert (equal right (multiple-value-list (clim:rectangle-edges* b)))))))
+  (defclass browser-edge-rectangle (clim:rectangle)
+    ((edges :initarg :edges) (tag :initarg :tag)))
+  (defparameter *browser-edge-calls* nil)
+  (defmethod clim:rectangle-edges* ((rectangle browser-edge-rectangle))
+    (push (slot-value rectangle 'tag) *browser-edge-calls*)
+    (values-list (slot-value rectangle 'edges)))
+  (let* ((a (make-instance 'browser-edge-rectangle :edges '(0 3 8 10) :tag :left))
+         (b (make-instance 'browser-edge-rectangle :edges '(4 0 12 9) :tag :right))
+         (result (clim:region-intersection a b)))
+    (assert (equal (reverse *browser-edge-calls*) '(:left :right)))
+    (assert (clim:region-equal result (clim:make-rectangle* 4 3 8 9))))
   (defparameter *browser-bitmap*
     (make-instance 'climi::image-pattern :array
       (make-array '(2 2) :element-type '(unsigned-byte 32)
@@ -51,9 +77,10 @@ const frame = `(in-package :cl-user)
           (setf (js:property (js:global "globalThis") "paintStage") "text")
           (clim:draw-text* pane "McCLIM in the browser" 20 45 :ink clim:+white+)
           (setf (js:property (js:global "globalThis") "paintStage") "painted")))
+      (entry :text-field :value "")
       (action :push-button :label "Count click"
         :activate-callback (lambda (gadget) (declare (ignore gadget)) (incf *browser-smoke-clicks*))))
-    (:layouts (default (clim:vertically () drawing action))))
+    (:layouts (default (clim:vertically () drawing entry action))))
   (defparameter *browser-smoke-frame* (clim:find-application-frame 'browser-smoke :activate nil))
   (defparameter *browser-smoke-thread*
     (clim-sys:make-process
@@ -207,6 +234,26 @@ try {
       await new Promise(resolve=>setTimeout(resolve,100));
     }
   };
+  // Send keys immediately after the pointer press, without waiting for CLIM
+  // focus. DOM focus can precede handling the queued gadget-focus event.
+  const entryPositionSource = `(let ((pane (clim:find-pane-named *browser-smoke-frame* (quote entry))))
+       (multiple-value-bind (x y) (climi::screen-position-from-sheet-position pane 8 8)
+         (format t "[~D,~D]" (round x) (round y))
+         (values)))`;
+  const entryPoint = await js(`JSON.parse(app.evaluate(${JSON.stringify(entryPositionSource)}).output)`);
+  const entry = {x: entryPoint[0], y: entryPoint[1]};
+  assert.ok(await js(`document.elementFromPoint(${entry.x},${entry.y}) === document.querySelector('canvas')`),
+    'Editable field is not on the visible canvas');
+  await command('Input.dispatchMouseEvent',{type:'mouseMoved',...entry});
+  await command('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',buttons:1,clickCount:1,...entry});
+  await command('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',buttons:0,clickCount:1,...entry});
+  const keys = ['a','b','c'];
+  for (const key of keys) {
+    await command('Input.dispatchKeyEvent',{type:'keyDown',key,text:key});
+    await command('Input.dispatchKeyEvent',{type:'keyUp',key});
+  }
+  await waitFor(`app.evaluate('(clim:gadget-value (clim:find-pane-named *browser-smoke-frame* (quote entry)))').output.trim() === ${JSON.stringify(JSON.stringify(keys.join('')))}`,
+    'Immediate keys were lost or reordered during gadget focus transfer');
   const drag=async (selector,dx,dy) => {
     const start=await js(`(() => {
       const bounds=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
@@ -226,7 +273,7 @@ try {
   await js(`document.querySelector('.mcclim-titlebar button').click()`);
   await waitFor(`document.querySelectorAll('.mcclim-window').length===0`,'Window did not close through CLIM');
   assert.deepEqual(exceptions,[]);
-  console.log('PASS real McCLIM drawing, gadget input, window movement and close through the Lisp browser backend');
+  console.log('PASS real McCLIM drawing, pointer and immediate keyboard input, window movement and close through the Lisp browser backend');
 } finally {
   fail(new Error('Browser test ended')); browser.kill(); await stopped;
   await new Promise(resolve=>server.close(resolve));

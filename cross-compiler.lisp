@@ -251,8 +251,8 @@ No compiler is bootstrapped in Wasm, and no guest function bindings are changed.
         (miricl-compiler::*hir-load-time-evaluator*
           (or load-time-evaluator #'require-target-load-time-evaluation))
         (*macroexpand-hook* macroexpand-hook))
-    (miricl-compiler:emit-native-module
-      (miricl-compiler:compile-to-hir source :name name :global-specials global-specials))))
+    (miricl-compiler::emit-native-module-checked
+      (miricl-compiler:compile-to-hir source :name name :global-specials global-specials) nil)))
 
 (defun compile-module (definitions &key (entry-points nil entriesp) (inline t) global-specials
                                        (macroexpand-hook #'require-target-macro-expansion)
@@ -272,7 +272,7 @@ host proclamations are not target declarations."
                       :entry-points entry-points :inline inline :global-specials global-specials)
                     (miricl-compiler:compile-module-to-hir definitions :inline inline
                       :global-specials global-specials))))
-      (multiple-value-bind (bytes literals debug) (miricl-compiler:emit-native-module unit)
+      (multiple-value-bind (bytes literals debug) (miricl-compiler::emit-native-module-checked unit nil)
         (values bytes literals debug unit)))))
 
 (defvar *kernel-cache* (make-hash-table :test 'equal))
@@ -285,9 +285,10 @@ host proclamations are not target declarations."
 (defun kernel-fixed-imports ()
   ;; Reuse the checked, primary-value ABI of the actual fixed-call dispatcher.
   ;; MIRICL/CROSS alone has no runtime registry and therefore no such adapters.
+  ;; Kernel callbacks currently support only one to three object operands.
   (when (fboundp 'miricl::native-fixed-primitive-entries)
     (loop for (primitive arity target) in (miricl::native-fixed-primitive-entries)
-          for index from 0 collect
+          for index from 0 when (member arity '(1 2 3)) collect
       (list (format nil "native-kernel-fixed-~D" index) arity target primitive))))
 
 (defun kernel-fixed-callback-descriptor (descriptor)
@@ -309,10 +310,9 @@ host proclamations are not target declarations."
         (push (list index primitive) copy)))))
 
 (defun kernel-fixed-callback-facts (unit selected descriptor)
-  "Prove callback identity on this fresh, verified closed HIR only.
+  "Prove callback identity on this fresh, privately owned closed HIR only.
 Intersect every internal ingress, including reentry into SELECTED, with the
 private adapter's ingress. Exhausted work and unknown provenance prove nothing."
-  (miricl-compiler:verify-hir unit)
   (let* ((functions (miricl-compiler:hir-unit-functions unit))
          (arguments (make-hash-table :test 'eq)) (owners (make-hash-table :test 'eq))
          (uses (make-hash-table :test 'eq)) (calls (make-hash-table :test 'eq))
@@ -464,7 +464,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
              (when facts
                (loop for (name arity) in (kernel-fixed-imports) collect
                  (list name (make-list arity :initial-element :object) :object))))))
-    (miricl-compiler:emit-native-module unit :entries entries :entry-tables nil)))
+    (miricl-compiler::emit-native-module-checked unit entries nil)))
 
 (defun kernel-macroexpand-hook (expander form environment)
   ;; Use the target's logical expansion: host AND/OR expanders can introduce
@@ -905,7 +905,6 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
 
 (defun kernel-closed-helper-unit (unit entry)
   "Remove only call-only, immutable module function cells from a fresh unit."
-  (miricl-compiler:verify-hir unit)
   (let* ((factory (first (miricl-compiler:hir-unit-functions unit)))
          (children (rest (miricl-compiler:hir-unit-functions unit)))
          (members (make-hash-table :test 'eq)) (uses (make-hash-table :test 'eq))
@@ -1019,7 +1018,6 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
         (setf (miricl-compiler::hir-function-parent function) nil
               (miricl-compiler::hir-function-captures function) nil))
       (setf (miricl-compiler:hir-unit-functions unit) children)
-      (miricl-compiler:verify-hir unit)
       (values unit selected closed))))
 
 (defun kernel-link-helper-group (group)

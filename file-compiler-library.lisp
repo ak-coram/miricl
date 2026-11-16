@@ -112,7 +112,7 @@
               (let ((marker (gensym)))
                 (setf (gethash marker %file-load-values) (list (%compile-form form nil)))
                 marker)))))
-    (vector :hir (miricl-compiler:emit-hir-code
+    (vector :hir (miricl-compiler::emit-hir-code-checked
       (if source-p
           (miricl-compiler::lower-source-to-hir (list 'lambda nil form) nil nil environment)
           (miricl-compiler:compile-to-hir (list 'lambda nil form)))))))

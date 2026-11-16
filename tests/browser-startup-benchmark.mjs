@@ -1,4 +1,5 @@
 // node tests/browser-startup-benchmark.mjs [site directory] [samples=5] [first calculation]
+// Local use only; browser timings do not gate CI.
 // Each sample uses a fresh Chromium profile, followed by a cached reload.
 // Assets are served unchanged over loopback; worker instrumentation is transient.
 // Game of Life sites also measure ten generations and ten ASCII renders.

@@ -78,6 +78,8 @@
   "Validate type structure consumed by inference, without running type expanders.
 Objects inside MEMBER and EQL remain literal data, including cyclic objects."
   (declare (optimize (safety 3)))
+  ;; Atomic types are opaque leaves; only compound structure needs a worklist.
+  (unless (consp type) (return-from compiler-type-specifier type))
   (let ((seen (or checked (make-hash-table :test 'eq))) (work (list (cons type nil))))
     (loop while work do
       (let* ((job (pop work)) (item (car job)))

@@ -254,7 +254,7 @@
 (setf *runtime-functions* (append *runtime-functions* '(pprint-fill pprint-linear pprint-tabular copy-pprint-dispatch pprint-dispatch set-pprint-dispatch write write-to-string constantp write-char read-sequence write-sequence write-line
     make-string-input-stream read-char read-char-no-hang peek-char unread-char read-line listen clear-input read read-preserving-whitespace)))
 (setf *runtime-functions* (append *runtime-functions* '(make-array adjust-array vector-push vector-pop vector-push-extend vector svref arrayp vectorp simple-vector-p simple-string-p bit-vector-p simple-bit-vector-p bit sbit upgraded-array-element-type array-element-type adjustable-array-p array-has-fill-pointer-p array-displacement fill-pointer array-in-bounds-p array-row-major-index aref row-major-aref schar array-rank array-dimensions array-dimension array-total-size)))
-(setf *runtime-functions* (append *runtime-functions* '(null consp atom listp stringp identity string copy-seq subseq concatenate)))
+(setf *runtime-functions* (append *runtime-functions* '(null consp atom listp stringp identity string copy-seq subseq concatenate list*)))
 (setf *runtime-functions* (append *runtime-functions*
   '(char-upcase char-downcase coerce maphash digit-char digit-char-p standard-char-p
     upper-case-p lower-case-p both-case-p alpha-char-p alphanumericp graphic-char-p char-name name-char oddp evenp equalp max min reduce)))

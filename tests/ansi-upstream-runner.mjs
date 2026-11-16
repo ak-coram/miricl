@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {runUpstream} from './ansi-upstream.mjs';
+import {correctUpstreamTestInput} from './ansi-full.mjs';
 
 const binary = process.argv[2] ?? 'miricl-interpreter.wasm';
 const sources = ['rt-package.lsp', 'rt.lsp'].map(file => [file,
@@ -55,3 +56,48 @@ assert.equal(broken.summary.complete, false);
 assert.equal(broken.loadErrors.length, 1);
 assert.match(broken.error, /initialization failed/);
 console.log('Upstream ANSI runner: normal loading, guest inventory, forward definitions, failure details, individual timeouts, sandbox defaults, and incomplete-run accounting passed.');
+
+// Force both RANDOM endpoints so a rare invalid printer-test input is tested
+// deterministically. One sample per selected upstream assertion is sufficient
+// here; the ordinary ANSI suite retains its complete sampling loops.
+const printerFile = 'printer/print-floats.lsp';
+const originalPrinter = fs.readFileSync(new URL(`./ansi-test/${printerFile}`, import.meta.url), 'utf8');
+const corrections = [];
+const correctedPrinter = correctUpstreamTestInput(printerFile, originalPrinter, value => corrections.push(value));
+assert.ok(corrections.length, 'Report the upstream printer input correction.');
+const endpoints = [
+  {source: originalPrinter, upper: false, status: 'fail'},
+  {source: correctedPrinter, upper: false, status: 'pass'},
+  {source: correctedPrinter, upper: true, status: 'pass'},
+];
+let originalNames;
+for (const {source, upper, status} of endpoints) {
+  const fixture = source.replace(/\brepeat\s+\d+/gi, 'repeat 1');
+  const printerReport = await runUpstream({binary,
+    sources: [...sources.filter(([file]) => ['rt-package.lsp', 'rt.lsp'].includes(file)),
+      ['float-input.lsp', fixture], ['init.lsp', `
+        (load "rt-package.lsp") (load "rt.lsp")
+        (defpackage :cl-test (:use :cl :rt))
+        (in-package :cl-test)
+        (with-open-file (input "float-input.lsp")
+          (loop for form = (read input nil :eof) until (eq form :eof) do
+            (when (or (eq (car form) 'defparameter)
+                      (and (eq (car form) 'deftest)
+                        (let* ((name (symbol-name (second form)))
+                               (dot (position #\\. name :from-end t)))
+                          (and dot (member (subseq name (1+ dot)) '("2" "4") :test #'equal)))))
+              (eval form))))
+        (setf (symbol-function 'random)
+          (lambda (limit &optional state)
+            (declare (ignore state))
+            ${upper ? '(1- limit)' : '(declare (ignore limit)) 0'}))
+      `]],
+  });
+  assert.equal(printerReport.error, null);
+  assert.ok(printerReport.tests.length, 'Discover the upstream floating-point printer assertions.');
+  const names = printerReport.tests.map(test => test.name);
+  originalNames ??= names;
+  assert.deepEqual(names, originalNames, 'Input correction preserves every selected upstream assertion.');
+  assert.ok(printerReport.tests.every(test => test.status === status), JSON.stringify(printerReport.tests));
+}
+console.log('Upstream ANSI runner: floating-point printer input correction preserves assertions and checks both random endpoints.');

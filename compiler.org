@@ -194,6 +194,29 @@ operands, attributes, effect classification, scoped safety and available
 origin information. Multiple-value groups are distinct from primary values.
 Dynamic bindings, nonlocal targets and cleanup regions remain explicit.
 
+HIR trust follows ownership. Source and macroexpansion inputs are checked
+before lowering. Freshly lowered graphs remain compiler-owned through
+optimization, inference and emission, without full graph validation between
+passes. Predecessor construction is separate graph maintenance and runs after
+lowering or control-flow changes. Public HIR consumers validate on entry,
+including graphs returned earlier and subsequently mutated by their callers.
+No validation certificate survives external sharing or mutation.
+Consumed declaration and THE type syntax, and retained SETF names, are
+snapshotted when admitted from shared source, before later macroexpansion or
+load-time-value callbacks can mutate that source. Opaque type arguments and
+EQL/MEMBER literal objects retain their intended sharing.
+
+The private =emit-hir-code-checked= kernel can emit executable descriptors
+directly. =hir-unit-function= transfers those fresh private containers to the
+unexported =%%hir-function-checked= runtime constructor, avoiding a wire
+serialization, validation and decoding round trip during local evaluation.
+Neither helper accepts caller-owned HIR or executable payloads as a public
+API. =emit-hir-code= and =load-hir-code= remain checked public boundaries.
+Stored code is validated and copied once on ingestion; reconstruction reuses
+that private decoded snapshot and checks externally determined native operand,
+lexical-parent, register-definition and control-flow contracts before native
+optimization. Constructed record shapes need no additional integrity scan.
+
 =hir-optimize.lisp= simplifies this semantic graph before retained-code or
 native lowering. Private cell reads can use reaching SSA values when actual
 uses exclude aliases and capture. Joins forward a value only when every
@@ -263,6 +286,9 @@ entries and escaping functions account for outside callers. Unknown global
 calls keep unknown results. The worklist requests the facts needed by current
 lowering and can also answer whole-unit queries. Facts do not overwrite source
 assertions, and HIR changes require recomputation.
+Interval widening retains canonical transfer bounds from owned operand
+assertions and literals, independently of the cycle's evolving facts.
+Unknown operands still lose the range; executable-only proofs ignore assertions.
 
 *** Control-flow premises and mutable state
 
@@ -379,6 +405,17 @@ mistaken for the builtin. Ordinary and NOTINLINE calls retain dynamic lookup;
 ordinary specialized runtime helpers guard the resolved function object and
 fall back for replacements.
 
+Method specializers are not unconditional body type declarations. The public
+=METHOD-FUNCTION= adapter reaches the same body without generic applicability
+selection: direct calls to an INTEGER-specialized method can pass a string,
+and EQL-specialized methods can receive a different object. Saved specializers
+retain class-object identity when =FIND-CLASS= names are rebound; =CHANGE-CLASS=
+inside a callback also invalidates a class fact established on body entry.
+Future private specialized entries need guarded ingress, class-object facts
+and mutation/redefinition invalidation, while retaining ordinary escaping
+method functions. Speculative class candidates can retain exact runtime guards,
+but final native recipes currently discard transient generic-call plans.
+
 *** Tail calls and dynamic control
 
 A call whose complete value group flows directly to return can use Wasm
@@ -386,6 +423,13 @@ A call whose complete value group flows directly to return can use Wasm
 lexical calls and computed native callees, including the builtin FUNCALL,
 APPLY and MULTIPLE-VALUE-CALL paths. Global redefinition, argument order,
 multiple values and checks remain observable.
+
+Calls with zero through four operands share fixed-arity tail helpers. A guarded
+native worker, or an eligible recent generic plan with at most three operands,
+receives the operands directly; other targets allocate the ordinary argument
+packet. The helpers retain live function selection, debugger entry, complete
+values, frame replacement and cooperative checkpoints. This reduces both code
+and allocation at the caller without duplicating dispatch machinery.
 
 Tail lowering is restricted by active dynamic bindings, captured nonlocal
 targets and DEBUG policy. Branch-local scopes do not inhibit unrelated calls.
@@ -437,8 +481,15 @@ Unobserved predicate results can feed branches without constructing a Lisp
 boolean; observed results keep their value and multiple-value behavior.
 Adjacent repeated nontrapping predicates can share results for identical SSA
 operands within a bounded effect-safe region.
+Canonical CHARACTERP shares the same dead-result, predicate-reuse and
+loop-invariant rules as the other immutable type predicates. Rebinding or
+reading mutable operands still prevents reuse of a stale result.
 
 Inline LIST constructs a fresh spine for its evaluated primary arguments.
+Canonical inline LIST* uses the same shared cons helpers for a fresh prefix,
+retaining its final arbitrary object as the tail. One argument forwards its
+primary value; two arguments reuse CONS and its field proofs. Zero arguments
+retain ordinary arity rejection, and NOTINLINE retains ordinary calls.
 List emission shares tail-first allocation helpers across argument packets,
 value groups and canonical list construction. Operand order and fresh cell
 identity remain intact. Literal-lambda APPLY and single-producer
@@ -638,6 +689,12 @@ Special variables, symbol macros, debugger names and captured targets retain
 their own runtime handling. Generic dispatch uses live method/function,
 version, cache, class and MOP checks; a private next-method context object is
 retained by nested and escaped CALL-NEXT-METHOD closures.
+Native standard method bodies share the direct-body adapter path while retaining
+that context, complete values and unwind cleanup. Their externally callable
+method functions keep the two-argument protocol.
+Generated accessors can reuse a proved slot plan when inherited primary methods
+follow them. Their next-method spines remain checked, and the same slot protocol,
+layout and redefinition guards control the specialization.
 
 DEBUG 3 compact HIR records the visible binding names and active control
 targets at each step site, including otherwise unused lexical cells. Frame
@@ -647,6 +704,11 @@ types before changing cells, including assignments compiled inside escaping
 frame-created closures. RETURN-FROM and GO use the existing target tokens and
 dynamic cleanup machinery. Native Wasm does not yet carry equivalent stepping
 instrumentation.
+
+The shipped native compiler also compiles =hir-debug-check-write=, which
+runtime-generated HIR closures call for checked assignments. Its ordinary
+=TYPEP= and =ERROR= calls remain live; compiling the helper changes neither
+the assignment checks nor the debugging policy.
 
 Debug frames expose snapshots of scope metadata and selected cells rather
 than the executable register and capture arrays. Loading retained HIR copies

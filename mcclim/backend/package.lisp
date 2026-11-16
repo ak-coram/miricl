@@ -15,6 +15,7 @@
   ((root :reader browser-root)
    (incoming :initform nil :accessor incoming-events)
    (outgoing :initform nil :accessor outgoing-events)
+   (focus-delivery-token :initform nil :accessor focus-delivery-token)
    (modifiers :initform 0 :accessor browser-modifiers)
    (stack :initform 0 :accessor browser-stack))
   (:default-initargs :pointer (make-instance 'browser-pointer)))

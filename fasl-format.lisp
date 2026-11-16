@@ -355,6 +355,7 @@
                (spine object "FASL reference list") (dolist (id object) (reference id)))
              (invalid (record)
                (compiler-input-fail "FASL record" record "invalid record shape or field")))
+      (declare (inline reference spine references invalid))
       (references roots)
       (loop for record across records do
         (let ((size (spine record "FASL record")))

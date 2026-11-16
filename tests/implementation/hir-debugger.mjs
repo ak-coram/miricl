@@ -16,6 +16,40 @@ const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl
 });
 const evaluate = source => vm.evaluate(source, {eof: true}).output;
 const cases = [
+['captured nested RETURN-FROM targets retain values and cleanup', `(let* ((direct
+ (miricl-compiler:compile-hir '(lambda (outerp)
+  (let ((effects nil))
+   (values (multiple-value-list
+    (block outer
+     (block inner
+      (unwind-protect
+       (funcall (lambda () (if outerp (return-from outer (values :outer 42))
+                                    (return-from inner (values :inner 17)))))
+       (push :cleanup effects)))
+     (values :after-inner 19))) effects)))))
+ (loaded (miricl-compiler:load-hir-code (miricl-compiler::compiler-primitive 43 direct))))
+ (mapcar (lambda (worker)
+   (list (multiple-value-list (funcall worker t))
+         (multiple-value-list (funcall worker nil)))) (list direct loaded)))`,
+ '((((:OUTER 42) (:CLEANUP)) ((:AFTER-INNER 19) (:CLEANUP))) (((:OUTER 42) (:CLEANUP)) ((:AFTER-INNER 19) (:CLEANUP))))\n'],
+['captured nested GO targets retain landing sites and cleanup', `(let* ((direct
+ (miricl-compiler:compile-hir '(lambda (outerp)
+  (let ((steps nil) (cleanup 0))
+   (tagbody outer
+    (tagbody inner
+     (unwind-protect
+      (funcall (lambda () (if outerp (go outer-done) (go inner-done))))
+      (incf cleanup))
+     (push :unreachable steps)
+     inner-done (push :inner steps))
+    (push :after-inner steps)
+    outer-done (push :outer steps))
+   (values (reverse steps) cleanup)))))
+ (loaded (miricl-compiler:load-hir-code (miricl-compiler::compiler-primitive 43 direct))))
+ (mapcar (lambda (worker)
+   (list (multiple-value-list (funcall worker t))
+         (multiple-value-list (funcall worker nil)))) (list direct loaded)))`,
+ '((((:OUTER) 1) ((:INNER :AFTER-INNER :OUTER) 1)) (((:OUTER) 1) ((:INNER :AFTER-INNER :OUTER) 1)))\n'],
 ['captured cell and escaping frame-created closure',`(progn
  (defparameter *debug-retained* nil)
  (let ((f (miricl-compiler:compile-hir '(lambda (x) (declare (optimize (debug 3))) (funcall (lambda () (values x :done)))) :name 'captured-debug)) (edited nil))
@@ -66,6 +100,23 @@ const cases = [
    (handler-case (miricl-debugger:eval-in-frame '(locally (declare (optimize (safety 0))) (setq x :wrong)) frame) (type-error () (setq rejected t)))
    (miricl-debugger:eval-in-frame '(incf x) frame)))))
   (list (multiple-value-list (funcall f 41)) rejected (miricl-debugger:frames))))`,'((42 :DONE) T NIL)\n'],
+['custom declarations preserve typed writes',`(let ((identifier (gensym "CUSTOM-DECLARATION-")))
+ (proclaim (list 'declaration identifier))
+ (let* ((source (list 'lambda '(x)
+          (list 'declare '(fixnum x) (list identifier 'x "author" '(:annotation t)))
+          '(let ((effects nil))
+             (flet ((assign () (push :before effects)
+                       (setq x (progn (push :rhs effects) 42)))) (assign))
+             (values x :done effects))))
+        (worker (miricl-compiler:compile-hir source))
+        (rejected (handler-case
+          (progn (funcall (miricl-compiler:compile-hir
+            (list 'lambda '(x) (list 'declare '(fixnum x) (list identifier 'x))
+              '(setq x :wrong) 'x)) 41) nil)
+          (type-error (condition)
+            (and (eq (type-error-datum condition) :wrong)
+                 (eq (type-error-expected-type condition) 'fixnum))))))
+  (list (multiple-value-list (funcall worker 41)) rejected)))`,'((42 :DONE (:RHS :BEFORE)) T)\n'],
 ['expired target and stale frame reject',`(progn (defparameter *review-exit* nil) (defparameter *review-frame* nil)
  (let ((f (miricl-compiler:compile-hir '(lambda (x) (declare (optimize (debug 3))) (block outer (values x :done))) :name 'review-lifetime)) (edited nil))
   (let ((miricl-debugger:*step-hook* (lambda (frame) (when (and (not edited) (consp (miricl-debugger:frame-form frame)) (eq (car (miricl-debugger:frame-form frame)) 'values))
@@ -109,6 +160,40 @@ const cases = [
  (let ((miricl-debugger:*step-hook* (lambda (frame) (unless edited (setq edited t)
   (handler-case (miricl-debugger:eval-in-frame '(setq x 101) frame) (type-error () (setq rejected t)))))))
  (list (multiple-value-list (funcall loaded 42)) rejected)))`, '((42 :DONE) T)\n'],
+['source type metadata private after compilation', `(let* ((type (list 'integer 0 100))
+ (source (list 'lambda '(x) (list 'declare (list 'type type 'x) '(optimize (debug 3)))
+               '(values x :done)))
+ (f (miricl-compiler:compile-hir source)) (edited nil) (rejected nil))
+ (setf (third type) 1000)
+ (let ((miricl-debugger:*step-hook* (lambda (frame) (unless edited (setq edited t)
+   (handler-case (miricl-debugger:eval-in-frame '(setq x 101) frame)
+     (type-error () (setq rejected t)))))))
+  (list (multiple-value-list (funcall f 42)) rejected)))`, '((42 :DONE) T)\n'],
+['source type metadata private during macro callbacks', `(progn
+ (defvar *debug-callback-type* nil)
+ (defmacro debug-mutate-source-type () (setf (third *debug-callback-type*) 1) nil)
+ (unwind-protect
+  (let* ((*debug-callback-type* (list 'integer 0 100))
+         (source (list 'lambda '(x)
+           (list 'declare (list 'type *debug-callback-type* 'x) '(optimize (debug 3)))
+           '(debug-mutate-source-type) '(values x :done)))
+         (f (miricl-compiler:compile-hir source)) (edited nil) (accepted nil))
+   (let ((miricl-debugger:*step-hook* (lambda (frame)
+     (when (and (not edited) (assoc 'x (miricl-debugger:frame-locals frame)))
+      (setq edited t)
+      (handler-case (progn (miricl-debugger:eval-in-frame '(setq x 42) frame) (setq accepted t))
+        (type-error () nil))))))
+    (list (third *debug-callback-type*) (multiple-value-list (funcall f 42)) accepted)))
+  (fmakunbound 'debug-mutate-source-type)))`, '(1 (42 :DONE) T)\n'],
+['retained type literals keep cyclic object identity', `(let* ((object (list :cycle)) (edited nil) (accepted nil))
+ (setf (cdr object) object)
+ (let* ((source (list 'lambda '(x) (list 'declare (list 'type (list 'eql object) 'x)
+                                          '(optimize (debug 3))) '(values x :done)))
+        (f (miricl-compiler:compile-hir source)))
+  (let ((miricl-debugger:*step-hook* (lambda (frame) (unless edited (setq edited t)
+    (setq accepted (eq (miricl-debugger:eval-in-frame (list 'setq 'x (list 'quote object)) frame) object))))))
+   (let ((answer (multiple-value-list (funcall f object))))
+    (list (eq (first answer) object) (second answer) accepted)))))`, '(T :DONE T)\n'],
 ['malformed default debug eval and recovery', `(progn (setq miricl-compiler:*compile-evaluations* :interpreted) (let ((form (list 'progn nil))) (setf (second form) form)
  (list (handler-case (eval (list 'locally '(declare (optimize (debug 3))) form))
    (program-error (c) (not (null (princ-to-string c))))) (eval '(+ 20 22)))))`, '(T 42)\n'],

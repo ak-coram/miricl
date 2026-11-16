@@ -657,7 +657,7 @@ A budget limits cost; stopping early only loses optimization opportunities."
          (name (first attributes)))
     ;; INLINE is the contract that permits relying on the definition selected
     ;; at compilation. Ordinary calls retain their unrestricted result types.
-    (when (and (eq (second attributes) 'inline) (member name '(char char-code code-char sbit row-major-aref length integer-length mod truncate cons list consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor lognot ash)))
+    (when (and (eq (second attributes) 'inline) (member name '(char char-code code-char sbit row-major-aref length integer-length mod truncate cons list list* consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor lognot ash)))
       (multiple-value-bind (canonical found) (gethash name cache)
         (unless found
           (setq canonical
@@ -807,6 +807,8 @@ numbers, including bignums, and is never proved true by this rule."
     (return-from hir-inline-result-type 'cons))
   (when (eq name 'list)
     (return-from hir-inline-result-type (if types 'cons 'null)))
+  (when (and (eq name 'list*) types)
+    (return-from hir-inline-result-type (if (cdr types) 'cons (first types))))
   (when (and (member name '(1+ 1-)) (= (length types) 1))
     (return-from hir-inline-result-type
       (hir-inline-result-type (if (eq name '1+) '+ '-) (list (first types) '(integer 1 1)))))
@@ -1117,8 +1119,28 @@ Return primary type facts and executable branch premises as separate values."
                       (setf (gethash value growth) count)
                       (when (>= count 4)
                         (compiler-statistic :proof/interval-widening)
-                        (setq next (if (or function proven-only) t
-                                       (hir-type-restrict t (hir-value-type value))))))))))
+                        (setq next
+                          (if (or function proven-only) t
+                              (hir-type-restrict
+                                ;; Repeated arithmetic growth can stabilize at
+                                ;; declared operand bounds after its storage
+                                ;; join widens. Use those owned assertions and
+                                ;; literal facts, independent of this cycle's
+                                ;; evolving inferred intervals. Unknown inputs
+                                ;; still give the ordinary unknown result.
+                                (if (and (%hir-instruction-p producer)
+                                         (eq (hir-instruction-opcode producer) :call)
+                                         (gethash value intrinsics))
+                                    (hir-inline-result-type (gethash value intrinsics)
+                                      (mapcar (lambda (input)
+                                                (let ((origin (hir-value-producer input)))
+                                                  (if (and (%hir-instruction-p origin)
+                                                           (eq (hir-instruction-opcode origin) :constant))
+                                                      (hir-constant-type (first (hir-instruction-attributes origin)))
+                                                      (hir-value-type-at (hir-value-type input) 0))))
+                                        (cddr (hir-instruction-inputs producer))))
+                                    t)
+                                (hir-value-type value))))))))))
             (setf (gethash value facts) next)
             (dolist (user (gethash value users)) (enqueue user)))))
       (values facts guards))))

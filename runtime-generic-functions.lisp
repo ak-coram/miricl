@@ -72,9 +72,15 @@
   #@(block $returned
     (block $thrown
       (try_table (catch $transfer $thrown)
+        ;; These private adapters only unpack the original arguments. Retain
+        ;; the same next-method binding and cleanup while avoiding their fresh
+        ;; (arguments next-methods) packet and an extra APPLY frame.
         (if (if (result i32) (ref.test (ref $direct-function) (local.get $function))
-              (then (i32.eq (struct.get $direct-function $mode
-                (ref.cast (ref $direct-function) (local.get $function))) (i32.const 17)))
+              (then (i32.or
+                (i32.eq (struct.get $direct-function $mode
+                  (ref.cast (ref $direct-function) (local.get $function))) (i32.const 10))
+                (i32.eq (struct.get $direct-function $mode
+                  (ref.cast (ref $direct-function) (local.get $function))) (i32.const 17))))
               (else (i32.const 0)))
           (then (local.set $result (call $apply
             (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $function)))
@@ -278,7 +284,7 @@
 (defun $generic-fixed-arity-cl ()
   (runtime-function-definition '$generic-fixed-arity-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$generic-fixed-arity-cl 'miricl-runtime:generic-fixed-arity-value
-      :result :truth :fixed-callbacks '((2 %%generic-dispatch-metadata))))))
+      :result :truth))))
 (defun $generic-cache-permitted-cl ()
   (runtime-function-definition '$generic-cache-permitted-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$generic-cache-permitted-cl 'miricl-runtime:generic-cache-permitted-value
@@ -467,33 +473,35 @@
 ;; Fixed-argument callers can enter a recent executable plan without first
 ;; allocating an argument container or invoking the universal dispatcher.
 (define-runtime-function $generic-fixed-arity-p (($params :nullable-object) ($count i32)) (i32)
-  (:locals ($result i32) ($saved :nullable-object) ($saved-count i32))
-  #@(local.set $saved (call $extra-value-list))
-  #@(local.set $saved-count (global.get $value-count))
-  #@(block $failed (try_table (catch $transfer $failed)
-    (local.set $result (call $generic-fixed-arity-cl (local.get $params) (call $int (local.get $count))
-    (call $generic-dispatch-metadata-function)))
-    (global.set $extra-values (local.get $saved))
-    (global.set $value-count (local.get $saved-count))
-    (return (local.get $result))))
-  #@(global.set $extra-values (local.get $saved))
-  #@(global.set $value-count (local.get $saved-count))
-  #@(throw $transfer))
+  ;; Counts originate at private fixed callers; unknown counts supply no proof.
+  ;; The CL worker checks every lambda-list cell within this bounded count.
+  ;; Its raw truth ABI neither changes multiple values nor calls/polls Lisp.
+  #@(if (i32.gt_u (local.get $count) (i32.const 4)) (then (return (i32.const 0))))
+  #@(call $generic-fixed-arity-cl (local.get $params) (call $int (local.get $count))))
 
 (define-runtime-function $generic-recent-call
     (($gf :nullable-object) ($count i32) ($a :nullable-object) ($b :nullable-object)
      ($c :nullable-object) ($d :nullable-object)) (:nullable-object i32)
+  #@(if (global.get $debug-evaluating) (then (return (ref.null eq) (i32.const 0))))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(return_call $generic-recent-call-ready (local.get $gf) (local.get $count)
+    (local.get $a) (local.get $b) (local.get $c) (local.get $d)))
+
+;; Callers poll before capturing operands. Class-only selection through the
+;; fixed-arity proof is nonpolling; executing the selected method can yield.
+(define-runtime-function $generic-recent-plan-ready
+    (($gf :nullable-object) ($count i32) ($a :nullable-object) ($b :nullable-object)
+     ($c :nullable-object) ($d :nullable-object))
+    (:nullable-object :nullable-object :nullable-object :nullable-object :nullable-object)
   (:locals ($info (ref $obj)) ($metadata :nullable-object) ($recent (ref $objects))
            ($row-object :nullable-object) ($row (ref $objects)) ($phase i32) ($mode i32) ($target-mode i32) ($position i32)
            ($version :nullable-object) ($history :nullable-object) ($discriminator :nullable-object)
-           ($proof :nullable-object) ($key :nullable-object) ($profile :nullable-object)
+           ($proof :nullable-object) ($key :nullable-object)
            ($object :nullable-object) ($class :nullable-object) ($selected :nullable-object)
            ($method :nullable-object) ($rest :nullable-object) ($next :nullable-object)
-           ($function :nullable-object) ($body (ref null $native-function)) ($args :nullable-object)
-           ($context :nullable-object) ($result :nullable-object) ($index i32))
+           ($function :nullable-object) ($body (ref null $native-function)))
   #@(block $miss
     (br_if $miss (global.get $debug-evaluating))
-    (if (global.get $thread-active) (then (call $thread-checkpoint)))
     (br_if $miss (i32.gt_u (local.get $count) (i32.const 3)))
     (local.set $info (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $gf)))))
     (local.set $metadata (struct.get $obj $c (local.get $info)))
@@ -534,10 +542,15 @@
         (local.set $mode (call $natural-count (array.get $objects (local.get $row) (i32.const 3))))
         (br_if $row-miss (i32.eqz (local.get $mode)))
         (br_if $row-miss (i32.ne (i32.and (local.get $mode) (i32.const 7)) (local.get $count)))
+        ;; EQL-key workers validate metadata through polling callbacks. Keep
+        ;; those profiles in ordinary dispatch until they have a raw selector.
+        (br_if $row-miss (i32.and (local.get $mode) (i32.const 3840)))
         (if (i32.and (local.get $mode) (i32.const 4096))
           (then (br_if $row-miss (i32.eqz (ref.eq (global.get $slot-access-token)
             (array.get $objects (local.get $row) (i32.const 5)))))))
         ;; Reject unsupported plans before classifying operands on a miss.
+        (local.set $function (ref.null eq))
+        (local.set $method (ref.null eq)) (local.set $rest (ref.null eq)) (local.set $next (ref.null eq))
         (local.set $selected (array.get $objects (local.get $row) (i32.const 2)))
         (br_if $row-miss (i32.eqz (ref.test (ref $direct-function) (local.get $selected))))
         (local.set $target-mode (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $selected))))
@@ -567,6 +580,7 @@
           (local.set $function (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $function))))
           (br_if $row-miss (i32.eqz (ref.test (ref $native-function) (local.get $function))))
           (local.set $body (ref.cast (ref $native-function) (local.get $function)))
+          (br_if $row-miss (ref.test (ref $native-debug-function) (local.get $function)))
           (br_if $row-miss (f64.ne (struct.get $obj $f (ref.as_non_null (local.get $body)))
             (f64.convert_i32_u (i32.add (local.get $count) (i32.const 3)))))
           (br_if $row-miss (ref.is_null (struct.get $native-function $direct (ref.as_non_null (local.get $body)))))
@@ -583,23 +597,12 @@
                   (then (local.get $b)) (else (local.get $a))))))
               (local.set $class (call $dispatch-class-known (local.get $object)))
               (br_if $row-miss (ref.is_null (local.get $class)))
-              (if (i32.and (local.get $mode) (i32.shl (i32.const 256) (local.get $position)))
-                (then
-                  (local.set $profile (call $generic-property (local.get $gf) ,(clos-library-reference :eql-dispatch-profile)))
-                  (local.set $index (local.get $position))
-                  (block $at-profile (loop $profile
-                    (br_if $at-profile (i32.eqz (local.get $index)))
-                    (local.set $profile (call $cdr (local.get $profile)))
-                    (local.set $index (i32.sub (local.get $index) (i32.const 1))) (br $profile)))
-                  (br_if $row-miss (i32.eqz (ref.eq (call $car (local.get $key))
-                    (call $dispatch-eql-key (local.get $object) (call $car (local.get $profile))))))
-                  (local.set $key (call $cdr (local.get $key)))))
               (br_if $row-miss (i32.eqz (ref.eq (call $car (local.get $key)) (local.get $class))))
               (local.set $key (call $cdr (local.get $key)))))
           (br $keys)))
         (br_if $row-miss (i32.eqz (ref.is_null (local.get $key))))
-        ;; Classification and EQL comparison above neither call Lisp nor poll.
-        ;; The cache identities checked before them therefore remain valid.
+        ;; Class matching and bounded arity validation neither call Lisp nor
+        ;; poll. All cache identities remain current until selection commits.
         (br_if $miss (i32.eqz (call $generic-fixed-arity-p
           (call $car (array.get $objects (local.get $recent)
             (i32.const ,(1+ (position :lambda-list *generic-property-cache-keys*))))) (local.get $count))))
@@ -608,38 +611,80 @@
             (local.set $object (local.get $a))
             (if (i32.eq (call $tag (local.get $object)) (i32.const 8))
               (then (local.set $object (struct.get $obj $a (ref.cast (ref $obj) (local.get $object))))))
-            (br_if $row-miss (i32.ne (call $tag (local.get $object)) (i32.const 23)))
-            ;; Read the canonical cell on every hit, retaining borrowed-slot
-            ;; mutation visibility without another argument list or APPLY.
-            (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $object)))
-              (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $selected)))))
-            (i32.const 1) (return)))
-        (if (i32.and (i32.eq (local.get $target-mode) (i32.const 15)) (i32.eq (local.get $count) (i32.const 1)))
-          (then (call $specialized-slot-operation (ref.cast (ref $direct-function) (local.get $selected))
-            (local.get $a) (local.get $a)) (i32.const 1) (return)))
-        (if (i32.and (i32.eq (local.get $target-mode) (i32.const 16)) (i32.eq (local.get $count) (i32.const 2)))
-          (then (call $specialized-slot-operation (ref.cast (ref $direct-function) (local.get $selected))
-            (local.get $b) (local.get $a)) (i32.const 1) (return)))
-        (local.set $index (struct.get $obj $n
-          (ref.as_non_null (struct.get $native-function $direct (ref.as_non_null (local.get $body))))))
-        (if (i32.or (i32.eqz (local.get $index))
-              (i32.and (i32.sub (local.get $index) (i32.const 1)) (i32.const 1)))
-          (then
-        (local.set $position (local.get $count))
-        (block $arguments (loop $argument
-          (br_if $arguments (i32.eqz (local.get $position)))
-          (local.set $position (i32.sub (local.get $position) (i32.const 1)))
-          (local.set $args (call $cons (if (result (ref null eq)) (i32.eq (local.get $position) (i32.const 2))
-            (then (local.get $c)) (else (if (result (ref null eq)) (local.get $position)
-              (then (local.get $b)) (else (local.get $a))))) (local.get $args))) (br $argument)))
-        (local.set $context (struct.new $method-context (call $allocate-object-tag (i32.const 53))
-          (i32.const 0) (f64.const 0) (ref.null $digits) (local.get $gf) (local.get $method)
-          (local.get $rest) (local.get $args) (local.get $next)))
-          ))
-        (call $native-direct-apply (ref.as_non_null (local.get $body)) (local.get $context)
-          (local.get $a) (local.get $b) (local.get $c)) (i32.const 1) (return))
+            (br_if $row-miss (i32.ne (call $tag (local.get $object)) (i32.const 23)))))
+        ;; Internal Wasm results retain the exact selection; no Lisp packet.
+        (return (local.get $selected) (local.get $function)
+          (local.get $method) (local.get $rest) (local.get $next)))
       (local.set $phase (i32.add (local.get $phase) (i32.const 1))) (br $rows)))
-  #@(ref.null eq) #@(i32.const 0))
+  #@(ref.null eq) #@(ref.null eq) #@(ref.null eq) #@(ref.null eq) #@(ref.null eq))
+
+;; Fixed and tail calls share this executor for a committed scalar plan.
+;; The nonpolling selector checked shape, owner, arity, classes and epochs,
+;; including the metadata reader's object representation.
+(define-runtime-function $generic-recent-scalar-call
+    (($selected (ref $direct-function)) ($a :nullable-object) ($b :nullable-object)) (:nullable-object)
+  (:locals ($mode i32) ($object :nullable-object))
+  #@(local.set $mode (struct.get $direct-function $mode (local.get $selected)))
+  #@(if (i32.eq (local.get $mode) (i32.const 4))
+    (then
+      (local.set $object (local.get $a))
+      (if (i32.eq (call $tag (local.get $object)) (i32.const 8))
+        (then (local.set $object (struct.get $obj $a (ref.cast (ref $obj) (local.get $object))))))
+      (call $clear-values)
+      (return (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $object)))
+        (struct.get $direct-function $slot (local.get $selected)))))))
+  #@(if (i32.eq (local.get $mode) (i32.const 15))
+    (then (return_call $specialized-slot-operation (local.get $selected) (local.get $a) (local.get $a))))
+  ;; The only remaining selected scalar mode is the standard two-arg writer.
+  #@(return_call $specialized-slot-operation (local.get $selected) (local.get $b) (local.get $a)))
+
+(define-runtime-function $generic-recent-call-ready
+    (($gf :nullable-object) ($count i32) ($a :nullable-object) ($b :nullable-object)
+     ($c :nullable-object) ($d :nullable-object)) (:nullable-object i32)
+  (:locals ($selected :nullable-object) ($function :nullable-object)
+           ($method :nullable-object) ($rest :nullable-object) ($next :nullable-object)
+           ($body (ref null $native-function)) ($context :nullable-object))
+  #@(call $generic-recent-plan-ready (local.get $gf) (local.get $count)
+    (local.get $a) (local.get $b) (local.get $c) (local.get $d))
+  #@(local.set $next) #@(local.set $rest) #@(local.set $method)
+  #@(local.set $function) #@(local.set $selected)
+  #@(if (ref.is_null (local.get $selected)) (then (return (ref.null eq) (i32.const 0))))
+  ;; A NIL body denotes one of the already-proved scalar plan modes4/15/16.
+  #@(if (ref.is_null (local.get $function))
+    (then (return (call $generic-recent-scalar-call
+      (ref.cast (ref $direct-function) (local.get $selected)) (local.get $a) (local.get $b)) (i32.const 1))))
+  #@(local.set $body (ref.cast (ref $native-function) (local.get $function)))
+  #@(local.set $context (call $generic-recent-context (local.get $gf) (ref.as_non_null (local.get $body))
+    (local.get $method) (local.get $rest) (local.get $next) (local.get $count)
+    (local.get $a) (local.get $b) (local.get $c)))
+  #@(call $native-direct-apply (ref.as_non_null (local.get $body)) (local.get $context)
+    (local.get $a) (local.get $b) (local.get $c))
+  #@(i32.const 1))
+
+;; This internal helper cannot call Lisp or poll. Allocate the lexical context
+;; and original argument spine only when the worker reads its context argument.
+(define-runtime-function $generic-recent-context
+    (($gf :nullable-object) ($body (ref $native-function))
+     ($method :nullable-object) ($rest :nullable-object) ($next :nullable-object)
+     ($count i32) ($a :nullable-object) ($b :nullable-object) ($c :nullable-object)) (:nullable-object)
+  (:locals ($index i32) ($position i32) ($args :nullable-object))
+  #@(local.set $index (struct.get $obj $n
+    (ref.as_non_null (struct.get $native-function $direct (local.get $body)))))
+  #@(if (i32.or (i32.eqz (local.get $index))
+        (i32.and (i32.sub (local.get $index) (i32.const 1)) (i32.const 1)))
+    (then
+      (local.set $position (local.get $count))
+      (block $arguments (loop $argument
+        (br_if $arguments (i32.eqz (local.get $position)))
+        (local.set $position (i32.sub (local.get $position) (i32.const 1)))
+        (local.set $args (call $cons (if (result (ref null eq)) (i32.eq (local.get $position) (i32.const 2))
+          (then (local.get $c)) (else (if (result (ref null eq)) (local.get $position)
+            (then (local.get $b)) (else (local.get $a))))) (local.get $args))) (br $argument)))
+      (return (struct.new $method-context (call $allocate-object-tag (i32.const 53))
+        (i32.const 0) (f64.const 0) (ref.null $digits) (local.get $gf) (local.get $method)
+        (local.get $rest) (local.get $args) (local.get $next)))))
+  #@(ref.null eq))
+
 
 (define-runtime-function $generic-apply (($gf :nullable-object) ($args :nullable-object)) (:nullable-object)
   (:locals ($function :nullable-object) ($cache :nullable-object) ($entry :nullable-object)
@@ -647,7 +692,32 @@
            ($ca :nullable-object) ($cb :nullable-object) ($cc :nullable-object) ($cd :nullable-object)
            ($mode i32) ($computed i32) ($phase i32)
            ($metadata :nullable-object) ($recent (ref null $objects)) ($row (ref null $objects))
-           ($selected :nullable-object) ($epoch :nullable-object) ($slot-token :nullable-object))
+           ($selected :nullable-object) ($epoch :nullable-object) ($slot-token :nullable-object)
+           ($scan :nullable-object) ($a :nullable-object) ($b :nullable-object) ($c :nullable-object)
+           ($result :nullable-object) ($count i32) ($hit i32))
+  ;; This ingress owns an argument spine rather than fixed operand values.
+  ;; Poll before reading it, then recognize only a complete bounded proper
+  ;; list. Long, dotted and cyclic inputs retain ordinary checked dispatch.
+  #@(block $ordinary
+    (if (global.get $thread-active) (then (call $thread-checkpoint)))
+    (local.set $scan (local.get $args))
+    (block $arguments (loop $argument
+      (br_if $arguments (ref.is_null (local.get $scan)))
+      (br_if $ordinary (i32.ge_u (local.get $count) (i32.const 3)))
+      (br_if $ordinary (i32.ne (call $tag (local.get $scan)) (i32.const 7)))
+      (if (i32.eqz (local.get $count))
+        (then (local.set $a (call $car (local.get $scan))))
+        (else (if (i32.eq (local.get $count) (i32.const 1))
+          (then (local.set $b (call $car (local.get $scan))))
+          (else (local.set $c (call $car (local.get $scan)))))))
+      (local.set $count (i32.add (local.get $count) (i32.const 1)))
+      (local.set $scan (call $cdr (local.get $scan))) (br $argument)))
+    (call $generic-recent-call-ready (local.get $gf) (local.get $count)
+      (local.get $a) (local.get $b) (local.get $c) (ref.null eq))
+    (local.set $hit) (local.set $result)
+    ;; Preserve the committed method's complete value group, including zero
+    ;; values. Scalar metadata/slot plans clear their own transient values.
+    (if (local.get $hit) (then (return (local.get $result)))))
   #@(local.set $function (call $generic-property (local.get $gf) ,(clos-library-reference :discriminating-function)))
   ;; Bootstrap generics use NIL for the same default dispatcher. Custom
   ;; discriminators and trace wrappers retain their own call path.
@@ -856,22 +926,36 @@
     (local.set $method (call $car (call $cdr (local.get $form))))
     (br_if $ordinary (i32.ne (call $tag (local.get $method)) (i32.const 23)))
     (local.set $body (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $method))) ,(clos-library-reference :function))))
-    (if (i32.and (ref.is_null (local.get $next)) (ref.test (ref $direct-function) (local.get $body)))
+    (if (ref.test (ref $direct-function) (local.get $body))
       (then
         (if (i32.or
               (i32.eq (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $body))) (i32.const 11))
               (i32.eq (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $body))) (i32.const 12)))
           (then
-            (if (call $generic-cache-permitted-p (local.get $gf))
-              (then (local.set $specialized (call $specialize-accessor (local.get $function) (local.get $gf)
-                (ref.cast (ref $direct-function) (local.get $body)) (local.get $args)))
-                (if (i32.eqz (ref.is_null (local.get $specialized))) (then (return (local.get $specialized))))))
-            (return (call $direct-function (local.get $function)
-            (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $body)))
-            (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $body)))
-            (i32.add (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $body))) (i32.const 2))))))
-        (if (i32.eq (struct.get $direct-function $mode
-                       (ref.cast (ref $direct-function) (local.get $body))) (i32.const 3))
+            ;; Generated accessors do not call their inherited primary methods.
+            ;; Keep the checked next-method boundary before trying a slot proof;
+            ;; synthesized methods retain the ordinary effective expansion.
+            (block $accessor
+              (if (i32.eqz (ref.is_null (local.get $next)))
+                (then
+                  (call $check-apply-list (local.get $next))
+                  (local.set $scan (local.get $next))
+                  (block $checked (loop $method
+                    (br_if $checked (ref.is_null (local.get $scan)))
+                    (br_if $accessor (i32.ne (call $tag (call $car (local.get $scan))) (i32.const 23)))
+                    (local.set $scan (call $cdr (local.get $scan))) (br $method)))))
+              (if (call $generic-cache-permitted-p (local.get $gf))
+                (then (local.set $specialized (call $specialize-accessor (local.get $function) (local.get $gf)
+                  (ref.cast (ref $direct-function) (local.get $body)) (local.get $args)))
+                  (if (i32.eqz (ref.is_null (local.get $specialized))) (then (return (local.get $specialized))))))
+              (if (ref.is_null (local.get $next))
+                (then (return (call $direct-function (local.get $function)
+                  (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $body)))
+                  (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $body)))
+                  (i32.add (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $body))) (i32.const 2)))))))))
+        (if (i32.and (ref.is_null (local.get $next))
+              (i32.eq (struct.get $direct-function $mode
+                       (ref.cast (ref $direct-function) (local.get $body))) (i32.const 3)))
         (then (return (call $direct-function (local.get $function) (ref.null eq)
           (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $body))) (i32.const 4)))))))
     ;; A CALL-METHOD plan can invoke the primary directly. Its next-method
@@ -955,6 +1039,6 @@
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
     (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
     (field $args (ref null eq)) (field $next (ref null eq)))))
-  ($dispatch-eql-key) ($generic-discriminator) ($generic-property) ($invoke-method) ($method-context-element) ($dispatch-class-known) ($dispatch-class) ($generic-key-match) ($generic-fixed-arity-p) ($generic-recent-call) ($generic-cache-permitted-p) ($generic-cache-row) ($generic-apply)
+  ($dispatch-eql-key) ($generic-discriminator) ($generic-property) ($invoke-method) ($method-context-element) ($dispatch-class-known) ($dispatch-class) ($generic-key-match) ($generic-fixed-arity-p) ($generic-recent-call) ($generic-recent-plan-ready) ($generic-recent-context) ($generic-recent-scalar-call) ($generic-recent-call-ready) ($generic-cache-permitted-p) ($generic-cache-row) ($generic-apply)
   ($make-generic-call-plan) ($generic-call-plan-function)
   ($standard-property-generic-p) ($find-instance-slot) ($instance-slot-operation-general) ($restore-saved-slots) ($property-effective) ($ensure-instance-layout))

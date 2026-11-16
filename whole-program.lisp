@@ -929,7 +929,7 @@ With STRIP NIL, retain every definition and compact only the representation."
        (if (some (lambda (function) (= (svref function 12) 3)) (svref payload 1))
            (compile-to-hir
              (list 'lambda nil (list 'funcall (list 'load-hir-code (list 'quote wire)))))
-           (hir-code-to-unit wire))))
+           (hir-code-to-unit-checked payload))))
     (:native
      (unless (= (length initializer) 5) (error "Invalid native initializer."))
      (let ((function (gensym "NATIVE-INITIALIZER-")))
@@ -970,7 +970,7 @@ With STRIP NIL, retain every definition and compact only the representation."
               ;; Execute native initializers in order, retaining TCO for deep
               ;; calls, using the same optimization pipeline as the shared output.
               (multiple-value-bind (bytes literals debug)
-                  (emit-native-module hir)
+                  (emit-native-module-checked hir nil)
                 (declare (ignore debug))
                 (multiple-value-bind (function native) (compiler-primitive 17 bytes literals nil)
                   (unless native (error "This host cannot execute native bundle initializers."))
@@ -1019,8 +1019,8 @@ With STRIP NIL, retain every definition and compact only the representation."
     (setq entries (nreverse entries))
     (if entries
         (multiple-value-bind (code literals debug)
-            (emit-native-module (make-hir-unit :functions (apply #'append (nreverse functions)))
-                                :entries entries)
+            (emit-native-module-checked (make-hir-unit :functions (apply #'append (nreverse functions)))
+                                       entries)
           (values code literals debug (mapcar #'car recipes) initializer-count count))
         (values nil nil nil nil initializer-count count))))
 

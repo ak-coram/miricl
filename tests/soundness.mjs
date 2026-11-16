@@ -11,6 +11,336 @@ const check = source => assert.equal(evaluate(source), 'T\n', source);
 const recover = () => assert.equal(evaluate("(funcall (compile-native '(lambda (x) (+ x 1))) 41)"), '42\n');
 try {
   evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
+  // These private method bodies are callable independently of their public
+  // MOP generic functions. Keep their checked boundary and live callbacks.
+  evaluate(`(defclass soundness-mop-meta (standard-class) ())
+    (defmethod miricl-mop:validate-superclass
+        ((class soundness-mop-meta) (super standard-class)) t)
+    (defvar *soundness-mop-events* nil)
+    (defmethod miricl-mop:class-finalized-p :around ((class soundness-mop-meta))
+      (push :finalized *soundness-mop-events*)
+      (values (call-next-method) :discarded))
+    (defmethod miricl-mop:finalize-inheritance :around ((class soundness-mop-meta))
+      (push :finalize *soundness-mop-events*)
+      (values (call-next-method) :discarded))
+    (defmethod class-name :around ((class soundness-mop-meta))
+      (push :name *soundness-mop-events*) (call-next-method))
+    (defclass soundness-mop-record () ((value :initarg :value))
+      (:metaclass soundness-mop-meta) (:default-initargs :value 42)) (values)`);
+  check(`(let* ((class (find-class 'soundness-mop-record))
+      (slots (symbol-function (compiler-primitive 10 1 "%%STANDARD-CLASS-SLOTS")))
+      (defaults (symbol-function (compiler-primitive 10 1 "%%STANDARD-CLASS-DEFAULT-INITARGS"))))
+    (labels ((recover ()
+               (and (consp (funcall slots class))
+                 (= (slot-value (make-instance class) 'value) 42)))
+             (reject (function arguments &optional arityp)
+               (and (handler-case (progn (apply function arguments) nil)
+                      (program-error (condition) (plusp (length (princ-to-string condition))))
+                      (error (condition)
+                        (and (not arityp) (plusp (length (princ-to-string condition))))))
+                    (recover))))
+      (and
+        (every (lambda (function)
+          (and (reject function nil t) (reject function (list class class) t)
+            (every (lambda (object) (reject function (list object)))
+                   (list nil 3 'not-a-class #()))))
+          (list slots defaults))
+        ;; MIRICL retains lazy CLASS-SLOTS finalization; defaults still reject
+        ;; an unfinalized class and call the extensible CLASS-NAME diagnostic.
+        (progn (make-instances-obsolete class)
+          (let ((*soundness-mop-events* nil))
+            (and (handler-case (progn (funcall defaults class) nil) (error () t))
+              (member :name *soundness-mop-events*)
+              (not (member :finalize *soundness-mop-events*))
+              (let* ((slot-values (multiple-value-list (funcall slots class)))
+                     (default-values (multiple-value-list (funcall defaults class))))
+                (and (member :finalized *soundness-mop-events*)
+                  (member :finalize *soundness-mop-events*)
+                  (equal slot-values (list (funcall slots class)))
+                  (equal default-values (list (funcall defaults class)))
+                  (eq (car slot-values) (miricl-mop:class-slots class))
+                  (eq (car default-values) (miricl-mop:class-default-initargs class))
+                  (recover)))))))))`);
+  console.log('Soundness: native MOP readers reject invalid calls with recovery and retain finalization callbacks, sharing and values.');
+  // Unary runtime callbacks preserve complete method values and cleanup. Keep
+  // dispatch class-only: EQL profiles deliberately retain ordinary dispatch.
+  evaluate(`(defgeneric soundness-unary-callback (object))
+    (defvar *soundness-unary-scope* :outside)
+    (funcall (compile-native '(lambda ()
+      (defmethod soundness-unary-callback ((object t))
+        (declare (optimize (debug 0))) (values t :parent))
+      (defmethod soundness-unary-callback ((object symbol))
+        (declare (optimize (debug 0)))
+        (case object
+          (:zero (values))
+          (:many (values t :second :third :fourth :fifth))
+          (:escape (let ((*soundness-unary-scope* :inside))
+                     (throw 'soundness-unary-exit (values :escaped :extra))))
+          (:failure (let ((*soundness-unary-scope* :inside)) (error "Callback failure")))
+          (otherwise (multiple-value-bind (value extra) (call-next-method)
+                       (values value :child extra)))))))) (values)`);
+  check(`(let* ((metadata (symbol-function (compiler-primitive 10 1 "%%CLOS-METHOD-METADATA")))
+      (original (fdefinition 'miricl-mop:class-finalized-p))
+      (replacement (compile-native '(lambda (object) (values t :replacement object))))
+      (class (find-class 'standard-object)) (result nil))
+    (labels ((probe (object) (funcall metadata 0 object nil))
+             (normal () (equal (multiple-value-list (probe :normal)) '(t :child :parent))))
+      (unwind-protect
+        (progn
+          (setf (fdefinition 'miricl-mop:class-finalized-p) #'soundness-unary-callback)
+          (dotimes (i 8) (normal))
+          (setq result
+            (and (normal)
+              (null (multiple-value-list (probe :zero)))
+              (equal (multiple-value-list (probe :many)) '(t :second :third :fourth :fifth))
+              (equal (multiple-value-list (catch 'soundness-unary-exit (probe :escape)))
+                     '(:escaped :extra))
+              (eq *soundness-unary-scope* :outside)
+              (handler-case (progn (probe :failure) nil) (error () t))
+              (eq *soundness-unary-scope* :outside) (normal)
+              (equal (multiple-value-list
+                (probe (progn (setf (fdefinition 'miricl-mop:class-finalized-p) replacement)
+                              :changed))) '(t :replacement :changed)))))
+        (setf (fdefinition 'miricl-mop:class-finalized-p) original))
+      (and result
+        (equal (multiple-value-list (probe class))
+               (multiple-value-list (miricl-mop:class-finalized-p class))))))`);
+  console.log('Soundness: unary MOP callbacks retain next methods, full values, live bindings and nonlocal cleanup.');
+  // The private fixed-call ABI must recognize saved function objects, including
+  // after rebinding their names, and retain the ordinary checked boundary.
+  check(`(let* ((tail-name (compiler-primitive 10 1 "%%NTHCDR"))
+      (copy-name (compiler-primitive 10 1 "%%LIST-COPY"))
+      (slot-name (compiler-primitive 10 1 "%%SLOT-OPERATION"))
+      (tail (symbol-function tail-name)) (copy (symbol-function copy-name))
+      (slot (symbol-function slot-name))
+      (one (compile-native '(lambda (f a) (funcall f a))))
+      (two (compile-native '(lambda (f a b) (funcall f a b))))
+      (three (compile-native '(lambda (f a b c) (funcall f a b c))))
+      (four (compile-native '(lambda (f a b c d) (funcall f a b c d))))
+      (five (compile-native '(lambda (f a b c d e) (funcall f a b c d e))))
+      (replacement (compile-native '(lambda (&rest arguments)
+        (declare (ignore arguments)) (values :replacement :extra))))
+      (items (list :first :second))
+      (object (make-instance 'soundness-mop-record)))
+    (labels ((recover ()
+               (and (equal (multiple-value-list (funcall two tail 1 items))
+                           (list (cdr items)))
+                    (equal (multiple-value-list (funcall four slot 0 object 'value nil)) '(42))))
+             (reject (thunk &optional arityp)
+               (and (handler-case (progn (funcall thunk) nil)
+                      (program-error (condition) (plusp (length (princ-to-string condition))))
+                      (error (condition)
+                        (and (not arityp) (plusp (length (princ-to-string condition))))))
+                    (recover))))
+      (and
+        (every (lambda (function)
+          (and (reject (lambda () (funcall one function nil)) t)
+               (reject (lambda () (funcall three function nil nil nil)) t)))
+          (list tail copy))
+        (reject (lambda () (funcall three slot 0 object 'value)) t)
+        (reject (lambda () (funcall five slot 0 object 'value nil nil)) t)
+        (every (lambda (selector)
+          (and (reject (lambda () (funcall two copy items selector)))
+               (reject (lambda () (funcall four slot selector object 'value nil)))))
+          (list -1 (expt 2 40) :bad-selector))
+        (reject (lambda () (funcall two tail 1 :not-a-list)))
+        (reject (lambda () (funcall two tail -1 items)))
+        (reject (lambda () (funcall two copy :not-a-list 0)))
+        (reject (lambda () (funcall two copy (list :not-a-pair) 1)))
+        (reject (lambda () (funcall four slot 0 17 'value nil)))
+        (every (lambda (entry)
+          (let ((name (car entry)) (original (cdr entry)))
+            (unwind-protect
+              (progn (setf (symbol-function name) replacement)
+                (and (if (eq name slot-name)
+                       (equal (multiple-value-list (funcall four original 0 object 'value nil)) '(42))
+                       (equal (multiple-value-list (funcall two original
+                                  (if (eq name tail-name) 1 items)
+                                  (if (eq name tail-name) items 0)))
+                              (list (if (eq name tail-name) (cdr items) items))))
+                     (equal (multiple-value-list
+                       (if (eq name slot-name)
+                         (funcall four (symbol-function name) 0 object 'value nil)
+                         (funcall two (symbol-function name) nil nil))) '(:replacement :extra))))
+              (setf (symbol-function name) original))))
+          (list (cons tail-name tail) (cons copy-name copy) (cons slot-name slot)))
+        (recover))))`);
+  evaluate(`(defvar *soundness-slot-calls* 0)
+    (defmethod miricl-mop:slot-value-using-class :around
+        ((class soundness-mop-meta) (object soundness-mop-record) slot)
+      (incf *soundness-slot-calls*) (values (call-next-method) :discarded)) (values)`);
+  // An inherited generated accessor can use a slot proof even when another
+  // primary follows it. Its private effective-method boundary still validates
+  // the complete next-method spine before publishing that proof.
+  evaluate(`(defclass soundness-inherited-slot-base ()
+      ((value :initform 11 :reader soundness-inherited-slot)))
+    (defclass soundness-inherited-slot-child (soundness-inherited-slot-base)
+      ((value :initform 42 :reader soundness-inherited-slot)))
+    (defparameter *soundness-inherited-object* (make-instance 'soundness-inherited-slot-child))
+    (defparameter *soundness-inherited-reader*
+      (compile-native '(lambda (object) (soundness-inherited-slot object)))) (values)`);
+  check(`(let* ((gf (fdefinition 'soundness-inherited-slot))
+       (methods (compute-applicable-methods gf (list *soundness-inherited-object*)))
+       (primitive (symbol-function (compiler-primitive 10 1 "%%PROPERTY-EFFECTIVE"))))
+    (labels ((recover () (= (funcall *soundness-inherited-reader* *soundness-inherited-object*) 42))
+             (reject (next)
+               (and (handler-case
+                      (progn (funcall primitive nil (list 'call-method (car methods) next)
+                               gf (list *soundness-inherited-object*)) nil)
+                      (type-error (condition)
+                        (let ((*print-circle* t)) (plusp (length (princ-to-string condition))))))
+                    (recover))))
+      (let ((cycle (list (cadr methods))))
+        (setf (cdr cycle) cycle)
+        (and (cdr methods) (recover) (reject (cons (car methods) :tail))
+             (reject cycle) (recover)))))`);
+  check(`(let ((function (symbol-function (compiler-primitive 10 1 "%%SLOT-OPERATION")))
+      (object (make-instance 'soundness-mop-record))
+      (driver (compile-native '(lambda (function object)
+        (let ((events nil))
+          (values (multiple-value-list (funcall function
+            (progn (push :mode events) 0) (progn (push :object events) object)
+            (progn (push :name events) 'value) (progn (push :value events) nil)))
+            (reverse events)))))))
+    (let ((*soundness-slot-calls* 0))
+      (and (equal (multiple-value-list (funcall driver function object))
+                  '((42) (:mode :object :name :value)))
+           (= *soundness-slot-calls* 1))))`);
+  console.log('Soundness: fixed primitive aliases retain identity, validation, recovery, operand order and custom MOP callbacks.');
+  // Public bootstrap functions also escape as saved objects. Rebinding their
+  // public names must not replace those objects or bypass their arity checks.
+  check(`(let* ((items (list :first :second))
+      (object (make-instance 'soundness-mop-record))
+      (one (compile-native '(lambda (function a) (funcall function a))))
+      (two (compile-native '(lambda (function a b) (funcall function a b))))
+      (replacement (compile-native '(lambda (&rest arguments)
+        (declare (ignore arguments)) (values :replacement :extra)))))
+    (every (lambda (entry)
+      (destructuring-bind (name arguments expected) entry
+        (let ((saved (fdefinition name)))
+          (labels ((invoke ()
+                     (if (cdr arguments)
+                       (funcall two saved (car arguments) (cadr arguments))
+                       (funcall one saved (car arguments))))
+                   (recover ()
+                     (and (equal (multiple-value-list (invoke)) (list expected))
+                       (if (eq name 'copy-list) (not (eq (invoke) items)) t))))
+            (and
+              (handler-case
+                (progn (if (cdr arguments) (funcall one saved nil)
+                           (funcall two saved nil nil)) nil)
+                (program-error (condition) (plusp (length (princ-to-string condition)))))
+              (recover)
+              (unwind-protect
+                (progn (setf (fdefinition name) replacement)
+                  (and (recover)
+                    (equal (multiple-value-list (apply (fdefinition name) arguments))
+                           '(:replacement :extra))))
+                (setf (fdefinition name) saved))
+              (recover))))))
+      (list (list 'nth (list 1 items) :second)
+            (list 'nthcdr (list 1 items) (cdr items))
+            (list 'list-length (list items) 2)
+            (list 'copy-list (list items) items)
+            (list 'slot-value (list object 'value) 42))))`);
+  check(`(let* ((saved (fdefinition 'nth))
+      (original-car (fdefinition 'car)) (original-tail (fdefinition 'nthcdr))
+      (driver (compile-native '(lambda (function count items)
+        (let ((events nil))
+          (values (multiple-value-list
+                    (funcall (progn (push :function events) function)
+                      (progn (push :count events) count)
+                      (progn (push :items events) items)))
+                  (reverse events))))))
+      ;; Expand PUSH and SETF before changing primitives used by source macros.
+      (factory (compile-native '(lambda ()
+        (let ((events nil))
+          (values
+            (lambda (tail)
+              (push (list :car tail) events) (values :current-car :discarded))
+            (lambda (count items)
+              (push (list :nthcdr count items) events)
+              (values '(:current-tail) :discarded))
+            (lambda () (reverse events)))))))
+      (runner (compile-native '(lambda (driver saved items car-callback tail-callback
+                                       original-car original-tail)
+        (unwind-protect
+          (progn (setf (fdefinition 'car) car-callback
+                       (fdefinition 'nthcdr) tail-callback)
+            (multiple-value-list (funcall driver saved 1 items)))
+          (setf (fdefinition 'car) original-car
+                (fdefinition 'nthcdr) original-tail)))))
+      (items (list :first :second)))
+    (multiple-value-bind (car-callback tail-callback read-events) (funcall factory)
+      (let ((result (funcall runner driver saved items car-callback tail-callback
+                             original-car original-tail)))
+        (and (equal result '((:current-car) (:function :count :items)))
+             (equal (funcall read-events)
+                    (list (list :nthcdr 1 items) '(:car (:current-tail))))
+             (equal (multiple-value-list (funcall saved 1 items)) '(:second))))))`);
+  console.log('Soundness: public saved aliases survive rebinding and arity errors; NTH retains live callbacks, operand order and one value.');
+  // Initarg validation uses intrinsic method-selection caches. A warmed
+  // constructor must observe method keyword changes without repeating hooks.
+  check(`(progn
+    (defclass soundness-initarg-cache () ())
+    (defparameter *soundness-initarg-cache-calls* 0)
+    (dotimes (i 3) (make-instance 'soundness-initarg-cache))
+    (labels ((reject ()
+               (handler-case
+                   (progn (make-instance 'soundness-initarg-cache :added 42) nil)
+                 (error () t))))
+      (and (reject)
+        (progn
+          (defmethod initialize-instance :after
+              ((object soundness-initarg-cache) &key added)
+            (when (eql added 42) (incf *soundness-initarg-cache-calls*)))
+          (let ((method (find-method #'initialize-instance '(:after)
+                          (list (find-class 'soundness-initarg-cache)))))
+            (unwind-protect
+              (and (typep (make-instance 'soundness-initarg-cache :added 42) 'soundness-initarg-cache)
+                   (= *soundness-initarg-cache-calls* 1)
+                   (typep (make-instance 'soundness-initarg-cache :added 42) 'soundness-initarg-cache)
+                   (= *soundness-initarg-cache-calls* 2))
+              (remove-method #'initialize-instance method))))
+        (reject) (= *soundness-initarg-cache-calls* 2)
+        (typep (make-instance 'soundness-initarg-cache) 'soundness-initarg-cache))))`);
+  console.log('Soundness: warmed initarg checks observe method keyword changes and invoke hooks once.');
+  // A warmed generic must observe new applicability hooks and borrowed metadata.
+  evaluate(`(defgeneric soundness-dispatch-protocol (x))
+    (defvar *soundness-dispatch-protocol-calls* 0)
+    (funcall (compile-native '(lambda ()
+      (defmethod soundness-dispatch-protocol ((x integer))
+        (declare (optimize (space 3) (speed 1) (debug 0) (safety 1))) x)))) (values)`);
+  check(`(let ((driver (compile-native '(lambda (x)
+      (declare (optimize (space 3) (speed 1) (debug 0) (safety 1)))
+      (soundness-dispatch-protocol x))))
+    (replacement (compile-native '(lambda (arguments)
+      (declare (ignore arguments)) :borrowed))))
+    (dotimes (i 8) (funcall driver i))
+    (and
+      (let ((method (eval '(defmethod compute-applicable-methods :around
+          ((generic (eql #'soundness-dispatch-protocol)) arguments)
+          (incf *soundness-dispatch-protocol-calls*) (call-next-method)))))
+        (unwind-protect
+          (let ((*soundness-dispatch-protocol-calls* 0))
+            (and (= (funcall driver 41) 41)
+                 (= *soundness-dispatch-protocol-calls* 1)
+                 (= (funcall driver 42) 42)
+                 (= *soundness-dispatch-protocol-calls* 2)))
+          (remove-method #'compute-applicable-methods method)))
+      (progn
+        (dotimes (i 8) (funcall driver i))
+        (let* ((info (symbol-function (compiler-primitive 10 1 "%%GENERIC-INFO")))
+          (raw (symbol-function (compiler-primitive 10 1 "%%RAW-SLOTS")))
+          (slots (funcall raw (funcall info #'soundness-dispatch-protocol)))
+          (old (getf slots :discriminating-function)))
+          (and (member :discriminating-function slots)
+            (unwind-protect
+              (progn (setf (getf slots :discriminating-function) replacement)
+                (eq (funcall driver 31) :borrowed))
+              (setf (getf slots :discriminating-function) old))
+            (= (funcall driver 32) 32))))))`);
+  console.log('Soundness: warmed generic dispatch observes applicability hooks and borrowed canonical metadata.');
   // The private native ABI accepts raw mutable eqref arrays. These standalone
   // stable WasmGC types canonicalize to that packet type across modules; the
   // fixture constructs packets without depending on runtime layout indices.
@@ -152,9 +482,9 @@ try {
     recover();
   }
 
-  const reject = (source, reason) => {
+  const reject = (source, reason, conditionType = 'compiler-input-error') => {
     const output = evaluate(`(handler-case (progn ${source} :unexpected-acceptance)
-      (compiler-input-error (condition) (princ-to-string condition)))`);
+      (${conditionType} (condition) (princ-to-string condition)))`);
     assert.doesNotMatch(output, /:UNEXPECTED-ACCEPTANCE/, source);
     assert.match(output, reason, source);
     assert.match(output, /Input:/, 'The condition identifies the offending input.');
@@ -239,11 +569,12 @@ try {
     ['(setf (hir-block-id block) -1)', /block record or ID/],
     ['(setf (hir-instruction-opcode instruction) :unknown)', /unknown opcode/],
     ['(setf (hir-instruction-safety-level instruction) -1)', /safety level/],
-  ]) reject(`(let* ((unit (compile-to-hir '(lambda (x) (+ x 1))))
+  ]) for (const consumer of ['emit-native-module', 'emit-hir-code', 'optimize-hir', 'infer-hir-types'])
+    reject(`(let* ((unit (compile-to-hir '(lambda (x) (+ x 1))))
       (function (first (hir-unit-functions unit)))
       (block (first (hir-function-blocks function)))
       (instruction (first (hir-block-instructions block))))
-    ${mutation} (emit-native-module unit))`, reason);
+    ${mutation} (${consumer} unit))`, reason);
   // Public CALL metadata is validated before compiler internals or retained-code
   // serialization; malformed policy data must leave the compiler usable.
   for (const attributes of [':speed', '17', "'(:unknown)", "'(:speed :speed)",
@@ -284,6 +615,32 @@ try {
     (and (eq object (funcall (compile-native (list 'lambda nil (list 'quote object)))))
       (equal (funcall (compile-native (list 'lambda '(x) (list 'list shared shared))) 1) '(2 2))))`);
   console.log('Soundness: compiler boundaries reject malformed graphs and recover.');
+
+  // Construct corrupt wire using the private emitter only as a fixture. A
+  // well-formed byte stream is not proof of lexical or control-flow semantics
+  // when stored code is admitted to the unchecked native compiler.
+  for (const [source, mutation, reason] of [
+    ["(lambda () (lambda () 42))", `
+      (let ((closure (find :closure (hir-block-instructions (first (hir-function-blocks function)))
+                      :key (lambda (instruction) (hir-instruction-opcode instruction)))))
+        (setf (hir-instruction-attributes closure) (list function)))`, /parent|lexical|circular|cycle/],
+    ["(lambda (x) (if x (values 1 2) (values 3 4)))", `
+      (let* ((join (find-if (lambda (block) (hir-block-parameters block)) (hir-function-blocks function)))
+             (branch (find :branch (mapcar (lambda (block) (hir-block-terminator block))
+                                    (hir-function-blocks function))
+                       :key (lambda (instruction) (hir-instruction-opcode instruction)))))
+        (setf (hir-instruction-attributes branch) (list join join)))`, /conditional|branch|parameter|block arguments/],
+    ["(lambda (x) (if x (values 1 2) (values 3 4)))", `
+      (let ((jump (find-if (lambda (instruction)
+                    (and (eq (hir-instruction-opcode instruction) :jump)
+                         (hir-block-parameters (first (hir-instruction-attributes instruction)))))
+                   (mapcar (lambda (block) (hir-block-terminator block))
+                     (hir-function-blocks function)))))
+        (setf (hir-instruction-inputs jump) nil))`, /group|parameter|block arguments/],
+  ]) reject(`(let* ((unit (compile-to-hir '${source}))
+      (function (first (hir-unit-functions unit))))
+    ${mutation}
+    (compile-native-hir (emit-hir-code-checked unit)))`, reason, 'hir-code-input-error');
 
   // Group kinds determine the executable calling convention. They cannot be
   // forged into single-value certificates through the public HIR boundary.
@@ -427,6 +784,25 @@ try {
     '(lambda (flag) (let ((x 7)) (when flag (setq x 8)) x))',
   ]) check(`(not (hir-type-proves-p (soundness-proven-result '${source}) '(eql 7)))`);
   check("(hir-type-proves-p (soundness-proven-result '(lambda () 7)) '(eql 7))");
+  // Widen a recurrence's storage without losing the finite range supplied by
+  // its declared operand reads. Executable-only proofs still ignore promises.
+  evaluate(`(defparameter *soundness-bounded-recurrence*
+    '(lambda (count)
+       (declare (type (integer 0 16) count) (inline + eql)
+                (optimize (safety 0) (debug 0)))
+       (let ((index 0))
+         (declare (type (integer 0 16) index))
+         (tagbody next (if (eql index count) (go done))
+           (setq index (+ index 1)) (go next) done)
+         (+ index 1)))) (values)`);
+  check(`(let* ((unit (compile-to-hir *soundness-bounded-recurrence*))
+                (facts (infer-hir-types unit)))
+    (and (hir-type-proves-p (gethash (first (hir-unit-functions unit)) facts t)
+                            '(integer 1 17))
+      (not (hir-type-proves-p (soundness-proven-result *soundness-bounded-recurrence*)
+                              '(signed-byte 64)))))`);
+  check(`(let ((function (compile-native *soundness-bounded-recurrence*)))
+    (loop for count from 0 to 16 always (= (funcall function count) (1+ count))))`);
   evaluate(`(deftype soundness-opaque () (error "Proof expanded an opaque DEFTYPE"))
     (defun soundness-predicate (value) (declare (ignore value))
       (error "Proof executed a SATISFIES predicate")) (values)`);

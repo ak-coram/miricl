@@ -16,6 +16,28 @@ const directory = fileURLToPath(new URL('./ansi-test/', import.meta.url));
 // budget covers that required wall time; stress tests retain the normal limit.
 const requiredTimeouts = new Map([['CL-TEST::GET-UNIVERSAL-TIME.3', 7000]]);
 
+export function correctUpstreamTestInput(file, source, onCorrection = () => {}) {
+  let corrected = source;
+  if (file === 'environment/encode-universal-time.lsp') {
+    // ENCODE-UNIVERSAL-TIME.1 generates one-based dates and months.
+    // Its epoch-day guard must exclude zones that can yield a negative stamp.
+    corrected = source.replace('(and (= year 1900) (= date 0) (= month 0))',
+      '(and (= year 1900) (= date 1) (= month 1))');
+    if (corrected !== source)
+      onCorrection('ENCODE-UNIVERSAL-TIME.1 uses the January 1, 1900 guard for generated time zones.');
+  } else if (file === 'printer/print-floats.lsp') {
+    // CLHS 22.1.3.1.3 requires scientific notation at magnitude 10^7.
+    // The .2/.4 tests expect fixed notation but include -10^7 at RANDOM's
+    // lower endpoint. Sample the symmetric integer domain strictly inside
+    // that boundary, preserving every assertion and floating-point format.
+    corrected = source.replaceAll('(random 20000000) 10000000',
+      '(random 19999999) 9999999');
+    if (corrected !== source)
+      onCorrection('PRINT.*-FLOAT.2/.4 sample magnitudes strictly below 10^7, the exclusive fixed-notation boundary (CLHS 22.1.3.1.3).');
+  }
+  return corrected;
+}
+
 export function inventory(root = directory) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'miricl-ansi-'));
   const output = path.join(temporary, 'inventory.json');
@@ -290,17 +312,11 @@ export async function main(binary, args = []) {
     }
     const sources = files.map(file => {
       const source = fs.readFileSync(path.join(directory, file), 'utf8');
-      if (diagnostic || file !== 'environment/encode-universal-time.lsp') return [file, source];
-      // ENCODE-UNIVERSAL-TIME.1 generates one-based dates and months.
-      // Its epoch-day guard must exclude zones that can yield a negative stamp.
-      const corrected = source.replace('(and (= year 1900) (= date 0) (= month 0))',
-        '(and (= year 1900) (= date 1) (= month 1))');
-      if (corrected !== source) {
-        const correction = 'ENCODE-UNIVERSAL-TIME.1 uses the January 1, 1900 guard for generated time zones.';
+      if (diagnostic) return [file, source];
+      return [file, correctUpstreamTestInput(file, source, correction => {
         testInputCorrections.push(correction);
         console.log(`ANSI test input correction: ${correction}`);
-      }
-      return [file, corrected];
+      })];
     });
     let lastCheckpoint = 0;
     const display = progressReporter();

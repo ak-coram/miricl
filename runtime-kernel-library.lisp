@@ -6,14 +6,14 @@
            #:last-bounded #:copy-before-tail #:copy-butlast-bounded #:truncate-butlast-bounded
            #:copy-proper-list #:copy-list-onto #:remove-first-eq #:copy-list-spine #:copy-alist-spine #:nthcdr-bounded
            #:tail-member-p #:ensure-list #:property-set-location #:property-link-cell #:reverse-list-copy
-           #:make-list-bounded #:list-length-or-cycle #:join-list-spines
+           #:make-list-bounded #:list-length-or-cycle #:join-list-spines #:list-star-value
            #:vector-list-copy #:reverse-simple-vector-in-place #:fill-vector-from-list
            #:pair-lists-onto #:sequence-key #:reduce-pair #:ordering-predicate #:merge-list-runs
            #:require-list-value #:callable-value #:put-property-box #:remove-property-box
            #:byte-spec-component #:natural-count-value
            #:read-list-path #:write-list-path #:pop-argument-box #:bounded-index-value
            #:check-keyword-pairs #:list-cursor-buffer
-           #:property-value #:nthcdr-general #:check-generic-arguments
+           #:property-value #:nthcdr-general #:public-nth-value #:check-generic-arguments
            #:integer-gcd #:integer-lcm-list #:integer-square-root #:integer-bit-present-p #:integer-all-ones-p #:integer-power-of-two-p #:deposit-integer-field #:text-equal-p #:text-fold-equal-p #:text-designator #:ascii-white-p #:ascii-upper-code #:ascii-digit-value #:integer-power #:calendar-part-value #:calendar-days-before-year #:calendar-days-before-month
            #:if-expression #:expand-values-form #:expand-logical-form #:expand-conditional-form #:expand-selection-form #:function-block-forms #:split-function-documentation #:condition-operator-name-p
            #:allocate-like-vector #:reverse-vector-value #:fill-array-values #:slice-simple-vector #:vector-elements-equalp #:fill-sequence-values #:copy-sequence-values #:copy-subsequence-values #:concatenate-sequence-values #:character-bag-member-p #:trim-text-value #:generated-symbol-text #:copy-symbol-value #:format-index-value #:format-parameter-value #:format-comparison-value #:format-escape-value-p #:format-minimum-column #:flatten-value-groups #:standard-syntax-code
@@ -461,6 +461,12 @@ This is the package tables' internal operation, rather than public REMOVE."
         (setq items (cdr (the cons items))
               remaining (the (integer 0 #x7fffffff) (1- remaining)))
         (go next))))))
+
+(defun public-nth-value (count items)
+  "Keep NTH's calls through the current public CAR and NTHCDR definitions."
+  (declare (optimize (safety 0) (debug 0)) (inline fdefinition))
+  (values (funcall (fdefinition 'car)
+                  (funcall (fdefinition 'nthcdr) count items))))
 
 (defun tail-member-p (items object)
   "Find a shared tail; the caller validates the initial list argument."
@@ -1646,12 +1652,13 @@ The native boundary translates a false result into its checked arity condition."
 (defun loop-word-value-p (word text)
   (declare (type string text) (optimize (safety 0) (debug 0)) (inline symbolp))
   (values (if (symbolp word) (string= (symbol-name word) text) nil)))
-(defun spread-call-arguments (arguments)
+(defun splice-call-arguments (arguments proper-tail-p)
+  "Copy a private nonempty argument spine onto its last object.
+PROPER-TAIL-P retains APPLY's final-list boundary; LIST* accepts any tail."
   (declare (optimize (safety 0) (debug 0))
            (inline checked-path-car checked-path-cdr consp car cdr cons rplacd eq length <))
   (values (block done
-    (if (< (length arguments) 2) (error 'program-error))
-    (let ((scan (checked-path-cdr arguments)) (head nil) (tail nil))
+    (let ((scan arguments) (head nil) (tail nil))
       (tagbody next
         (if (checked-path-cdr scan) nil (go last))
         (let ((cell (cons (checked-path-car scan) nil)))
@@ -1660,7 +1667,8 @@ The native boundary translates a false result into its checked arity condition."
         (go next)
        last
         (let ((remaining (checked-path-car scan)))
-          (let ((fast remaining) (slow remaining) (phase nil))
+          (if proper-tail-p
+            (let ((fast remaining) (slow remaining) (phase nil))
             (tagbody validate
               (if fast nil (go valid))
               (if (consp fast) nil (return-from done (checked-cdr fast)))
@@ -1671,9 +1679,18 @@ The native boundary translates a false result into its checked arity condition."
                         (error 'type-error :datum remaining :expected-type (list 'satisfies 'list-length)))))
               (setq phase (not phase))
               (go validate)
-             valid))
+             valid)))
           (if tail (progn (rplacd (the cons tail) remaining) (return-from done head))
               (return-from done remaining))))))))
+(defun list-star-value (arguments)
+  "LIST* over a checked nonempty argument spine, sharing its arbitrary tail."
+  (declare (optimize (safety 0) (debug 0)) (inline splice-call-arguments))
+  (values (splice-call-arguments arguments nil)))
+(defun spread-call-arguments (arguments)
+  (declare (optimize (safety 0) (debug 0))
+           (inline length < checked-path-cdr splice-call-arguments))
+  (if (< (length arguments) 2) (error 'program-error))
+  (values (splice-call-arguments (checked-path-cdr arguments) t)))
 (defun integer-interval-bound-value (bound lower)
   (declare (optimize (safety 0) (debug 0))
            (inline consp car cdr eq list))

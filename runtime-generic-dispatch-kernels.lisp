@@ -18,11 +18,10 @@
        done)
      nil)))
 
-(defun generic-fixed-arity-value (parameters count metadata)
-  "Recognize a fixed generic lambda-list for a bounded direct caller."
-  (declare (type function metadata) (optimize (safety 0) (debug 0))
+(defun generic-fixed-arity-value (parameters count)
+  "Recognize a fixed generic lambda-list after the checked count boundary."
+  (declare (optimize (safety 0) (debug 0))
            (inline car cdr consp symbolp eq eql +))
-  (funcall metadata 9 count nil)
   (values
    (block fixed
      (let ((index 0) (name nil))
@@ -36,7 +35,10 @@
           (case name
             ((&optional &rest &body &key &allow-other-keys &aux &whole &environment)
              (return-from fixed nil)))
-          (setq parameters (cdr parameters) index (+ index 1)) (go next)
+          ;; INDEX is below COUNT here; retain that bounded result so the
+          ;; compiled worker keeps its loop counter in an unboxed local.
+          (setq parameters (cdr parameters)
+                index (the (integer 0 4) (+ index 1))) (go next)
          done)
        (eq parameters nil)))))
 

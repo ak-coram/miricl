@@ -34,7 +34,7 @@ try {
                (unit (compile-module-to-hir
                       (mapcar (lambda (entry) (list* 'defun (first entry) (cdr (second entry)))) *image-sources*)
                       :inline nil)))
-          (multiple-value-bind (code literals) (emit-native-module unit)
+          (multiple-value-bind (code literals) (emit-native-module-checked unit nil)
             ;; One factory shares the module's literals and closes over its
             ;; internal function bindings. Preserve only its literal graph;
             ;; runtime startup creates and installs the native entry points.

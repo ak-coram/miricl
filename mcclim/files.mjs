@@ -33,6 +33,22 @@ export async function mcclimFiles() {
     if (!source || source.split(before).length !== 2) throw new Error(`McCLIM port anchor changed: ${file}`);
     files.set(file, Buffer.from(source.replace(before, after)));
   };
+  // Rectangle clipping needs no temporary rectangle sets or band lists.
+  // Keep the protocol method and generic edge readers; touching areas are empty.
+  replace('/mcclim/Silex/geometry/region-composition.lisp',
+    `(defmethod region-intersection ((xr rectangle) (yr rectangle))
+  (region-intersection (rectangle->standard-rectangle-set xr)
+                       (rectangle->standard-rectangle-set yr)))`,
+    `(defmethod region-intersection ((xr rectangle) (yr rectangle))
+  (multiple-value-bind (ax1 ay1 ax2 ay2) (rectangle-edges* xr)
+    (multiple-value-bind (bx1 by1 bx2 by2) (rectangle-edges* yr)
+      (let ((x1 (if (< ax1 bx1) bx1 ax1))
+            (y1 (if (< ay1 by1) by1 ay1))
+            (x2 (if (< ax2 bx2) ax2 bx2))
+            (y2 (if (< ay2 by2) ay2 by2)))
+        (if (and (< x1 x2) (< y1 y2))
+            (make-rectangle* x1 y1 x2 y2)
+            +nowhere+)))))`);
   // Use CL-WHO's existing once-only constant definitions on MIRICL too.
   for (const file of ['/deps/cl-who/packages.lisp', '/deps/cl-who/specials.lisp'])
     replace(file, '#+(or :clasp :sbcl)', '#+(or :clasp :sbcl :miricl)');

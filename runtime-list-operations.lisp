@@ -9,9 +9,22 @@
       (i32.const ,(runtime-error-code :expected-designator))))))
 
 (define-runtime-function $check-apply-arguments (($args :nullable-object) ($count i32)) (:nullable-object)
-  #@(call $check-apply-list (local.get $args))
+  ;; ARITY counts through the checked proper-list walker before comparing.
+  ;; A separate properness pass would traverse the same spine twice.
   #@(call $arity (local.get $args) (local.get $count) (local.get $count))
   #@(ref.null eq))
+
+(defun $list-star-cl ()
+  (runtime-function-definition '$list-star-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$list-star-cl 'miricl-runtime:list-star-value))))
+
+(define-runtime-function $list-star-native (($args :nullable-object)) (:nullable-object)
+  (:locals ($result :nullable-object))
+  ;; Validate the caller-owned argument spine, never the arbitrary last object.
+  (wat-arity 1 2147483647)
+  #@(local.set $result (call $list-star-cl (local.get $args)))
+  #@(call $clear-values)
+  #@(local.get $result))
 
 (defun $pop-argument-cl ()
   (runtime-function-definition '$pop-argument-cl
@@ -143,6 +156,10 @@
   #@(if (i32.le_u (call $bitlength (ref.as_non_null (local.get $count))) (i32.const 31))
     (then (return (call $nthcdr-bounded (local.get $count) (local.get $x)))))
   #@(call $nthcdr-general (local.get $count) (local.get $x)))
+
+(defun $public-nth-cl ()
+  (runtime-function-definition '$public-nth-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$public-nth-cl 'miricl-runtime:public-nth-value))))
 
 (defun $last-bounded ()
   (runtime-function-definition '$last-bounded
@@ -495,34 +512,11 @@
   #@(call $check-apply-list (local.get $allowed))
   #@(call $check-keyword-pairs (local.get $args) (local.get $allowed) (call $bool (local.get $allow))))
 
-(define-runtime-function $list-primitive (($op i32) ($args :nullable-object)) (:nullable-object)
-  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%proclaim-variable)))
-    (then ,(wat-arity 1)
-      (call $check-variable (call $car (local.get $args)))
-      (call $proclaim-special (call $car (local.get $args)))
-      (return (ref.null eq))))
-  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%reader-dispatch-sub)))
-    (then ,(wat-arity 4)
-      (return (call $read-input-action ,(list-operation-argument 0) (i32.const 1) (i32.const 1)
-        (call $symbol (i32.const 1)) (ref.null eq)
-        (i32.add (i32.const 256) (call $sequence-index ,(list-operation-argument 1)))
-        (call $character-code ,(list-operation-argument 2)) ,(list-operation-argument 3)))))
-  (runtime-wat-forms
-    (loop for (code name) in '((34 %%reader-string) (35 %%reader-dispatch) (39 %%reader-quote)
-                              (40 %%reader-list) (41 %%reader-close) (44 %%reader-comma)
-                              (59 %%reader-comment) (96 %%reader-backquote)) collect
-      `(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op name)))
-        (then ,(wat-arity 2)
-          (return (call $read-input-action ,(list-operation-argument 0) (i32.const 1) (i32.const 1)
-            (call $symbol (i32.const 1)) (ref.null eq) (i32.const ,code)
-            (call $character-code ,(list-operation-argument 1)) (ref.null eq)))))))
-  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%sequence-construction)))
-    (then (return (call $sequence-construction-primitive (local.get $args)))))
-  ;; Share the existing compact integer dispatcher with symbol cases. Each
-  ;; adapter retains its checked boundary and evaluates its arguments in order.
-  (wat-integer-dispatch (runtime-wat-sequence #@(local.get $op))
-    (loop for (name arity function arguments) in
-      '((%check-keys 3 $check-keywords-native (0 1 (:truth 2)))
+;; One descriptor table and operand decoder serve the ordinary APPLY dispatcher
+;; and checked fixed object adapters. Selector conversion retains the same
+;; SEQUENCE-INDEX boundary in both calling conventions.
+(defun list-primitive-entries ()
+  '((%check-keys 3 $check-keywords-native (0 1 (:truth 2)))
         (%%list-copy 2 $copy-spine (0 (:index 1)))
         (%%make-list 2 $make-list-native (0 1))
         (%%pairlis 3 $pairlis-native (0 1 2))
@@ -627,16 +621,80 @@
         (%%restore-saved-slots 4 $restore-saved-slots (0 1 2 3))
         (%%builtin-macro 2 $direct-function (1 0 (:null) (:constant 7)))
         (%%define-constant 2 $define-constant (0 1))
-        (%%define-package 2 $defpackage (0 1)))
+        (%%define-package 2 $defpackage (0 1))
+        (%%copy-list 1 $copy-spine (0 (:constant 0)))
+        (%%slot-value 2 $instance-slot-operation ((:constant 0) 0 1 (:null)))
+        (%%nth 2 $public-nth-cl (0 1))))
+
+(defun list-primitive-operand-wat (operand argument)
+  (if (integerp operand) (funcall argument operand)
+      (ecase (car operand)
+        (:null '(ref.null eq))
+        (:constant `(i32.const ,(second operand)))
+        (:index `(call $sequence-index ,(funcall argument (second operand))))
+        (:truth `(i32.eqz (ref.is_null ,(funcall argument (second operand))))))))
+
+(defun list-primitive-fixed-call-wat (name arguments)
+  (destructuring-bind (primitive arity function operands)
+      (assoc name (list-primitive-entries))
+    (declare (ignore primitive))
+    (assert (= arity (length arguments)))
+    (wat-string `(call ,function
+      ,@(mapcar (lambda (operand)
+                  (list-primitive-operand-wat operand
+                    (lambda (index) `(local.get ,(nth index arguments)))))
+                operands)))))
+
+(define-runtime-function $list-copy-fixed
+    (($x :nullable-object) ($mode :nullable-object)) (:nullable-object)
+  (list-primitive-fixed-call-wat '%%list-copy '($x $mode)))
+
+(define-runtime-function $slot-operation-fixed
+    (($mode :nullable-object) ($object :nullable-object)
+     ($name :nullable-object) ($value :nullable-object)) (:nullable-object)
+  (list-primitive-fixed-call-wat '%%slot-operation '($mode $object $name $value)))
+
+(define-runtime-function $copy-list-native (($x :nullable-object)) (:nullable-object)
+  (list-primitive-fixed-call-wat '%%copy-list '($x)))
+
+(define-runtime-function $slot-value-native
+    (($object :nullable-object) ($name :nullable-object)) (:nullable-object)
+  (list-primitive-fixed-call-wat '%%slot-value '($object $name)))
+
+(define-runtime-function $list-primitive (($op i32) ($args :nullable-object)) (:nullable-object)
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%proclaim-variable)))
+    (then ,(wat-arity 1)
+      (call $check-variable (call $car (local.get $args)))
+      (call $proclaim-special (call $car (local.get $args)))
+      (return (ref.null eq))))
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%reader-dispatch-sub)))
+    (then ,(wat-arity 4)
+      (return (call $read-input-action ,(list-operation-argument 0) (i32.const 1) (i32.const 1)
+        (call $symbol (i32.const 1)) (ref.null eq)
+        (i32.add (i32.const 256) (call $sequence-index ,(list-operation-argument 1)))
+        (call $character-code ,(list-operation-argument 2)) ,(list-operation-argument 3)))))
+  (runtime-wat-forms
+    (loop for (code name) in '((34 %%reader-string) (35 %%reader-dispatch) (39 %%reader-quote)
+                              (40 %%reader-list) (41 %%reader-close) (44 %%reader-comma)
+                              (59 %%reader-comment) (96 %%reader-backquote)) collect
+      `(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op name)))
+        (then ,(wat-arity 2)
+          (return (call $read-input-action ,(list-operation-argument 0) (i32.const 1) (i32.const 1)
+            (call $symbol (i32.const 1)) (ref.null eq) (i32.const ,code)
+            (call $character-code ,(list-operation-argument 1)) (ref.null eq)))))))
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%sequence-construction)))
+    (then (return (call $sequence-construction-primitive (local.get $args)))))
+  ;; Share the existing compact integer dispatcher with symbol cases. Each
+  ;; adapter retains its checked boundary and evaluates its arguments in order.
+  (wat-integer-dispatch (runtime-wat-sequence #@(local.get $op))
+    (loop for (name arity function arguments) in
+      (list-primitive-entries)
       collect (cons (list (clos-primitive-op name))
         (runtime-wat-sequence (wat-arity arity)
-          (wat-string `(return (call ,function ,@(loop for argument in arguments collect
-            (if (integerp argument) (list-operation-argument argument)
-              (ecase (car argument)
-                (:null '(ref.null eq))
-                (:constant `(i32.const ,(second argument)))
-                (:index `(call $sequence-index ,(list-operation-argument (second argument))))
-                (:truth `(i32.eqz (ref.is_null ,(list-operation-argument (second argument)))))))))))))))
+          (wat-string `(return (call ,function
+            ,@(mapcar (lambda (argument)
+                        (list-primitive-operand-wat argument #'list-operation-argument))
+                      arguments))))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%storage-state)))
     (then ,(wat-arity 0)
       (return (call $three-values
@@ -656,14 +714,14 @@
   #@(ref.null eq))
 
 (define-runtime-section list-operations-runtime-wat ()
-  ($check-apply-list) ($check-apply-arguments) ($pop-argument-cl) ($pop-argument) ($list-eq) ($find-method-list)
+  ($check-apply-list) ($check-apply-arguments) ($list-star-cl) ($list-star-native) ($pop-argument-cl) ($pop-argument) ($list-eq) ($find-method-list)
   ($check-generic-arguments) ($check-generic-arity)
   ($check-keyword-pairs) ($check-keywords-native)
   ($list-type-error) ($require-list-cl) ($require-list) ($natural-count-cl) ($natural-count) ($copy-list-spine) ($copy-alist-spine) ($copy-tree-value-cl) ($copy-spine)
   ($reverse-copy-onto) ($reverse-mutate-onto) ($reverse-onto) ($reverse-sequence)
-  ($make-list-bounded) ($make-list-native) ($nthcdr-bounded) ($nthcdr-general) ($nthcdr-native) ($last-bounded) ($last-native)
+  ($make-list-bounded) ($make-list-native) ($nthcdr-bounded) ($nthcdr-general) ($nthcdr-native) ($public-nth-cl) ($last-bounded) ($last-native)
   ($copy-butlast-bounded) ($truncate-butlast-bounded) ($butlast-native)
   ($copy-before-tail) ($tail-member-p) ($tail-difference)
   ($list-length-native) ($pair-lists-onto) ($pairlis-native) ($callable) ($mapping-argument-cl) ($mapping-argument) ($map-lists-cl) ($map-lists-native) ($map-sequence-result-cl) ($map-sequences-native) ($map-into-apply) ($bounded-index-cl) ($bounded-index)
   ($sequence-character-kind) ($sequence-character-needle) ($simple-predicate-value) ($sequence-key-value) ($sequence-item-match)
-  ($search-list-cl) ($search-list-native) ($list-exclusive-cl) ($list-exclusive-native) ($list-set-apply) ($list-set-values-cl) ($list-set-native) ($count-sequence-value-cl) ($count-sequence-native) ($list-primitive))
+  ($search-list-cl) ($search-list-native) ($list-exclusive-cl) ($list-exclusive-native) ($list-set-apply) ($list-set-values-cl) ($list-set-native) ($count-sequence-value-cl) ($count-sequence-native) ($list-copy-fixed) ($slot-operation-fixed) ($copy-list-native) ($slot-value-native) ($list-primitive))

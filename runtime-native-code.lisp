@@ -1209,6 +1209,10 @@
   #@(extern.convert_any (call $bool (i32.eq
     (call $tag ,(native-object '(local.get $value))) (i32.const 7)))))
 
+(define-runtime-function $native-consp-test (($value externref)) (i32)
+  (:export-raw "native-consp-test")
+  #@(i32.eq (call $tag ,(native-object '(local.get $value))) (i32.const 7)))
+
 (define-runtime-function $native-simple-vector-p-inline (($value externref)) (externref)
   (:export-raw "native-simple-vector-p-inline")
   #@(extern.convert_any (call $bool (i32.eq
@@ -1394,11 +1398,64 @@
 
 (define-runtime-function $native-tail-call (($function externref) ($arguments externref)) (externref)
   (:export-raw "native-tail-call")
+  #@(return_call $native-tail-dispatch (local.get $function) (local.get $arguments) (i32.const 0)))
+
+;; Allocate only for the ordinary adapter; never share a mutable argument spine.
+(define-runtime-function $native-tail-arguments
+    (($count i32) ($a :nullable-object) ($b :nullable-object) ($c :nullable-object) ($d :nullable-object)) (:nullable-object)
+  (:locals ($args :nullable-object))
+  #@(if (i32.ge_u (local.get $count) (i32.const 4))
+    (then (local.set $args (call $cons (local.get $d) (local.get $args)))))
+  #@(if (i32.ge_u (local.get $count) (i32.const 3))
+    (then (local.set $args (call $cons (local.get $c) (local.get $args)))))
+  #@(if (i32.ge_u (local.get $count) (i32.const 2))
+    (then (local.set $args (call $cons (local.get $b) (local.get $args)))))
+  #@(if (local.get $count) (then (local.set $args (call $cons (local.get $a) (local.get $args)))))
+  #@(local.get $args))
+
+;; Fixed operands enter the same guarded workers without an argument packet.
+;; Unknown arities, debugger entries and adapters retain the ordinary path.
+(define-runtime-function $native-fixed-tail-call
+    (($name :nullable-object) ($count i32) ($a :nullable-object) ($b :nullable-object)
+     ($c :nullable-object) ($d :nullable-object)) (externref)
+  (:locals ($body (ref null $native-function)))
+  #@(call $thread-checkpoint)
+  #@(if (call $symbolp (local.get $name)) (then (local.set $name (call $fdefinition (local.get $name)))))
+  #@(block $ordinary
+    (br_if $ordinary (global.get $debug-evaluating))
+    (if (ref.test (ref $native-function) (local.get $name))
+      (then
+        (block $not-direct
+          (br_if $not-direct (ref.test (ref $native-debug-function) (local.get $name)))
+          (local.set $body (ref.cast (ref $native-function) (local.get $name)))
+          (br_if $not-direct (f64.ne (struct.get $obj $f (ref.as_non_null (local.get $body)))
+            (f64.convert_i32_u (i32.add (local.get $count) (i32.const 2)))))
+          (br_if $not-direct (ref.is_null (struct.get $native-function $direct (ref.as_non_null (local.get $body)))))
+          (if (global.get $backtrace-depth)
+            (then (array.set $objects (global.get $backtrace-frames)
+              (i32.and (i32.sub (global.get $backtrace-depth) (i32.const 1)) (i32.const 63)) (local.get $name))))
+          (call $clear-values)
+          (return_call_ref $native-direct-entry
+            (extern.convert_any (local.get $name)) (extern.convert_any (local.get $a))
+            (extern.convert_any (local.get $b)) (extern.convert_any (local.get $c)) (extern.convert_any (local.get $d))
+            (struct.get $native-direct-code $entry
+              (ref.as_non_null (struct.get $native-function $direct (ref.as_non_null (local.get $body)))))))))
+    (if (i32.and (i32.le_u (local.get $count) (i32.const 3))
+          (i32.eq (call $native-builtin-id (local.get $name)) (i32.const 2147483644)))
+      (then (return_call $native-generic-fixed-tail-call (local.get $name) (ref.null eq) (local.get $count)
+        (local.get $a) (local.get $b) (local.get $c)))))
+  #@(return_call $native-tail-dispatch (extern.convert_any (local.get $name))
+    (extern.convert_any (call $native-tail-arguments (local.get $count)
+      (local.get $a) (local.get $b) (local.get $c) (local.get $d))) (i32.const 1)))
+
+(define-runtime-function $native-tail-dispatch (($function externref) ($arguments externref) ($ready i32)) (externref)
   (:locals ($name :nullable-object) ($args :nullable-object) ($id i32))
   #@(local.set $name ,(native-object '(local.get $function)))
   #@(local.set $args ,(native-object '(local.get $arguments)))
+  ;; The fixed-operand entry already supplied its checkpoint. Adapter loops
+  ;; still checkpoint before reading each subsequently selected mutable spine.
   #@(loop $dispatch
-    (call $thread-checkpoint)
+    (if (local.get $ready) (then (local.set $ready (i32.const 0))) (else (call $thread-checkpoint)))
     (if (call $symbolp (local.get $name))
       (then (local.set $name (call $fdefinition (local.get $name)))))
     ;; APPLY and FUNCALL are dispatch adapters, not additional Lisp frames.
@@ -1424,8 +1481,116 @@
         (return_call_ref $native-entry
           (extern.convert_any (local.get $name)) (extern.convert_any (local.get $args))
           (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $name))))))
+    ;; Generic functions need an actual tail worker entry, not APPLY cleanup.
+    (if (i32.and (i32.eqz (global.get $debug-evaluating))
+          (i32.eq (local.get $id) (i32.const 2147483644)))
+      (then (return_call $native-generic-tail-call
+        (extern.convert_any (local.get $name)) (extern.convert_any (local.get $args)))))
     (return (extern.convert_any (call $apply (local.get $name) (local.get $args)))))
   #@(unreachable))
+
+;; Checked packet ingress shares the guarded selector and worker entry below.
+(define-runtime-function $native-generic-tail-call
+    (($function externref) ($arguments externref)) (externref)
+  (:locals ($gf :nullable-object) ($args :nullable-object) ($scan :nullable-object)
+           ($a :nullable-object) ($b :nullable-object) ($c :nullable-object) ($count i32))
+  #@(local.set $gf ,(native-object '(local.get $function)))
+  #@(local.set $args ,(native-object '(local.get $arguments)))
+  #@(block $ordinary
+    (br_if $ordinary (global.get $debug-evaluating))
+    ;; Read the mutable spine only after the dispatcher's checkpoint.
+    (local.set $scan (local.get $args))
+    (block $arguments (loop $argument
+      (br_if $arguments (ref.is_null (local.get $scan)))
+      (br_if $ordinary (i32.ge_u (local.get $count) (i32.const 3)))
+      (br_if $ordinary (i32.ne (call $tag (local.get $scan)) (i32.const 7)))
+      (if (i32.eqz (local.get $count))
+        (then (local.set $a (call $car (local.get $scan))))
+        (else (if (i32.eq (local.get $count) (i32.const 1))
+          (then (local.set $b (call $car (local.get $scan))))
+          (else (local.set $c (call $car (local.get $scan)))))))
+      (local.set $count (i32.add (local.get $count) (i32.const 1)))
+      (local.set $scan (call $cdr (local.get $scan))) (br $argument)))
+    (return_call $native-generic-fixed-tail-call
+      (local.get $gf) (local.get $args) (local.get $count) (local.get $a) (local.get $b) (local.get $c)))
+  #@(extern.convert_any (call $apply (local.get $gf) (local.get $args))))
+
+(define-runtime-function $native-generic-fixed-tail-call
+    (($gf :nullable-object) ($args :nullable-object) ($count i32)
+     ($a :nullable-object) ($b :nullable-object) ($c :nullable-object)) (externref)
+  (:locals ($selected :nullable-object) ($body-object :nullable-object) ($body (ref null $native-function))
+           ($method :nullable-object) ($rest :nullable-object) ($next :nullable-object) ($context :nullable-object))
+  #@(block $ordinary
+    (br_if $ordinary (global.get $debug-evaluating))
+    (call $generic-recent-plan-ready (local.get $gf) (local.get $count)
+      (local.get $a) (local.get $b) (local.get $c) (ref.null eq))
+    (local.set $next) (local.set $rest) (local.set $method)
+    (local.set $body-object) (local.set $selected)
+    ;; Native methods enter their direct worker in tail position. Scalar plans
+    ;; share their existing executor; other cases keep ordinary APPLY.
+    ;; Callbacks within scalar operations have no added TCO guarantee.
+    (br_if $ordinary (ref.is_null (local.get $selected)))
+    (if (ref.is_null (local.get $body-object))
+      (then
+        ;; A committed scalar plan needs neither a second probe nor APPLY.
+        ;; Match native tail entry's frame/value contract before callbacks.
+        (if (global.get $backtrace-depth)
+          (then (array.set $objects (global.get $backtrace-frames)
+            (i32.and (i32.sub (global.get $backtrace-depth) (i32.const 1)) (i32.const 63))
+            (local.get $gf))))
+        (call $clear-values)
+        (return (extern.convert_any (call $generic-recent-scalar-call
+          (ref.cast (ref $direct-function) (local.get $selected)) (local.get $a) (local.get $b))))))
+    (local.set $body (ref.cast (ref $native-function) (local.get $body-object)))
+    (local.set $context (call $generic-recent-context (local.get $gf) (ref.as_non_null (local.get $body))
+      (local.get $method) (local.get $rest) (local.get $next) (local.get $count)
+      (local.get $a) (local.get $b) (local.get $c)))
+    ;; Selection, context assembly and frame replacement are one nonpolling
+    ;; interval. The dispatcher already supplied the cooperative checkpoint.
+    (if (global.get $backtrace-depth)
+      (then (array.set $objects (global.get $backtrace-frames)
+        (i32.and (i32.sub (global.get $backtrace-depth) (i32.const 1)) (i32.const 63))
+        (local.get $body-object))))
+    (call $clear-values)
+    (return_call_ref $native-direct-entry
+      (extern.convert_any (local.get $body-object)) (extern.convert_any (local.get $context))
+      (extern.convert_any (local.get $a)) (extern.convert_any (local.get $b)) (extern.convert_any (local.get $c))
+      (struct.get $native-direct-code $entry
+        (ref.as_non_null (struct.get $native-function $direct (ref.as_non_null (local.get $body)))))))
+  ;; This fallback intentionally retains the existing APPLY cleanup contract.
+  #@(extern.convert_any (call $apply (local.get $gf) (if (result (ref null eq)) (ref.is_null (local.get $args))
+      (then (call $native-tail-arguments (local.get $count) (local.get $a) (local.get $b) (local.get $c) (ref.null eq)))
+      (else (local.get $args))))))
+
+(define-runtime-function $native-tail-call0
+    (($function externref)) (externref)
+  (:export-raw "native-tail-call0")
+  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 0)
+    (ref.null eq) (ref.null eq) (ref.null eq) (ref.null eq)))
+
+(define-runtime-function $native-tail-call1
+    (($function externref) ($a externref)) (externref)
+  (:export-raw "native-tail-call1")
+  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 1)
+    ,(native-object '(local.get $a)) (ref.null eq) (ref.null eq) (ref.null eq)))
+
+(define-runtime-function $native-tail-call2
+    (($function externref) ($a externref) ($b externref)) (externref)
+  (:export-raw "native-tail-call2")
+  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 2)
+    ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) (ref.null eq) (ref.null eq)))
+
+(define-runtime-function $native-tail-call3
+    (($function externref) ($a externref) ($b externref) ($c externref)) (externref)
+  (:export-raw "native-tail-call3")
+  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 3)
+    ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) ,(native-object '(local.get $c)) (ref.null eq)))
+
+(define-runtime-function $native-tail-call4
+    (($function externref) ($a externref) ($b externref) ($c externref) ($d externref)) (externref)
+  (:export-raw "native-tail-call4")
+  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 4)
+    ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) ,(native-object '(local.get $c)) ,(native-object '(local.get $d))))
 
 (define-runtime-function $native-attach-direct (($function externref) ($entry funcref)) (externref)
   (:export-raw "native-attach-direct")
@@ -1552,6 +1717,11 @@
   ;; packet. These descriptors do not change private primitive ordinals.
   '((%%list-length 1 $list-length-native)
     (%%oddp 1 $oddp-native)
+    (%%copy-list 1 $copy-list-native)
+    (%%nthcdr 2 $nthcdr-native)
+    (%%nth 2 $public-nth-cl)
+    (%%slot-value 2 $slot-value-native)
+    (%%list-copy 2 $list-copy-fixed)
     (%cell 2 $property-cell)
     (%list-eq 2 $list-eq)
     (%%hash-cell 2 $hash-cell-native)
@@ -1567,17 +1737,22 @@
     (%%complex-type-metadata 3 $complex-type-metadata-value)
     (%%generic-dispatch-metadata 3 $generic-dispatch-metadata-value)
     (%%compound-type-metadata 3 $compound-type-metadata-value)
-    (%%array-adjust-metadata 3 $array-adjust-metadata-value)))
+    (%%array-adjust-metadata 3 $array-adjust-metadata-value)
+    (%%slot-operation 4 $slot-operation-fixed)))
 
 (defun native-fixed-primitive-call-wat (arity)
   ;; NATIVE-BUILTIN-ID reads the actual function object's code, independently
   ;; of its current name. Interpreted/native closures (code zero), replacements
   ;; and other arities continue through ordinary APPLY, including its errors.
-  (let ((arguments (ecase arity (1 '($value)) (2 '($left $right)) (3 '($a $b $c)))))
+  (let ((arguments (ecase arity (1 '($value)) (2 '($left $right))
+                               (3 '($a $b $c)) (4 '($a $b $c $d))))
+        (id (if (= arity 4)
+                `(call $native-builtin-id ,(native-object '(local.get $function)))
+                '(local.get $id))))
     (runtime-wat-forms
       (loop for (name count target) in (native-fixed-primitive-entries)
             when (= count arity) collect
-        `(if (i32.eq (local.get $id)
+        `(if (i32.eq ,id
                      (i32.const ,(let ((code (+ +clos-primitive-base+ (clos-primitive-op name))))
                                    (if (= arity 3) (- -1 code) (1- code)))))
            (then
@@ -1969,6 +2144,7 @@
     (then (return (extern.convert_any
       (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
         (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null eq)))))))))
+  (native-fixed-primitive-call-wat 4)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
       (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null eq))))))))
@@ -2038,7 +2214,7 @@
   ($native-vector-ref) ($native-boolean)
   ($native-eq-inline) ($native-eq-test) ($native-eql-inline) ($native-eql-test) ($native-length-inline) ($native-list-length-inline) ($native-vector-length-inline)
   ($native-gethash-inline) ($checked-gethash-primary) ($native-gethash-primary-inline) ($native-puthash-inline)
-  ($native-consp-inline) ($native-simple-vector-p-inline) ($native-vector-p-inline)
+  ($native-consp-inline) ($native-consp-test) ($native-simple-vector-p-inline) ($native-vector-p-inline)
   ($native-string-p-inline) ($native-integer-p-inline) ($native-character-p-inline)
   ($native-integer-length-inline) ($native-ash-general-inline) ($native-logand-general-inline)
   ($native-mod-general-inline) ($native-rounding-primary-inline) ($native-truncate-primary-inline)
@@ -2064,5 +2240,8 @@
   ($native-character-code-at-unboxed-inline)
   ($native-character-code-at64-unboxed-inline)
   ($native-vector-set-inline)
-  ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-tail-enter) ($native-tail-direct) ($native-tail-call)
-  ($native-call0) ($native-call1) ($native-call2) ($native-call3) ($native-call4) ($native-generic-call))
+  ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
+  ($native-call0) ($native-call1) ($native-call2) ($native-call3) ($native-call4) ($native-generic-call)
+  ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)
+  ($native-generic-fixed-tail-call)
+  ($native-tail-call0) ($native-tail-call1) ($native-tail-call2) ($native-tail-call3) ($native-tail-call4))

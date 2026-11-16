@@ -197,6 +197,8 @@
       output-stream-p stream-element-type interactive-stream-p)
       #@(return (call $constructed-stream-apply (local.get $id) (local.get $args)))))
   (wat-symbol-case #@(local.get $id)
+    (list*
+      #@(return_call $list-star-native (local.get $args)))
     (fresh-line
       (wat-arity 0 1)
       #@(return (call $fresh-line-native (call $car (local.get $args)))))

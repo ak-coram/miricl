@@ -42,9 +42,9 @@ export async function createMaxima(image, core, {progress = () => {}, onPrompt, 
           (make-string-input-stream (maxima-browser-answer)))
         (let ((original (symbol-function 'maxima::retrieve)))
           (setf (symbol-function 'maxima::retrieve)
-            (lambda (message flag)
-              (if (peek-char nil *query-io* nil nil)
-                (funcall original message flag)
+            (lambda (message flag &optional subject)
+              (if (or maxima::*with-answers* (peek-char nil *query-io* nil nil))
+                (funcall original message flag subject)
                 (progn
                   (let* ((*standard-input* (maxima-browser-await-input
                       (cond ((null message) "Input:")
@@ -53,17 +53,18 @@ export async function createMaxima(image, core, {progress = () => {}, onPrompt, 
                           (t (with-output-to-string (stream)
                                (maxima::format-prompt stream "~M" message))))))
                          (*query-io* (make-two-way-stream *standard-input* *standard-output*)))
-                    (funcall original message flag)))))))
-        (let ((original (symbol-function 'maxima::$readonly)))
-          (setf (symbol-function 'maxima::$readonly)
-            (lambda (&rest messages)
-              (if (peek-char nil *query-io* nil nil)
-                (apply original messages)
+                    (funcall original message flag subject)))))))
+        ;; READ and READONLY share READ-INPUT; READ evaluates its result.
+        (let ((original (symbol-function 'maxima::read-input)))
+          (setf (symbol-function 'maxima::read-input)
+            (lambda (subject messages)
+              (if (or maxima::*with-answers* (peek-char nil *query-io* nil nil))
+                (funcall original subject messages)
                 (let* ((*standard-input* (maxima-browser-await-input
                           (if messages (with-output-to-string (stream)
                             (let ((*standard-output* stream)) (apply #'maxima::$print messages))) "Input:")))
                        (*query-io* (make-two-way-stream *standard-input* *standard-output*)))
-                  (apply original messages))))))` : ''}
+                  (funcall original subject messages))))))` : ''}
       (defun maxima-browser-evaluate (text answers)
         (let ((*package* (find-package :maxima))
               (*debugger-hook* nil)

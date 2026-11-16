@@ -141,7 +141,16 @@
 (defun copy-hir-debug-type (type)
   ;; Copy executable type syntax; MEMBER/EQL and opaque DEFTYPE arguments
   ;; remain literal data. Their object identities are part of type semantics.
+  ;; Atomic specifiers are already accepted unchanged by the structural
+  ;; validator; most debug bindings carry T and need no graph worklist.
+  (unless (consp type) (return-from copy-hir-debug-type type))
   (compiler-type-specifier type)
+  (copy-hir-debug-type-checked type))
+
+(defun copy-hir-debug-type-checked (type)
+  ;; Source validation or the public wrapper has already accepted this type.
+  ;; Snapshot executable syntax without copying EQL/MEMBER literal objects.
+  (unless (consp type) (return-from copy-hir-debug-type-checked type))
   (let ((root (list type)) (work nil) (copies (make-hash-table :test 'eq)))
     (push root work)
     (loop while work do

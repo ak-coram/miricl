@@ -4,7 +4,11 @@
 (defun hir-code-to-unit (payload)
   "Reconstruct semantic HIR for native compilation of a compact-code FASL."
   (declare (optimize (safety 3)))
-  (let* ((payload (validate-hir-code payload)) (literals (svref payload 0))
+  (hir-code-to-unit-checked (validate-hir-code payload)))
+
+(defun hir-code-to-unit-checked (payload)
+  ;; PAYLOAD is the private decoded snapshot obtained at wire ingestion.
+  (let* ((literals (svref payload 0))
          (descriptors (svref payload 1)) (count (length descriptors))
          (functions (make-array count)) (values (make-array count))
          (blocks (make-array count)) (captures (make-array count))
@@ -159,7 +163,9 @@
                (unless (%hir-target-p id) (hir-code-error payload "block environment has no lexical target"))
                (setf (hir-instruction-attributes instruction) (list id))))))))
     (let ((unit (make-hir-unit :functions (coerce functions 'list))))
-      (verify-hir unit)
+      (dolist (function (hir-unit-functions unit)) (hir-refresh-predecessors function))
+      ;; These are admission checks for the untrusted stored program, not
+      ;; integrity checks on the reconstruction algorithm.
       (verify-hir-code-operands unit)
       (verify-hir-code-dominance unit)
       (optimize-hir-checked unit)
@@ -169,7 +175,8 @@
   ;; A wire-level register is not a proof of an internal representation. The
   ;; native ABI uses unchecked context/cell accesses, unlike the guarded VM.
   (declare (optimize (safety 3)))
-  (labels ((identity-of (value)
+  (let ((parents (make-hash-table :test 'eq)))
+   (labels ((identity-of (value)
              (let ((producer (hir-value-producer value)))
                (when (%hir-instruction-p producer)
                  (case (hir-instruction-opcode producer)
@@ -184,6 +191,21 @@
              (unless (eq (hir-value-kind value) :multiple)
                (hir-code-error (hir-value-id value) "expected a multiple-value register"))))
     (dolist (function (hir-unit-functions unit))
+      ;; Wire closure indices determine parent edges; constructing fresh
+      ;; records does not establish that these external edges are acyclic.
+      (let ((parent function) (path nil))
+        (loop while (and parent (not (eq (gethash parent parents) :done))) do
+          (when (gethash parent parents)
+            (hir-code-error (hir-function-name function) "circular function-parent chain"))
+          (setf (gethash parent parents) :visiting)
+          (push parent path)
+          (setq parent (hir-function-parent parent)))
+        (dolist (parent path) (setf (gethash parent parents) :done)))
+      ;; Register counts come from the wire, including registers never used
+      ;; by an instruction. Every one must still have a real definition.
+      (dolist (value (hir-function-values function))
+        (unless (hir-value-producer value)
+          (hir-code-error (hir-value-id value) "register has no definition")))
       (dolist (block (hir-function-blocks function))
         (when (and (hir-block-environment block) (not (context-p (hir-block-environment block))))
           (hir-code-error (hir-block-id block) "block has no dynamic environment"))
@@ -206,6 +228,16 @@
                 (hir-code-error opcode "operand is not a lexical control target"))
               (when (third inputs) (group (third inputs))))
             (case opcode
+              (:function-reference
+               (compiler-function-name (first (hir-instruction-attributes instruction)) "HIR function name"))
+              (:values
+               (unless (every (lambda (input) (eq (hir-value-kind input) :single)) inputs)
+                 (hir-code-error opcode "VALUES operands must be single values")))
+              (:branch
+               (unless (and (eq (hir-value-kind (first inputs)) :single)
+                            (every (lambda (target) (null (hir-block-parameters target)))
+                              (hir-instruction-attributes instruction)))
+                 (hir-code-error opcode "invalid HIR conditional")))
               (:copy
                (unless (and (eq (hir-value-kind (first inputs)) :single)
                             (hir-instruction-output instruction)
@@ -214,8 +246,17 @@
               ((:primary :value-ref :values-list :return) (group (first inputs)))
               (:jump (when inputs (group (first inputs))))
               (:throw (group (third inputs)))
-              (:multiple-value-call (mapc #'group (cddr inputs)))))))))
-  t)
+              (:multiple-value-call (mapc #'group (cddr inputs))))
+            (when (member opcode '(:jump :block-return))
+              (let ((successors (hir-instruction-attributes instruction)))
+                (when successors
+                  (unless (if (and (eq opcode :jump) (null inputs))
+                              (null (hir-block-parameters (first successors)))
+                              (and (= (length (hir-block-parameters (first successors))) 1)
+                                   (eq (hir-value-kind (first (hir-block-parameters (first successors)))) :multiple)
+                                   (eq (hir-value-kind (car (last inputs))) :multiple)))
+                    (hir-code-error opcode "successor parameters and incoming values must be multiple-value groups"))))))))))
+  t))
 
 (defun verify-hir-code-dominance (unit)
   ;; Immediate dominators use linear storage. Include lexical exception landing
@@ -243,7 +284,10 @@
             (let ((output (hir-instruction-output instruction)))
               (when output (setf (svref definition (hir-value-id output)) i
                                 (svref position (hir-value-id output)) p))))
-          (dolist (target (svref successors i)) (pushnew i (svref predecessors target)))))
+          ;; SUCCESSORS has already removed duplicate edges from this block.
+          ;; Each source index is visited once, so predecessor insertion needs
+          ;; no search through a potentially large join's incoming edges.
+          (dolist (target (svref successors i)) (push i (svref predecessors target)))))
       (let ((work (list (cons entry nil))))
         (loop while work do
           (let* ((item (pop work)) (i (car item)))

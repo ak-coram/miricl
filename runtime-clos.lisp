@@ -28,7 +28,8 @@
 ;; The remaining high function IDs are reserved for HIR code, formatters, complements, constant macro expanders,
 ;; generic functions, and condition readers in $APPLY1.
 (setf *clos-primitives* (append *clos-primitives* '(%pop-arg %list-eq %%find-method %%dispatch-eql-key %nth %%debugger
-                                                 %%class-subclass-p %%instance-type-p %%restore-saved-slots %%hir-function)))
+                                                 %%class-subclass-p %%instance-type-p %%restore-saved-slots %%hir-function
+                                                 %%hir-function-checked)))
 
 (defparameter *native-clos-defaults*
   '((allocate-instance . %%standard-allocate-instance)
@@ -88,6 +89,23 @@
 (setf *clos-primitives* (append *clos-primitives* '(%prog-expansion)))
 (setf *clos-primitives* (append *clos-primitives* '(%%do-expander %%do*-expander)))
 (setf *clos-primitives* (append *clos-primitives* '(%iteration-expansion)))
+;; Later default bodies share promotion, with their own primitive interval.
+(let ((entries '((class-slots . %%standard-class-slots)
+                 (class-default-initargs . %%standard-class-default-initargs))))
+  (setf *native-clos-defaults* (append *native-clos-defaults* entries)
+        *clos-primitives* (append *clos-primitives* (mapcar #'cdr entries))))
+;; These public functions only adapt arguments to checked native operations.
+;; Install the saved native body during bootstrap, avoiding a Lisp argument
+;; frame while leaving ordinary public function rebinding intact.
+(defparameter *native-public-functions*
+  '((nthcdr . %%nthcdr)
+    (nth . %%nth)
+    (list-length . %%list-length)
+    (copy-list . %%copy-list)
+    (slot-value . %%slot-value)
+    (list* . list*)))
+;; Keep new private IDs after every existing primitive interval.
+(setf *clos-primitives* (append *clos-primitives* '(%%copy-list %%slot-value %%nth)))
 (defparameter *native-clos-symbols* '(:initarg-profile))
 
 (assert (<= (length *clos-primitives*) (- 2147483640 +clos-primitive-base+)))
@@ -115,9 +133,29 @@
                         (let ((native (and (consp form) (eq (car form) 'defun)
                                        (or (cdr (assoc (second form) *native-mop-slot-functions* :test #'equal))
                                            (cdr (assoc (second form) *native-clos-defaults* :test #'equal))
+                                           (cdr (assoc (second form) *native-public-functions* :test #'equal))
                                            (second (assoc (second form) *native-javascript-functions* :test #'equal))))))
                           (lower-runtime-library
                             (if native `(setf (fdefinition ',(second form)) (function ,native)) form))))))
+        (when (equal file "compiler-input.lisp")
+          ;; Every guest has the checked list scanner. Call it directly,
+          ;; avoiding the host-probing ABI and its multiple-value packet on
+          ;; every FASL record and compiler input list. Keep the portable
+          ;; scanner in the host source, with identical rejection conditions.
+          (setf forms
+            (loop for form in forms collect
+              (if (eq (second form) 'miricl-compiler::compiler-list-length)
+                  (lower-runtime-library
+                    '(defun miricl-compiler::compiler-list-length (object context)
+                       (declare (optimize (safety 3)))
+                       (if (null object) 0
+                           (let ((count (%%compile 40 object)))
+                             (case count
+                               (-1 (miricl-compiler::compiler-input-fail context object
+                                     "expected a proper list; found a dotted tail"))
+                               (-2 (miricl-compiler::compiler-input-fail context object "circular list"))
+                               (otherwise count))))))
+                  form))))
         (when (equal file "hir-code.lisp")
           ;; Host Common Lisp needs portable fallbacks. Both guest images
           ;; always have the shared Wasm readers; do not ship duplicate parsers.
@@ -612,14 +650,20 @@
         (i32.const ,(- (clos-primitive-op (second (car (last *native-javascript-functions*))))
                       (clos-primitive-op '%%js-available))))
     (then (return_call $javascript-library-call (local.get $op) (local.get $args))))
-  #@(if (i32.le_u (i32.sub (local.get $op) (i32.const ,(clos-primitive-op '%%standard-allocate-instance)))
-        (i32.const ,(- (clos-primitive-op (cdr (car (last *native-clos-defaults*))))
-                      (clos-primitive-op '%%standard-allocate-instance))))
+  #@(if (i32.or
+        (i32.le_u (i32.sub (local.get $op) (i32.const ,(clos-primitive-op '%%standard-allocate-instance)))
+          (i32.const ,(- (clos-primitive-op '%%standard-check-initargs)
+                        (clos-primitive-op '%%standard-allocate-instance))))
+        (i32.le_u (i32.sub (local.get $op) (i32.const ,(clos-primitive-op '%%standard-class-slots)))
+          (i32.const ,(- (clos-primitive-op '%%standard-class-default-initargs)
+                        (clos-primitive-op '%%standard-class-slots)))))
     (then (return_call $standard-clos-call (local.get $op) (local.get $args))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%compile)))
     (then (return (call $compile-primitive (local.get $args)))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%hir-function)))
     (then (return_call $hir-load (local.get $args))))
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%hir-function-checked)))
+    (then (return_call $hir-load-checked (local.get $args))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%debugger)))
     (then (return (call $debug-operation (local.get $args)))))
   #@(if (i32.or

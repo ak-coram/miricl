@@ -7,8 +7,51 @@
             (wat-fragment #@(call $cons ,(if (stringp argument) (wat-fragment argument) argument) ,rest)))
     arguments :from-end t :initial-value (if (stringp tail) (wat-fragment tail) tail)))
 
-(defun clos-default-call (name arguments &optional (tail #@(ref.null eq)))
-  (wat-fragment #@(call $apply ,(clos-library-reference name) ,(clos-default-arguments arguments tail))))
+(defun clos-default-call (name arguments &optional (tail #@(ref.null eq) tail-supplied-p))
+  (if (and (not tail-supplied-p) (= (length arguments) 1))
+      (wat-fragment #@(call $clos-default-call1 ,(clos-library-reference name)
+        ,(let ((argument (first arguments)))
+           (if (stringp argument) (wat-fragment argument) argument))))
+      (wat-fragment #@(call $apply ,(clos-library-reference name) ,(clos-default-arguments arguments tail)))))
+
+(define-runtime-function $clos-default-call1
+    (($name :nullable-object) ($argument :nullable-object)) (:nullable-object)
+  (:locals ($function :nullable-object) ($hit i32)
+           ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
+           ($handlers :nullable-object) ($restarts :nullable-object)
+           ($restart-associations :nullable-object) ($catches :nullable-object) ($targets :nullable-object)
+           ($thrown i32) ($result :nullable-object)
+           ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object))
+  ;; Evaluate the operand before resolving the name: it may call Lisp that
+  ;; changes the global function binding. Debugger calls keep ordinary APPLY.
+  #@(if (global.get $debug-evaluating)
+    (then (return_call $apply (local.get $name) (call $cons (local.get $argument) (ref.null eq)))))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  ;; Match APPLY0's frame and dynamic cleanup, including nonlocal exits.
+  #@(local.set $backtrace-depth (global.get $backtrace-depth))
+  #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
+  #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
+  #@(array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $name))
+  #@(global.set $backtrace-depth (i32.add (local.get $backtrace-depth) (i32.const 1)))
+  #@(call $clear-values)
+  (wat-dynamic-call
+    #@(block $done (result (ref null eq))
+      (local.set $function (call $fdefinition (local.get $name)))
+      (if (i32.eq (call $native-builtin-id (local.get $function)) (i32.const 2147483644))
+        (then
+          (call $generic-recent-call (local.get $function) (i32.const 1)
+            (local.get $argument) (ref.null eq) (ref.null eq) (ref.null eq))
+          (local.set $hit) (local.set $result)
+          ;; The selected method owns its complete value group. Do not use
+          ;; the scalar NATIVE-CALL1 ABI, which clears secondary values.
+          (br_if $done (local.get $result) (local.get $hit))
+          (drop)))
+      ;; Retain the resolved binding across the selector's scheduler poll,
+      ;; as ordinary generic APPLY does. Misses allocate the original packet.
+      (call $apply1 (local.get $function) (call $cons (local.get $argument) (ref.null eq))))
+    :cleanup #@(block
+      (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
+      (global.set $backtrace-depth (local.get $backtrace-depth)))))
 
 (defun clos-default-get (object key)
   (wat-fragment #@(call $clos-meta-value ,(if (stringp object) (wat-fragment object) object) ,(clos-library-reference key))))
@@ -142,7 +185,7 @@
 
 (define-runtime-function $clos-method-metadata-value
     (($selector-value :nullable-object) ($object :nullable-object) ($extra :nullable-object)) (:nullable-object)
-  (:locals ($selector i32) ($data (ref $objects)))
+  (:locals ($selector i32) ($count i32) ($data (ref $objects)))
   #@(local.set $selector (call $natural-count (local.get $selector-value)))
   #@(if (i32.eq (local.get $selector) (i32.const 0))
     (then (return ,(clos-default-call 'class-finalized-p (list #@(local.get $object))))))
@@ -152,6 +195,17 @@
     (then (return ,(clos-default-call 'class-default-initargs (list #@(local.get $object))))))
   #@(if (i32.eq (local.get $selector) (i32.const 3))
     (then (return ,(clos-default-call 'class-slots (list #@(local.get $object))))))
+  #@(if (i32.eq (local.get $selector) (i32.const 15))
+    (then (return (call $clos-meta-value (local.get $object)
+      (if (result (ref null eq)) (ref.is_null (local.get $extra))
+        (then ,(clos-library-reference :slots)) (else ,(clos-library-reference :default-initargs)))))))
+  #@(if (i32.eq (local.get $selector) (i32.const 16))
+    (then (return (call $bool (ref.eq (call $dispatch-class (local.get $object))
+      ,(clos-default-call 'find-class (list (clos-library-reference 'forward-referenced-class))))))))
+  #@(if (i32.eq (local.get $selector) (i32.const 17))
+    (then (return ,(clos-default-call 'error
+      (list (wat-text-literal "Class ~S has not been finalized.")
+        (clos-default-call 'class-name (list #@(local.get $object))))))))
   #@(if (i32.eq (local.get $selector) (i32.const 4))
     (then (return ,(clos-default-call 'slot-definition-name (list #@(local.get $object))))))
   #@(if (i32.eq (local.get $selector) (i32.const 5))
@@ -165,10 +219,12 @@
   #@(if (i32.or (i32.eq (local.get $selector) (i32.const 9))
                 (i32.eq (local.get $selector) (i32.const 10)))
     (then
-      (call $check-apply-list (local.get $object))
+      ;; LENGTH validates dotted and cyclic spines while counting. Reuse that
+      ;; checked count for both the initarg parity check and the result.
+      (local.set $count (call $length (local.get $object)))
       ,(wat-fail-when #@(i32.and (i32.eq (local.get $selector) (i32.const 10))
-                        (i32.and (call $length (local.get $object)) (i32.const 1))) :wrong-arity)
-      (return (call $int (call $length (local.get $object))))))
+                        (i32.and (local.get $count) (i32.const 1))) :wrong-arity)
+      (return (call $int (local.get $count)))))
   #@(if (i32.eq (local.get $selector) (i32.const 12))
     (then (return ,(clos-default-call 'error
       (list (clos-library-reference 'simple-type-error) (clos-library-reference :datum) #@(local.get $object)
@@ -206,6 +262,14 @@
 ;; The private WAT ingresses below supply the saved immutable metadata
 ;; callback. Prove its uses through the CL workers while preserving the
 ;; checked service and every dynamic MOP call inside it.
+(defun $clos-class-slots-cl ()
+  (runtime-function-definition '$clos-class-slots-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-class-slots-cl 'miricl-runtime:clos-class-slots-value
+      :fixed-callbacks '((1 %%clos-method-metadata))))))
+(defun $clos-class-default-initargs-cl ()
+  (runtime-function-definition '$clos-class-default-initargs-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-class-default-initargs-cl 'miricl-runtime:clos-class-default-initargs-value
+      :fixed-callbacks '((1 %%clos-method-metadata))))))
 (defun $clos-default-initargs-cl ()
   (runtime-function-definition '$clos-default-initargs-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-default-initargs-cl 'miricl-runtime:clos-default-initargs-value
@@ -257,6 +321,17 @@
 (define-runtime-function $standard-clos-call (($op i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($class :nullable-object) ($object :nullable-object) ($initargs :nullable-object) ($slots :nullable-object))
   #@(call $check-apply-list (local.get $args))
+  #@(if (i32.or (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%standard-class-slots)))
+                (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%standard-class-default-initargs))))
+    (then ,(wat-arity 1)
+      (local.set $class (call $car (local.get $args)))
+      (if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%standard-class-slots)))
+        (then (local.set $object (call $clos-class-slots-cl
+          (local.get $class) (call $clos-method-metadata-function))))
+        (else (local.set $object (call $clos-class-default-initargs-cl
+          (local.get $class) (call $clos-method-metadata-function)))))
+      (call $clear-values)
+      (return (local.get $object))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%standard-default-initargs)))
     (then ,(wat-arity 2)
       (return_call $standard-default-initargs (call $car (local.get $args)) (call $car (call $cdr (local.get $args))))))
@@ -623,9 +698,113 @@
   #@(return_call $clos-initarg-metadata-value (call $car (local.get $args))
     (call $car (call $cdr (local.get $args))) (call $car (call $cdr (call $cdr (local.get $args))))))
 
+(define-runtime-function $clos-applicable-class-key-p
+    (($key :nullable-object) ($profile :nullable-object) ($args :nullable-object)) (i32)
+  (:locals ($count i32) ($mask i32) ($flag :nullable-object) ($class :nullable-object)
+           ($ca :nullable-object) ($cb :nullable-object) ($cc :nullable-object) ($cd :nullable-object))
+  ;; Intrinsic keys contain selected classes in reverse argument order. Keep
+  ;; EQL profiles ordinary. This bounded probe neither calls Lisp nor polls.
+  #@(block $miss
+    (block $classified (loop $next
+      (br_if $classified (ref.is_null (local.get $profile)))
+      (br_if $miss (i32.ge_u (local.get $count) (i32.const 4)))
+      (br_if $miss (i32.ne (call $tag (local.get $profile)) (i32.const 7)))
+      (br_if $miss (i32.ne (call $tag (local.get $args)) (i32.const 7)))
+      (local.set $flag (call $car (local.get $profile)))
+      (if (call $eql (local.get $flag) (call $int (i32.const 1)))
+        (then
+          (local.set $class (call $dispatch-class-known (call $car (local.get $args))))
+          (br_if $miss (ref.is_null (local.get $class)))
+          (local.set $mask (i32.or (local.get $mask) (i32.shl (i32.const 1) (local.get $count))))
+          (if (i32.eqz (local.get $count)) (then (local.set $ca (local.get $class))))
+          (if (i32.eq (local.get $count) (i32.const 1)) (then (local.set $cb (local.get $class))))
+          (if (i32.eq (local.get $count) (i32.const 2)) (then (local.set $cc (local.get $class))))
+          (if (i32.eq (local.get $count) (i32.const 3)) (then (local.set $cd (local.get $class)))))
+        (else (br_if $miss (i32.eqz (call $eql (local.get $flag) (call $int (i32.const 0)))))))
+      (local.set $profile (call $cdr (local.get $profile)))
+      (local.set $args (call $cdr (local.get $args)))
+      (local.set $count (i32.add (local.get $count) (i32.const 1))) (br $next)))
+    (block $matched (loop $keys
+      (br_if $matched (i32.eqz (local.get $count)))
+      (local.set $count (i32.sub (local.get $count) (i32.const 1)))
+      (if (i32.and (local.get $mask) (i32.shl (i32.const 1) (local.get $count)))
+        (then
+          (br_if $miss (i32.ne (call $tag (local.get $key)) (i32.const 7)))
+          (local.set $class (if (result (ref null eq)) (i32.eqz (local.get $count))
+            (then (local.get $ca)) (else (if (result (ref null eq)) (i32.eq (local.get $count) (i32.const 1))
+              (then (local.get $cb)) (else (if (result (ref null eq)) (i32.eq (local.get $count) (i32.const 2))
+                (then (local.get $cc)) (else (local.get $cd))))))))
+          (br_if $miss (i32.eqz (ref.eq (call $car (local.get $key)) (local.get $class))))
+          (local.set $key (call $cdr (local.get $key)))))
+      (br $keys)))
+    (return (ref.is_null (local.get $key))))
+  #@(i32.const 0))
+
+(define-runtime-function $clos-applicable-cache-hit
+    (($gf :nullable-object) ($args :nullable-object)) (:nullable-object i32)
+  (:locals ($info (ref $obj)) ($owned :nullable-object) ($metadata (ref $objects))
+           ($version :nullable-object) ($token :nullable-object) ($profile :nullable-object) ($parameters :nullable-object)
+           ($cache :nullable-object) ($scan :nullable-object) ($entry :nullable-object)
+           ($key :nullable-object) ($methods :nullable-object) ($remaining i32))
+  #@(block $miss
+    (br_if $miss (i32.ne (call $tag (local.get $gf)) (i32.const 8)))
+    (br_if $miss (i32.ne (call $value-n (local.get $gf)) (i32.const 2147483645)))
+    (br_if $miss (i32.eqz (ref.is_null (call $symbol-value ,(clos-library-reference '%booting)))))
+    ;; Check arity before capturing proofs: checked workers can poll.
+    (local.set $parameters (call $generic-property (local.get $gf) ,(clos-library-reference :lambda-list)))
+    (drop (call $check-generic-arity (local.get $parameters) (local.get $args)))
+    (br_if $miss (i32.eqz (ref.eq (local.get $parameters)
+      (call $generic-property (local.get $gf) ,(clos-library-reference :lambda-list)))))
+    (local.set $cache (call $generic-property (local.get $gf) ,(clos-library-reference :applicable-cache)))
+    (br_if $miss (ref.is_null (local.get $cache)))
+    (local.set $token (call $generic-property (local.get $gf) ,(clos-library-reference :cache-token)))
+    (local.set $profile (call $generic-property (local.get $gf) ,(clos-library-reference :dispatch-profile)))
+    (local.set $version (call $symbol-value ,(clos-library-reference '%dispatch-version)))
+    (local.set $info (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $gf)))))
+    (local.set $owned (struct.get $obj $c (local.get $info)))
+    (br_if $miss (i32.eqz (ref.test (ref $objects) (local.get $owned))))
+    (local.set $metadata (ref.cast (ref $objects) (local.get $owned)))
+    (br_if $miss (i32.ne (array.len (local.get $metadata)) (i32.const ,*generic-property-cache-size*)))
+    (br_if $miss (i32.eqz (ref.eq (array.get $objects (local.get $metadata) (i32.const 0)) (call $symbol (i32.const 1)))))
+    (br_if $miss (i32.eqz (call $eql (call $car (call $car (local.get $cache))) (local.get $version))))
+    (local.set $scan (local.get $cache)) (local.set $remaining (i32.const 16))
+    (loop $next
+      (br_if $miss (ref.is_null (local.get $scan)))
+      (br_if $miss (i32.eqz (local.get $remaining)))
+      (br_if $miss (i32.ne (call $tag (local.get $scan)) (i32.const 7)))
+      (local.set $remaining (i32.sub (local.get $remaining) (i32.const 1)))
+      (local.set $entry (call $car (local.get $scan)))
+      (br_if $miss (i32.eqz (call $eql (call $list-length-native (local.get $entry)) (call $int (i32.const 4)))))
+      (local.set $key (call $car (call $cdr (call $cdr (local.get $entry)))))
+      (if (i32.and (ref.eq (call $car (call $cdr (local.get $entry))) (local.get $token))
+            (call $clos-applicable-class-key-p (local.get $key) (local.get $profile) (local.get $args)))
+        (then
+          (local.set $methods (call $car (call $cdr (call $cdr (call $cdr (local.get $entry))))))
+          (call $check-apply-list (local.get $methods))
+          ;; Revalidate after the final checked worker, then classify again:
+          ;; CHANGE-CLASS and list edits need not change the dispatch epoch.
+          (br_if $miss (i32.eqz (ref.eq (struct.get $obj $c (local.get $info)) (local.get $owned))))
+          (br_if $miss (i32.eqz (call $eql (local.get $version)
+            (call $symbol-value ,(clos-library-reference '%dispatch-version)))))
+          (br_if $miss (i32.eqz (ref.eq (local.get $token)
+            (call $generic-property (local.get $gf) ,(clos-library-reference :cache-token)))))
+          (br_if $miss (i32.eqz (ref.eq (local.get $cache)
+            (call $generic-property (local.get $gf) ,(clos-library-reference :applicable-cache)))))
+          (br_if $miss (i32.eqz (ref.eq (local.get $profile)
+            (call $generic-property (local.get $gf) ,(clos-library-reference :dispatch-profile)))))
+          (br_if $miss (i32.eqz (ref.eq (local.get $parameters)
+            (call $generic-property (local.get $gf) ,(clos-library-reference :lambda-list)))))
+          (br_if $miss (i32.eqz (call $clos-applicable-class-key-p
+            (local.get $key) (local.get $profile) (local.get $args))))
+          (call $clear-values)
+          (call $copy-spine (local.get $methods) (i32.const 0)) (i32.const 1) (return)))
+      (local.set $scan (call $cdr (local.get $scan))) (br $next)))
+  #@(ref.null eq) #@(i32.const 0))
+
 (define-runtime-function $clos-initarg-metadata-value
     (($selector-value :nullable-object) ($object :nullable-object) ($extra :nullable-object)) (:nullable-object)
-  (:locals ($selector i32) ($class :nullable-object) ($metaclass :nullable-object) ($data (ref $objects)))
+  (:locals ($selector i32) ($class :nullable-object) ($metaclass :nullable-object) ($data (ref $objects))
+           ($methods :nullable-object) ($hit i32))
   #@(local.set $selector (call $natural-count (local.get $selector-value)))
   #@(if (i32.le_u (local.get $selector) (i32.const 14))
     (then (return_call $clos-method-metadata-value (local.get $selector-value) (local.get $object) (local.get $extra))))
@@ -635,6 +814,9 @@
     (then
       (call $check-type (local.get $object) ,(clos-library-reference 'generic-function))
       (call $check-apply-list (local.get $extra))
+      (call $clos-applicable-cache-hit (local.get $object) (local.get $extra))
+      (local.set $hit) (local.set $methods)
+      (if (local.get $hit) (then (return (local.get $methods))))
       (return ,(clos-default-call '%compute-applicable (list #@(local.get $object) #@(local.get $extra))))))
   #@(if (i32.eq (local.get $selector) (i32.const 17))
     (then (return ,(clos-default-call 'method-lambda-list (list #@(local.get $object))))))
@@ -712,12 +894,15 @@
       :fixed-callbacks '((1 %%clos-initarg-metadata))))))
 
 (define-runtime-section clos-defaults-runtime-wat ()
+  ($clos-default-call1)
   #@(global $clos-method-metadata-function (mut (ref null eq)) (ref.null eq))
   ($clos-method-metadata-function) ($clos-method-metadata-call) ($clos-method-metadata-value)
+  ($clos-class-slots-cl) ($clos-class-default-initargs-cl)
   ($clos-default-initargs-cl) ($clos-shared-initialize-cl) ($clos-find-slot-cl)
   #@(global $clos-initarg-metadata-function (mut (ref null eq)) (ref.null eq))
   ($clos-initarg-metadata-function) ($clos-initarg-metadata-call) ($clos-initarg-metadata-value)
   ($clos-check-initargs-cl) ($clos-allocate-instance-cl) ($standard-allocate-storage)
+  ($clos-applicable-class-key-p) ($clos-applicable-cache-hit)
   #@(global $slot-access-token (mut (ref null eq)) (ref.null eq))
   #@(global $slot-read-cache (mut (ref null $objects)) (ref.null $objects))
   #@(global $slot-read-epoch (mut (ref null eq)) (ref.null eq))

@@ -55,6 +55,25 @@
                      ("PageUp" :page-up) ("PageDown" :page-down) ("Home" :home) ("End" :end)) :test #'string=)))
              (values (if entry (second entry) (intern (string-upcase text) :keyword))
                      (when (third entry) (code-char (third entry))))))))
+
+(defun deliver-browser-key (port source event)
+  ;; Run in the frame queue after earlier focus events, rather than choosing
+  ;; the target while the port is still distributing the pointer press.
+  (when (sheet-grafted-p source)
+    (let ((target (or (port-keyboard-input-focus port) source)))
+      (when (sheet-grafted-p target)
+        (unless (eq target (event-sheet event))
+          (setq event (climi::shallow-copy-object event))
+          (setf (slot-value event 'climi::sheet) target))
+        (handle-event target event)))))
+
+(defun finish-browser-focus-delivery (port sheet token)
+  (dispatch-event sheet
+    (make-instance 'climi::lambda-event :sheet sheet
+      :thunk (lambda ()
+               (when (eq token (focus-delivery-token port))
+                 (setf (focus-delivery-token port) nil))))))
+
 (defun translate-browser-event (port input)
   (destructuring-bind (kind sheet &rest data) input
     (unless (sheet-grafted-p sheet) (return-from translate-browser-event nil))
@@ -74,9 +93,14 @@
        (destructuring-bind (direction text modifiers timestamp) data
          (setf (browser-modifiers port) modifiers)
          (multiple-value-bind (name character) (browser-key text)
-           (make-instance (if (eq direction :down) 'key-press-event 'key-release-event)
-             :sheet sheet :key-code (if character (char-code character) 0)
-             :key-name name :key-character character :modifier-state modifiers :timestamp timestamp))))
+           (let ((event
+                   (make-instance (if (eq direction :down) 'key-press-event 'key-release-event)
+                     :sheet sheet :key-code (if character (char-code character) 0)
+                     :key-name name :key-character character :modifier-state modifiers :timestamp timestamp)))
+             (if (focus-delivery-token port)
+                 (make-instance 'climi::lambda-event :sheet sheet :timestamp timestamp
+                   :thunk (lambda () (deliver-browser-key port sheet event)))
+                 event)))))
       (:pointer
        (destructuring-bind (action x y button modifiers timestamp delta-x delta-y buttons) data
          (setf (browser-modifiers port) modifiers
@@ -100,10 +124,21 @@
     (loop
       (when (and wait-function (funcall wait-function))
         (return (values nil :wait-function)))
-      (let ((input (next-browser-event port)))
-        (when input
-          (let ((event (translate-browser-event port input)))
-            (when event (distribute-event port event) (return t)))))
+      ;; Frames can call PROCESS-NEXT-EVENT concurrently. Finish distributing
+      ;; each input before another frame removes the next item from the inbox.
+      (when (climi::with-port-locked (port)
+              (let ((input (next-browser-event port)))
+                (when input
+                  (let ((event (translate-browser-event port input)))
+                    (when event
+                      (if (typep event 'pointer-button-press-event)
+                          (let ((token (list nil)))
+                            (setf (focus-delivery-token port) token)
+                            (distribute-event port event)
+                            (finish-browser-focus-delivery port (event-sheet event) token))
+                          (distribute-event port event))
+                      t)))))
+        (return t))
       (when (and deadline (>= (get-internal-real-time) deadline))
         (return (values nil :timeout)))
       (sleep 0.01))))

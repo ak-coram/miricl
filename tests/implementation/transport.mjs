@@ -19,6 +19,7 @@ bare.initialize();
 const source = new TextEncoder().encode(`(and (not (js:available-p))
   (handler-case (js:global "Math") (js:javascript-unavailable () t))
   (not (fboundp 'miricl-compiler:compile-native))
+  (null miricl-compiler:*compile-evaluations*)
   (= (eval (read-from-string "(+ 20 22)")) 42)
   (let ((function (compile nil '(lambda (x) (values (+ x 2) :tail)))))
     (and (compiled-function-p function)
@@ -46,7 +47,17 @@ try {
       (let ((counter 40) (literal (list :shared)))
         (setf (cdr literal) literal)
         (vector literal literal (lambda (delta) (incf counter delta))
-          (lambda () counter) #'miricl-compiler::compiler-list-length))) (values)`, {eof: true});
+          (lambda () counter) #'miricl-compiler::compiler-list-length)))
+    (defclass transport-saved-record () ((value :initarg :value))
+      (:default-initargs :value 42))
+    (defparameter *transport-saved-mop*
+      (let* ((class (find-class 'transport-saved-record))
+             (slots (miricl-mop:class-slots class))
+             (defaults (miricl-mop:class-default-initargs class)))
+        (list class slots defaults
+          (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%STANDARD-CLASS-SLOTS"))
+          (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%STANDARD-CLASS-DEFAULT-INITARGS")))))
+    (values)`, {eof: true});
   const saved = other.saveImage();
   const restored = await Miricl.instantiate(saved);
   try {
@@ -59,6 +70,16 @@ try {
           (progn (funcall (svref graph 4) '(one . two) "restored input") nil)
           (program-error () t))
         (= (eval '(+ 20 22)) 42)))`, {eof: true}).output, 'T\n');
+    assert.equal(restored.evaluate(`(destructuring-bind (class slots defaults read-slots read-defaults)
+        *transport-saved-mop*
+      (and (eq class (find-class 'transport-saved-record))
+        (eq slots (miricl-mop:class-slots class))
+        (eq defaults (miricl-mop:class-default-initargs class))
+        (equal (multiple-value-list (funcall read-slots class)) (list slots))
+        (equal (multiple-value-list (funcall read-defaults class)) (list defaults))
+        (handler-case (progn (funcall read-slots) nil) (program-error () t))
+        (handler-case (progn (funcall read-defaults 3) nil) (error () t))
+        (= (slot-value (make-instance class) 'value) 42)))`, {eof: true}).output, 'T\n');
   } finally {restored.close();}
   // Corrupt the Lisp payload inside a structurally valid Wasm custom section.
   // Rejection must not damage the original worker or a subsequent restore.

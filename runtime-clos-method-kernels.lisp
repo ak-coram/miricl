@@ -1,9 +1,24 @@
 ;;;; CLOS initialization and effective-slot selection over checked target getters.
 (in-package #:miricl-runtime)
 (export '(clos-initarg-cell-value clos-default-initargs-value
-          clos-shared-initialize-value clos-find-slot-value))
+          clos-shared-initialize-value clos-find-slot-value
+          clos-class-slots-value clos-class-default-initargs-value))
 
 (declaim (inline clos-initarg-cell-value))
+
+(defun clos-class-slots-value (class metadata)
+  "Read effective slots after the extensible finalization protocol."
+  (declare (type function metadata) (optimize (safety 0) (debug 0)))
+  (if (funcall metadata 0 class nil) nil (funcall metadata 1 class nil))
+  (values (funcall metadata 15 class nil)))
+
+(defun clos-class-default-initargs-value (class metadata)
+  "Read effective defaults, rejecting forward or unfinalized classes."
+  (declare (type function metadata) (optimize (safety 0) (debug 0)))
+  (if (funcall metadata 16 class nil)
+      (funcall metadata 17 class nil)
+      (if (funcall metadata 0 class nil) nil (funcall metadata 17 class nil)))
+  (values (funcall metadata 15 class t)))
 
 (defun clos-initarg-cell-value (arguments names metadata)
   "Return the value cell of the leftmost initarg naming any member of NAMES."

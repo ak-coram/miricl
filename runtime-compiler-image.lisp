@@ -16,7 +16,11 @@
 (defun compiler-image-library-forms ()
   (if (null *native-compiler-image*)
       (append *clos-library*
-        (list (lower-runtime-library '(setq miricl-compiler:*compile-evaluations* :interpreted))))
+        ;; Cold compiler images exercise the HIR interpreter. Lightweight
+        ;; scripting keeps source evaluation; explicit :INTERPRETED remains
+        ;; available without making every definition pay frontend costs.
+        (list (lower-runtime-library
+                `(setq miricl-compiler:*compile-evaluations* ,(when *include-compiler* :interpreted)))))
       (destructuring-bind (wat names roots records) *native-compiler-image*
         (declare (ignore wat))
         (let ((packed (compiler-image-records-string records)))

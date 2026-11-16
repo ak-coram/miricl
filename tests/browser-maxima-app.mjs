@@ -108,7 +108,14 @@ try {
   await run('%+1;', /50/);
   await run('"λ🙂";', /λ🙂/);
   await run('kill(a)$ integrate(x^a,x);', /x\^\(a\+1\)\/\(a\+1\)/, '', 'no');
+  await run('kill(b)$ integrate(x^b,x);', /x\^\(b\+1\)\/\(b\+1\)/, 'no;');
+  await run('kill(c)$ with_answers([equal(c,-1)=no], integrate(x^c,x));', /x\^\(c\+1\)\/\(c\+1\)/);
   await run('read("Enter a number");', /42/, '', '42');
+  await run('read_value:41$ read("Evaluate an expression");', /42/, '', 'read_value+1');
+  await run('readonly("Keep an expression");', /read_value\+1/, '', 'read_value+1');
+  await run('read("Supplied number");', /43/, '43;');
+  await run('with_answers([read=44],read("Programmatic number"));', /44/);
+  await run('with_answers([readonly="read_value+2"],readonly("Programmatic expression"));', /read_value\+2/);
   await run('? integrate;', /manual is not bundled/);
   await run('1+;', /incorrect syntax/);
   await run('2+2;', /4/);

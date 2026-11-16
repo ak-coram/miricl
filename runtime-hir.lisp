@@ -296,8 +296,8 @@
 
 (define-runtime-function $hir-function
     (($payload :nullable-object) ($index i32) ($captures :nullable-object)) (:nullable-object)
-  ;; Only internal calls use this constructor; the public primitive below
-  ;; calls VALIDATE-HIR-CODE and supplies the root with no captures.
+  ;; Only internal calls use this constructor. Public loading validates and
+  ;; snapshots the wire; private compiler emission owns its executable payload.
   (wat-new-object #@(i32.const 8) :n #@(i32.const 2147483641)
     :f #@(f64.convert_i32_u (local.get $index)) :a #@(local.get $payload)
     :b #@(local.get $captures)
@@ -383,6 +383,14 @@
   #@(local.set $payload (call $apply ,(clos-library-reference 'miricl-compiler::validate-hir-code)
     (local.get $args)))
   #@(call $hir-function (local.get $payload) (i32.const 0)
+    (call $vector-new (array.new_default $objects (i32.const 0)))))
+
+(define-runtime-function $hir-load-checked (($args :nullable-object)) (:nullable-object)
+  ;; Private compiler kernel: HIR-UNIT-FUNCTION supplies freshly emitted
+  ;; executable descriptors with exclusive ownership. Never route public
+  ;; LOAD-HIR-CODE or caller-supplied wire payloads through this constructor.
+  (wat-arity 1)
+  #@(call $hir-function (call $car (local.get $args)) (i32.const 0)
     (call $vector-new (array.new_default $objects (i32.const 0)))))
 
 (defun hir-read-word (local)
@@ -744,4 +752,4 @@
   ($hir-read-instruction) ($hir-cached-block) ($hir-read-instruction-primitive)
   ($hir-unpack-blocks)
   ($hir-control-data)
-  ($hir-function) ($hir-function-recipe) ($hir-function-restore) ($hir-load) ($hir-debug-snapshot) ($hir-debug-environment) ($hir-debug-site) ($hir-execute) ($hir-apply))
+  ($hir-function) ($hir-function-recipe) ($hir-function-restore) ($hir-load) ($hir-load-checked) ($hir-debug-snapshot) ($hir-debug-environment) ($hir-debug-site) ($hir-execute) ($hir-apply))

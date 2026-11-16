@@ -16,5 +16,5 @@
             (miricl-compiler::compiler-source-form source)
             (miricl-compiler::compiler-function-name name "function name")
             (let ((unit (miricl-compiler::lower-source-to-hir source name)))
-              (miricl-compiler:load-hir-code (miricl-compiler:emit-hir-code unit))))
+              (miricl-compiler::hir-unit-function unit)))
           (miricl-compiler::compiler-primitive 0 function)))))
