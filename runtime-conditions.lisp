@@ -42,7 +42,7 @@
   #@(if (i32.eq (call $tag (local.get $form)) (i32.const 7))
     (then (if (ref.eq (call $car (local.get $form)) ,(clos-library-reference '%compiled-condition-init))
       (then (return (call $apply (call $car (call $cdr (call $cdr (local.get $form)))) (ref.null eq)))))))
-  #@(call $eval (local.get $form) (local.get $env)))
+  #@(call $evaluate-in-environment (local.get $form) (local.get $env)))
 
 (define-runtime-function $condition-defaults (($class :nullable-object) ($condition :nullable-object)) ()
   (:locals ($scan :nullable-object) ($key :nullable-object) ($form :nullable-object))
@@ -348,6 +348,7 @@
   (:locals ($function :nullable-object))
   #@(local.set $function (call $closure (local.get $params) (local.get $body) (local.get $env)))
   #@(if (i32.eqz (local.get $compiled)) (then (return (local.get $function))))
+  #@(if (call $value-n (local.get $function)) (then (return (local.get $function))))
   (wat-new-object #@(i32.const 8) :f #@(f64.const 1)
     :a #@(struct.get $obj $a (ref.cast (ref $obj) (local.get $function))) :b #@(struct.get $obj $b (ref.cast (ref $obj) (local.get $function)))
     :c #@(struct.get $obj $c (ref.cast (ref $obj) (local.get $function)))))
@@ -405,7 +406,7 @@
         #@(local.set $report (call $car (call $cdr (local.get $spec))))
         #@(if (i32.and (i32.ne (call $tag (local.get $report)) (i32.const 10))
                       (i32.ne (call $tag (local.get $report)) (i32.const 8)))
-            (then (local.set $report (call $eval
+            (then (local.set $report (call $evaluate-in-environment
               (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'function)))
                 (call $cons (local.get $report) (ref.null eq))) (local.get $env))))))
       (:default-initargs
@@ -791,8 +792,8 @@
         (if (ref.is_null (local.get $owner))
           (then (local.set $owner (call $node (i32.const 21) (i32.const 0) (ref.null eq) (ref.null eq) (ref.null eq)))))
         (local.set $entry (call $node (i32.const 21) (i32.const 1) (local.get $form) (local.get $scan) (local.get $owner)))
-        (local.set $env (call $cons (call $node (i32.const 9) (i32.const -2147483648)
-          (local.get $entry) (ref.null eq) (ref.null eq)) (local.get $env))))) (br $bind)))
+        (local.set $env (call $cons (call $environment-binding (i32.const 9) (i32.const -2147483648)
+          (local.get $entry) (ref.null eq) (ref.null eq) (local.get $form)) (local.get $env))))) (br $bind)))
   #@(if (i32.eqz (ref.is_null (local.get $owner)))
     (then (global.set $targets (call $cons (local.get $owner) (local.get $targets)))))
   #@(local.set $scan (local.get $args))
@@ -875,8 +876,8 @@
         (then (struct.set $obj $a (ref.cast (ref $obj) (local.get $target)) (call $eval (local.get $name) (local.get $env)))
           (global.set $catches (call $cons (local.get $target) (global.get $catches))))
         (else (call $require-symbol (local.get $name))
-          (local.set $env (call $cons (call $node (i32.const 9) (i32.sub (i32.const -1) (call $id (local.get $name)))
-            (local.get $target) (ref.null eq) (ref.null eq)) (local.get $env)))
+          (local.set $env (call $cons (call $environment-binding (i32.const 9) (i32.sub (i32.const -1) (call $id (local.get $name)))
+            (local.get $target) (ref.null eq) (ref.null eq) (local.get $name)) (local.get $env)))
           (global.set $targets (call $cons (local.get $target) (global.get $targets))))))
     (handler-bind
       (wat-arity 1 2147483647)
@@ -1011,6 +1012,11 @@
     (loop for name in '(*debugger-hook* *break-on-signals*) collect
       `(drop (call $set-symbol-value (call $symbol (i32.const ,(runtime-symbol-id name))) (ref.null eq))))))
 
+(define-runtime-section source-condition-runtime-wat ()
+  ($marked-closure)
+  ($handler-bindings) ($option-function) ($restart-bindings) ($restart-expression)
+  ($protected-eval) ($go-eval) ($tagbody-eval) ($condition-operator-p) ($condition-eval) ($check-assert))
+
 (define-runtime-section condition-runtime-wat ()
   #@(global $condition-class-index (ref $symbol-index) ,(empty-symbol-index-wat))
   (runtime-wat-forms
@@ -1020,7 +1026,8 @@
   ($condition-class) ($register-condition-class) ($condition-subtype-p) ($condition-slot) ($put-condition-slot)
   ($condition-init-value) ($condition-defaults) ($slot-initarg-p) ($slot-initarg-value) ($condition-init-slots) ($make-condition) ($coerce-condition)
   ($transfer-to) ($signal-condition) ($debug-condition) ($fail) ($type-fail) ($division-error) ($condition-access) ($condition-reader)
-  ($function-body-documentation-cl) ($function-body-documentation) ($function-block-body-cl) ($function-block-body) ($closure) ($marked-closure) ($validate-condition-slots) ($define-condition) ($new-restart) ($restart-visible-p) ($compute-restarts)
+  ($function-body-documentation-cl) ($function-body-documentation) ($function-block-body-cl) ($function-block-body) ($closure) ($validate-condition-slots) ($define-condition) ($new-restart) ($restart-visible-p) ($compute-restarts)
   ($find-restart) ($invoke-restart) ($system-restart) ($unbound-value) ($condition-apply)
-  ($handler-bindings) ($option-function) ($restart-bindings) ($prepend-list) ($restart-expression)
-  ($protected-eval) ($go-eval) ($tagbody-eval) ($condition-operator-p) ($condition-eval) ($check-assert) ($initialize-conditions))
+  ($prepend-list)
+  (if *source-bootstrap-p* (source-condition-runtime-wat) "")
+  ($initialize-conditions))

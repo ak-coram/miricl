@@ -110,9 +110,10 @@
                     ;; for serialized IR before native list traversal.
                     (let ((check (make-hir-instruction-record :check-apply-list inputs nil nil nil :check)))
                       (push (list fi check) instructions) (push check body)))
-                  (push (list fi instruction) instructions)
-                  (if (sixth spec) (setf (hir-block-terminator block) instruction)
-                      (push instruction body))))
+                  (unless (member opcode '(:debug-step :debug-resume))
+                    (push (list fi instruction) instructions)
+                    (if (sixth spec) (setf (hir-block-terminator block) instruction)
+                        (push instruction body)))))
               (setf (hir-block-instructions block) (nreverse body)))))))
     ;; Captures use binding identities, including captures forwarded through
     ;; intermediate closures. Resolve those edges with a bounded worklist.

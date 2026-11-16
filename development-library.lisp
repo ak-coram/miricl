@@ -865,15 +865,40 @@
       (setq inherited (if (consp quality) (second quality) 3)))))
 
 (defun %debug-form-p (form)
-  ;; An interpreted debug region cannot expose a containing native frame.
-  ;; Select interpretation for the containing evaluation as well. Quoted data
-  ;; is never a request to change evaluation policy.
-  (and (consp form) (not (eq (car form) 'quote))
-    (if (eq (car form) 'declare) (eql (%body-debug-level (list form)) 3)
-        ;; Source trees include dotted destructuring lists and macro data.
-        ;; Walk their cons cells without treating an atomic tail as a sequence.
-        (loop for tail = form then (cdr tail) while (consp tail)
-              thereis (%debug-form-p (car tail))))))
+  ;; This policy scan is not a source validator: macros may consume arbitrary
+  ;; cyclic data. Visit each cons once, skip quoted data, and let checked
+  ;; lowering reject cycles in executable positions after macro expansion.
+  (let ((work (list form)) (seen (make-hash-table :test 'eq))
+        (spines (make-hash-table :test 'eq)))
+    (labels ((spine (object)
+               (let ((cells nil) (visited (make-hash-table :test 'eq)))
+                 (loop while (consp object) do
+                   (when (gethash object visited) (return-from spine nil))
+                   (setf (gethash object visited) t)
+                   (push (car object) cells) (setq object (cdr object)))
+                 (and (null object) (nreverse cells))))
+             (debug-declaration-p (object)
+               (let ((level nil))
+                 (dolist (declaration (spine (cdr object)))
+                   (when (and (consp declaration) (eq (car declaration) 'optimize))
+                     (dolist (quality (spine (cdr declaration)))
+                       (cond ((eq quality 'debug) (setq level 3))
+                             ((and (consp quality) (eq (car quality) 'debug))
+                              (let ((spec (spine quality)))
+                                (when (and (= (length spec) 2) (typep (second spec) '(integer 0 3)))
+                                  (setq level (second spec)))))))))
+                 (eql level 3))))
+      (loop while work do
+        (let ((object (pop work)))
+          (when (and (consp object) (not (gethash object seen)))
+            (setf (gethash object seen) t)
+            (unless (eq (car object) 'quote)
+              (when (and (eq (car object) 'declare) (debug-declaration-p object))
+                (return-from %debug-form-p t))
+              (loop while (and (consp object) (not (gethash object spines))) do
+                (setf (gethash object spines) t)
+                (push (car object) work) (setq object (cdr object)))))))
+      nil)))
 
 (defun %proclaim-all (specs)
   (%%while specs

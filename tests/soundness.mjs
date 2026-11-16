@@ -158,20 +158,49 @@ try {
   for (const [source, reason] of [
     ["(compile-native '(lambda (x . tail) x))", /dotted tail/],
     ["(compile-native '(lambda (x x) x))", /duplicate parameter/],
+    ["(compile-native '(lambda (&rest &key) nil))", /lambda-list keyword/],
+    ["(compile-native '(lambda (&optional (x nil &rest)) x))", /lambda-list keyword/],
     ["(compile-native '(lambda () (declare (optimize (safety 4))) nil))", /level from 0 through 3/],
     ["(compile-native '(lambda (x) (declare (type (array t (-1)) x)) x))", /array dimension/],
+    ["(compile-native '(lambda (x) (declare ((12) x)) x))", /symbol naming the compound type/],
+    ["(compile-native '(lambda (x) (declare ((integer 0 2) 12)) x))", /variable name/],
+    ["(compile-native '(lambda (x) (declare ((integer . 2) x)) x))", /dotted tail/],
     [`(let ((form (list 'progn nil))) (setf (second form) form)
        (compile-to-hir (list 'lambda nil form)))`, /circular executable/],
     [`(let ((parameters (list 'x))) (setf (cdr parameters) parameters)
        (compile-to-hir (list 'lambda parameters 'x)))`, /circular list/],
     [`(let ((type (list 'array nil '(5)))) (setf (second type) type)
        (compile-to-hir (list 'lambda '(x) (list 'declare (list 'type type 'x)) 'x)))`, /circular type/],
+    [`(let ((type (list 'and nil))) (setf (second type) type)
+       (compile-to-hir (list 'lambda '(x) (list 'declare (list type 'x)) 'x)))`, /circular type/],
     ['(compile-native-module 4)', /module definitions/],
     ['(emit-native-module #())', /HIR unit/],
     ['(infer-hir-types nil)', /HIR unit/],
     ['(native-read-uleb #(128) 0)', /truncated/],
     ['(native-read-sleb #(128 128 128 128 128 128 128 128 128 128 0) 0)', /exceeds 64 bits/],
   ]) reject(source, reason);
+  // Reachability analysis consumes source without expanding opaque macro
+  // operands. Their dotted or cyclic data must not become executable code.
+  evaluate(`(defmacro soundness-scanner-syntax (&rest syntax)
+    (declare (ignore syntax)) (error "Reachability must not expand macros.")) (values)`);
+  check(`(let ((operand (cons 'scanner-first 'scanner-rest)))
+    (setf (cdr operand) operand)
+    (multiple-value-bind (references barriers)
+        (form-references (list 'soundness-scanner-syntax operand))
+      (and barriers
+        (member (list :literal (symbol-key 'scanner-first)) references :test #'equal) t)))`);
+  check(`(and
+    (nth-value 1 (form-references
+      '(lambda (node) (loop :for (a . b) :in node :collect a))))
+    (nth-value 1 (form-references
+      '(macrolet ((pattern ((a . b)) (list 'quote a))) (pattern (1 . 2))))) t)`);
+  for (const source of [
+    "(form-references '(progn (+ 1 . 2)))",
+    `(form-references '(flet ((soundness-scanner-syntax (x) x))
+       (soundness-scanner-syntax (+ 1 . 2))))`,
+    `(let ((form (list '+ 1))) (setf (cddr form) form) (form-references form))`,
+  ]) reject(source, /dotted tail|circular list/);
+  evaluate("(fmakunbound 'soundness-scanner-syntax) (values)");
   evaluate("(defmacro soundness-bad-expansion () '(let ((x 1 2)) x)) (values)");
   reject("(compile-native '(lambda () (soundness-bad-expansion)))", /binding/);
   for (const [mutation, reason] of [
@@ -293,13 +322,10 @@ try {
       (do ((x 0 (1+ x))) ((= x 3) (values x :ok)))) '(3 :ok))`);
   }
 
-  // Discover the private constructor through the macro's source, retaining
-  // its actual symbol identity rather than interning a same-named substitute.
+  // Resolve the current private bootstrap identity directly. Macro functions
+  // may omit their source through FUNCTION-LAMBDA-EXPRESSION.
   evaluate(`(defparameter *soundness-iteration-helper*
-    (labels ((find-helper (form)
-               (cond ((consp form) (or (find-helper (car form)) (find-helper (cdr form))))
-                     ((and (symbolp form) (string= (symbol-name form) "%ITERATION-EXPANSION")) form))))
-      (find-helper (function-lambda-expression (macro-function 'dolist))))) (values)`);
+    (compiler-primitive 10 1 "%ITERATION-EXPANSION")) (values)`);
   for (const mutation of [
     '(setf body :dotted)',
     '(setf (cdr body) :dotted)',
@@ -345,6 +371,65 @@ try {
   // An exhausted proof budget supplies no proof, even for a true relationship.
   check(`(and (not (hir-type-proves-p 'integer 'integer 0))
     (not (hir-type-proves-p 'integer 'integer 32 (list 0))))`);
+  // Negative facts use target disjointness, including the overlap of NIL's
+  // symbol and list types. Unknown alternatives cannot prove a complement.
+  check(`(and
+    (every (lambda (case) (hir-type-proves-p (first case) (second case)))
+      '((cons (not vector)) (symbol (not number)) (null (not cons))
+        (list (not number)) ((or cons string) (not number))
+        ((and cons soundness-opaque) (not vector))
+        ((member nil :key "text") (not number))
+        (cons (not (or number character)))
+        (symbol (not (and number integer)))))
+    (every (lambda (case) (not (hir-type-proves-p (first case) (second case))))
+      '((null (not symbol)) (list (not symbol)) (sequence (not symbol))
+        ((or cons number) (not number)) (soundness-opaque (not number))
+        ((or cons soundness-opaque) (not vector))
+        ((satisfies soundness-predicate) (not number))))
+    (not (hir-type-proves-p 'cons '(not vector) 0))
+    (not (hir-type-proves-p 'cons '(not vector) 32 (list 0))))`);
+  for (const [type, value, predicate] of [
+    ['cons', '(cons 1 2)', 'vectorp'],
+    ['symbol', ':value', 'integerp'],
+    ['simple-vector', '#(1)', 'consp'],
+    ['character', '#\\a', 'symbolp'],
+  ]) {
+    check(`(let ((effects 0)
+        (function (compile-native '(lambda (value effect)
+          (declare (type ${type} value) (inline ${predicate})
+            (optimize (safety 0) (debug 0)))
+          (if (${predicate} (progn (funcall effect) value))
+            :wrong (values :disjoint nil :extra))))))
+      (and (equal (multiple-value-list
+          (funcall function ${value} (lambda () (incf effects))))
+        '(:disjoint nil :extra)) (= effects 1)))`);
+  }
+  // A declaration alone cannot remove a checked predicate's other outcome.
+  for (const safety of [1, 2, 3]) {
+    check(`(let ((function (compile-native '(lambda (value)
+      (declare (type cons value) (inline integerp)
+        (optimize (safety ${safety}) (debug 0)))
+      (if (integerp value) :integer :other)))))
+      (and (eq (funcall function 7) :integer)
+        (eq (funcall function '(7)) :other)))`);
+  }
+  // A nonnumeric operand permits identity comparison; a union containing
+  // numbers must retain value comparison. Both operands keep their effects.
+  for (const [type, left, right, expected] of [
+    ['cons', 'object', 'object', 't'],
+    ['cons', 'object', '(copy-list object)', 'nil'],
+    ['(or cons number)', '(parse-integer text)', '(parse-integer text)', 't'],
+  ]) {
+    check(`(let* ((object (list :value)) (text "18446744073709551617") (effects nil)
+        (function (compile-native '(lambda (left right effect)
+          (declare (type ${type} left) (inline eql)
+            (optimize (safety 0) (debug 0)))
+          (values (eql (progn (funcall effect :left) left)
+                       (progn (funcall effect :right) right)) :extra)))))
+      (and (equal (multiple-value-list
+          (funcall function ${left} ${right} (lambda (tag) (push tag effects))))
+        '(${expected} :extra)) (equal effects '(:right :left))))`);
+  }
   // Variable shift proofs must enclose every result, including negative
   // operands and counts. Leaving signed i64 supplies no scalar proof.
   check(`(and
@@ -459,6 +544,33 @@ try {
         (equal (multiple-value-list (funcall function t t)) '(:present :extra))
         (equal (multiple-value-list (funcall function nil t)) '(:missing :extra))))`);
   }
+  // A false canonical predicate establishes a complement for later reads.
+  // Writes, captured aliases and paths which skipped the test end that fact.
+  for (const safety of [0, 3]) {
+    for (const change of [
+      '(setq value (list :new))',
+      '(funcall (lambda () (setq value (list :new))))',
+    ]) {
+      check(`(let ((effects 0)
+          (function (compile-native '(lambda (value effect)
+            (declare (inline consp) (optimize (safety ${safety}) (debug 0)))
+            (if (consp value) :wrong
+              (progn (funcall effect)
+                (unless (consp value) ${change})
+                (if (consp value) (values :changed nil :extra) :wrong)))))))
+        (and (equal (multiple-value-list
+            (funcall function :old (lambda () (incf effects))))
+          '(:changed nil :extra)) (= effects 1)))`);
+    }
+    check(`(let ((function (compile-native '(lambda (value observe)
+      (declare (inline consp) (optimize (safety ${safety}) (debug 0)))
+      (when observe (if (consp value) :cons :atom))
+      (if (consp value) (values :cons nil :extra) (values :atom :extra))))))
+      (every (lambda (observe)
+        (and (equal (multiple-value-list (funcall function '(1) observe)) '(:cons nil :extra))
+          (equal (multiple-value-list (funcall function :atom observe)) '(:atom :extra))))
+        '(nil t)))`);
+  }
   // Proper-spine proofs describe current objects, not the CL LIST type.
   // Canonical constructors retain fresh spines, operand order and all values.
   for (const safety of [0, 1, 2, 3]) {
@@ -538,9 +650,17 @@ try {
           (equal (funcall function #(42) 0) '(:replacement)))
         (setf (symbol-function 'svref) original))
       (equal (funcall function #(42) 0) '(42))))`);
-  check(`(let ((ordinary (compile-native '(lambda (x) (list x))))
+  check(`(let* ((ordinary (compile-native '(lambda (x) (list x))))
       (indirect (compile-native '(lambda (x) (declare (notinline list)) (list x))))
       (captured (compile-native '(lambda (x) (declare (inline list)) (list x))))
+      (module (compile-native-module
+        '((defun module-list-default (x) (list x))
+          (defun module-list-notinline (x) (declare (notinline list)) (list x))
+          (defun module-list-inline (x) (declare (inline list)) (list x)))
+        :inline nil))
+      (module-ordinary (cdr (assoc 'module-list-default module)))
+      (module-indirect (cdr (assoc 'module-list-notinline module)))
+      (module-captured (cdr (assoc 'module-list-inline module)))
       (ordinary-apply (compile-native '(lambda (x)
         (apply (lambda (&rest result) result) (list x)))))
       (captured-apply (compile-native '(lambda (x) (declare (inline list))
@@ -554,6 +674,9 @@ try {
         (and (equal (multiple-value-list (funcall ordinary 1)) '(:replacement :extra))
           (equal (multiple-value-list (funcall indirect 2)) '(:replacement :extra))
           (equal (multiple-value-list (funcall captured 3)) '((3)))
+          (equal (multiple-value-list (funcall module-ordinary 1)) '(:replacement :extra))
+          (equal (multiple-value-list (funcall module-indirect 2)) '(:replacement :extra))
+          (equal (multiple-value-list (funcall module-captured 3)) '((3)))
           (handler-case (progn (funcall ordinary-apply 4) nil)
             (type-error (condition) (eq (type-error-datum condition) :replacement)))
           (equal (funcall captured-apply 5) '(5))
@@ -611,15 +734,41 @@ try {
   console.log('Soundness: native recursion preserves stack depth and effects; condition handlers can reenter with multiple values.');
 
   vm.mountFile('/soundness.lisp', `(in-package :cl-user)
-    (defparameter *soundness-graph* '#1=("λ𝄞" #2=(:shared) #2# . #1#))`);
+    (defparameter *soundness-graph* '#1=("λ𝄞" #2=(:shared) #2# . #1#))
+    (defparameter *soundness-functions*
+      '#.(funcall (miricl-compiler:compile-hir
+          '(lambda (initial)
+            (let ((n initial) (object (list :kept)))
+              (labels ((sum (x) (if (zerop x) n (+ x (sum (1- x))))))
+                (vector #'sum #'sum (lambda (delta) (incf n delta))
+                        object (constantly object)))))) 40))`);
   check('(pathnamep (compile-file "/soundness.lisp" :verbose nil))');
   const bytes = await vm.readFile('/soundness.wasm');
   assert.ok(WebAssembly.validate(bytes), 'Current FASLs are valid Wasm containers.');
   const graphCheck = `(and (load "/soundness.wasm")
     (let ((graph cl-user::*soundness-graph*))
       (and (string= (first graph) "λ𝄞") (eq (second graph) (third graph))
-        (eq graph (cdddr graph)))))`;
+        (eq graph (cdddr graph))))
+    (let ((graph cl-user::*soundness-functions*))
+      (and (eq (svref graph 0) (svref graph 1))
+           (= (funcall (svref graph 0) 3) 46)
+           (= (funcall (svref graph 2) 2) 42)
+           (= (funcall (svref graph 0) 0) 42)
+           (eq (svref graph 3) (funcall (svref graph 4) :arguments)))))`;
   check(graphCheck);
+  for (const invalid of [
+    "(vector '(5 0 9 0))", "(vector '(12 0 0 0 7 0))",
+    "(vector '(12 1 9 0 -1 0))", "(let ((record (list 0))) (setf (cdr record) record) (vector record))",
+  ]) {
+    check(`(and (handler-case (progn (validate-fasl-graph '(0) ${invalid}) nil)
+                  (program-error (condition) (not (null (princ-to-string condition)))))
+                (= (+ 20 22) 42))`);
+  }
+  check(`(let ((shell (compiler-primitive 50 0 (vector 0 0) nil)))
+    (and (handler-case (progn (funcall shell) nil) (program-error () t))
+         (handler-case (progn (compiler-primitive 50 1 shell (vector 0 (vector) 0 (vector) nil)) nil)
+           (program-error (condition) (not (null (princ-to-string condition)))))
+         (= (+ 20 22) 42)))`);
   // Derive Wasm section offsets from the produced file; no fixed section
   // inventory, object count, or encoded-size expectation is needed.
   let cursor = 8, payloadStart, payloadEnd;

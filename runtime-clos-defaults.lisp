@@ -588,7 +588,8 @@
     ;; ordinary path until a complete, epoch-checked plan is available.
     (array.set $objects (local.get $cache) (local.get $index)
       (call $cons (local.get $class) (local.get $name)))
-    (local.set $function (call $closure (ref.null eq) (ref.null eq) (ref.null eq)))
+    ;; Direct accessor dispatch supplies all execution; no source closure is needed.
+    (local.set $function (call $node (i32.const 8) (i32.const 0) (ref.null eq) (ref.null eq) (ref.null eq)))
     (local.set $entry (call $specialize-accessor (local.get $function) (ref.null eq)
       (ref.cast (ref $direct-function) (call $direct-function
         (local.get $function) (ref.null eq) (local.get $name) (i32.const 11)))

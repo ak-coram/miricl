@@ -1,8 +1,13 @@
 ;;;; Object-level control/data flow, separate from the definition linker IR.
 (in-package :miricl-compiler)
 
+;; Frontend preparation can create lexical helper functions before the
+;; remaining compiler library has loaded.
+(defvar *compiling-evaluation* nil)
+
 (defvar *hir-load-time-recipes* nil)
 (defvar *hir-load-time-evaluator* nil)
+(defvar *hir-source-environments* nil)
 
 ;; Internal records have fixed, named vector layouts on both hosts. Keep the
 ;; ordinary constructor, copier and predicate functions available, while hot
@@ -46,16 +51,16 @@
               (list 'setf (list 'get 'macro (list 'quote 'miricl::runtime-inline-macro)) t))) forms)
     (cons 'progn (nreverse forms))))
 
-(defstruct hir-unit functions)
+(define-hir-record hir-unit functions)
 (define-hir-record hir-function name parent parameters environment entry blocks captures bindings values
   (value-count 0) (block-count 0) (debug-level 1))
 (define-hir-record hir-block id parameters instructions terminator predecessors environment)
 (define-hir-record hir-value id kind owner producer (type t))
 (define-hir-record hir-instruction opcode inputs output attributes origin effect (safety-level 1))
 (define-hir-record hir-binding name owner cell special-p captured-p assigned-p local)
-(define-hir-record hir-local definition variables functions targets types policy debug-level used-p function (safety-level 1))
+(define-hir-record hir-local definition variables functions targets types policy debug-level used-p function (safety-level 1) macro-context)
 (define-hir-record hir-target name owner block token captured-p)
-(define-hir-record hir-debug-site kind operator value variables functions targets types parent owner)
+(define-hir-record hir-debug-site kind operator value variables functions targets types parent owner form macros)
 (defvar *hir-unit*)
 (defvar *hir-function*)
 (defvar *hir-block*)
@@ -71,10 +76,11 @@
 (defvar *hir-safety-level* 1)
 (defvar *hir-source-path* nil)
 (defvar *hir-debug-sites* nil)
+(defvar *hir-macro-context* nil)
+(defvar *hir-debug-write-types* nil)
 ;; Keep marker generation disabled until both executable HIR and native
-;; lowering support the debugger operations. DEBUG 3 currently uses the source
-;; interpreter's existing debugger; unsupported markers must not reach either
-;; backend while that migration is in progress.
+;; lowering support the debugger operations. Compact HIR execution enables
+;; these markers; native lowering keeps its own DEBUG policy.
 (defvar *hir-debug-info-enabled* nil)
 
 (defun hir-debug-origin (form variables functions targets)
@@ -86,7 +92,9 @@
   (dolist (entry (append variables functions targets))
     (let ((identity (cdr entry)))
       (when (and (%hir-binding-p identity) (not (hir-binding-special-p identity)))
-        (setf (hir-binding-assigned-p identity) t))
+        (setf (hir-binding-assigned-p identity) t)
+        (when (hir-binding-local identity)
+          (setf (hir-local-used-p (hir-binding-local identity)) t)))
       (when (%hir-target-p identity) (setf (hir-target-captured-p identity) t))
       (when (or (and (%hir-binding-p identity) (not (hir-binding-special-p identity))
                      (not (eq (hir-binding-owner identity) *hir-function*)))
@@ -104,7 +112,8 @@
                      (t 0)))
          (site (make-hir-debug-site-record kind
                  (case kind (1 form) (2 (if (symbolp (car form)) (car form) 'funcall)))
-                 nil variables functions targets *hir-types* parent *hir-function*)))
+                 nil variables functions targets *hir-types* parent *hir-function* form
+                 (hir-visible-macros variables functions))))
     (setf (gethash site *hir-debug-sites*) t)
     site))
 
@@ -325,7 +334,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
          (definition (and info (hir-local-definition info)))
          (parameters (second definition))
          (policy (cdr (assoc binding *hir-inline-policy*))))
-    (when (and info (< *hir-debug-level* 2) (< (hir-local-debug-level info) 2)
+    (when (and info definition (< *hir-debug-level* 2) (< (hir-local-debug-level info) 2)
                (not (member binding *hir-inlining*))
                (not (eq policy 'notinline)) (or (eq policy 'inline) *hir-inline-small-functions*)
                (= (length arguments) (length parameters))
@@ -353,6 +362,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
          (variables (hir-local-variables info)) (functions (hir-local-functions info))
          (targets (hir-local-targets info)) (*hir-types* (hir-local-types info))
          (*hir-inline-policy* (hir-local-policy info))
+         (*hir-macro-context* (hir-local-macro-context info))
          (*hir-debug-level* (hir-local-debug-level info))
          (*hir-safety-level* (hir-local-safety-level info))
          (*hir-inlining* (cons binding *hir-inlining*))
@@ -401,7 +411,13 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
 
 (defun hir-write-variable (name value environment)
   (declare (type symbol name) (type simple-vector value) (type list environment))
-  (let ((binding (cdr (assoc name environment))))
+  (let* ((binding (cdr (assoc name environment)))
+         (type (and *hir-debug-write-types* (assoc (or binding name) *hir-types*))))
+    ;; Check before the cell write, including writes in escaping frame closures.
+    (when (and type (not (eq (cdr type) t)))
+      (setq value (hir-single
+                    (hir-emit :call (list *hir-dynamic* (hir-function-reference 'hir-debug-check-write nil)
+                                         value (hir-constant (cdr type))) :multiple nil :call))))
     (when (or (member name '(nil t)) (keywordp name)) (error "Assignment to constant ~S." name))
     (if (and binding (not (hir-binding-special-p binding)))
         (progn (setf (hir-binding-assigned-p binding) t)
@@ -434,10 +450,16 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   (declare (type list lambda variables functions targets implicit-block))
   (let* ((child (hir-lambda lambda *hir-function* variables functions targets nil implicit-block))
          (captures (mapcar (lambda (capture)
-                    (etypecase capture
-                      (hir-binding (hir-cell-for-binding capture))
-                      (hir-target (if (eq (hir-target-owner capture) *hir-function*)
-                                      (hir-target-token capture) (hir-capture capture :dynamic)))))
+                    ;; Bootstrap records already have their checked vector
+                    ;; layouts before source replay installs their DEFTYPEs.
+                    ;; Captures are precisely lexical cells or control tokens.
+                    (cond
+                      ((%hir-binding-p capture) (hir-cell-for-binding capture))
+                      ((%hir-target-p capture)
+                       (if (eq (hir-target-owner capture) *hir-function*)
+                           (hir-target-token capture) (hir-capture capture :dynamic)))
+                      (t (compiler-input-fail "closure capture" capture
+                           "expected a lexical binding or control target"))))
                    (hir-function-captures child))))
     (hir-emit :closure captures :single (list child) :allocation)))
 
@@ -554,22 +576,66 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
           (hir-terminate :jump (list (hir-multiple (hir-constant nil))) (list join))))
     (setq *hir-block* join) (first (hir-block-parameters join))))
 
+(defun hir-visible-macros (variables functions)
+  ;; A new lexical binding shadows macros from an enclosing scope. Compare
+  ;; binding identities, since a macro can itself shadow an older lexical name.
+  (let ((seen-variables nil) (seen-functions nil) (result nil))
+    (dolist (entry (fourth *hir-macro-context*) (nreverse result))
+      (let* ((symbol-macro (= (first entry) 9)) (name (second entry))
+             (seen (if symbol-macro seen-variables seen-functions)))
+        (unless (member name seen)
+          (if symbol-macro (push name seen-variables) (push name seen-functions))
+          (when (eq (cdr (assoc name (if symbol-macro variables functions) :test #'equal)) (fourth entry))
+            (push entry result)))))))
+
 (defun hir-macro-environment (variables functions)
-  (let ((environment nil))
+  (let ((environment (first *hir-macro-context*)))
     (dolist (entry (reverse variables))
-      (setq environment (compiler-primitive (if (hir-binding-special-p (cdr entry)) 11 3)
-                          environment (car entry))))
+      (unless (and *hir-macro-context*
+                   (eq (cdr entry) (cdr (assoc (car entry) (second *hir-macro-context*)))))
+        (setq environment (compiler-primitive (if (hir-binding-special-p (cdr entry)) 11 3)
+                            environment (car entry)))))
     (dolist (entry (reverse functions))
-      (setq environment (compiler-primitive 4 environment (car entry) nil)))
+      (unless (and *hir-macro-context*
+                   (eq (cdr entry) (cdr (assoc (car entry) (third *hir-macro-context*) :test #'equal))))
+        (setq environment (compiler-primitive 4 environment (car entry) nil))))
     environment))
 
-(defun hir-expand-local-macros (form variables functions)
-  ;; Reuse the runtime's macro lambda-list parser and lexical macro environment
-  ;; builder. Only expansion happens here; the resulting body still goes
-  ;; through HIR and native code generation, without an interpreted fallback.
-  (unless (fboundp 'miricl::%compile-form)
-    (error "Local macro expansion requires the host's lexical environment adapter."))
-  (miricl::%compile-form form (hir-macro-environment variables functions)))
+(defun hir-import-macro-context (environment variables functions)
+  ;; A file block can contain forms prepared in distinct top-level lexical
+  ;; environments. Retain their actual expanders while sharing the block's
+  ;; lexical function bindings and the ordinary checked environment boundary.
+  (when environment
+    (let* ((packet (compiler-primitive 48 environment))
+           (scope (svref packet 0)) (macros nil))
+      (loop for i from 0 below (length scope) by 4 do
+        (let* ((kind (svref scope i)) (name (svref scope (+ i 2))))
+          (when (member kind '(9 10))
+            (push (list kind name (svref scope (+ i 3))
+                        (cdr (assoc name (if (= kind 9) variables functions) :test #'equal))) macros))))
+      (list environment variables functions (nreverse macros)))))
+
+(defun hir-local-macros-form (form variables functions targets)
+  ;; Preserve the actual expander and its definition environment. Expanding
+  ;; the whole body in the source compiler loses lexical debugger metadata.
+  (let* ((environment (hir-macro-environment variables functions))
+         (local environment) (entries (fourth *hir-macro-context*)))
+    (compiler-list-length (second form) "local macro bindings")
+    (dolist (definition (second form))
+      (let ((size (compiler-list-length definition "local macro definition")))
+        (unless (if (eq (car form) 'symbol-macrolet) (= size 2) (>= size 2))
+          (compiler-input-fail "local macro definition" definition "invalid definition length")))
+      (unless (symbolp (first definition))
+        (compiler-input-fail "local macro name" (first definition) "expected a symbol"))
+      (let* ((name (first definition)) (symbol-macro (eq (car form) 'symbol-macrolet))
+             (value (if symbol-macro (second definition)
+                        (compiler-primitive 7 environment
+                          (apply #'miricl::%macro-lambda name (second definition) (cddr definition))))))
+        (setq local (compiler-primitive (if symbol-macro 6 5) local name value))
+        (push (list (if symbol-macro 9 10) name value
+                    (cdr (assoc name (if symbol-macro variables functions)))) entries)))
+    (let ((*hir-macro-context* (list local variables functions entries)))
+      (hir-form (cons 'locally (cddr form)) variables functions targets))))
 
 (defun hir-expand-parallel-places (form variables functions)
   ;; Runtime fast macro expanders encode simple places compactly. For native
@@ -820,7 +886,9 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
     (loop while pairs do
       (let ((name (pop pairs)) (value-form (pop pairs)))
         (unless (symbolp name) (error "Invalid SETQ variable ~S." name))
-        (multiple-value-bind (expansion expanded) (unless (assoc name variables) (macroexpand-1 name))
+        (multiple-value-bind (expansion expanded)
+            (when (or *hir-macro-context* (not (assoc name variables)))
+              (macroexpand-1 name (when *hir-macro-context* (hir-macro-environment variables functions))))
           (if expanded
               (setq result (hir-single (hir-form (list 'setf expansion value-form) variables functions targets)))
               (setq result (hir-write-variable name
@@ -840,11 +908,11 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
     (setq bindings (nreverse bindings))
     (loop for definition in (second form) for binding in bindings do
       (setf (hir-binding-local binding)
-        (make-hir-local :definition definition :variables variables
-          :functions (if (eq (car form) 'labels) local functions) :targets targets
-          :types *hir-types* :policy *hir-inline-policy*
-          :safety-level (native-safety-level (cddr definition) *hir-safety-level*)
-          :debug-level (native-debug-level (cddr definition) *hir-debug-level*))))
+        (make-hir-local-record definition variables
+          (if (eq (car form) 'labels) local functions) targets
+          *hir-types* *hir-inline-policy*
+          (native-debug-level (cddr definition) *hir-debug-level*) nil nil
+          (native-safety-level (cddr definition) *hir-safety-level*) *hir-macro-context*)))
     (multiple-value-bind (body specials types policy) (hir-declarations (cddr form))
       (let* ((variables (hir-shadow-specials variables specials))
              (*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*))
@@ -872,6 +940,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                 (push binding compiled)
                 (let* ((info (hir-binding-local binding)) (definition (hir-local-definition info))
                        (*hir-types* (hir-local-types info)) (*hir-inline-policy* (hir-local-policy info))
+                       (*hir-macro-context* (hir-local-macro-context info))
                        (*hir-debug-level* (hir-local-debug-level info))
                        (*hir-safety-level* (hir-local-safety-level info))
                        (function (hir-close (cons 'lambda (cdr definition)) (hir-local-variables info)
@@ -997,8 +1066,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
         (when (and size (<= size 8)) (cons (second form) elements))))))
 
 (defun hir-application-form (form variables functions targets)
-  (when (and (symbolp (car form)) (not (assoc (car form) functions :test #'equal)))
-    (multiple-value-bind (expansion expanded) (macroexpand-1 form)
+  (when (and (symbolp (car form)) (or *hir-macro-context* (not (assoc (car form) functions :test #'equal))))
+    (multiple-value-bind (expansion expanded) (macroexpand-1 form (when *hir-macro-context* (hir-macro-environment variables functions)))
       (when expanded (return-from hir-application-form (hir-form expansion variables functions targets)))))
   (when (and (symbolp (car form))
              (or (special-operator-p (car form))
@@ -1030,8 +1099,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                    ;; Most tasks have no declaration environment. Keep their
                    ;; policy as an immediate instead of allocating a seventh
                    ;; task slot or an otherwise empty environment list.
-                   (if (or *hir-types* *hir-inline-policy* *hir-inlining*)
-                       (list *hir-types* *hir-inline-policy* *hir-inlining* *hir-safety-level*)
+                   (if (or *hir-types* *hir-inline-policy* *hir-inlining* *hir-macro-context*)
+                       (list *hir-types* *hir-inline-policy* *hir-inlining* *hir-safety-level* *hir-macro-context*)
                        *hir-safety-level*) *hir-source-path*) work))
          (body (forms variables functions targets)
            (if (null forms) (setq result (hir-constant nil))
@@ -1081,7 +1150,12 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
            (compiler-source-form form)
            (when (and (consp form) (member form *hir-source-path* :test #'eq))
              (compiler-input-fail "source form" form "circular executable form"))
-           (let* ((*hir-origin* (if *hir-debug-info-enabled*
+           (let* ((environment (when *hir-source-environments*
+                                 (gethash form *hir-source-environments*)))
+                  (*hir-macro-context* (if environment
+                                          (hir-import-macro-context environment variables functions)
+                                          *hir-macro-context*))
+                  (*hir-origin* (if *hir-debug-info-enabled*
                                    (hir-debug-origin form variables functions targets)
                                    form))
                   (site (when (and *hir-debug-info-enabled* (= *hir-debug-level* 3)) *hir-origin*))
@@ -1098,10 +1172,19 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                    (setf (hir-function-debug-level *hir-function*)
                          (max *hir-debug-level* (hir-function-debug-level *hir-function*))))
                  (cond
+                   ;; The file frontend marks resolved calls so subsequent
+                   ;; macro definitions cannot re-expand already prepared code.
+                   ((and (consp form) (eql (compiler-primitive 8 form) 1))
+                    (arguments (cdr form) nil (hir-function-reference (car form) functions)
+                      variables functions targets))
+                   ((and *hir-macro-context* (consp form) (symbolp (car form))
+                         (macro-function (car form) (hir-macro-environment variables functions)))
+                    (lower (macroexpand-1 form (hir-macro-environment variables functions)) variables functions targets))
                    ((atom form)
                     (if (and (symbolp form) form (not (eq form t)) (not (keywordp form))
-                             (not (assoc form variables)))
-                        (multiple-value-bind (expansion expanded) (macroexpand-1 form)
+                             (or *hir-macro-context* (not (assoc form variables))))
+                        (multiple-value-bind (expansion expanded)
+                            (macroexpand-1 form (when *hir-macro-context* (hir-macro-environment variables functions)))
                           (if expanded (lower expansion variables functions targets)
                               (setq result (hir-read-variable form variables))))
                         (setq result (if (and (symbolp form) form (not (eq form t)) (not (keywordp form)))
@@ -1182,8 +1265,9 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                     (setq result (hir-recursive-form form variables functions targets)))
                    (t
                     (multiple-value-bind (expansion expanded)
-                        (if (and (symbolp (car form)) (not (assoc (car form) functions :test #'equal)))
-                            (macroexpand-1 form) (values form nil))
+                        (if (and (symbolp (car form)) (or *hir-macro-context* (not (assoc (car form) functions :test #'equal))))
+                            (macroexpand-1 form (when *hir-macro-context* (hir-macro-environment variables functions)))
+                            (values form nil))
                       (cond
                         (expanded (lower expansion variables functions targets))
                         ((symbolp (car form))
@@ -1201,7 +1285,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                (*hir-origin* (third task))
                (*hir-debug-level* (fourth task)) (*hir-dynamic* (fifth task))
                (*hir-source-path* (seventh task))
-               (*hir-types* (first facts)) (*hir-inline-policy* (second facts)) (*hir-inlining* (third facts)))
+               (*hir-types* (first facts)) (*hir-inline-policy* (second facts)) (*hir-inlining* (third facts))
+               (*hir-macro-context* (fifth facts)))
           ;; Reuse this invocation's dynamic policy binding. Creating a fresh
           ;; binding for every continuation adds allocation and lookup work.
           ;; Nested HIR-FORM invocations still restore their caller's policy.
@@ -1247,7 +1332,11 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                                           restart-bind restart-case with-condition-restarts with-simple-restart
                                           block return-from return tagbody go ignore-errors assert check-type define-condition))
             (error "Native condition lowering is not implemented for ~S." (second form)))
-          (hir-form (cdr form) variables functions targets))
+          ;; The macro expander already selected this builtin operation.
+          ;; Re-entering macro lookup here would expand the same operation
+          ;; again in a lexical macro context instead of lowering it.
+          (compiler-source-form (cdr form))
+          (hir-recursive-form (cdr form) variables functions targets))
          (define-condition (hir-define-condition form variables functions targets))
          (miricl::%%native-restart-signal (hir-restart-signal-form form variables functions targets))
          (with-simple-restart (hir-simple-restart-form form variables functions targets))
@@ -1280,8 +1369,9 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
          (miricl::%%case-form
           (unless (and (integerp (second form)) (<= 0 (second form) 5)) (error 'program-error))
           (let ((expanded (cons (nth (second form) '(case typecase ecase etypecase ccase ctypecase)) (cddr form))))
-            (hir-form (if (< (second form) 4) expanded
-                          (hir-correctable-place-form expanded variables functions)) variables functions targets)))
+            (if (< (second form) 4)
+                (hir-case-form expanded variables functions targets)
+                (hir-form (hir-correctable-place-form expanded variables functions) variables functions targets))))
          (eval-when
           (if (intersection (second form) '(:execute eval))
               (hir-body (cddr form) variables functions targets) (hir-constant nil)))
@@ -1294,7 +1384,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                   (unless (and (= (length binding) 2) (symbolp name)
                                (not (constantp name)) (not (hir-special-p name specials)))
                     (error 'program-error))))))
-          (hir-form (hir-expand-local-macros form variables functions) variables functions targets))
+          (hir-local-macros-form form variables functions targets))
          (miricl::%%symbol-iterate (hir-symbol-iterate-form form variables functions targets))
          (miricl::%%while (hir-while-form form variables functions targets))
          (tagbody (hir-tagbody-form form variables functions targets))
@@ -1493,7 +1583,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
         (when local
           (setf (hir-local-definition local) nil (hir-local-variables local) nil
                 (hir-local-functions local) nil (hir-local-targets local) nil
-                (hir-local-types local) nil (hir-local-policy local) nil))))
+                (hir-local-types local) nil (hir-local-policy local) nil (hir-local-macro-context local) nil))))
     (dolist (block (hir-function-blocks function))
       (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
         (let ((origin (hir-instruction-origin instruction)))
@@ -1507,31 +1597,33 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   "Lower a lambda to object-level control/data flow without executing its body.
 Unsupported special operators and parameter syntax signal an error."
   (declare (optimize (safety 3)))
-  (compiler-source-form lambda-expression)
-  (compiler-function-name name "function name")
-  (compiler-list-length global-specials "global special variables")
-  (dolist (variable global-specials) (compiler-variable-name variable "global special variable"))
-  (if (fboundp 'ensure-compiler)
-      (progn (ensure-compiler)
-        (optimize-hir-checked (lower-source-to-hir lambda-expression name global-specials)))
-      (lower-source-to-hir lambda-expression name global-specials)))
+  (let ((*compiling-evaluation* t))
+    (compiler-source-form lambda-expression)
+    (compiler-function-name name "function name")
+    (compiler-list-length global-specials "global special variables")
+    (dolist (variable global-specials) (compiler-variable-name variable "global special variable"))
+    (if (fboundp 'ensure-compiler)
+        (progn (ensure-compiler)
+          (optimize-hir-checked (lower-source-to-hir lambda-expression name global-specials)))
+        (lower-source-to-hir lambda-expression name global-specials))))
 
-(defun lower-source-to-hir (lambda-expression &optional name global-specials)
+(defun lower-source-to-hir (lambda-expression &optional name global-specials environment)
   ;; Internal lowering stage for validated source. The full compiler follows
   ;; it with optimization; the small image emits executable HIR directly.
-  (let ((*hir-unit* (make-hir-unit)) (*hir-specials* global-specials)
+  (let ((*hir-unit* (make-hir-unit-record)) (*hir-specials* global-specials)
         (*hir-debug-level* (or (compiler-primitive 33 nil) 1)) (*hir-types* nil)
         (*hir-safety-level* (or (compiler-primitive 36 nil) 1))
         (*hir-inline-policy* nil) (*hir-inlining* nil)
         (*hir-source-path* (and (consp lambda-expression) (list lambda-expression)))
-        (*hir-debug-sites* nil))
+        (*hir-debug-sites* nil)
+        (*hir-macro-context* (hir-import-macro-context environment nil nil)))
     (hir-lambda lambda-expression nil nil nil nil name)
     (setf (hir-unit-functions *hir-unit*) (nreverse (hir-unit-functions *hir-unit*)))
     (hir-clear-source *hir-unit*)
     (verify-hir *hir-unit*)
     *hir-unit*))
 
-(defun compile-module-to-hir (definitions &key (entry-points nil entriesp) (inline t))
+(defun compile-module-to-hir (definitions &key (entry-points nil entriesp) (inline t) global-specials)
   "Lower a sealed group of DEFUN forms. Only ENTRY-POINTS escape the module.
 The module factory returns an alist of names and functions, without installing
 global definitions. Internal calls refer to this group's lexical definitions."
@@ -1553,7 +1645,11 @@ global definitions. Internal calls refer to this group's lexical definitions."
       (unless (member name names :test #'equal) (error "Unknown module entry point ~S." name)))
     (compile-to-hir
       (list 'lambda nil (list 'labels (nreverse local)
-        (cons 'list (mapcar (lambda (name) (list 'cons (list 'quote name) (list 'function name))) entry-points)))))))
+        ;; This scaffolding is compiler-owned. Keep its inline policy inside
+        ;; the LABELS body so it does not affect the supplied function bodies.
+        (list 'locally '(declare (inline cons list))
+          (cons 'list (mapcar (lambda (name) (list 'cons (list 'quote name) (list 'function name))) entry-points)))))
+      :global-specials global-specials)))
 
 (defparameter *hir-instruction-shapes*
   ;; Validation consults this fixed opcode grammar for every instruction.
@@ -1578,7 +1674,7 @@ global definitions. Internal calls refer to this group's lexical definitions."
 
 (defun validate-hir-shapes (unit)
   (declare (optimize (safety 3)))
-  (unless (hir-unit-p unit) (compiler-input-fail "HIR unit" unit "expected an HIR-UNIT"))
+  (unless (%hir-unit-p unit) (compiler-input-fail "HIR unit" unit "expected an HIR-UNIT"))
   (let* ((functions (hir-unit-functions unit))
          (count (compiler-list-length functions "HIR function list"))
          (owners (make-hash-table :test 'eq)) (producers (make-hash-table :test 'eq))
@@ -1667,6 +1763,12 @@ global definitions. Internal calls refer to this group's lexical definitions."
              (dolist (entry (hir-debug-site-functions site))
                (compiler-function-name (car entry) "HIR debug function") (binding (cdr entry)))
              (dolist (entry (hir-debug-site-targets site)) (target (cdr entry)))
+             (compiler-list-length (hir-debug-site-macros site) "HIR debug macros")
+             (dolist (entry (hir-debug-site-macros site))
+               (unless (and (= (compiler-list-length entry "HIR debug macro") 4)
+                            (member (first entry) '(9 10)) (symbolp (second entry))
+                            (or (= (first entry) 9) (functionp (third entry))))
+                 (compiler-input-fail "HIR debug macro" entry "invalid macro binding")))
              (dolist (entry (hir-debug-site-types site))
                (unless (symbolp (car entry)) (binding (car entry)))
                (compiler-type-specifier (cdr entry) types-checked))))

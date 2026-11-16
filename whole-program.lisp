@@ -144,14 +144,21 @@
                (setf (gethash (car pairs) written) t)
                (push (second pairs) work)))
             (otherwise
-             (when (or (member (car value) '(setf psetf psetq rotatef shiftf incf decf push pop
-                                             macrolet symbol-macrolet progv miricl::%%parallel-place-form))
-                       (and (symbolp (car value)) (not (eq (car value) 'lambda))
-                            (macro-function (car value))))
-               (setq unknown t))
-             ;; The checked spine is finite. SEEN bounds shared subtrees,
-             ;; without interpreting quoted data as assignments.
-             (dolist (child (cdr value)) (push child work)))))))
+             (cond
+               ((or (member (car value) '(macrolet symbol-macrolet))
+                    (and (symbolp (car value)) (not (eq (car value) 'lambda))
+                         (macro-function (car value))))
+                ;; Macro operands are syntax, not executable subforms. LOOP
+                ;; and destructuring macros can contain dotted patterns or
+                ;; arbitrary data. Their writes are unknown without expansion.
+                (setq unknown t))
+               (t
+                (when (member (car value) '(setf psetf psetq rotatef shiftf incf decf push pop
+                                           progv miricl::%%parallel-place-form))
+                  (setq unknown t))
+                ;; The checked spine is finite. SEEN bounds shared subtrees,
+                ;; without interpreting quoted data as assignments.
+                (dolist (child (cdr value)) (push child work)))))))))
     (values written unknown)))
 
 (defun form-references (form &optional load-values)
@@ -206,6 +213,7 @@
                  (if (eq mode :data)
                      (progn (literal (car value)) (literal (cdr value)))
                      (let ((operator (car value)) (args (cdr value)))
+                       (compiler-list-length value "reachability form")
                        (case operator
                          (quote (literal (car args)))
                          (declare nil)
@@ -310,6 +318,18 @@
                                 (body (cdr args)))
                               (body args)))
                          (otherwise
+                          (cond
+                           ((or (member operator '(macrolet symbol-macrolet))
+                                (and (symbolp operator) (global-function-p operator)
+                                     (macro-function operator)))
+                            ;; Unexpanded macros can introduce arbitrary calls
+                            ;; and writes. Retain the closed world, and inspect
+                            ;; their operands as data rather than guessing at
+                            ;; executable syntax or invoking user expanders.
+                            (pushnew "UNEXPANDED-MACRO" barriers :test #'equal)
+                            (reference :macro operator)
+                            (literal args))
+                           (t
                           (if (symbolp operator)
                               (function-reference operator)
                               (queue operator :code))
@@ -365,7 +385,7 @@
                             (when (member operator '(fboundp boundp symbol-value))
                               (unless (and (consp (car args)) (eq (caar args) 'quote))
                                 (pushnew (symbol-name operator) barriers :test #'equal))))
-                          (body args)))))))))))
+                          (body args)))))))))))))
       (values references barriers)))))
 
 (defun read-units (file &key (records t))
@@ -603,6 +623,9 @@
       ((= kind 6) (cons (third record) (fourth record)))
       ((member kind '(7 10)) (list (second record)))
       ((= kind 11) (list* (second record) (third record) (remove -1 (fourth record))))
+      ((= kind 12) (if (zerop (second record))
+                      (list (fourth record) (fifth record) (sixth record))
+                      (list (fourth record) (sixth record))))
       (t (error "Unknown FASL record kind ~S." kind)))))
 
 (defun coalesce-records (records live)
@@ -770,6 +793,9 @@
                 ((= kind 10) (list 10 (aref mapping (second record))))
                 ((= kind 11) (list 11 (aref mapping (second record)) (aref mapping (third record))
                   (mapcar (lambda (id) (if (= id -1) -1 (aref mapping id))) (fourth record))))
+                ((= kind 12) (list 12 (second record) (third record) (aref mapping (fourth record))
+                  (if (zerop (second record)) (aref mapping (fifth record)) -1)
+                  (aref mapping (sixth record))))
                 (t record))))))
       (let ((definitions nil))
         (when index-definitions
@@ -884,6 +910,36 @@ With STRIP NIL, retain every definition and compact only the representation."
       (when report (miricl::%%filesystem 7 (miricl::%source-path report) nil)))
     (pathname target)))
 
+(defun initializer-hir-unit (initializer)
+  ;; Portable and native compiled roots use one current executable descriptor.
+  ;; Never reinterpret a stored source form or expand application macros here.
+  (unless (and (simple-vector-p initializer) (plusp (length initializer)))
+    (error "Invalid compiled initializer."))
+  (case (svref initializer 0)
+    (:hir
+     (unless (= (length initializer) 2) (error "Invalid HIR initializer."))
+     (let* ((wire (svref initializer 1)) (payload (validate-hir-code wire)))
+       ;; DEBUG 3 executes the same retained lexical sites as minimal COMPILE.
+       ;; Native reconstruction intentionally discards those sites; retain the
+       ;; compact executable HIR behind a native initializer instead.
+       (if (some (lambda (function) (= (svref function 12) 3)) (svref payload 1))
+           (compile-to-hir
+             (list 'lambda nil (list 'funcall (list 'load-hir-code (list 'quote wire)))))
+           (hir-code-to-unit wire))))
+    (:native
+     (unless (= (length initializer) 5) (error "Invalid native initializer."))
+     (let ((function (gensym "NATIVE-INITIALIZER-")))
+       (compile-to-hir
+         (list 'lambda nil
+           (list 'let (list (list function
+             (list 'miricl::%%compile 17 (list 'quote (svref initializer 1))
+                   (list 'quote (svref initializer 2)) nil)))
+             (if (svref initializer 3)
+                 (list 'funcall (list 'miricl::%%compile 34 function
+                         (list 'quote (svref initializer 3)) (svref initializer 4)))
+                 (list 'funcall function)))))))
+    (otherwise (error "Unknown compiled initializer kind."))))
+
 (defun prepare-native-unit (unit count progress load)
   (declare (type ir-unit unit) (type (unsigned-byte 32) count))
   (let ((functions nil) (entries nil) (recipes nil) (initializer-count 0)
@@ -903,14 +959,7 @@ With STRIP NIL, retain every definition and compact only the representation."
           (incf count)
           (when progress (funcall progress (ir-unit-source unit) count))
           (let ((hir
-                  (if (and (consp form) (eq (first form) 'funcall) (null (cddr form))
-                           (consp (second form)) (eq (first (second form)) 'load-hir-code)
-                           (null (cddr (second form)))
-                           (consp (second (second form)))
-                           (eq (first (second (second form))) 'quote)
-                           (null (cddr (second (second form)))))
-                      (hir-code-to-unit (second (second (second form))))
-                      (compile-to-hir (list 'lambda nil form)))))
+                  (initializer-hir-unit form)))
             (push (first (hir-unit-functions hir)) entries)
             (push (hir-unit-functions hir) functions)
             (when load
@@ -941,16 +990,18 @@ With STRIP NIL, retain every definition and compact only the representation."
                        (not (or (numberp value) (characterp value)
                                 (and (symbolp value) (symbol-package value)))))
               (setf (gethash value seen) t)
-              (push (cons value (miricl::%fasl-object (cadr record))) recipes))))))
+              (push (list value (miricl::%fasl-object (cadr record)) t) recipes))))))
     (setq initializer-count (length entries))
     (let ((pending (nreverse recipes)) (compiled nil))
       (loop
         (maphash (lambda (value form)
                    (unless (or (gethash value seen) (gethash value ordinary))
                      (setf (gethash value seen) t)
-                     (push (cons value form) pending))) *hir-load-time-recipes*)
+                     (push (list value form nil) pending))) *hir-load-time-recipes*)
         (unless pending (return))
-        (let* ((recipe (pop pending)) (hir (compile-to-hir (list 'lambda nil (cdr recipe)))))
+        (let* ((recipe (pop pending))
+               (hir (if (third recipe) (initializer-hir-unit (second recipe))
+                        (compile-to-hir (list 'lambda nil (second recipe))))))
           (push recipe compiled)
           (push (first (hir-unit-functions hir)) entries)
           (push (hir-unit-functions hir) functions)))
@@ -989,14 +1040,8 @@ With STRIP NIL, retain every definition and compact only the representation."
         (setq code (map 'string #'code-char code))
         (when debug (setf (svref debug 0) code))
         (flet ((entry-form (index literal-vector)
-                 (list 'funcall
-                   (let ((entry (list 'miricl::%%compile 17
-                                  (list 'quote (cons code index))
-                                  (list 'quote literal-vector) nil)))
-                     (if debug
-                         (list 'miricl::%%compile 34 entry (list 'quote debug)
-                           (svref (svref debug 2) index))
-                         entry)))))
+                 (vector :native (cons code index) literal-vector debug
+                         (if debug (svref (svref debug 2) index) 0))))
           ;; Creation recipes are native entries in the same module, invoked
           ;; by the loader when their opaque result is first needed.
           (loop for value in recipe-values

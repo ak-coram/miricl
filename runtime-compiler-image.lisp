@@ -2,7 +2,9 @@
 (in-package #:miricl)
 
 (defun compiler-image-library-forms ()
-  (if (null *native-compiler-image*) *clos-library*
+  (if (null *native-compiler-image*)
+      (append *clos-library*
+        (list (lower-runtime-library '(setq miricl-compiler:*compile-evaluations* :interpreted))))
       (destructuring-bind (wat names roots records) *native-compiler-image*
         (declare (ignore wat))
         (labels ((filter-form (form)

@@ -136,6 +136,13 @@
                   (field $b (mut (ref null eq)))
                   (field $c (mut (ref null eq)))))))
   #@(type $objects (array (mut (ref null eq))))
+  ;; Source lexical environments retain the actual name object. Transient
+  ;; gensyms are deliberately absent from the global symbol-ID registry.
+  #@(type $environment-binding (sub final $obj (struct
+        (field $tag i32) (field $n (mut i32)) (field $f f64)
+        (field $digits (ref null $digits))
+        (field $a (mut (ref null eq))) (field $b (mut (ref null eq)))
+        (field $c (mut (ref null eq))) (field $name (ref null eq)))))
   ;; Scalar payloads stay out of the common object layout. DIGITS is NIL;
   ;; only this subtype carries an i64, rather than a separately allocated array.
   #@(type $fixnum (sub final $obj (struct

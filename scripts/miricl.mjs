@@ -1090,11 +1090,13 @@ function restoreCore(vm, payload, runtimeImports) {
   if (reader.position !== payload.length) throw new Error('Unexpected data after Miricl image.');
   for (const [code, indices] of native) {
     if (code === 0) {
-      const table = vm['core-compiler-functions'];
       const entries = new Map();
-      for (let i = 0; table && i < table.length; i++) {
-        const entry = table.get(i);
-        entries.set(coreEntryIndex(entry), entry);
+      for (const name of ['core-compiler-functions', 'core-frontend-functions']) {
+        const table = vm[name];
+        for (let i = 0; table && i < table.length; i++) {
+          const entry = table.get(i);
+          entries.set(coreEntryIndex(entry), entry);
+        }
       }
       native.set(code, entries);
     } else {

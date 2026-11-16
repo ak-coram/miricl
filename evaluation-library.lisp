@@ -1,41 +1,63 @@
 ;;;; Browser/Node evaluation policy; forms and literals stay in the local heap.
+(defvar miricl-compiler::*compiling-evaluation* nil)
 (defun %compile-evaluation (form name)
-  (miricl-compiler::compiler-source-form form)
-  ;; Compiler helpers can themselves use EVAL. Prevent recursive automatic
-  ;; compilation while preparing code; execute the resulting application
-  ;; function in the caller's dynamic environment.
-  (let* ((miricl-compiler::*compiling-evaluation* t)
-         (%compilation-complete nil)
-         (expanded (%compile-form (list 'function form) nil)))
-    ;; Resolve macros and LOAD-TIME-VALUE in the application's environment,
-    ;; retaining the actual literal objects before native HIR lowering.
-    (let ((miricl-compiler::*wasm-single-use-entry* (null name)))
-      (miricl-compiler:compile-native
-        (if (eq (car expanded) 'function) (second expanded) expanded) :name name))))
+  ;; Interpretation uses the same checked source lowering and compact HIR as
+  ;; minimal COMPILE. The dynamic guard covers preparation, not user execution.
+  (let* ((interpreted (or (not miricl-compiler:*compile-evaluations*)
+                          miricl-compiler::*compiling-evaluation*
+                          (eq miricl-compiler:*compile-evaluations* :interpreted)))
+         (miricl-compiler::*compiling-evaluation* t))
+    (miricl-compiler::compiler-source-form form)
+    (miricl-compiler::compiler-function-name name "function name")
+    (if (or interpreted
+            (not (fboundp 'miricl-compiler:compile-native))
+            (%debug-form-p form)
+            (= (or (%body-debug-level (cddr form) %debug-default-level) 1) 3))
+        (let* ((miricl-compiler::*hir-debug-info-enabled* t)
+               (miricl-compiler::*hir-debug-write-types* t)
+               (expanded (miricl-compiler::lower-source-to-hir form name)))
+          (miricl-compiler:load-hir-code (miricl-compiler:emit-hir-code expanded)))
+        (let ((miricl-compiler::*wasm-single-use-entry* (null name)))
+          (miricl-compiler:compile-native form :name name)))))
 
-(defun %compiler-evaluate (form)
-  (when (or (not miricl-compiler:*compile-evaluations*)
-            miricl-compiler::*compiling-evaluation*
-            (atom form) (eq (car form) 'quote))
+(defun %compiler-evaluate (form &optional path)
+  ;; Keep the validated source route for bootstrap/compiler preparation and
+  ;; when automatic compilation is disabled. Explicit :INTERPRETED and
+  ;; DEBUG 3 compilation still use the checked HIR interpreter.
+  (when miricl-compiler::*compiling-evaluation*
     (return-from %compiler-evaluate (%%eval form)))
-  (miricl-compiler::compiler-source-form form)
-  ;; Debug definitions execute their existing forms in the interpreter. The
-  ;; native compiler retains instructions at DEBUG 2, without stepping support.
-  (when (or (%debug-form-p form) (= (or (case (car form)
-                 (defun (%body-debug-level (cdddr form) %debug-default-level))
-                 (locally (%body-debug-level (cdr form) %debug-default-level))
-                 (otherwise %debug-default-level)) 1) 3))
+  ;; Preserve EVAL's ordinary-call argument boundary before the compiler's
+  ;; source validator. Special operators and macros keep their source errors.
+  (when (and (consp form) (symbolp (car form))
+             (not (special-operator-p (car form))) (not (macro-function (car form)))
+             (not (and (listp (cdr form)) (%proper-sequence-p (cdr form)))))
+    (error 'type-error :datum (cdr form) :expected-type %proper-list-type))
+  (when (not miricl-compiler:*compile-evaluations*)
+    (let ((miricl-compiler::*compiling-evaluation* t))
+      (miricl-compiler::compiler-source-form form))
+    ;; Keep sequential top-level processing and its executable-cycle guard
+    ;; even when ordinary execution uses the source evaluator.
+    (unless (and (consp form) (member (car form) '(progn eval-when)))
+      (return-from %compiler-evaluate (%%eval form))))
+  (when (or (atom form) (eq (car form) 'quote))
     (return-from %compiler-evaluate (%%eval form)))
-  (let ((operator (and (consp form) (car form))))
+  (let ((miricl-compiler::*compiling-evaluation* t))
+    (miricl-compiler::compiler-source-form form))
+  (when (member form path :test #'eq)
+    (miricl-compiler::compiler-input-fail "source form" form "circular executable form"))
+  ;; Process top-level effects in order at every policy. NIL disables native
+  ;; compilation; execution still uses HIR, including compiler preparation.
+  (let ((path (cons form path))
+        (operator (and (consp form) (car form))))
     (case operator
       (progn
        (if (cdr form)
-           (progn (dolist (child (butlast (cdr form))) (%compiler-evaluate child))
-                  (%compiler-evaluate (car (last form)))) nil))
+           (progn (dolist (child (butlast (cdr form))) (%compiler-evaluate child path))
+                  (%compiler-evaluate (car (last form)) path)) nil))
       (eval-when
        (unless (cdr form) (error 'program-error))
        (if (intersection (second form) '(:execute eval))
-           (%compiler-evaluate (cons 'progn (cddr form))) nil))
+           (%compiler-evaluate (cons 'progn (cddr form)) path) nil))
       (defun
        (let* ((name (second form)) (body (cdddr form)) (prefix nil) (documentation nil))
          (loop while (or (and (stringp (car body)) (cdr body) (not documentation))
@@ -60,7 +82,7 @@
              (proclaim (list 'special (second form)))
              (if (and (cddr form) (or (eq operator 'defparameter) (not (boundp (second form)))))
                  (%%eval (list* operator (second form)
-                         (list 'quote (%compiler-evaluate (third form))) (cdddr form)))
+                         (list 'quote (%compiler-evaluate (third form) path)) (cdddr form)))
                  (%%eval form)))
            (%%eval form)))
       ((defpackage in-package defconstant declaim proclaim)
@@ -68,5 +90,5 @@
       (otherwise
        (multiple-value-bind (expansion expanded)
            (let ((miricl-compiler::*compiling-evaluation* t)) (macroexpand-1 form))
-         (if expanded (%compiler-evaluate expansion)
+         (if expanded (%compiler-evaluate expansion path)
              (funcall (%compile-evaluation (list 'lambda nil form) nil))))))))

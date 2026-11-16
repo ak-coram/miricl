@@ -3,7 +3,7 @@
 
 (defparameter *shared-loop-symbols*
   '(%%while %%arithmetic-step %%case-form %%list-test %%list-accumulate
-    %%numeric-collect %%parallel-place-form))
+    %%numeric-collect %%parallel-place-form %last-cell))
 
 ;; Libraries execute in the guest evaluator. No host macroexpansion or reader
 ;; is needed at runtime, and their uninterned symbols cannot capture user names.

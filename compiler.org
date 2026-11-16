@@ -48,10 +48,16 @@ triggering automatic compilation. Macro expansion, load-time evaluation and
 execution use the target's objects and the caller's dynamic bindings.
 Compilation or execution errors propagate without an automatic retry.
 
+The =:interpreted= evaluation policy lowers ordinary forms to checked compact
+HIR and executes them without native compilation. DEBUG 3 selects this path
+even when native evaluation is enabled. The compiler-free image also selects
+HIR when native compilation is requested but unavailable. NIL currently keeps
+the source-evaluation route used by bootstrap and remaining lexical adapters.
+
 The default =miricl.wasm= image contains the precompiled compiler and starts
 with compiler state =:ready= and origin =:image=. Its evaluation policy enables
 native compilation. =miricl-cold.wasm= retains compiler code for interpreted
-use and bootstrap, with automatic compilation disabled. The compiler-free
+use and bootstrap, with HIR evaluation and automatic native compilation disabled. The compiler-free
 =miricl-interpreter.wasm= retains scripting, portable code execution and native
 module loading without the optimizing compiler.
 
@@ -60,6 +66,52 @@ native Wasm, and emits its compiler definitions as a sealed module sharing
 literals and lexical function bindings. The ready image links that payload
 into the runtime; startup does not fetch or compile a separate compiler.
 ASDF is an explicitly loaded artifact.
+
+*** Compact HIR/debugger salvage checkpoint (2026-11-16)
+
+The shipped image retains the source evaluator for bootstrap, ordinary NIL
+evaluation and remaining source-closure adapters. Explicit =:interpreted=
+evaluation, minimal compilation and DEBUG 3 retain checked HIR execution and
+the writable HIR debugger. This checkpoint does not complete source-evaluator
+removal.
+
+The experimental additional native bootstrap frontend, its unrolled literal
+constructor and the duplicate cold compiler-source catalogue were removed.
+The ready image again links one self-compiled compiler payload. Shared target
+macro adapters remain host tooling and add no shipped image dependency.
+
+All images were rebuilt from the same frozen source copy. Raw and gzip level 9
+sizes, in bytes (later concurrent compiler edits are not covered):
+
+| Image         |     Raw | Gzip 9 |
+|---------------+---------+--------|
+| Cold          |  625863 | 304523 |
+| Compiler-free |  507660 | 237506 |
+| Native        | 1014518 | 392886 |
+| WASI REPL     | 2034476 | 787825 |
+
+The native image has 34058 bytes of raw headroom below 1 MiB. It is 266297
+raw bytes smaller than the failed native-bootstrap experiment, but 8962 bytes
+larger than the earlier validated HIR checkpoint; no net size optimization
+over that checkpoint is claimed. The current source also includes newer type
+proof rules, so these totals do not isolate debugger cost.
+
+The fresh build retained the required guest interpreted compiler bootstrap
+(224.109 seconds), followed by sealed module generation (43.038 seconds).
+These are build phase observations, not warmed throughput or application
+performance comparisons. A frozen source copy and matching image hashes
+were used after discovering that an earlier cached payload predated newer
+type-proof sources. A subsequent =wasm-compiler.lisp= optimization was preserved
+in the working tree and is outside this measured checkpoint.
+
+Validation passed native soundness, optimization and Node implementation
+checks, standalone compiler-free operation, full HIR debugger checks and
+214 selected upstream ANSI cases. WASI public evaluation/minimal compilation
+and rejection/recovery smoke checks passed; this is not a full ANSI or WASI
+thread-suite result. Ordinary and generic COMPILE, method redefinition,
+declared debugger writes and the existing primitive LIST redefinition
+regression are preserved. Temporary logs, measurements and the discarded
+experiment are archived under =/tmp/miricl-salvage-20261116/=.
 
 =ensure-compiler= handles source-image bootstrap. It records completion or
 failure, coordinates concurrent requests, and avoids recursive bootstrap.
@@ -295,6 +347,18 @@ contracts agree. A bounded DEBUG 0 effect analysis permits frame omission only
 for eligible bodies without dynamic cleanup or tail-frame replacement. Unknown
 calls, dynamic state, captured exits and debugger-visible cases retain ordinary
 runtime dispatch. Scheduler checkpoints and required value-state cleanup remain.
+
+A deferred frame-omission experiment admitted ordinary non-tail calls and
+bounded, transitively proved private tail calls. On the same 289 original
+compiler definitions in one sealed bootstrap module, admitted exact-arity
+sites rose from 8 to 559, but emitted size grew from 277867 to 281675 raw bytes
+(gzip 80925 to 81878; Brotli 65585 to 66260). The five changed compiler helpers
+also grew by 1064 bytes when emitted together. Shared =native-callN= dispatch
+already has a compact call site; direct workers add checkpoints, unused operand
+slots and potentially wider function indices. Broader eligibility alone is
+therefore deferred. Investigate worker/adapter retention and compact calling
+conventions before expanding the default policy; throughput benefits remain
+unmeasured and require a separate speed-policy evaluation.
 
 Small local functions can inline into their caller with their original lexical
 environment. Argument expressions are evaluated before the body. Escaped or
@@ -538,6 +602,22 @@ metadata services validate their structures before unchecked kernel traversal.
 Runtime expansion kernels construct stream and iteration forms while retaining
 declaration order, lexical hooks, evaluation order and multiple values.
 
+Sequence fill, region copying, subsequence copying, concatenation and character
+scanning already use portable CL kernels. The remaining native sequence-length
+adapter is representation glue worth retaining until equivalent CL lowering is
+efficient. A measured portable =sequence-length-or-invalid= prototype used
+=array-has-fill-pointer-p=, =fill-pointer= and =array-total-size= to avoid the
+current =length= inline primitive's dependency on =proper-sequence-length=.
+In paired diagnostic images, warmed direct helper calls slowed by 9.54 times
+for simple vectors and 25.1 times for fill-pointer vectors; a 128-element list
+slowed by 5.8 percent. The portable image grew by 396 raw bytes and 90 gzip
+bytes. These are helper measurements, not application throughput measurements.
+Generated code repeatedly used generic array accessor calls, while equivalent
+SBCL code accessed vector metadata directly. Generic specialization or an
+independent native vector-length substrate could enable this port without
+duplicating sequence algorithms. Keep the current native adapter until that
+path is measured; moving representation checks to CL alone is not a size win.
+
 Small interpreter VALUES groups use primary, secondary and tertiary slots
 plus native result tuples. Overflow values use an owned checked list; legacy
 consumers materialize it lazily. MVB, NTH-VALUE and MVPROG1 capture or preserve
@@ -558,6 +638,22 @@ Special variables, symbol macros, debugger names and captured targets retain
 their own runtime handling. Generic dispatch uses live method/function,
 version, cache, class and MOP checks; a private next-method context object is
 retained by nested and escaped CALL-NEXT-METHOD closures.
+
+DEBUG 3 compact HIR records the visible binding names and active control
+targets at each step site, including otherwise unused lexical cells. Frame
+evaluation shares those cells with program closures and retains lexical macro
+and symbol-macro expansion environments. Debugger assignments check declared
+types before changing cells, including assignments compiled inside escaping
+frame-created closures. RETURN-FROM and GO use the existing target tokens and
+dynamic cleanup machinery. Native Wasm does not yet carry equivalent stepping
+instrumentation.
+
+Debug frames expose snapshots of scope metadata and selected cells rather
+than the executable register and capture arrays. Loading retained HIR copies
+and validates binding metadata and rejects invalid or circular debug ancestry.
+Literal object identities remain shared. The source evaluator still handles
+bootstrap, NIL evaluation, source closures and macro preparation; moving the
+debugger and portable compiled-file execution to HIR does not make it removable.
 
 =miricl:float-bits= and =miricl:bits-float= expose checked IEEE bit conversion.
 They preserve the selected single/double representation; ordinary arithmetic

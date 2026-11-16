@@ -14,6 +14,229 @@
   (miricl-compiler::compiler-input-fail "cross-compilation LOAD-TIME-VALUE" form
     "a target load-time evaluator is required; host evaluation is not portable"))
 
+(defvar *bootstrap-loop-expander* nil)
+(defvar *bootstrap-destructuring-expander* nil)
+(defvar *bootstrap-macro-lambda-constructor* nil)
+
+(defun bootstrap-source-constructor (source entry &optional adapters)
+  "Host execution of shared target source with isolated private bindings.
+ADAPTERS explicitly implements the target primitives used by the constructor."
+      (let* ((package (make-package (symbol-name (gensym "MIRICL-TARGET-CONSTRUCTOR-")) :use '("COMMON-LISP")))
+             (forward (make-hash-table :test 'eq)) (backward (make-hash-table :test 'eq)))
+        (labels ((translate (object table &optional inbound)
+                   (cond ((consp object) (cons (translate (car object) table inbound)
+                                               (translate (cdr object) table inbound)))
+                         ((and (symbolp object) inbound
+                               (eq (symbol-package object) (find-package :miricl)))
+                          (or (gethash object table)
+                              (let ((private (intern (symbol-name object) package)))
+                                (setf (gethash object table) private
+                                      (gethash private backward) object)
+                                private)))
+                         ((symbolp object) (or (gethash object table) object))
+                         (t object))))
+          (let* ((*macroexpand-hook* #'funcall)
+                 (while (translate 'miricl::%%while forward t)))
+            (setf (macro-function while)
+              (lambda (form environment)
+                (declare (ignore environment))
+                (let ((next (gensym)) (done (gensym)))
+                  `(tagbody ,next (if ,(second form) nil (go ,done))
+                     ,@(cddr form) (go ,next) ,done))))
+            (dolist (adapter adapters)
+              (setf (fdefinition (translate (car adapter) forward t)) (cdr adapter)))
+            (dolist (form source) (eval (translate form forward t))))
+          (let ((function (fdefinition (translate entry forward t))))
+            (lambda (&rest arguments)
+              (translate (apply function arguments) backward))))))
+
+(defun bootstrap-loop-expander ()
+  "Run the target LOOP constructor on the host, without capturing a guest heap."
+  (or *bootstrap-loop-expander*
+      (let ((source
+              (with-open-file (stream (asdf:system-relative-pathname :miricl/cross "runtime-loop.lisp"))
+                (let ((*package* (find-package :miricl)) (*read-eval* nil))
+                  (loop for form = (read stream nil stream) until (eq form stream)
+                        when (and (consp form) (eq (first form) 'defparameter)
+                                  (eq (second form) 'miricl::*loop-library*))
+                          return (second (third (third form))))))))
+        (unless source (error "Missing target LOOP source."))
+        (setf *bootstrap-loop-expander* (bootstrap-source-constructor source 'miricl::%expand-loop)))))
+
+(defun prepare-bootstrap-source-adapters ()
+  "Provide the target lambda-list constructor required by host HIR lowering."
+  (unless (fboundp 'miricl::%normalize-lambda)
+    (let* ((names '(miricl::%quote miricl::%keyword miricl::%normalize-lambda miricl::%normalize-lambda-1))
+           (source
+             (with-open-file (stream (asdf:system-relative-pathname :miricl/cross "clos-library.lisp"))
+               (let ((*package* (find-package :miricl)) (*read-eval* nil))
+                 (loop for form = (read stream nil stream) until (eq form stream)
+                       when (and (consp form) (eq (first form) 'defun) (member (second form) names))
+                         collect form)))))
+      (unless (= (length source) (length names)) (error "Missing target lambda-list constructor source."))
+      ;; Source validation already established the lambda/body spines. This
+      ;; constructor only asks %%TAG whether a body element is a cons.
+      (setf (fdefinition 'miricl::%normalize-lambda)
+        (bootstrap-source-constructor source 'miricl::%normalize-lambda
+          (list (cons 'miricl::%%tag (lambda (object) (if (consp object) 7 0)))
+                (cons 'miricl::%member (lambda (item list) (member item list :test #'eq))))))))
+  (unless *bootstrap-destructuring-expander*
+    (let* ((names '(miricl::%function-body miricl::%destructure-lambda
+                    miricl::%destructuring-form miricl::%macro-lambda))
+           (source (with-open-file (stream (asdf:system-relative-pathname :miricl/cross "development-library.lisp"))
+                     (let ((*package* (find-package :miricl)) (*read-eval* nil))
+                       (loop for form = (read stream nil stream) until (eq form stream)
+                         when (and (consp form) (eq (first form) 'defun) (member (second form) names))
+                           collect form))))
+           (adapters (list (cons 'miricl::%member (lambda (item list) (member item list :test #'eq))))))
+      (unless (= (length source) (length names)) (error "Missing target destructuring constructor source."))
+      (setf *bootstrap-destructuring-expander*
+              (bootstrap-source-constructor source 'miricl::%destructuring-form adapters)
+            *bootstrap-macro-lambda-constructor*
+              (bootstrap-source-constructor source 'miricl::%macro-lambda adapters))))
+  (values))
+
+(defun bootstrap-place-expansion (place environment)
+  "Return the target setter protocol for the bootstrap's portable places.
+Do not use host GET-SETF-EXPANSION, which may expose host private functions."
+  (cond
+    ((symbolp place)
+     (miricl-compiler::compiler-variable-name place "bootstrap SETF place")
+     (let ((store (gensym "STORE")))
+       (values nil nil (list store) `(setq ,place ,store) place)))
+    ((and (consp place) (symbolp (car place))
+          (get (car place) 'miricl::runtime-inline-macro)
+          (macro-function (car place)))
+     (bootstrap-place-expansion (funcall (macro-function (car place)) place environment) environment))
+    ((and (consp place) (member (car place)
+           '(car cdr caar cadr cdar cddr caaar caadr cadar caddr cdaar cdadr cddar cdddr
+             first second third fourth fifth sixth seventh eighth ninth tenth rest
+             svref aref row-major-aref elt char schar gethash get symbol-value symbol-plist
+             symbol-function fdefinition fill-pointer)))
+     (miricl-compiler::compiler-list-length place "bootstrap SETF place")
+     (let ((temporaries (mapcar (lambda (form) (declare (ignore form)) (gensym "PLACE")) (cdr place)))
+           (store (gensym "STORE")))
+       (values temporaries (cdr place) (list store)
+         `(funcall #',(list 'setf (car place)) ,store ,@temporaries)
+         (cons (car place) temporaries))))
+    (t (miricl-compiler::compiler-input-fail "bootstrap SETF place" place
+         "no explicit target place adapter is registered"))))
+
+(defun bootstrap-modify-place (place environment writer)
+  (multiple-value-bind (temporaries forms stores write read) (bootstrap-place-expansion place environment)
+    (funcall writer temporaries forms (car stores) write read)))
+
+(defun bootstrap-macro-syntax (form)
+  ;; Constructors also inspect binding patterns and clause lists, beyond the
+  ;; executable-form boundary. Quoted objects remain opaque literal data.
+  (let ((seen (make-hash-table :test 'eq)) (work (list (cons form nil))))
+    (loop while work for job = (pop work) for object = (car job) when (consp object) do
+      (cond ((cdr job) (setf (gethash object seen) :done))
+            ((eq (gethash object seen) :active)
+             (miricl-compiler::compiler-input-fail "bootstrap macro syntax" form "circular syntax"))
+            ((not (gethash object seen))
+             (setf (gethash object seen) :active)
+             (push (cons object t) work)
+             (unless (eq (car object) 'quote)
+               (push (cons (cdr object) nil) work)
+               (push (cons (car object) nil) work)))))))
+
+(defun bootstrap-macroexpand-hook (expander form environment)
+  "Explicit target macro adapter for building the shared frontend on the host.
+Uses shared target constructors and core CL forms; never invokes a host CL macro."
+  (let* ((operator (and (consp form) (car form)))
+         (size (miricl-compiler::compiler-list-length form "bootstrap macro form"))
+         (bounds (case operator
+                   ((when unless dolist dotimes prog1) '(2))
+                   ((do do* prog2) '(3))
+                   ((incf decf) '(2 3))
+                   (push '(3 3)) (pop '(2 2))
+                   (return '(1 2)) (loop-finish '(1 1)))))
+    (bootstrap-macro-syntax form)
+    (unless (or (not bounds)
+                (and (>= size (first bounds)) (or (not (second bounds)) (<= size (second bounds)))))
+      (miricl-compiler::compiler-input-fail "bootstrap macro form" form "invalid argument count"))
+    (case operator
+      (destructuring-bind
+       (miricl-compiler::compiler-list-length form "bootstrap DESTRUCTURING-BIND")
+       (unless (cddr form) (miricl-compiler::compiler-input-fail "bootstrap DESTRUCTURING-BIND" form "missing value form"))
+       (apply *bootstrap-destructuring-expander* (cdr form)))
+      ((and or) (miricl-runtime:expand-logical-form form))
+      ((when unless cond)
+       (miricl-runtime::expand-conditional-form form (position operator '(when unless cond))))
+      ((multiple-value-list nth-value) (miricl-runtime::expand-values-form form))
+      ((dolist dotimes)
+       (let* ((spec (second form))
+              (size (miricl-compiler::compiler-list-length spec "bootstrap iteration binding")))
+         (unless (<= 2 size 3)
+           (miricl-compiler::compiler-input-fail "bootstrap iteration binding" spec
+             "expected (variable source [result])"))
+         (miricl-compiler::compiler-variable-name (first spec) "bootstrap iteration variable")
+         (miricl-runtime::expand-iteration-form (first spec) (second spec) (third spec)
+           (vector (cddr form) (if (eq operator 'dotimes) 1 0) 'miricl::%%while 'miricl::%%symbol-iterate))))
+      ((do do*)
+       (miricl-compiler::compiler-list-length (second form) "bootstrap DO bindings")
+       (dolist (binding (second form))
+         (if (symbolp binding)
+             (miricl-compiler::compiler-variable-name binding "bootstrap DO variable")
+             (progn
+               (unless (<= 1 (miricl-compiler::compiler-list-length binding "bootstrap DO binding") 3)
+                 (miricl-compiler::compiler-input-fail "bootstrap DO binding" binding
+                   "expected a variable, optional initializer and optional step"))
+               (miricl-compiler::compiler-variable-name (first binding) "bootstrap DO variable"))))
+       (unless (plusp (miricl-compiler::compiler-list-length (third form) "bootstrap DO end clause"))
+         (miricl-compiler::compiler-input-fail "bootstrap DO end clause" (third form) "missing end test"))
+       (miricl-runtime:expand-do-form form (eq operator 'do*) 'miricl::%%while))
+      (loop (funcall (bootstrap-loop-expander) (cdr form)))
+      (loop-finish '(return-from miricl::%finish nil))
+      (return (list 'return-from nil (second form)))
+      (prog1 (let ((value (gensym))) `(let ((,value ,(second form))) ,@(cddr form) ,value)))
+      (prog2 `(progn ,(second form) (prog1 ,@(cddr form))))
+      (psetq
+       (let ((bindings nil) (writes nil) (pairs (cdr form)))
+         (unless (evenp (length pairs)) (error 'program-error))
+         (loop for (name value) on pairs by #'cddr for temporary = (gensym) do
+           (miricl-compiler::compiler-variable-name name "bootstrap PSETQ variable")
+           (push (list temporary value) bindings) (push `(setq ,name ,temporary) writes))
+         `(let ,(nreverse bindings) ,@(nreverse writes) nil)))
+      (setf
+       (unless (evenp (length (cdr form))) (error 'program-error))
+       (if (null (cdr form)) nil
+           (if (cdddr form)
+               `(progn ,@(loop for (place value) on (cdr form) by #'cddr collect `(setf ,place ,value)))
+               (bootstrap-modify-place (second form) environment
+                 (lambda (temporaries forms store write read)
+                   (declare (ignore read))
+                   `(let* ,(mapcar #'list temporaries forms)
+                      (let ((,store ,(third form))) ,write)))))))
+      ((incf decf)
+       (bootstrap-modify-place (second form) environment
+         (lambda (temporaries forms store write read)
+           (let ((delta (gensym)))
+             `(let* ,(append (mapcar #'list temporaries forms)
+                       (list (list delta (if (cddr form) (third form) 1))
+                             (list store (list (if (eq operator 'incf) '+ '-) read delta))))
+                ,write)))))
+      (push
+       (bootstrap-modify-place (third form) environment
+         (lambda (temporaries forms store write read)
+           (let ((value (gensym)))
+             `(let* ,(append (list (list value (second form))) (mapcar #'list temporaries forms)
+                       (list (list store (list 'cons value read)))) ,write)))))
+      (pop
+       (bootstrap-modify-place (second form) environment
+         (lambda (temporaries forms store write read)
+           (let ((old (gensym)))
+             `(let* ,(append (mapcar #'list temporaries forms)
+                       (list (list old read) (list store (list 'cdr old)))) ,write (car ,old))))))
+      (otherwise
+       ;; These definitions are shared project source, not implementation CL
+       ;; expanders. Record macros explicitly mark their portable expansions.
+       (if (or (get operator 'miricl::runtime-inline-macro)
+               (member operator '(miricl-compiler:with-compilation-statistics miricl-compiler::compiler-statistic)))
+           (funcall expander form environment)
+           (require-target-macro-expansion expander form environment))))))
+
 (defun compile-lambda (source &key name global-specials
                                  (macroexpand-hook #'require-target-macro-expansion)
                                  (load-time-evaluator #'require-target-load-time-evaluation))
@@ -23,6 +246,7 @@ MACROEXPAND-HOOK; host implementation macros are rejected by default. Target
 global special bindings are supplied through GLOBAL-SPECIALS, not host state.
 LOAD-TIME-VALUE requires an explicit target LOAD-TIME-EVALUATOR.
 No compiler is bootstrapped in Wasm, and no guest function bindings are changed."
+  (when (eq macroexpand-hook #'bootstrap-macroexpand-hook) (prepare-bootstrap-source-adapters))
   (let ((miricl-compiler::*compiler-state* :interpreted)
         (miricl-compiler::*hir-load-time-evaluator*
           (or load-time-evaluator #'require-target-load-time-evaluation))
@@ -30,21 +254,24 @@ No compiler is bootstrapped in Wasm, and no guest function bindings are changed.
     (miricl-compiler:emit-native-module
       (miricl-compiler:compile-to-hir source :name name :global-specials global-specials))))
 
-(defun compile-module (definitions &key (entry-points nil entriesp) (inline t)
+(defun compile-module (definitions &key (entry-points nil entriesp) (inline t) global-specials
                                        (macroexpand-hook #'require-target-macro-expansion)
                                        (load-time-evaluator #'require-target-load-time-evaluation))
   "Cross-compile a closed DEFUN group; return Wasm bytes, literals, debug and HIR.
 Only ENTRY-POINTS escape; omitted ENTRY-POINTS exposes every supplied definition.
 Macro expansion and load-time evaluation have the same explicit target contract
-as COMPILE-LAMBDA."
+as COMPILE-LAMBDA. GLOBAL-SPECIALS supplies target global special declarations;
+host proclamations are not target declarations."
+  (when (eq macroexpand-hook #'bootstrap-macroexpand-hook) (prepare-bootstrap-source-adapters))
   (let ((miricl-compiler::*compiler-state* :interpreted)
         (miricl-compiler::*hir-load-time-evaluator*
           (or load-time-evaluator #'require-target-load-time-evaluation))
         (*macroexpand-hook* macroexpand-hook))
     (let ((unit (if entriesp
                     (miricl-compiler:compile-module-to-hir definitions
-                      :entry-points entry-points :inline inline)
-                    (miricl-compiler:compile-module-to-hir definitions :inline inline))))
+                      :entry-points entry-points :inline inline :global-specials global-specials)
+                    (miricl-compiler:compile-module-to-hir definitions :inline inline
+                      :global-specials global-specials))))
       (multiple-value-bind (bytes literals debug) (miricl-compiler:emit-native-module unit)
         (values bytes literals debug unit)))))
 

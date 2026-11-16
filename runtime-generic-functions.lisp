@@ -4,11 +4,9 @@
 
 (define-runtime-function $generic-discriminator (($gf :nullable-object) ($function :nullable-object)) (:object)
   (wat-fail-when #@(i32.ne (call $tag (local.get $function)) (i32.const 8)) :malformed-form)
-  (wat-fail-when #@(call $value-n (local.get $function)) :malformed-form)
   #@(struct.new $generic-discriminator (call $allocate-object-tag (i32.const 8)) (i32.const 0)
-    (struct.get $obj $f (ref.cast (ref $obj) (local.get $function))) (struct.get $obj $digits (ref.cast (ref $obj) (local.get $function)))
-    (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))) (struct.get $obj $b (ref.cast (ref $obj) (local.get $function)))
-    (struct.get $obj $c (ref.cast (ref $obj) (local.get $function))) (local.get $gf)))
+    (struct.get $obj $f (ref.cast (ref $obj) (local.get $function))) (ref.null $digits)
+    (local.get $function) (ref.null eq) (ref.null eq) (local.get $gf)))
 
 (defparameter *generic-property-cache-keys*
   '(:discriminating-function :cache :lambda-list :methods :cache-protocol :name :eql-dispatch-profile :cache-token))
@@ -848,7 +846,8 @@
            ($specialized :nullable-object) ($probe i32))
   #@(local.set $probe (ref.is_null (local.get $function)))
   #@(if (local.get $probe)
-    (then (local.set $function (call $closure (ref.null eq) (ref.null eq) (ref.null eq)))))
+    ;; This is an inert descriptor base, immediately wrapped by direct dispatch.
+    (then (local.set $function (call $node (i32.const 8) (i32.const 0) (ref.null eq) (ref.null eq) (ref.null eq)))))
   #@(block $ordinary
     (br_if $ordinary (i32.ne (call $operator (local.get $form)) (i32.const ,(runtime-symbol-id 'call-method))))
     (br_if $ordinary (i32.eqz (ref.is_null (call $cdr (call $cdr (call $cdr (local.get $form)))))))

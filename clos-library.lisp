@@ -222,7 +222,10 @@
   (setf (%get super :direct-subclasses) (%remove sub (%get super :direct-subclasses))) nil)
 (defun %instancep (object class) (%%instance-type-p object class))
 (defun type-of (object)
-  (cond ((compiled-function-p object) 'compiled-function)
+  ;; Compiled callability does not replace a funcallable object's class.
+  ;; In particular generic functions must retain their recognizable class type.
+  (cond ((and (compiled-function-p object) (eq (class-of object) (find-class 'function)))
+         'compiled-function)
         ((eq object t) 'boolean)
         ((keywordp object) 'keyword)
         ((and (characterp object) (standard-char-p object)) 'standard-char)
@@ -354,6 +357,12 @@
   (let ((ca (if (%classp a) a (and (symbolp a) (find-class a nil))))
         (cb (if (%classp b) b (and (symbolp b) (find-class b nil)))))
     (when (and ca cb) (return-from subtypep (values (%subclassp ca cb) t)))
+    ;; ALLOCATE-INSTANCE represents these classes with the native callable
+    ;; dispatcher, independently of whether their methods are interpreted.
+    (when (and ca (eq b 'compiled-function)
+               (or (%subclassp ca (find-class 'generic-function))
+                   (%subclassp (class-of ca) (find-class 'funcallable-standard-class))))
+      (return-from subtypep (values t t)))
     (when (and ca (null b)) (return-from subtypep (values nil t)))
     (when (and ca (eq b 'atom))
       (return-from subtypep (values (not (%subclassp (find-class 'cons) ca)) t)))
@@ -1203,6 +1212,13 @@
             (list '%%nthcdr (+ (car profile) (cadr profile)) '%effective-args)
             (%quote allowed) (not (not allow))) form)
           form))))
+(defun %interpret-generated-function (form)
+  ;; The HIR compiler needs no native loader, including during compilation of
+  ;; an effective method. Only the earliest source bootstrap lacks it.
+  (if (fboundp 'miricl-compiler::compile-hir-in-environment)
+      (let ((%compiling-effective-function t))
+        (miricl-compiler::compile-hir-in-environment form nil))
+      (%%eval form)))
 (defun %compile-generated-function (form)
   ;; Constructors and effective methods can generate executable functions
   ;; after startup. Use the ready compiler without bootstrapping or recursively
@@ -1213,9 +1229,9 @@
            (miricl-compiler::compiler-primitive 21 nil))
       (let ((%compiling-effective-function t))
         (miricl-compiler:compile-native form))
-      (%%eval form)))
+      (%interpret-generated-function form)))
 (defun %compile-effective-function (gf form)
-  (if (%dispatch-cache-permitted-p gf) (%compile-generated-function form) (%%eval form)))
+  (if (%dispatch-cache-permitted-p gf) (%compile-generated-function form) (%interpret-generated-function form)))
 (defun %make-effective-function (gf methods args)
   (let* ((form (compute-effective-method gf (%get gf :method-combination) methods))
          (function (%%property-effective nil form gf args)))

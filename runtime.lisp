@@ -3,7 +3,7 @@
 (named-readtables:in-readtable :miricl-wat)
 
 (defun interpreter-wat (&key wasi (compiler t))
-  (let* ((*include-compiler* compiler)
+  (let* ((*include-compiler* compiler) (*source-bootstrap-p* t)
          (*native-compiler-image* (and compiler *native-compiler-image*))
          (*clos-library* (if compiler *clos-library* *interpreter-library*))
          (*clos-library-symbols* (if compiler *clos-library-symbols* (clos-library-symbols *clos-library*)))
@@ -111,4 +111,5 @@
                                 :reserved-functions (if wasi 7 2)
                                 :references (first *native-compiler-image*))
       ,@(unless wasi (list (core-image-runtime-wat)))
+
       ,(wat-fragment (if *native-compiler-image* (first *native-compiler-image*) "")))))

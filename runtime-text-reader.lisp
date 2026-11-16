@@ -549,7 +549,7 @@
             (if (i32.or (global.get $text-status) (global.get $source-suppress)) (then (return (ref.null eq))))
             ,(wat-fail-when #@(ref.is_null (call $symbol-value
               (call $symbol (i32.const ,(runtime-symbol-id '*read-eval*))))) :reader-syntax)
-            (return (call $eval (local.get $value) (ref.null eq)))))
+            (return (call $evaluate-form (local.get $value)))))
         (if (i32.eq (local.get $c) (i32.const 80))
           (then (local.set $value (call $source-form))
             (if (i32.or (global.get $text-status) (global.get $source-suppress)) (then (return (ref.null eq))))

@@ -271,6 +271,18 @@
   #@(if (i32.ne (call $tag (local.get $function)) (i32.const 8))
     (then (call $type-fail (local.get $function) (call $symbol (i32.const ,(runtime-symbol-id 'function)))
       (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(if (i32.or (ref.test (ref $direct-function) (local.get $function))
+               (ref.test (ref $generic-discriminator) (local.get $function)))
+    (then
+      (if (ref.test (ref $direct-function) (local.get $function))
+        (then (if (i32.ge_u (struct.get $direct-function $mode
+            (ref.cast (ref $direct-function) (local.get $function))) (i32.const 17))
+          (then (return_call $function-documentation
+            (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $function)))
+            (local.get $value) (local.get $write))))))
+      (return_call $function-documentation
+        (struct.get $obj $a (ref.cast (ref $obj) (local.get $function)))
+        (local.get $value) (local.get $write))))
   #@(if (local.get $write)
     (then (if (i32.and (i32.eqz (ref.is_null (local.get $value)))
                       (i32.eqz (call $stringp-native (local.get $value))))
@@ -306,11 +318,16 @@
   #@(if (i32.ne (call $tag (local.get $function)) (i32.const 8))
     (then (call $type-fail (local.get $function) (call $symbol (i32.const ,(runtime-symbol-id 'function)))
       (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(if (ref.test (ref $direct-function) (local.get $function))
-    (then (if (i32.ge_u (struct.get $direct-function $mode
+  #@(if (i32.or (ref.test (ref $direct-function) (local.get $function))
+               (ref.test (ref $generic-discriminator) (local.get $function)))
+    (then
+      (if (ref.test (ref $direct-function) (local.get $function))
+        (then (if (i32.ge_u (struct.get $direct-function $mode
             (ref.cast (ref $direct-function) (local.get $function))) (i32.const 17))
-      (then (return_call $function-lambda-expression-native
-        (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $function))))))))
+          (then (return_call $function-lambda-expression-native
+            (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $function))))))))
+      (return_call $function-lambda-expression-native
+        (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))))))
   #@(if (ref.test (ref $native-function) (local.get $function))
     (then (return (call $three-values (ref.null eq) (call $symbol (i32.const 1))
       (struct.get $obj $c (ref.cast (ref $obj) (local.get $function)))))))

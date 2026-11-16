@@ -2,6 +2,9 @@
 (in-package #:miricl)
 
 (defvar *include-compiler* t)
+;; Source evaluation bootstraps the compiler before the HIR frontend is ready.
+;; Source parsing and packed-library decoding are independent of execution.
+(defvar *source-bootstrap-p* t)
 
 ;; Shared with evaluator shortcuts that recognize captured native expanders.
 ;; Reserve room for native private services below the special function tags.

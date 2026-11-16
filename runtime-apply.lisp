@@ -74,6 +74,27 @@
   #@(local.set $spread (call $spread-arguments (local.get $args)))
   #@(return_call $apply (call $car (local.get $args)) (local.get $spread)))
 
+(define-runtime-function $apply-source (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
+  (:locals ($params :nullable-object) ($env :nullable-object))
+  #@(block (result (ref null eq))
+        (local.set $params (struct.get $obj $a (ref.cast (ref $obj) (local.get $name))))
+        (local.set $env (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))
+        (block $done (loop $next
+          (br_if $done (ref.is_null (local.get $params)))
+          (if (i32.eq (call $id (call $car (local.get $params))) (i32.const ,(runtime-symbol-id '&rest)))
+            (then
+              (local.set $env (call $bind (local.get $env) (call $car (call $cdr (local.get $params))) (local.get $args)))
+              (local.set $args (ref.null eq)) (br $done)))
+          ,(wat-fail-when #@(ref.is_null (local.get $args)) :wrong-arity)
+          (local.set $env (call $bind (local.get $env) (call $car (local.get $params)) (call $car (local.get $args))))
+          (local.set $args (call $cdr (local.get $args)))
+          (local.set $params (call $cdr (local.get $params))) (br $next)))
+        ,(wat-fail-when #@(i32.eqz (ref.is_null (local.get $args))) :wrong-arity)
+        (call $activate-bindings (local.get $env) (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))
+        (local.set $args (struct.get $obj $b (ref.cast (ref $obj) (local.get $name))))
+        (return_call $body (local.get $args) (local.get $env) (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))
+  ))
+
 (define-runtime-function $apply1
     (($name :nullable-object) ($args :nullable-object))
     (:nullable-object)
@@ -116,8 +137,11 @@
   #@(if (i32.eq (local.get $code) (i32.const 2147483644))
     (then (if (i32.eqz (ref.is_null (struct.get $obj $b (ref.cast (ref $obj) (local.get $name)))))
         (then ,(wat-arity 2)
-          (call $arity (call $cdr (call $car (local.get $args))) (i32.const 0) (i32.const 0))))
+          (if (i32.eq (call $natural-count (struct.get $obj $b (ref.cast (ref $obj) (local.get $name)))) (i32.const 1))
+            (then (call $arity (call $cdr (call $car (local.get $args))) (i32.const 0) (i32.const 0))))))
       (return (struct.get $obj $a (ref.cast (ref $obj) (local.get $name))))))
+  ;; A current-format FASL function shell is not callable until initialization.
+  #@(if (i32.eq (local.get $code) (i32.const 2147483640)) (then ,(wat-fail :malformed-form)))
   #@(if (i32.and (i32.ge_u (local.get $code) (i32.const ,+clos-primitive-base+))
                  (i32.lt_u (local.get $code) (i32.const 2147483641)))
       (then (return (call $clos-primitive
@@ -195,22 +219,12 @@
         (if (ref.test (ref $direct-function) (local.get $name))
           (then (return (call $direct-function-call
             (ref.cast (ref $direct-function) (local.get $name)) (local.get $args)))))
-        (local.set $params (struct.get $obj $a (ref.cast (ref $obj) (local.get $name))))
-        (local.set $env (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))
-        (block $done (loop $next
-          (br_if $done (ref.is_null (local.get $params)))
-          (if (i32.eq (call $id (call $car (local.get $params))) (i32.const ,(runtime-symbol-id '&rest)))
-            (then
-              (local.set $env (call $bind (local.get $env) (call $car (call $cdr (local.get $params))) (local.get $args)))
-              (local.set $args (ref.null eq)) (br $done)))
-          ,(wat-fail-when #@(ref.is_null (local.get $args)) :wrong-arity)
-          (local.set $env (call $bind (local.get $env) (call $car (local.get $params)) (call $car (local.get $args))))
-          (local.set $args (call $cdr (local.get $args)))
-          (local.set $params (call $cdr (local.get $params))) (br $next)))
-        ,(wat-fail-when #@(i32.eqz (ref.is_null (local.get $args))) :wrong-arity)
-        (call $activate-bindings (local.get $env) (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))
-        (local.set $args (struct.get $obj $b (ref.cast (ref $obj) (local.get $name))))
-        (return_call $body (local.get $args) (local.get $env) (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))))
+        (if (ref.test (ref $generic-discriminator) (local.get $name))
+          (then (return_call $apply
+            (struct.get $obj $a (ref.cast (ref $obj) (local.get $name))) (local.get $args))))
+        ,(if *source-bootstrap-p*
+             '(return_call $apply-source (local.get $name) (local.get $args))
+             (wat-fail :malformed-form))))
   #@(if (i32.and (i32.ge_u (local.get $id) (i32.const ,(runtime-symbol-id 'make-package)))
                (i32.le_u (local.get $id) (i32.const ,(runtime-symbol-id 'values))))
       (then (return (call $package-apply (local.get $id) (local.get $args)))))
@@ -400,5 +414,6 @@
 
 (define-runtime-section apply-runtime-wat ()
   ($apply0)
+  (if *source-bootstrap-p* ($apply-source) "")
   ($spread-arguments) ($apply-spread)
   ($apply1))

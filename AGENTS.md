@@ -88,6 +88,16 @@ Add regression coverage for malformed input and recovery after rejection.
 
 # Performance
 
+On shared development machines, preserve ample memory and CPU headroom for
+interactive use. Check available memory and current resource use before
+starting heavy work, accounting for aggregate usage and peak memory across
+all agents and child Node, Wasm and browser processes. Size concurrent work
+to the measured resource budget and cap resources where supported; do not
+start additional workloads under resource pressure. Avoid duplicate full
+builds and compiler bootstraps. Keep persistent REPLs and reuse compiled
+payloads for fast iteration. Idle REPLs are not active workloads; do not
+close them or reload reusable state merely to reduce process counts.
+
 Keep the default precompiled browser image below 1 MiB (1,048,576 raw bytes). Track raw
 and compressed sizes separately; download compression does not replace this
 size budget. Preserve the compiler-free image for lightweight scripting.

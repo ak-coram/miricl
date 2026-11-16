@@ -389,14 +389,19 @@
 
 (named-readtables:in-readtable :miricl-wat)
 
-(define-runtime-function $initialize-loop () ()
-  (:locals ($names (ref $bootstrap-bytes)) ($forms :nullable-object) ($scan :nullable-object))
-  #@(call $reset-library-reader)
+(define-runtime-function $initialize-loop-symbols () ()
+  (:locals ($names (ref $bootstrap-bytes)))
+  #@(if (array.len (global.get $loop-library-symbols)) (then (return)))
   #@(local.set $names (array.new_data $bootstrap-bytes $loop-name-data
     (i32.const 0) (i32.const ,(length (bootstrap-private-symbol-bytes *loop-library-symbols*)))))
   #@(data.drop $loop-name-data)
   #@(global.set $loop-library-symbols (call $bootstrap-private-symbols
-    (local.get $names) (i32.const ,(length *loop-library-symbols*))))
+    (local.get $names) (i32.const ,(length *loop-library-symbols*)))))
+
+(define-runtime-function $initialize-loop () ()
+  (:locals ($forms :nullable-object) ($scan :nullable-object))
+  #@(call $initialize-loop-symbols)
+  #@(call $reset-library-reader)
   #@(global.set $cursor (i32.const 0))
   #@(global.set $limit (i32.const ,(length (loop-library-bytes))))
   #@(call $reserve (global.get $limit))
@@ -409,7 +414,7 @@
   #@(call $reset-library-reader)
   #@(local.set $scan (call $reverse-onto (local.get $forms) (ref.null eq) (i32.const 0)))
   (wat-list-loop ($scan)
-    #@(drop (call $eval (call $car (local.get $scan)) (ref.null eq))))
+    #@(drop (call $evaluate-in-environment (call $car (local.get $scan)) (ref.null eq))))
   #@(call $clear-values))
 
 (defun $loop-word-p-cl ()
@@ -707,11 +712,17 @@
       (call $cons (ref.null eq) (call $cons (local.get $form) (ref.null eq))) (local.get $env))))
   #@(call $eval (call $cached-loop-expansion (local.get $args)) (local.get $env)))
 
+(define-runtime-section source-loop-runtime-wat ()
+  ($loop-word-p-cl) ($loop-word-p) ($loop-source-copy-cl) ($loop-source-copy)
+  ($loop-source-equal) ($cached-loop-expansion)
+  ($eval-arithmetic-step) ($eval-list-test) ($eval-list-accumulate)
+  ($eval-numeric-collect) ($eval-loop))
+
 (define-runtime-section loop-runtime-wat ()
   #@(data $loop-name-data ,(runtime-library-data (bootstrap-private-symbol-bytes *loop-library-symbols*)))
   #@(data $loop-library-data ,(runtime-library-data (loop-library-bytes)))
   #@(global $loop-library-symbols (mut (ref $objects)) (array.new_default $objects (i32.const 0)))
   #@(global $loop-expansions (ref $objects) (array.new_default $objects (i32.const 32)))
   #@(global $loop-expansion-slot (mut i32) (i32.const 0))
-  ($initialize-loop) ($loop-word-p-cl) ($loop-word-p) ($loop-source-copy-cl) ($loop-source-copy) ($loop-source-equal) ($cached-loop-expansion)
-  ($eval-arithmetic-step) ($eval-list-test) ($eval-list-accumulate) ($eval-numeric-collect) ($loop-expansion) ($eval-loop))
+  ($initialize-loop-symbols) ($initialize-loop) ($loop-expansion)
+  (if *source-bootstrap-p* (source-loop-runtime-wat) ""))

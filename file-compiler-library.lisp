@@ -24,6 +24,7 @@
 (defvar %file-block-definitions nil)
 (defvar %file-block-forms nil)
 (defvar %file-block-complete t)
+(defvar %file-block-source-p nil)
 (define-condition %fasl-not-created (error) ())
 
 (defun %fasl-reference (object)
@@ -69,12 +70,77 @@
           (loop for value in values for i from 0
                 collect (if (logbitp i bound) (%fasl-reference value) -1)))))))
 
+(defun %fasl-function-record (object)
+  ;; Debug metadata can retain lexical macro functions. Preserve their shared
+  ;; captures and identity with ordinary graph edges, including recursive cells.
+  (let ((recipe (%%compile 49 object)))
+    (unless recipe
+      (when (and (not (compiled-function-p object))
+                 (fboundp 'miricl-compiler::compile-minimal-function))
+        (setq recipe (%%compile 49 (miricl-compiler::compile-minimal-function object nil)))))
+    (when recipe
+      (case (svref recipe 0)
+        (0 (list 12 0 (svref recipe 2) (%fasl-reference (svref recipe 1))
+                 (%fasl-reference (svref recipe 3)) (%fasl-reference (svref recipe 4))))
+        (1 (list 12 1 (svref recipe 2) (%fasl-reference (svref recipe 1))
+                 -1 (%fasl-reference (svref recipe 3))))
+        (otherwise (error "Invalid function externalization recipe."))))))
+
+(defun %fasl-load-function (index record)
+  (unless (and (= (miricl-compiler::compiler-list-length record "function record") 6)
+               (member (second record) '(0 1))
+               (or (zerop (second record)) (= (fifth record) -1)))
+    (error "Invalid compiled function record."))
+  (let ((function (%%compile 50 0 (vector (second record) (third record)) nil)))
+    ;; Reserve the function before descending into captures. The shell rejects
+    ;; calls until validated code, captures and documentation have been installed.
+    (setf (aref %fasl-values index) function (aref %fasl-states index) 3)
+    (%%compile 50 1 function
+      (if (zerop (second record))
+          (vector 0 (%fasl-object (fourth record)) (third record)
+                  (%fasl-object (fifth record)) (%fasl-object (sixth record)))
+          (vector 1 (%fasl-object (fourth record)) (third record) (%fasl-object (sixth record)))))
+    function))
+
+(defun %fasl-hir-initializer (form &optional environment source-p)
+  (let ((miricl-compiler::*compiling-evaluation* t)
+        (miricl-compiler::*hir-debug-info-enabled* t)
+        (miricl-compiler::*hir-debug-write-types* t)
+        (miricl-compiler::*hir-load-time-evaluator*
+          (when source-p
+            (lambda (form)
+              (let ((marker (gensym)))
+                (setf (gethash marker %file-load-values) (list (%compile-form form nil)))
+                marker)))))
+    (vector :hir (miricl-compiler:emit-hir-code
+      (if source-p
+          (miricl-compiler::lower-source-to-hir (list 'lambda nil form) nil nil environment)
+          (miricl-compiler:compile-to-hir (list 'lambda nil form)))))))
+
+(defun %execute-fasl-initializer (initializer)
+  (unless (and (simple-vector-p initializer) (plusp (length initializer)))
+    (error "Invalid compiled initializer."))
+  (case (svref initializer 0)
+    (:hir
+     (unless (= (length initializer) 2) (error "Invalid HIR initializer."))
+     (funcall (miricl-compiler:load-hir-code (svref initializer 1))))
+    (:native
+     (unless (= (length initializer) 5) (error "Invalid native initializer."))
+     (let ((function (%%compile 17 (svref initializer 1) (svref initializer 2) nil))
+           (debug (svref initializer 3)))
+       (when debug (setq function (%%compile 34 function debug (svref initializer 4))))
+       (funcall function)))
+    (otherwise (error "Unknown compiled initializer kind."))))
+
 (defun %fasl-dump (object)
   ;; Reserve graph references before encoding their contents. A worklist keeps
   ;; large constants independent of the host's control-stack depth.
   (let* ((%fasl-work nil) (root (%fasl-reference object)))
     (loop while %fasl-work do
-      (let* ((index (pop %fasl-work)) (object (aref %fasl-records index)))
+      (let* ((index (pop %fasl-work)) (object (aref %fasl-records index))
+             (function-record (and (functionp object)
+               (not (and %file-load-values (gethash object %file-load-values)))
+               (%fasl-function-record object))))
         (setf (aref %fasl-records index)
           (cond
             ((and %file-load-values (gethash object %file-load-values))
@@ -82,12 +148,17 @@
              ;; These forms run while reconstructing constants even when the
              ;; surrounding local function is never called. Their dependencies
              ;; belong to object creation, independently of code reachability.
-             (when (and %file-collect-object-references (fboundp 'miricl-compiler::form-references))
+             (when (and %file-collect-object-references (fboundp 'miricl-compiler::form-references)
+                        (not (simple-vector-p (car (gethash object %file-load-values)))))
                (multiple-value-bind (references barriers)
                    (miricl-compiler::form-references (car (gethash object %file-load-values)) %file-load-values)
                  (setq %file-object-references (union references %file-object-references :test #'equal)
                        %file-object-barriers (union barriers %file-object-barriers :test #'equal))))
-             (list 10 (%fasl-reference (car (gethash object %file-load-values)))))
+             (list 10 (%fasl-reference (let ((recipe (car (gethash object %file-load-values))))
+               (if (and (simple-vector-p recipe) (plusp (length recipe))
+                        (member (svref recipe 0) '(:hir :native)))
+                   recipe (%fasl-hir-initializer recipe))))))
+            (function-record function-record)
             ((null object) '(0))
             ;; Most compiler objects are conses. Handle them before the
             ;; less common numeric, character and string type checks.
@@ -99,8 +170,8 @@
              ;; Nonfinite IEEE values have no ANSI reader syntax. Reconstruct
              ;; their bits through the existing load-time-value record, keeping
              ;; ordinary numeric records and the portable FASL format intact.
-             (list 10 (%fasl-reference
-               (list 'bits-float (float-bits object) (if (typep object 'single-float) 0f0 0d0)))))
+             (list 10 (%fasl-reference (%fasl-hir-initializer
+               (list 'bits-float (float-bits object) (if (typep object 'single-float) 0f0 0d0))))))
             ((numberp object) (let ((*read-default-float-format* 'single-float))
                                (list 1 (write-to-string object :readably t :base 10 :radix nil))))
             ((characterp object) (list 2 (char-code object)))
@@ -138,7 +209,8 @@
                          (miricl-compiler::form-references (list 'progn creation initialization) %file-load-values)
                        (setq %file-object-references (union references %file-object-references :test #'equal)
                              %file-object-barriers (union barriers %file-object-barriers :test #'equal))))
-                   (list 9 (%fasl-reference creation) (%fasl-reference initialization)))))))))))
+                   (list 9 (%fasl-reference (%fasl-hir-initializer creation))
+                           (%fasl-reference (%fasl-hir-initializer initialization))))))))))))
     root))
 
 ;; Collect instance references before constructing an initialization form.
@@ -169,7 +241,7 @@
                 (dolist (dependency (%fasl-dependencies (third record) t)) (%fasl-object dependency))
         ;; Like FASL top-level forms, these recipes have already passed the
         ;; file compiler. Execute them without compiling them again via EVAL.
-                (%%eval (%fasl-object (third record))))))
+                (%execute-fasl-initializer (%fasl-object (third record))))))
         (setf (aref %fasl-states index) 4))
       (%fasl-not-created () (setf (aref %fasl-states index) 2) (pushnew index %fasl-pending)))))
 (defun %fasl-object (index) (%%compile 27 index))
@@ -213,9 +285,10 @@
              (error "Invalid saved slot reference."))
            (setf (aref %fasl-values index) value (aref %fasl-states index) 2)
            (%fasl-initialize index) value))
+        (12 (%fasl-load-function index record))
         ((9 10)
          (dolist (dependency (%fasl-dependencies (cadr record))) (%fasl-object dependency))
-         (let ((value (%%eval (%fasl-object (cadr record)))))
+         (let ((value (%execute-fasl-initializer (%fasl-object (cadr record)))))
            (setf (aref %fasl-values index) value (aref %fasl-states index) 2)
            (if (= (car record) 9) (%fasl-initialize index) (setf (aref %fasl-states index) 4)) value))
         (otherwise (error "Invalid compiled object kind."))))
@@ -243,17 +316,11 @@
                   ((consp object) (push (cdr object) work) (push (car object) work))))))
       (nreverse markers))))
 
-(defun %file-emit-body (body complete)
+(defun %file-emit-body (body complete &optional environment source-p)
   (let* ((%file-object-references nil) (%file-object-barriers nil) (%file-object-effects nil)
          (load-values (%file-load-value-markers body))
          (body (if complete (%file-lexical-form body nil nil nil nil) body))
-         (hir (miricl-compiler:compile-to-hir (list 'lambda nil body)))
-         (root (%fasl-dump
-           (if (some (lambda (function) (= (miricl-compiler::hir-function-debug-level function) 3))
-                     (miricl-compiler:hir-unit-functions hir))
-               body
-               (list 'funcall (list 'miricl-compiler:load-hir-code
-                 (list 'quote (miricl-compiler:emit-hir-code hir))))))))
+         (root (%fasl-dump (%fasl-hir-initializer body environment source-p))))
     (dolist (marker load-values)
       (unless (nth-value 1 (gethash marker %fasl-seen))
         ;; A separate initializer returns the value so both portable and native
@@ -278,8 +345,10 @@
 (defun %file-block-flush ()
   (let ((definitions (nreverse %file-block-definitions))
         (forms (nreverse %file-block-forms))
-        (entries %file-block-entries) (complete %file-block-complete))
-    (setq %file-block-definitions nil %file-block-forms nil %file-block-complete t)
+        (entries %file-block-entries) (complete %file-block-complete)
+        (source-p %file-block-source-p))
+    (setq %file-block-definitions nil %file-block-forms nil %file-block-complete t
+          %file-block-source-p nil)
     (dolist (entry entries)
       (unless (assoc entry definitions :test #'equal)
         (miricl-compiler::compiler-input-fail "block entry point" entry "no definition in this block")))
@@ -287,7 +356,7 @@
       ;; The block is one indivisible initializer in the file IR. The existing
       ;; LABELS lowering owns escape analysis, calls, argument checks and types.
       (let ((%file-definition nil))
-        (%file-emit-body (list* 'labels definitions forms) complete)))))
+        (%file-emit-body (list* 'labels definitions forms) (and complete (not source-p)) nil source-p)))))
 
 (defun %file-block-declaration (spec)
   (when (and %file-compiling %file-block-mode)
@@ -315,12 +384,17 @@
       (loop while (and (consp (car body)) (eq (caar body) 'declare)) do
         (push (pop body) declarations))
       (let* ((%compilation-complete t)
-             (parts (%compile-lambda-parts (third form)
-                      (append (list (list 'declare (list 'optimize
+             (body (append (list (list 'declare (list 'optimize
                                        (list 'debug %debug-default-level) (list 'safety %safety-default-level))))
                         %file-top-declarations (nreverse declarations)
-                        (list (list* 'block (if (consp name) (second name) name) body))) environment)))
-        (push (if %compilation-complete (%%compile 2 name parts) (cons name parts)) %file-block-definitions)
+                        (list (list* 'block (if (consp name) (second name) name) body))))
+             (source-p (%debug-form-p (list* 'lambda (third form) body)))
+             ;; Debug lowering needs the original lexical names and macro
+             ;; bindings. Prepared siblings keep their resolved call markers.
+             (parts (if source-p (cons (third form) body)
+                        (%compile-lambda-parts (third form) body environment))))
+        (when source-p (setq %file-block-source-p t))
+        (push (if (and %compilation-complete (not source-p)) (%%compile 2 name parts) (cons name parts)) %file-block-definitions)
         (setq %file-block-complete (and %file-block-complete %compilation-complete)))
       (when (or (null %file-block-entries) (member name %file-block-entries :test #'equal))
         (push (%compile-form (list 'setf (list 'fdefinition (list 'quote name))
@@ -403,13 +477,20 @@
       (otherwise
         (when compile-time-too (%%compile 7 environment form))
         (let ((%compilation-complete t))
-          (let ((compiled (%compile-form form environment)))
+          (let* ((source-p (or (eql %debug-default-level 3)
+                              (%debug-form-p (cons 'locally (append %file-top-declarations (list form))))))
+                 (compiled (if source-p form (%compile-form form environment))))
             (let ((body (if %file-top-declarations
                          (cons 'locally (append %file-top-declarations (list compiled))) compiled)))
               (if (and %file-block-active %file-block-definitions)
                   (progn (push body %file-block-forms)
+                         (when (and source-p environment)
+                           (unless miricl-compiler::*hir-source-environments*
+                             (setq miricl-compiler::*hir-source-environments* (make-hash-table :test 'eq)))
+                           (setf (gethash body miricl-compiler::*hir-source-environments*) environment))
+                         (when source-p (setq %file-block-source-p t))
                          (setq %file-block-complete (and %file-block-complete %compilation-complete)))
-                  (%file-emit-body body %compilation-complete)))))))))
+                  (%file-emit-body body (and %compilation-complete (not source-p)) environment source-p)))))))))
 
 (defun %fasl-write (path roots records &optional metadata)
   (with-open-file (stream path :direction :output :element-type '(unsigned-byte 8) :if-exists :supersede)
@@ -463,6 +544,7 @@
 
 (defun compile-file (input-file &key (output-file nil outputp) (verbose *compile-verbose*) (print *compile-print*) (external-format :default)
                                    (block-compile miricl-compiler:*block-compile-default*) entry-points)
+  (let ((miricl-compiler::*compiling-evaluation* t))
   (when (fboundp 'miricl-compiler::ensure-compiler) (miricl-compiler::ensure-compiler))
   (unless (member block-compile '(nil :specified t))
     (miricl-compiler::compiler-input-fail "block compilation mode" block-compile "expected NIL, :SPECIFIED or T"))
@@ -485,7 +567,8 @@
          (%file-collect-object-references t)
          (%file-block-mode block-compile) (%file-block-active (eq block-compile t))
          (%file-block-entries (and (eq block-compile t) (copy-list entry-points))) (%file-block-definitions nil)
-         (%file-block-forms nil) (%file-block-complete t)
+         (%file-block-forms nil) (%file-block-complete t) (%file-block-source-p nil)
+         (miricl-compiler::*hir-source-environments* nil)
          (warnings nil) (failure nil))
     (when verbose (format t "~&; Compiling ~A~%" *compile-file-truename*))
     (handler-bind ((warning (lambda (condition) (setq warnings t) (unless (typep condition 'style-warning) (setq failure t)))))
@@ -500,4 +583,4 @@
       (%fasl-write target (nreverse %fasl-roots) %fasl-records
         (when (fboundp 'miricl-compiler::definition-info)
           (list :miricl-ir (namestring *compile-file-truename*) (nreverse %file-ir)))))
-    (values (truename target) warnings failure)))
+    (values (truename target) warnings failure))))

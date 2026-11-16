@@ -4,15 +4,18 @@
 
 (define-runtime-function $compiled-function-p (($x :nullable-object)) (i32)
   #@(if (i32.ne (call $tag (local.get $x)) (i32.const 8)) (then (return (i32.const 0))))
-  ;; Direct runtime adapters execute Wasm too. Mode 7 alone deliberately
-  ;; exposes an evaluator-backed macroexpansion function.
+  ;; Direct runtime adapters execute Wasm too. Macro wrappers retain the
+  ;; original callable, whose implementation determines compilation status.
   #@(if (ref.test (ref $direct-function) (local.get $x))
-    (then (return (i32.ne (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $x))) (i32.const 7)))))
+    (then (if (i32.eq (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $x))) (i32.const 7))
+      (then (return_call $compiled-function-p (struct.get $obj $a (ref.cast (ref $obj) (local.get $x))))))
+      (return (i32.const 1))))
+  ;; Generic functions execute the native dispatcher. Their methods retain
+  ;; their own callable implementations, independently of the generic object.
+  ;; In particular COMPILE must preserve its identity and mutable metadata.
   ;; Native entry points have no run-time macro or load-time-value references.
-  ;; Generic dispatch objects retain interpreted method machinery separately.
   #@(i32.or (f64.ne (struct.get $obj $f (ref.cast (ref $obj) (local.get $x))) (f64.const 0))
-    (i32.and (i32.ne (call $value-n (local.get $x)) (i32.const 0))
-      (i32.ne (call $value-n (local.get $x)) (i32.const 2147483645)))))
+    (i32.ne (call $value-n (local.get $x)) (i32.const 0))))
 
 (defun $integer-power-of-two-p-cl ()
   (runtime-function-definition '$integer-power-of-two-p-cl

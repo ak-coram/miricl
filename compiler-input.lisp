@@ -88,6 +88,8 @@ Objects inside MEMBER and EQL remain literal data, including cyclic objects."
              (compiler-input-fail "type specifier" item "circular type expression"))
             ((not (gethash item seen))
              (let ((size (compiler-list-length item "type specifier")))
+               (unless (symbolp (car item))
+                 (compiler-input-fail "type specifier" item "expected a symbol naming the compound type"))
                (setf (gethash item seen) :active) (push (cons item t) work)
                (case (car item)
                  ((and or values)
@@ -142,8 +144,7 @@ Objects inside MEMBER and EQL remain literal data, including cyclic objects."
 
 (defun compiler-variable-name (name context)
   (declare (optimize (safety 3)))
-  (unless (and (symbolp name) name (not (constantp name))
-               (not (member name lambda-list-keywords)))
+  (unless (and (symbolp name) name (not (constantp name)))
     (compiler-input-fail context name "expected a nonconstant variable name"))
   name)
 
@@ -161,6 +162,10 @@ Objects inside MEMBER and EQL remain literal data, including cyclic objects."
   (let ((mode :required) (seen nil) (markers nil))
     (labels ((variable (name)
                (compiler-variable-name name "lambda parameter")
+               ;; Lambda-list markers remain syntax in parameter positions,
+               ;; but are ordinary variable names in LET, SETQ and declarations.
+               (when (member name lambda-list-keywords)
+                 (compiler-input-fail "lambda parameter" name "lambda-list keyword is not a parameter name"))
                ;; &AUX introduces sequential LET*-style bindings, which may
                ;; shadow parameters and earlier auxiliary bindings.
                (unless (eq mode :aux)
@@ -212,9 +217,17 @@ Objects inside MEMBER and EQL remain literal data, including cyclic objects."
   (loop while (and (consp (first body)) (eq (caar body) 'declare)) do
     (compiler-list-length (first body) "DECLARE form")
     (dolist (declaration (cdar body))
-      (unless (and (consp declaration) (symbolp (first declaration)))
-        (compiler-input-fail "declaration" declaration "expected (declaration-name ...)"))
+      (unless (consp declaration)
+        (compiler-input-fail "declaration" declaration "expected (declaration-name ...) or (type-specifier variables...)"))
       (compiler-list-length declaration "declaration")
+      ;; TYPE also permits the shorthand (typespec var*), including compound
+      ;; types and class objects. Symbol declaration identifiers may be opaque
+      ;; extensions, so inspect only unambiguous nonsymbol type specifiers here.
+      (unless (symbolp (first declaration))
+        (unless (or (consp (first declaration)) (typep (first declaration) 'class))
+          (compiler-input-fail "declaration" declaration "expected a declaration name or type specifier"))
+        (compiler-type-specifier (first declaration))
+        (dolist (name (cdr declaration)) (compiler-variable-name name "TYPE declaration variable")))
       (case (first declaration)
         ((start-block end-block)
          (compiler-input-fail "block declaration" declaration "only valid as a global proclamation"))
@@ -238,6 +251,39 @@ Objects inside MEMBER and EQL remain literal data, including cyclic objects."
             (compiler-input-fail "optimization quality" quality "expected a quality name or (name level), with level from 0 through 3")))))
     (setq body (cdr body)))
   t)
+
+(defun compiler-macro-parameters (parameters)
+  ;; Validate destructuring spines before the runtime macro lambda-list
+  ;; adapter. Defaults are forms, whose quoted/macro data may be circular.
+  (let ((work (list (cons parameters nil))))
+    (loop while work do
+      (let* ((job (pop work)) (tail (car job)) (path (cdr job)) (mode nil))
+        (loop while (consp tail) do
+          (when (member tail path :test #'eq)
+            (compiler-input-fail "macro lambda list" parameters "circular destructuring syntax"))
+          (push tail path)
+          (let ((spec (car tail)))
+            (cond
+              ((member spec '(&optional &key &aux &rest &body &whole &environment &allow-other-keys))
+               (unless (eq spec '&allow-other-keys) (setq mode spec)))
+              (t
+               (let ((target spec))
+                 (when (and (member mode '(&optional &key &aux)) (consp spec))
+                   (unless (<= 1 (compiler-list-length spec "macro parameter") (if (eq mode '&aux) 2 3))
+                     (compiler-input-fail "macro parameter" spec "invalid parameter syntax"))
+                   (setq target (car spec))
+                   (when (and (eq mode '&key) (consp target))
+                     (unless (= (compiler-list-length target "macro keyword parameter") 2)
+                       (compiler-input-fail "macro keyword parameter" target "expected keyword and pattern"))
+                     (setq target (second target))))
+                 (cond ((consp target) (push (cons target path) work))
+                       ((not (symbolp target))
+                        (compiler-input-fail "macro parameter" target "expected a variable or pattern"))))
+               (when (member mode '(&whole &environment)) (setq mode nil)))))
+          (setq tail (cdr tail)))
+        (unless (symbolp tail)
+          (compiler-input-fail "macro lambda list" tail "invalid dotted rest variable")))))
+  parameters)
 
 (defun compiler-source-form (form)
   (declare (optimize (safety 3)))
@@ -290,6 +336,17 @@ Objects inside MEMBER and EQL remain literal data, including cyclic objects."
                (compiler-input-fail "local function definition" definition "duplicate function name"))
              (push (first definition) names)
              (compiler-lambda-list (second definition)) (compiler-body (cddr definition))))
+         (compiler-body (cddr form)))
+        ((macrolet symbol-macrolet)
+         (unless (>= size 2) (compiler-input-fail "local macro form" form "missing bindings"))
+         (compiler-list-length (second form) "local macro bindings")
+         (dolist (definition (second form))
+           (let ((count (compiler-list-length definition "local macro definition")))
+             (unless (and (if (eq operator 'macrolet) (>= count 2) (= count 2))
+                          (symbolp (first definition)))
+               (compiler-input-fail "local macro definition" definition "invalid definition")))
+           (when (eq operator 'macrolet)
+             (compiler-macro-parameters (second definition)) (compiler-body (cddr definition))))
          (compiler-body (cddr form)))
         (locally (compiler-body (cdr form)))
         (setq

@@ -1804,10 +1804,14 @@ exhausted work budgets keep every incoming value group."
                        ;; comparison sufficient, even when the other type is T.
                        (if (some (lambda (input)
                              (let ((producer (hir-value-producer input)))
-                               (and (%hir-instruction-p producer)
+                               (or (and (%hir-instruction-p producer)
                                     (eq (hir-instruction-opcode producer) :constant)
                                     (let ((literal (first (hir-instruction-attributes producer))))
-                                      (not (or (numberp literal) (characterp literal))))))) (cddr inputs))
+                                      (not (or (numberp literal) (characterp literal)))))
+                                   (and (zerop (hir-instruction-safety-level instruction))
+                                        *wasm-inferred-types*
+                                        (hir-type-proves-p (gethash input *wasm-inferred-types* t)
+                                          '(not (or number character))))))) (cddr inputs))
                            :eq :eql))))
                      (cons (and (= (length inputs) 4) :cons))
                      ;; Canonical LIST needs only its fresh result spine.
@@ -4544,7 +4548,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    emit-native-cons-access native-fixed-arity emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    emit-native-structured-target emit-native-structured-jump emit-native-structured-region
                    hir-capture hir-cell-for-binding
-                   hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
+                   hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
                    hir-type-without-null hir-copy-source hir-type-truth-premise hir-type-branch-guards
                    hir-inline-primitive hir-integer-identity hir-integer-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-result-callee hir-result-callees hir-result-arities-checked
                    hir-dispatch-candidate
@@ -4557,7 +4561,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
                    hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir verify-hir-contents
                    native-inline-constants native-loop-literals native-loop-dominates-p native-hoist-source native-hoist-width native-hoist-type native-hoist-immediate-result-p native-plan-loop-hoists native-finalize-loop-hoists emit-native-invariant-value emit-native-hoisted-primitive native-plan-unboxed-arguments native-plan-unboxed-cell-values native-plan-unboxed-values native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-with-results emit-native-module-checked emit-native-module
-                   hir-body hir-close hir-expand-local-macros hir-normalize-keywords hir-lambda
+                   hir-body hir-close hir-local-macros-form hir-normalize-keywords hir-lambda
                    hir-tagbody-form hir-setq-form hir-local-functions-form
                    hir-multiple-value-bind-form hir-block-form hir-simple-restart-form
                    hir-restart-signal-form hir-symbol-iterate-form hir-while-form
@@ -4607,7 +4611,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
   ;; interpreter still installs and executes ordinary global definitions.
   '((wasm-byte wasm-append wasm-u32 wasm-u32-width wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call)
     (hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant hir-clear-source)
-    (hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell)
+    (hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell)
     (hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells)
     (miricl::%file-lexical-name miricl::%file-lexical-specials miricl::%file-lexical-bind
      miricl::%file-lexical-reference miricl::%file-code-cons miricl::%file-lexical-forms
@@ -4648,6 +4652,14 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                  (unless complete (setq *compiler-state* :failed))))
              (progn (setq *compiler-state* :interpreted) nil)))))
 
+(defvar *compiler-original-sources* nil)
+
+(defun compiler-function-source (name)
+  ;; The bootstrap consumes the original compiler corpus even when its
+  ;; initial shared frontend is already native and has no lambda metadata.
+  (or (cdr (assoc name *compiler-original-sources* :test #'equal))
+      (function-lambda-expression (fdefinition name))))
+
 (defun compile-compiler ()
   "Bootstrap supported compiler kernels; return installed names and unsupported sources.
 This does not change the policy for compiling application bodies."
@@ -4664,7 +4676,7 @@ This does not change the policy for compiling application bodies."
                    (definitions (and block
                      (loop for member in block
                        for source = (and (not (gethash member *native-compiler-functions*))
-                                     (function-lambda-expression (symbol-function member)))
+                                     (compiler-function-source member))
                        unless source do (return nil)
                        collect (list* 'defun member (cdr (compiler-source-policy source)))))))
               (if definitions
@@ -4674,10 +4686,9 @@ This does not change the policy for compiling application bodies."
                     (dolist (entry functions)
                       (setf (symbol-function (car entry)) (cdr entry)
                             (gethash (car entry) *native-compiler-functions*) t)))
-                  (let* ((code (compiler-primitive 43 (symbol-function name)))
-                         (source (unless code
-                           (let ((original (function-lambda-expression (symbol-function name))))
-                             (and original (compiler-source-policy original)))))
+                  (let* ((original (compiler-function-source name))
+                         (source (and original (compiler-source-policy original)))
+                         (code (unless source (compiler-primitive 43 (symbol-function name))))
                          (function (cond (code (compile-native-hir code :name name))
                                          (source (compile-native source :name name))
                                          (t (error "Missing compiler bootstrap code for ~S." name)))))
@@ -4701,7 +4712,7 @@ This does not change the policy for compiling application bodies."
     (let ((functions nil))
       (dolist (name '(record-edges compact-unit))
         (unless (gethash name *native-compiler-functions*)
-          (let ((source (function-lambda-expression (symbol-function name))))
+          (let ((source (compiler-function-source name)))
             (unless source (error "Missing bootstrap source for ~S." name))
             (push (cons name (compile-native (compiler-source-policy source) :name name)) functions))))
       ;; Install only when all kernels compiled successfully.

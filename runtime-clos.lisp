@@ -90,7 +90,7 @@
 (setf *clos-primitives* (append *clos-primitives* '(%iteration-expansion)))
 (defparameter *native-clos-symbols* '(:initarg-profile))
 
-(assert (<= (length *clos-primitives*) (- 2147483641 +clos-primitive-base+)))
+(assert (<= (length *clos-primitives*) (- 2147483640 +clos-primitive-base+)))
 
 (defun clos-primitive-op (name) (position name *clos-primitives*))
 
@@ -103,9 +103,9 @@
   (let ((*gensym-counter* 0))
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
                                   "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
-    unless (if compiler (equal file "interpreter-library.lisp")
+    unless (and (not compiler)
                (member file '("whole-program.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp"
-                              "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp") :test #'equal)) append
+                              "wasm-optimizer.lisp" "wasm-disassembly.lisp") :test #'equal)) append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let* ((*package* (find-package :miricl))
              (forms (loop for form = (read in nil :eof) until (eq form :eof)
@@ -144,8 +144,16 @@
                                 #'string< :key #'symbol-name))
                  (symbols (union (runtime-library-structure-symbols forms)
                                  (union exports (runtime-library-symbols forms)))))
-            (setf forms (list (lower-runtime-library
-              `(let ((*package* (find-package ,(package-name package)))) ,@forms))))
+            ;; Establish the package before lowering any of the file's forms.
+            ;; A runtime LET around a form is too late: DEFSTRUCT and other
+            ;; macros use the current package while the HIR frontend expands
+            ;; them. Separate evaluations also preserve preceding DEFMACROs.
+            (setf forms (append
+              (list (lower-runtime-library
+                `(setq *package* (find-package ,(package-name package)))))
+              forms
+              (list (lower-runtime-library
+                '(setq *package* (find-package "COMMON-LISP-USER"))))))
             (push (lower-runtime-library
               `(let ((package (or (find-package ,(package-name package))
                                   (make-package ,(package-name package) :use '("CL")))))
@@ -195,11 +203,12 @@
         (i32.const 0) (f64.const 1) (ref.null $digits)
         (ref.null eq) (ref.null eq) (ref.null eq)
         (local.get $function) (local.get $slot) (local.get $mode)))))
-  (wat-fail-when #@(call $value-n (local.get $function)) :malformed-form)
+  ;; Keep the callable itself: HIR and native functions do not share the
+  ;; parameter/body/environment layout of an interpreted source closure.
   #@(struct.new $direct-function (call $allocate-object-tag (i32.const 8)) (i32.const 0)
-    (struct.get $obj $f (ref.cast (ref $obj) (local.get $function))) (struct.get $obj $digits (ref.cast (ref $obj) (local.get $function)))
-    (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))) (struct.get $obj $b (ref.cast (ref $obj) (local.get $function)))
-    (struct.get $obj $c (ref.cast (ref $obj) (local.get $function))) (local.get $class) (local.get $slot) (local.get $mode)))
+    (struct.get $obj $f (ref.cast (ref $obj) (local.get $function))) (ref.null $digits)
+    (local.get $function) (ref.null eq) (ref.null eq)
+    (local.get $class) (local.get $slot) (local.get $mode)))
 
 (define-runtime-function $direct-function-call
     (($function (ref $direct-function)) ($args :nullable-object)) (:nullable-object)
@@ -250,12 +259,10 @@
       (return (call $invoke-method (local.get $class)
         (struct.get $direct-function $slot (local.get $function)) (ref.null eq)
         (call $car (local.get $args)) (ref.null eq) (i32.const 0)))))
-  ;; Native core forms expose their expansion functions without repeating
-  ;; expansion during ordinary evaluation. Explicit calls execute the source.
+  ;; Native core forms expose their original macro expansion function.
   #@(if (i32.eq (local.get $mode) (i32.const 7))
-    (then (return (call $apply (call $node (i32.const 8) (i32.const 0)
-      (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))) (struct.get $obj $b (ref.cast (ref $obj) (local.get $function)))
-      (struct.get $obj $c (ref.cast (ref $obj) (local.get $function)))) (local.get $args)))))
+    (then (return_call $apply
+      (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))) (local.get $args))))
   #@(if (i32.ge_u (local.get $mode) (i32.const 5))
     (then ,(wat-arity 2)
       (local.set $args (call $car (local.get $args)))
@@ -708,7 +715,7 @@
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%condition-info)))
     (then ,(wat-arity 1) (return (call $condition-class (local.get $a)))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%eval)))
-    (then ,(wat-arity 1) (return (call $eval (local.get $a) (ref.null eq)))))
+    (then ,(wat-arity 1) (return (call $evaluate-in-environment (local.get $a) (ref.null eq)))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%apply)))
     (then ,(wat-arity 2) (return (call $apply (local.get $a) (local.get $b)))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%make-generic)))
@@ -956,14 +963,19 @@
   #@(global.set $library-string-count (i32.add (global.get $library-string-count) (i32.const 1)))
   #@(return_call $read-library-string))
 
-(define-runtime-function $initialize-clos () ()
-  (:locals ($names (ref $bootstrap-bytes)) ($forms :nullable-object) ($scan :nullable-object))
-  #@(call $reset-library-reader)
+(define-runtime-function $initialize-clos-symbols () ()
+  (:locals ($names (ref $bootstrap-bytes)))
+  #@(if (array.len (global.get $clos-library-symbols)) (then (return)))
   #@(local.set $names (array.new_data $bootstrap-bytes $clos-name-data
     (i32.const 0) (i32.const ,(length (bootstrap-private-symbol-bytes *clos-library-symbols* *clos-primitives*)))))
   #@(data.drop $clos-name-data)
   #@(global.set $clos-library-symbols (call $bootstrap-private-symbols
-    (local.get $names) (i32.const ,(length *clos-library-symbols*))))
+    (local.get $names) (i32.const ,(length *clos-library-symbols*)))))
+
+(define-runtime-function $initialize-clos () ()
+  (:locals ($forms :nullable-object) ($scan :nullable-object))
+  #@(call $initialize-clos-symbols)
+  #@(call $reset-library-reader)
   #@(global.set $cursor (i32.const 0))
   #@(global.set $limit (i32.const ,(length (clos-library-bytes))))
   #@(call $reserve (global.get $limit))
@@ -977,8 +989,8 @@
   #@(call $reset-library-reader)
   #@(local.set $scan (call $reverse-onto (local.get $forms) (ref.null eq) (i32.const 0)))
   (wat-list-loop ($scan)
-    #@(drop (call $eval (call $car (local.get $scan)) (ref.null eq)))
-  #@(global.set $debug-ready (i32.const 1)))
+    #@(drop (call $evaluate-in-environment (call $car (local.get $scan)) (ref.null eq))))
+  #@(global.set $debug-ready (i32.const 1))
   #@(drop (call $set-symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*gensym-counter*)))
     (call $int (i32.const 0))))
   #@(call $clear-values))
@@ -1004,4 +1016,4 @@
   ($direct-function) ($direct-function-call) ($structure-sequence-element) ($typed-structure-p)
   ($structure-access) ($print-structure-default) ($structure-copy) ($structure-make)
   ($named-class) ($set-named-class) ($clos-primitive) ($clos-find-class) ($class-subclassp) ($clos-typep)
-  ($read-library-byte) ($read-library-unsigned) ($read-library-integer) ($reset-library-reader) ($prepare-library-reader) ($read-library-string) ($library-symbol) ($read-library-literal) ($initialize-clos))
+  ($read-library-byte) ($read-library-unsigned) ($read-library-integer) ($reset-library-reader) ($prepare-library-reader) ($read-library-string) ($library-symbol) ($read-library-literal) ($initialize-clos-symbols) ($initialize-clos))

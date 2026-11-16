@@ -265,6 +265,23 @@ string/simple-string/sequence. Parameterized array element types are invariant."
          mask))
       (otherwise 0))))
 
+(defun hir-disjoint-type-mask (type)
+  "A conservative cover by disjoint CLHS 4.2.2 families, or zero if unknown."
+  ;; Reuse target nominal rules for numeric and parameterized array types.
+  ;; LIST includes NIL, which belongs to SYMBOL. Do not cover SEQUENCE by
+  ;; LIST and VECTOR: those need not exhaust that class. Opaque classes and
+  ;; STANDARD-OBJECT/STRUCTURE-OBJECT supply no disjointness certificate.
+  (let ((nominal (hir-nominal-type-mask type)))
+    (cond ((not (zerop (logand nominal 1))) 1)
+          ((not (zerop (logand nominal 32))) 2)
+          (t (case (if (consp type) (car type) type)
+               ((symbol keyword null boolean) 4)
+               (cons 8) (list 12)
+               ((character base-char standard-char extended-char) 16)
+               ((function compiled-function) 32)
+               (hash-table 64) (package 128) (readtable 256)
+               (otherwise 0))))))
+
 (defun hir-type-proves-p (type required &optional (depth 32) fuel)
   "True only when CL type relationships establish TYPE is within REQUIRED.
 NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
@@ -273,7 +290,7 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
     (compiler-statistic :proof/budget-exhausted :subtype)
     (return-from hir-type-proves-p nil))
   (when (or (and (consp type) (member (car type) '(and or member eql)))
-            (and (consp required) (member (car required) '(and or))))
+            (and (consp required) (member (car required) '(and or not))))
     (unless fuel (setq fuel (list 128))))
   (when fuel
     (when (zerop (car fuel))
@@ -305,6 +322,15 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
          (or (member type '(cons character function compiled-function hash-table package readtable keyword))
              (and (consp type) (member (car type) '(cons function)))
              (not (zerop (logand 33 (hir-nominal-type-mask type))))))
+        ((and (consp required) (eq (car required) 'not))
+         (let ((excluded (second required)))
+           (cond ((and (consp excluded) (member (car excluded) '(and or)))
+                  (let ((queries (cdr excluded)))
+                    (if (eq (car excluded) 'or)
+                        (every (lambda (part) (hir-type-proves-p type (list 'not part) (1- depth) fuel)) queries)
+                        (some (lambda (part) (hir-type-proves-p type (list 'not part) (1- depth) fuel)) queries))))
+                 (t (let ((left (hir-disjoint-type-mask type)) (right (hir-disjoint-type-mask excluded)))
+                      (and (plusp left) (plusp right) (zerop (logand left right))))))))
         ;; Shared nominal facts prove only unparameterized supertypes.
         ;; Shape/element constraints and integer bounds keep their own paths;
         ;; skip this domain altogether for those frequent compound queries.
@@ -573,11 +599,9 @@ A budget limits cost; stopping early only loses optimization opportunities."
                   ;; Subsequent joins need every predecessor inside this region.
                   (let* ((positive (if (second premise) (not positive) positive))
                          (restriction (third premise))
-                         ;; Integer predicates have useful facts on both arms.
-                         ;; False type predicates still supply no complement.
-                         (pending (when (and (or (null restriction) positive
-                                                (member restriction '(zerop minusp plusp)))
-                                             (= (aref incoming (the (unsigned-byte 32) (hir-block-id arm))) 1))
+                         ;; Canonical type predicates establish their type's
+                         ;; complement on the false arm as well.
+                         (pending (when (= (aref incoming (the (unsigned-byte 32) (hir-block-id arm))) 1)
                                     (list arm))))
                     (loop while (and pending (plusp budget)) do
                       (let* ((current (pop pending)) (id (hir-block-id current)) (killed nil))
@@ -602,7 +626,9 @@ A budget limits cost; stopping early only loses optimization opportunities."
                               (compiler-statistic :proof/branch-premise (or restriction positive))
                               (push (cons observed (if (member restriction '(zerop minusp plusp))
                                                       (cons restriction positive)
-                                                      (or restriction positive)))
+                                                      (if restriction
+                                                          (if positive restriction (list 'not restriction))
+                                                          positive)))
                                     (gethash (hir-instruction-output instruction) guards))))
                           (let ((terminator (hir-block-terminator current)) (previous nil))
                             (when (and (not killed) (member (hir-instruction-opcode terminator) '(:jump :branch)))
@@ -771,9 +797,9 @@ numbers, including bignums, and is never proved true by this rule."
   (when (and (= (length types) 1) (member name '(consp simple-vector-p vectorp stringp symbolp integerp characterp null not)))
     (let* ((type (first types))
            (positive (case name (consp 'cons) (simple-vector-p 'simple-vector) (vectorp 'vector) (stringp 'string) (symbolp 'symbol) (integerp 'integer) (characterp 'character) (otherwise 'null)))
-           ;; NIL is a symbol. Unlike the other tag predicates, its type
-           ;; therefore proves SYMBOLP true, never a negative result.
-           (negative (case name ((null not) '(not null)) (symbolp '(not symbol)) (otherwise 'null))))
+           ;; Ask the same target rules for the complement. In particular,
+           ;; NIL is a symbol, and LIST cannot prove SYMBOLP false.
+           (negative (list 'not positive)))
       (return-from hir-inline-result-type
         (cond ((hir-type-proves-p type positive) '(eql t))
               ((hir-type-proves-p type negative) 'null) (t 'boolean)))))

@@ -299,21 +299,17 @@
   #@(local.get $right))
 
 (define-runtime-function $evaluate-form (($form :nullable-object)) (:nullable-object)
-  ;; Public evaluation boundaries select the policy. Recursive evaluation keeps
-  ;; its lexical environment and does not repeatedly compile subexpressions.
-  (if *include-compiler*
-      #@(if (i32.eq (call $tag (local.get $form)) (i32.const 7))
+  ;; The public policy dispatcher preserves ordered top-level effects even
+  ;; when native compilation is disabled. Lexical/internal evaluation shares
+  ;; the same checked HIR frontend through EVALUATE-IN-ENVIRONMENT.
+  #@(if (global.get $debug-ready)
+    (then
+      (if (i32.eq (call $tag (local.get $form)) (i32.const 7))
         (then
-          ;; Some library initialization calls EVAL before the compiler variables
-          ;; have been defined. Such calls use the bootstrap evaluator.
-          (if (if (result i32) (call $boundp ,(clos-library-reference 'miricl-compiler:*compile-evaluations*))
-                (then (i32.eqz (ref.is_null
-                  (call $symbol-value ,(clos-library-reference 'miricl-compiler:*compile-evaluations*)))))
-                (else (i32.const 0)))
+          (if (i32.eqz (ref.is_null (call $function-binding ,(clos-library-reference '%compiler-evaluate))))
             (then (return (call $apply ,(clos-library-reference '%compiler-evaluate)
-              (call $cons (local.get $form) (ref.null eq))))))))
-      (wat-fragment ""))
-  #@(return_call $eval (local.get $form) (ref.null eq)))
+              (call $cons (local.get $form) (ref.null eq))))))))))
+  #@(return_call $evaluate-in-environment (local.get $form) (ref.null eq)))
 
 (define-runtime-function $eval0
     (($form :nullable-object) ($env :nullable-object))
@@ -793,11 +789,11 @@
   #@(local.set $value (call $eval (local.get $form) (local.get $env)))
   #@(call $apply (local.get $setter) (call $cons (local.get $value) (local.get $args))))
 
-(define-runtime-section eval-runtime-wat ()
-  ($evaluate-form)
+(define-runtime-section source-eval-runtime-wat ()
+  ;; Only the temporary seed-producing image executes source trees. The
+  ;; shipped runtime evaluates checked HIR through EVALUATE-IN-ENVIRONMENT.
   ($eval-backquote)
   ($eval-setf)
-  ($operator)
   ($body)
   ($eval-list)
   ($eval-small-values)
@@ -805,4 +801,10 @@
   ($validate-params)
   ($declared-special-p)
   ($eval0)
-  ($eval1) ($eval-apply) ($eval-call-arguments) ($eval-apply-fixed))
+  ($eval1) ($eval-call-arguments))
+
+(define-runtime-section eval-runtime-wat ()
+  ($evaluate-form)
+  ($operator)
+  ($eval-apply) ($eval-apply-fixed)
+  (if *source-bootstrap-p* (source-eval-runtime-wat) ""))

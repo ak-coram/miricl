@@ -487,6 +487,16 @@
   (:export-raw "native-block-return")
   (:locals ($target :nullable-object))
   #@(local.set $target ,(native-object '(local.get $token)))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $target)) (i32.const 21)) :control-error)
+  ;; Source TAGBODY entries retain the resume spine and their shared owner.
+  ;; HIR closures can capture these tokens while their enclosing source frame
+  ;; is still active; use its ordinary transfer packet and cleanup machinery.
+  #@(if (i32.eq (call $value-n (local.get $target)) (i32.const 1))
+    (then
+      ,(wat-fail-when #@(i32.eqz (call $member-eq
+        (struct.get $obj $c (ref.cast (ref $obj) (local.get $target))) (global.get $targets))) :control-error)
+      (call $transfer-to (struct.get $obj $c (ref.cast (ref $obj) (local.get $target))) (local.get $target))
+      (unreachable)))
   (wat-fail-when #@(i32.eqz (call $member-eq (local.get $target) (global.get $targets))) :control-error)
   #@(call $transfer-to (local.get $target) ,(native-object '(local.get $values))))
 
