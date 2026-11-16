@@ -46,13 +46,21 @@ try {
   };
   // Mount files verbatim. Lisp reading, macros, RT registration, evaluation,
   // multiple-value comparison, and error handling all run in WASM.
-  for (const file of ['rt-package.lsp', 'rt.lsp', ...files]) {
+  const helperPrerequisites = helpers === 'cons'
+    ? ['cl-test-package.lsp', 'auxiliary/ansi-aux-macros.lsp'] : [];
+  for (const file of ['rt-package.lsp', 'rt.lsp', ...helperPrerequisites, ...files]) {
     const resolved = path.resolve(root, file);
     if (!resolved.startsWith(root)) throw new Error(`Path outside ANSI submodule: ${file}`);
     vm.mountFile(file, fs.readFileSync(resolved, 'utf8'));
   }
   evaluate('(load "rt-package.lsp") (load "rt.lsp")');
-  evaluate('(defpackage :cl-test (:use :cl :rt)) (in-package :cl-test)');
+  if (helpers === 'cons') {
+    // Upstream helper definitions use NORMALLY and the package's condition
+    // wrappers. Install their macro environment before reading those helpers.
+    evaluate('(in-package :cl-user) (load "cl-test-package.lsp") (in-package :cl-test) (load "auxiliary/ansi-aux-macros.lsp")');
+  } else {
+    evaluate('(defpackage :cl-test (:use :cl :rt)) (in-package :cl-test)');
+  }
   if (helpers === 'cons') {
     // Load upstream definitions verbatim, without the array/character
     // initialization needed by the full ANSI bootstrap. Tests requiring that

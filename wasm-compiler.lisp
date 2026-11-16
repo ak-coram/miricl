@@ -238,7 +238,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-block-return" (:object :object) nil)
     ("native-block-match" (:object) :i32)
     ("native-block-values" nil :object)
-    ("native-restart-signal" (:object :i32 :object :object) :object)))
+    ("native-restart-signal" (:object :i32 :object :object) :object)
+    ("native-eq-test" (:object :object) :i32)))
 
 (defun wasm-byte (byte)
   (declare (type (unsigned-byte 8) byte))
@@ -406,12 +407,12 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (declare (type simple-vector value))
   (wasm-get value) (wasm-gc #x1a) (wasm-gc #x17 1))
 
-(defun emit-native-tag-test (value tag &optional invariant nullp)
+(defun emit-native-tag-test (value tag &optional invariant nullp compactp)
   (declare (type simple-vector value))
-  ;; A tag check needs neither a Lisp boolean nor a call through the generic
-  ;; representation decoder. Test the GC heap type before reading its tag;
-  ;; immediate integers take the false path without a trap. SYMBOLP also
-  ;; accepts NIL, which has no heap header in the target representation.
+  (when (and compactp (= tag 7))
+    (if invariant (emit-native-invariant-value value) (wasm-get value))
+    (wasm-call "native-consp-inline") (wasm-byte #xd1) (wasm-byte #x45)
+    (return-from emit-native-tag-test nil))
   (setq *wasm-object-types* t)
   (if invariant (emit-native-invariant-value value) (wasm-get value))
   (wasm-gc #x1a) (wasm-gc #x14 1)
@@ -554,7 +555,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
           ;; keep an otherwise unused entry snapshot alive.
           (if (and (eq (hir-instruction-opcode instruction) :call)
                    (or (native-value-slot *wasm-single-calls* (hir-instruction-output instruction))
-                       (member instruction *wasm-tail-calls* :test #'eq)))
+                       (member instruction *wasm-tail-calls* :test miricl::%compiler-eq-function)))
               (cdr inputs) inputs)))))
 
 (defun native-direct-cells (function)
@@ -943,6 +944,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun native-predicate-key (scope instruction constants reused)
   (declare (type simple-vector instruction) (type hash-table constants))
+  (when (eq (hir-instruction-opcode instruction) :capture)
+    (return-from native-predicate-key (list* scope :capture (hir-instruction-attributes instruction))))
   (let ((key (list scope (gethash instruction *wasm-inline-simple-calls*))))
     (dolist (input (cddr (hir-instruction-inputs instruction)))
       (let* ((source (native-predicate-source input reused)) (producer (hir-value-producer source))
@@ -1015,11 +1018,20 @@ Liveness can then remove an allocation whose identity is never observed."
           (unless (native-removable-p instruction)
             (when (= epoch 4096) (return-from native-plan-predicate-reuse reused))
             (incf epoch))
-          (let ((kind (and (eq (hir-instruction-opcode instruction) :call)
-                           (gethash instruction *wasm-inline-simple-calls*))))
-            (when (and kind (native-stable-predicate-p kind)
+          (let* ((output (hir-instruction-output instruction))
+                 (capture (and output (eq (hir-instruction-opcode instruction) :capture)
+                               (eq (hir-value-type output) t)
+                               (not (eq (hir-value-kind output) :multiple))))
+                 (kind (if capture :capture
+                           (and (eq (hir-instruction-opcode instruction) :call)
+                                (gethash instruction *wasm-inline-simple-calls*)))))
+            ;; A closure's binding slots are immutable; a captured cell's
+            ;; contents are not. Reuse only the slot read, leaving every cell
+            ;; read/write and its ordering intact. Public HIR validation keeps
+            ;; capture indices out of the private child-cache slot.
+            (when (and kind (or capture (native-stable-predicate-p kind))
                        (native-value-slot *wasm-live-values* (hir-instruction-output instruction))
-                       (native-value-slot *wasm-scalar-groups* (hir-instruction-output instruction)))
+                       (or capture (native-value-slot *wasm-scalar-groups* (hir-instruction-output instruction))))
               (when (zerop fuel) (return-from native-plan-predicate-reuse reused))
               (decf fuel)
               (if (null first)
@@ -1391,7 +1403,7 @@ exhausted work budgets keep every incoming value group."
                           (setf (gethash function *wasm-call-plans*) call-plan))))
                     ;; A tail call never emits a guarded generic-call plan.
                     ;; Avoid constructing its effective method and EQL facts.
-                    (unless (member instruction (svref call-plan 2) :test #'eq)
+                    (unless (member instruction (svref call-plan 2) :test miricl::%compiler-eq-function)
                       (let* ((candidates
                                (mapcar (lambda (value)
                                  (let ((origin (hir-value-producer value)))
@@ -2011,7 +2023,7 @@ exhausted work budgets keep every incoming value group."
   ;; Follow value-preserving, effect-free joins to a full multiple-value return.
   (let ((seen nil))
     (loop
-      (when (or (member block seen :test #'eq) (hir-block-instructions block)) (return nil))
+      (when (or (member block seen :test miricl::%compiler-eq-function) (hir-block-instructions block)) (return nil))
       (push block seen)
       (let* ((parameter (first (hir-block-parameters block)))
              (terminator (hir-block-terminator block)))
@@ -2348,7 +2360,7 @@ exhausted work budgets keep every incoming value group."
        (when (and *wasm-closed-worker-functions*
                   (gethash (native-known-callee (second inputs)) *wasm-closed-worker-functions*)
                   (not (native-value-slot *wasm-single-calls* output))
-                  (not (member instruction *wasm-tail-calls* :test #'eq)))
+                  (not (member instruction *wasm-tail-calls* :test miricl::%compiler-eq-function)))
          (compiler-input-fail "closed worker call" :multiple-values
            "a non-tail full-value consumer requires the ordinary closure ABI"))
        (let ((kind (gethash instruction *wasm-inline-simple-calls*)))
@@ -2373,7 +2385,7 @@ exhausted work budgets keep every incoming value group."
              ((eq kind :right) (wasm-get (fourth inputs)))
              ((eq kind :list) (wasm-list (cddr inputs)))
              ((eq kind :consp)
-              (emit-native-tag-test (third inputs) 7) (wasm-call "native-boolean"))
+              (emit-native-tag-test (third inputs) 7 nil nil (null (hir-instruction-attributes instruction))) (wasm-call "native-boolean"))
              ((eq kind :symbolp)
               (emit-native-tag-test (third inputs) 6 nil t) (wasm-call "native-boolean"))
              ((member kind '(:evenp :oddp))
@@ -2468,14 +2480,14 @@ exhausted work budgets keep every incoming value group."
            (wasm-null) (wasm-call "native-cons"))
          (wasm-set output)
          (return-from emit-native-instruction nil))
-       (when (and (not (member instruction *wasm-tail-calls* :test #'eq))
+       (when (and (not (member instruction *wasm-tail-calls* :test miricl::%compiler-eq-function))
                   (emit-native-generic-call instruction inputs output))
          (wasm-set output)
          (return-from emit-native-instruction nil))
        (when (emit-native-multiple-call inputs output)
          (wasm-set output)
          (return-from emit-native-instruction nil))
-       (when (member instruction *wasm-tail-calls* :test #'eq)
+       (when (member instruction *wasm-tail-calls* :test miricl::%compiler-eq-function)
          (emit-native-tail-call inputs (hir-instruction-safety-level instruction))
          (return-from emit-native-instruction nil))
        (if (native-value-slot *wasm-single-calls* output)
@@ -2503,7 +2515,7 @@ exhausted work budgets keep every incoming value group."
          (wasm-get group)
          (when (native-value-slot *wasm-scalar-groups* group) (wasm-null) (wasm-call "native-cons")))
        (wasm-null) (dotimes (i (length (cddr inputs))) (wasm-call "native-cons"))
-       (if (member instruction *wasm-tail-calls* :test #'eq)
+       (if (member instruction *wasm-tail-calls* :test miricl::%compiler-eq-function)
            (let ((start (length *wasm-bytes*)))
              (wasm-call "native-tail-multiple-value-call")
              (setf (aref *wasm-bytes* start) #x12)
@@ -2556,7 +2568,7 @@ exhausted work budgets keep every incoming value group."
          (wasm-local 0)
          ;; This stable HIR ordinal is resolved through the retained map after
          ;; body sharing, function ordering and module pruning have finished.
-         (wasm-integer (position (first attributes) *native-functions* :test #'eq))
+         (wasm-integer (position (first attributes) *native-functions* :test miricl::%compiler-eq-function))
          (wasm-call "native-debug-close")))
       (otherwise (error "Native lowering is not implemented for ~S." (hir-instruction-opcode instruction))))
     (when output (wasm-set output))))
@@ -2659,11 +2671,14 @@ exhausted work budgets keep every incoming value group."
             ((member kind '(:true :false)) (wasm-integer (if (eq kind :true) 1 0)))
             ((eq kind :null) (wasm-get (third inputs)) (wasm-byte #xd1))
             ((eq kind :eq)
-             (wasm-get (third inputs)) (wasm-gc #x1a) (wasm-gc #x17 #x6d)
-             (wasm-get (fourth inputs)) (wasm-gc #x1a) (wasm-gc #x17 #x6d) (wasm-byte #xd3))
+             (if (null (hir-instruction-attributes call))
+                 (progn (wasm-get (third inputs)) (wasm-get (fourth inputs))
+                   (wasm-call "native-eq-test"))
+                 (progn (wasm-get (third inputs)) (wasm-gc #x1a) (wasm-gc #x17 #x6d)
+                   (wasm-get (fourth inputs)) (wasm-gc #x1a) (wasm-gc #x17 #x6d) (wasm-byte #xd3))))
             ((eq kind :eql)
              (wasm-get (third inputs)) (wasm-get (fourth inputs)) (wasm-call "native-eql-test"))
-            ((eq kind :consp) (emit-native-tag-test (third inputs) 7))
+            ((eq kind :consp) (emit-native-tag-test (third inputs) 7 nil nil (null (hir-instruction-attributes call))))
             ((eq kind :symbolp) (emit-native-tag-test (third inputs) 6 nil t))
             ((member kind '(:evenp :oddp))
              (emit-native-unboxed-integer (third inputs) (native-integer-width (third inputs)))
@@ -2936,7 +2951,7 @@ exhausted work budgets keep every incoming value group."
                                     (hir-instruction-output instruction)))))
                     (member (hir-instruction-opcode instruction)
                             '(:rest-argument :values-list :cell-write :environment-restore))
-                    (member instruction *wasm-tail-calls* :test #'eq)
+                    (member instruction *wasm-tail-calls* :test miricl::%compiler-eq-function)
                     ;; Direct workers strip this check; ordinary entries must
                     ;; retain their small checked wrapper outside the worker.
                     (and checked-entry (eq (hir-instruction-opcode instruction) :check-arguments)))
@@ -3212,11 +3227,15 @@ exhausted work budgets keep every incoming value group."
              (emit-native-integer-box (hir-instruction-output (svref record 0)))
              (wasm-call "native-boolean"))))
       ((and (svref record 6) (eq kind :eq))
-       (dolist (input arguments)
-         (emit-native-invariant-value input) (wasm-gc #x1a) (wasm-gc #x17 #x6d))
-       (wasm-byte #xd3))
+       (if (null (hir-instruction-attributes (svref record 0)))
+           (progn
+             (dolist (input arguments) (emit-native-invariant-value input))
+             (wasm-call "native-eq-test"))
+           (progn
+             (dolist (input arguments) (emit-native-invariant-value input) (wasm-gc #x1a) (wasm-gc #x17 #x6d))
+             (wasm-byte #xd3))))
       ((eq kind :consp)
-       (emit-native-tag-test (first arguments) 7 t)
+       (emit-native-tag-test (first arguments) 7 t nil (null (hir-instruction-attributes (svref record 0))))
        (unless (svref record 6) (wasm-call "native-boolean")))
       ((eq kind :symbolp)
        (emit-native-tag-test (first arguments) 6 t t)
@@ -4228,9 +4247,13 @@ the named-entry format for hosts that translate individual Wasm workers."
   (compiler-list-length entries "native entry points")
   (ensure-compiler)
   (verify-hir unit)
-  (dolist (entry entries)
-    (unless (member entry (hir-unit-functions unit) :test #'eq)
-      (compiler-input-fail "native entry point" entry "entry does not belong to this HIR unit")))
+  (dolist (entry (or entries (list (first (hir-unit-functions unit)))))
+    (unless (member entry (hir-unit-functions unit) :test miricl::%compiler-eq-function)
+      (compiler-input-fail "native entry point" entry "entry does not belong to this HIR unit"))
+    ;; Bare entry factories receive no closure environment. Captured functions
+    ;; must be constructed by a checked :CLOSURE with its complete operands.
+    (when (hir-function-captures entry)
+      (compiler-input-fail "native entry point" entry "entry requires a closure environment")))
   (emit-native-module-checked unit entries entry-tables))
 
 (defun native-entry-sections (entries direct-exports argument-usages entry-tables)
@@ -4468,7 +4491,7 @@ the named-entry format for hosts that translate individual Wasm workers."
                         for index = (gethash function *native-function-indices*)
                         collect (and index (>= (hir-function-debug-level function) 2)
                                      (+ (length *native-imports*) index))) 'simple-vector)
-          (coerce (mapcar (lambda (entry) (position entry *native-functions* :test #'eq)) entries) 'simple-vector))))))))
+          (coerce (mapcar (lambda (entry) (position entry *native-functions* :test miricl::%compiler-eq-function)) entries) 'simple-vector))))))))
 
 (defun compile-native-hir (payload &key name)
   "Compile stored HIR directly, without reconstructing or retaining source."
@@ -4533,7 +4556,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    read-hir-code-instruction validate-hir-code copy-hir-code verify-hir-code-operands
                    verify-hir-code-dominance hir-code-to-unit
                    hir-special-p hir-declarations hir-intersect-types hir-type-environment hir-bound-type-environment hir-declared-argument-types
-                   native-optimization-level native-debug-level native-safety-level
+                   native-optimization-level native-size-policy native-debug-level native-safety-level
                    native-canonical-builtin-code native-builtin-code emit-native-object-types wasm-literal wasm-list
                    native-removable-p native-live-inputs native-direct-cells native-forward-blocks native-reachable-blocks native-loop-region-order native-loop-plan native-live-values native-local-layout native-single-calls native-full-groups native-proven-truth native-proof-reachable-blocks native-scalar-groups native-plan-branch-tests native-stable-predicate-p native-predicate-source native-predicate-key native-plan-cons-forwarding native-plan-predicate-reuse native-predicate-aliases native-block-targets native-single-return-target-p
                    native-argument-usage native-direct-workers native-direct-worker-body native-optimize-typed-body native-direct-wrapper native-boxed-result-worker native-direct-fallback native-direct-relocations

@@ -3,6 +3,10 @@
 ;;;; application initializers or guesses dependencies from a running image.
 (in-package :miricl-compiler)
 
+;; The target captures this in COMPILER-LIBRARY before source compilation.
+;; Host tooling loads this file first; DEFVAR preserves either existing object.
+(defvar miricl::%compiler-eq-function #'eq)
+
 (defstruct ir-node kind name source group roots references barriers effect-p details
   retained-p reason)
 (defstruct ir-unit source records roots nodes bytes output-bytes record-count file payload-start payload-end)
@@ -477,7 +481,7 @@
       (when (and observe-classes (member (ir-node-kind node) '(:structure :class)))
         (setf (ir-node-effect-p node) t))
       (dolist (name (getf (ir-node-details node) :provided))
-        (pushnew node (gethash (list :function name) definitions) :test #'eq))
+        (pushnew node (gethash (list :function name) definitions) :test miricl::%compiler-eq-function))
       (when (eq (ir-node-kind node) :structure)
         (let ((slots nil) (readonly nil) (work (list node)) (seen (make-hash-table :test 'eq))
               (details (ir-node-details node)))
@@ -496,9 +500,9 @@
           (dolist (slot slots)
             (let ((name (if (getf details :prefix)
                             (list (concatenate 'string (getf details :prefix) (first slot)) (getf details :package)) slot)))
-              (pushnew node (gethash (list :function name) definitions) :test #'eq)
+              (pushnew node (gethash (list :function name) definitions) :test miricl::%compiler-eq-function)
               (unless (member (first slot) readonly :test #'equal)
-                (pushnew node (gethash (list :function (list :setf name)) definitions) :test #'eq)))))))))
+                (pushnew node (gethash (list :function (list :setf name)) definitions) :test miricl::%compiler-eq-function)))))))))
 
 (defun entry-key (entry)
   (cond ((symbolp entry) (function-key entry))
@@ -577,7 +581,7 @@
                               (gethash (list :function (ir-node-name node)) definitions)))))
           (dolist (specializer (getf (ir-node-details node) :specializers))
             (when (and (consp specializer) (gethash (list :class specializer) definitions))
-              (pushnew node (gethash specializer method-waiters) :test #'eq)))
+              (pushnew node (gethash specializer method-waiters) :test miricl::%compiler-eq-function)))
           (when (method-ready-p node) (retain node (list :runtime-method)))))
       (dolist (entry entries) (public-root entry :entry))
       (dolist (entry keep) (public-root entry :keep))

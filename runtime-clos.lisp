@@ -132,6 +132,34 @@
                       (lower-runtime-library
                         `(defun ,(second form) ,(third form) (%%compile ,mode ,@(third form))))
                       form)))))
+        (when (equal file "fasl-format.lisp")
+          ;; Every guest image has the native record codec. Keep the portable
+          ;; descriptions codec on the host without shipping duplicate parsers
+          ;; and writers in the interpreted compiler or scripting image.
+          (setf forms
+            (loop for form in forms
+              unless (member (second form)
+                        '(miricl-compiler::*binary-strings* miricl-compiler::*binary-last-string*
+                          miricl-compiler::*binary-prefixes* miricl-compiler::*binary-limit*
+                          miricl-compiler::binary-byte miricl-compiler::binary-uleb
+                          miricl-compiler::uleb-size miricl-compiler::encode-value
+                          miricl-compiler::decode-value miricl-compiler::decode-sequence-value
+                          miricl-compiler::compact-cons-record-p miricl-compiler::record-edge-delta
+                          miricl-compiler::encode-record-edge miricl-compiler::decode-record-edge
+                          miricl-compiler::encode-record-block miricl-compiler::list-run-parameters
+                          miricl-compiler::decode-record-block))
+              collect
+                (case (second form)
+                  (miricl-compiler::write-binary-chunk
+                   (lower-runtime-library
+                     '(defun miricl-compiler::write-binary-chunk (value stream &optional record-base)
+                        (let ((bytes (%%compile 15 value record-base)))
+                          (write-sequence bytes stream) (length bytes)))))
+                  (miricl-compiler::read-binary-chunk
+                   (lower-runtime-library
+                     '(defun miricl-compiler::read-binary-chunk (stream start end)
+                        (%%compile 16 stream start end))))
+                  (otherwise form)))))
         ;; Establish the native package and symbol identities before DEFSTRUCT
         ;; generates accessors. Public exports are declared in PACKAGE.LISP.
         (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp") :test #'equal)
@@ -845,12 +873,16 @@
   #@(global.set $library-read-budget (i32.shl (global.get $limit) (i32.const 7))))
 
 (define-runtime-function $read-library-string () (:object)
-  (:locals ($n i32) ($i i32) ($digits :digits))
+  (:locals ($n i32) ($i i32) ($digits :digits) ($byte-mode i32))
   #@(local.set $n (call $read-library-unsigned))
+  #@(local.set $byte-mode (i32.lt_s (local.get $n) (i32.const 0)))
+  #@(local.set $n (i32.and (local.get $n) (i32.const 2147483647)))
   (wat-fail-when #@(i32.gt_u (local.get $n) (i32.sub (global.get $limit) (global.get $cursor))) :malformed-form)
   #@(local.set $digits (array.new_default $digits (local.get $n)))
   #@(block $done (loop $next (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-    (array.set $digits (local.get $digits) (local.get $i) (call $read-library-unsigned))
+    (array.set $digits (local.get $digits) (local.get $i)
+      (if (result i32) (local.get $byte-mode)
+        (then (call $read-library-byte)) (else (call $read-library-unsigned))))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
   #@(call $text (local.get $digits)))
 

@@ -1,36 +1,49 @@
 ;;;; Build the compiler with itself, then link its code into the runtime.
 (in-package #:miricl)
 
+(defun compiler-image-records-string (records)
+  ;; Reuse the current FASL record codec. Only the descriptions are packed;
+  ;; their IDs still reconstruct the same literal graph during startup.
+  (uiop:with-temporary-file (:stream out :pathname file :type "fasl"
+                                   :element-type '(unsigned-byte 8))
+    (miricl-compiler::write-binary-chunk (coerce records 'vector) out 0)
+    (finish-output out)
+    (with-open-file (in file :element-type '(unsigned-byte 8))
+      (let ((bytes (make-array (file-length in) :element-type '(unsigned-byte 8))))
+        (read-sequence bytes in)
+        (map 'string #'code-char bytes)))))
+
 (defun compiler-image-library-forms ()
   (if (null *native-compiler-image*)
       (append *clos-library*
         (list (lower-runtime-library '(setq miricl-compiler:*compile-evaluations* :interpreted))))
       (destructuring-bind (wat names roots records) *native-compiler-image*
         (declare (ignore wat))
-        (labels ((filter-form (form)
-                   (cond
-                     ((atom form) form)
-                     ((and (eq (car form) 'defun) (symbolp (second form))
-                           (eq (symbol-package (second form)) (find-package :miricl-compiler))
-                           (member (symbol-name (second form)) names :test #'equal)) nil)
-                     ((eq (car form) 'let)
-                      (list* 'let (second form) (remove nil (mapcar #'filter-form (cddr form)))))
-                     (t form))))
-          (append (remove nil (mapcar #'filter-form *clos-library*))
-            (list (lower-runtime-library
-              `(let ((%fasl-records (coerce ',records 'vector))
-                     (%fasl-values (make-array ,(length records)))
-                     (%fasl-states (make-array ,(length records) :initial-element 0))
-                     (%fasl-readtable (copy-readtable nil)) (%fasl-pending nil))
-                 ,@(loop for root in roots for index from 0 collect
-                   `(let ((%fasl-work (%fasl-object ,root)))
-                      (dolist (entry (funcall (%%compile 20 ,index (cadr %fasl-work) nil)))
-                        (setf (symbol-function (car entry)) (cdr entry)
-                              (gethash (car entry) miricl-compiler::*native-compiler-functions*) t))))
-                 (%invalidate-all-dispatch)
-                 (setq miricl-compiler::*compiler-state* :ready
-                       miricl-compiler::*compiler-origin* :image
-                       miricl-compiler:*compile-evaluations* ,*compile-evaluations-default*)))))))))
+        (let ((packed (compiler-image-records-string records)))
+          (labels ((filter-form (form)
+                     (cond
+                       ((atom form) form)
+                       ((and (eq (car form) 'defun) (symbolp (second form))
+                             (eq (symbol-package (second form)) (find-package :miricl-compiler))
+                             (member (symbol-name (second form)) names :test #'equal)) nil)
+                       ((eq (car form) 'let)
+                        (list* 'let (second form) (remove nil (mapcar #'filter-form (cddr form)))))
+                       (t form))))
+            (append (remove nil (mapcar #'filter-form *clos-library*))
+              (list (lower-runtime-library
+                `(let ((%fasl-records (%%compile 16 ,packed 0 ,(length packed)))
+                       (%fasl-values (make-array ,(length records)))
+                       (%fasl-states (make-array ,(length records) :initial-element 0))
+                       (%fasl-readtable (copy-readtable nil)) (%fasl-pending nil))
+                   ,@(loop for root in roots for index from 0 collect
+                     `(let ((%fasl-work (%fasl-object ,root)))
+                        (dolist (entry (funcall (%%compile 20 ,index (cadr %fasl-work) nil)))
+                          (setf (symbol-function (car entry)) (cdr entry)
+                                (gethash (car entry) miricl-compiler::*native-compiler-functions*) t))))
+                   (%invalidate-all-dispatch)
+                   (setq miricl-compiler::*compiler-state* :ready
+                         miricl-compiler::*compiler-origin* :image
+                         miricl-compiler:*compile-evaluations* ,*compile-evaluations-default*))))))))))
 
 (defun ensure-native-compiler-image ()
   (unless *native-compiler-image*

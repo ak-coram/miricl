@@ -65,13 +65,30 @@ try {
                 (declare (optimize (debug 0)))
                 (let ((counter initial))
                   (values (lambda (delta) (incf counter delta))
-                          (lambda () counter))))
+                          (lambda () counter)
+                          (lambda (effect)
+                            (let ((before counter) (child (lambda () counter)))
+                              (funcall effect)
+                              (values before counter child))))))
+              (defun image-worker-function-captures (initial)
+                (declare (optimize (debug 0)))
+                (let ((counter initial))
+                  (labels ((entry (n) (funcall (target) n))
+                           (target () #'walk)
+                           (walk (n)
+                             (if (zerop n) (values counter #'entry #'walk)
+                               (progn (incf counter) (again (1- n)))))
+                           (again (n) (walk n))
+                           (observe () (lambda () (values counter #'walk))))
+                    (declare (notinline entry target walk again observe))
+                    (values #'entry #'observe (lambda (delta) (incf counter delta))))))
               (defun image-worker-wide (a b c d e)
                 (declare (optimize (debug 0))) (values a b c d e)))
             :inline nil))
       (let ((fixed (cdr (assoc 'image-worker-check entries)))
             (tail (cdr (assoc 'image-worker-tail entries)))
             (captures (cdr (assoc 'image-worker-captures entries)))
+            (function-captures (cdr (assoc 'image-worker-function-captures entries)))
             (wide (cdr (assoc 'image-worker-wide entries))))
         (and (plusp (length bytes))
           (every (lambda (entry) (compiled-function-p (cdr entry))) entries)
@@ -80,11 +97,25 @@ try {
           (handler-case (progn (funcall fixed) nil) (program-error () t))
           (handler-case (progn (funcall fixed 1 2) nil) (program-error () t))
           (equal (multiple-value-list (funcall fixed 42)) '(43 :second))
-          (multiple-value-bind (advance observe) (funcall captures 10)
+          (multiple-value-bind (advance observe probe) (funcall captures 10)
             (multiple-value-bind (other-advance other-observe) (funcall captures 100)
               (and (= (funcall advance 2) 12) (= (funcall observe) 12)
                 (= (funcall other-observe) 100) (= (funcall other-advance 3) 103)
-                (= (funcall observe) 12))))
+                (= (funcall observe) 12)
+                (multiple-value-bind (before after child)
+                    (funcall probe (lambda () (funcall advance 5) (values :ignored :extra)))
+                  (and (= before 12) (= after 17) (= (funcall child) after)
+                    (= (funcall advance 1) 18) (= (funcall child) 18)
+                    (= (funcall other-observe) 103))))))
+          (multiple-value-bind (entry observe advance) (funcall function-captures 10)
+            (multiple-value-bind (other-entry other-observe) (funcall function-captures 100)
+              (let ((read (funcall observe)) (other-read (funcall other-observe)))
+                (multiple-value-bind (answer same-entry walk) (funcall entry 3)
+                  (multiple-value-bind (observed same-walk) (funcall read)
+                    (and (= answer 13) (= observed answer) (eq entry same-entry)
+                      (eq walk same-walk) (= (funcall advance 2) 15)
+                      (= (funcall read) 15) (= (funcall other-read) 100)
+                      (= (funcall other-entry 1) 101) (= (funcall read) 15)))))))
           (equal (multiple-value-list (funcall wide 1 nil 3 4 5)) '(1 nil 3 4 5))
           (eq compiler (symbol-function 'compile-native))
           (eq policy *wasm-bootstrap-direct-workers*)))))`);
@@ -212,6 +243,40 @@ try {
       (function (first (hir-unit-functions unit)))
       (block (first (hir-function-blocks function)))
       (instruction (first (hir-block-instructions block))))
+    ${mutation} (emit-native-module unit))`, reason);
+  // Public CALL metadata is validated before compiler internals or retained-code
+  // serialization; malformed policy data must leave the compiler usable.
+  for (const attributes of [':speed', '17', "'(:unknown)", "'(:speed :speed)",
+    "(cons :speed :dotted)", "(let ((cycle (list :speed))) (setf (cdr cycle) cycle) cycle)"]) {
+    reject(`(let* ((unit (lower-source-to-hir '(lambda (x) (soundness-unknown x))))
+        (instructions (mapcan (lambda (function)
+          (mapcan (lambda (block) (copy-list (hir-block-instructions block)))
+            (hir-function-blocks function))) (hir-unit-functions unit)))
+        (call (find :call instructions :key (lambda (instruction) (hir-instruction-opcode instruction)))))
+      (setf (hir-instruction-attributes call) ${attributes})
+      (emit-native-module unit))`, /attribute|policy|dotted|circular/);
+  }
+  for (const selectEntry of [
+    '(emit-native-module unit :entries (list function))',
+    '(setf (hir-unit-functions unit) (cons function (remove function (hir-unit-functions unit)))) (emit-native-module unit)',
+  ]) reject(`(let* ((unit (compile-to-hir '(lambda (x) (lambda () x))))
+      (function (find-if (lambda (function) (hir-function-captures function)) (hir-unit-functions unit))))
+    ${selectEntry})`, /entry requires a closure environment/);
+  // Capture metadata describes the actual closure environment. Public HIR
+  // must not name an absent slot or mistake the private child-cache slot for
+  // a binding, even when the individual records and operands are well formed.
+  for (const [opcode, mutation, reason] of [
+    [':capture', '(setf (hir-instruction-output instruction) nil)', /capture must produce/],
+    [':capture', '(setf (first (hir-instruction-attributes instruction)) (length (hir-function-captures function)))', /index and identity/],
+    [':capture', '(setf (second (hir-instruction-attributes instruction)) (second (hir-function-captures function)))', /index and identity/],
+    [':closure', '(setf (hir-instruction-inputs instruction) (cdr (hir-instruction-inputs instruction)))', /operand count/],
+    [':closure', '(push (first (hir-instruction-inputs instruction)) (hir-instruction-inputs instruction))', /operand count/],
+  ]) reject(`(let* ((unit (compile-to-hir '(lambda (x y) (lambda () (values x y)))))
+      (function (find-if (lambda (function)
+        (find ${opcode} (mapcan (lambda (block) (copy-list (hir-block-instructions block)))
+          (hir-function-blocks function)) :key (lambda (instruction) (hir-instruction-opcode instruction)))) (hir-unit-functions unit)))
+      (instruction (find ${opcode} (mapcan (lambda (block) (copy-list (hir-block-instructions block)))
+        (hir-function-blocks function)) :key (lambda (instruction) (hir-instruction-opcode instruction)))))
     ${mutation} (emit-native-module unit))`, reason);
   // Sharing and literal cycles are valid inputs, unlike cyclic executable code.
   check(`(let ((object (list :cycle)) (shared '(+ x 1)))
@@ -571,6 +636,32 @@ try {
           (equal (multiple-value-list (funcall function :atom observe)) '(:atom :extra))))
         '(nil t)))`);
   }
+  // Both size preferences preserve predicate operands, branch polarity and
+  // value groups, including the debugger's retained-code configuration.
+  for (const [space, speed] of [[3, 1], [1, 3]]) {
+    for (const safety of [0, 3]) {
+      for (const debug of [0, 2]) {
+        check(`(let ((function (compile-native '(lambda (x y effect)
+            (declare (inline consp eq)
+              (optimize (space ${space}) (speed ${speed}) (safety ${safety}) (debug ${debug})))
+            (values (consp (funcall effect :object x))
+              (eq (funcall effect :left x) (funcall effect :right y))
+              (if (consp x) :cons :atom) (if (eq x y) :same :different)))))
+            (objects (list nil 17 (ash 1 80) :symbol #\\a #(1) '(1))))
+          (every (lambda (object)
+            (every (lambda (other)
+              (let ((effects nil))
+                (and (equal (multiple-value-list
+                    (funcall function object other
+                      (lambda (tag value) (push tag effects) (values value :discarded))))
+                  (list (consp object) (eq object other)
+                    (if (consp object) :cons :atom) (if (eq object other) :same :different)))
+                  (equal effects '(:right :left :object)))))
+              objects)) objects))`);
+      }
+    }
+  }
+
   // Proper-spine proofs describe current objects, not the CL LIST type.
   // Canonical constructors retain fresh spines, operand order and all values.
   for (const safety of [0, 1, 2, 3]) {
@@ -640,6 +731,28 @@ try {
 
   // ANSI leaves redefining CL primitives undefined. MIRICL explicitly supports
   // it unless an INLINE/sealed contract permits capturing the old definition.
+  for (const [predicate, arguments_] of [['consp', 'object'], ['eq', 'object object']]) {
+    check(`(let* ((object (list :identity))
+        (ordinary (compile-native '(lambda (object) (${predicate} ${arguments_}))))
+        (indirect (compile-native '(lambda (object) (declare (notinline ${predicate}))
+          (${predicate} ${arguments_}))))
+        (captured (compile-native '(lambda (object) (declare (inline ${predicate}))
+          (${predicate} ${arguments_}))))
+        (replacement (compile-native '(lambda (&rest arguments) (declare (ignore arguments))
+          (values :replacement :extra))))
+        (original (symbol-function '${predicate})))
+      (and (equal (multiple-value-list (funcall ordinary object)) '(t))
+        (unwind-protect
+          (progn (setf (symbol-function '${predicate}) replacement)
+            (and (equal (multiple-value-list (funcall ordinary object)) '(:replacement :extra))
+              (equal (multiple-value-list (funcall indirect object)) '(:replacement :extra))
+              (equal (multiple-value-list (funcall captured object)) '(t))
+              (equal (multiple-value-list
+                (funcall (compile-native '(lambda (object) (declare (inline ${predicate}))
+                  (${predicate} ${arguments_}))) object)) '(:replacement :extra))))
+          (setf (symbol-function '${predicate}) original))
+        (equal (multiple-value-list (funcall ordinary object)) '(t))))`);
+  }
   check(`(let ((function (compile-native '(lambda (v i)
       (declare (optimize (safety 0)) (type simple-vector v) (fixnum i))
       (list (svref v i))))) (original (symbol-function 'svref)))
@@ -733,6 +846,139 @@ try {
       (funcall *soundness-reentry* t))) '(:kept :kept :kept :kept :kept :kept))`);
   console.log('Soundness: native recursion preserves stack depth and effects; condition handlers can reenter with multiple values.');
 
+  // Policy metadata is a retained-code capability: delayed definitions keep
+  // each default initializer's original context after later proclamations.
+  evaluate(`(defun soundness-policy-flags (unit)
+  (labels ((source (value)
+             (dotimes (fuel 16 value)
+               (let ((producer (hir-value-producer value)))
+                 (unless (and (%hir-instruction-p producer)
+                              (member (hir-instruction-opcode producer) '(:primary :copy)))
+                   (return value))
+                 (setq value (first (hir-instruction-inputs producer))))))
+           (constant (value)
+             (let ((producer (hir-value-producer (source value))))
+               (when (and (%hir-instruction-p producer)
+                          (eq (hir-instruction-opcode producer) :constant))
+                 (first (hir-instruction-attributes producer))))))
+    (let ((flags nil))
+      (dolist (function (hir-unit-functions unit))
+        (dolist (block (hir-function-blocks function))
+          (dolist (instruction (hir-block-instructions block))
+            (when (eq (hir-instruction-opcode instruction) :call)
+              (let* ((inputs (hir-instruction-inputs instruction))
+                     (reference (hir-value-producer (second inputs))))
+                (when (and (%hir-instruction-p reference)
+                           (eq (hir-instruction-opcode reference) :function-reference)
+                           (eq (first (hir-instruction-attributes reference)) 'consp))
+                  (let ((probe (hir-value-producer (source (third inputs)))))
+                    (when (and (%hir-instruction-p probe)
+                               (eq (hir-instruction-opcode probe) :call))
+                      (let ((tag (constant (third (hir-instruction-inputs probe)))))
+                        (when (keywordp tag)
+                          (push (cons tag (null (hir-instruction-attributes instruction))) flags)))))))))))
+      flags)))
+
+(defun soundness-policy-probe (tag object) (declare (ignore tag)) object) (values)`);
+  const savedSize = Number(evaluate('(values (compiler-primitive 52 nil))').trim());
+  const savedDebug = Number(evaluate('(values (compiler-primitive 33 nil))').trim());
+  if (!Number.isInteger(savedSize) || savedSize < 0 || savedSize > 15
+      || !Number.isInteger(savedDebug) || savedDebug < 0 || savedDebug > 3)
+    throw Error('Invalid initial optimization policy');
+  try {
+    for (const debug of [0, 3]) {
+      vm.mountFile('/soundness-policy.lisp', `(in-package :cl-user)
+        (declaim (optimize (debug 1) (space 3) (speed 1)))
+        (defun soundness-policy-early (&optional (object
+            (progn (consp (miricl-compiler::soundness-policy-probe :optional nil)) nil))
+            &key ((:sample sample) (consp (miricl-compiler::soundness-policy-probe :key object)) supplied)
+            &aux (aux (consp (miricl-compiler::soundness-policy-probe :aux object))))
+          (declare (inline consp) (optimize (debug ${debug})))
+          (values (consp (miricl-compiler::soundness-policy-probe :early object)) sample supplied aux))
+        (declaim (optimize (space 1) (speed 3)))
+        (defun soundness-policy-late (object)
+          (declare (inline consp) (optimize (debug ${debug})))
+          (consp (miricl-compiler::soundness-policy-probe :late object)))
+        (declaim (optimize (space 0) (speed 0)))`);
+      check(`(let ((result (multiple-value-list (compile-file "/soundness-policy.lisp"
+          :verbose nil :block-compile t))))
+        (and (pathnamep (first result)) (null (third result))
+          (load "/soundness-policy.wasm")))`);
+      check(`(let* ((recipe (compiler-primitive 44 #'cl-user::soundness-policy-early))
+          (code (car recipe)) (flags (soundness-policy-flags (hir-code-to-unit code))))
+        (and (every (lambda (tag) (let ((entry (assoc tag flags))) (and entry (cdr entry))))
+               '(:optional :key :aux :early))
+          (let ((entry (assoc :late flags))) (and entry (null (cdr entry))))
+          (every (lambda (tag)
+            (let* ((copy (copy-hir-code (validate-hir-code code)))
+                   (entry (assoc tag (soundness-policy-flags (hir-code-to-unit copy)))))
+              (and entry (cdr entry)))) '(:optional :key :aux :early))
+          (equal (multiple-value-list (cl-user::soundness-policy-early)) '(nil nil nil nil))
+          (equal (multiple-value-list (cl-user::soundness-policy-early '(x))) '(t t nil t))
+          (equal (multiple-value-list (cl-user::soundness-policy-early '(x) :sample 99)) '(t 99 t t))
+          (cl-user::soundness-policy-late '(x)) (not (cl-user::soundness-policy-late 17))))`);
+    }
+  } finally {
+    evaluate(`(proclaim '(optimize (space ${savedSize >> 2}) (speed ${savedSize & 3})
+      (debug ${savedDebug}))) (values)`);
+  }
+
+// Ordinary COMPILE must inherit the current global preference even when the
+// source function has a live lexical environment and retains no debug source.
+check(`(let ((saved-policy (compiler-primitive 52 nil))
+    (saved-debug (compiler-primitive 33 nil)))
+  (labels ((sharing-preferences (function)
+             (let* ((recipe (compiler-primitive 44 function))
+                    (payload (validate-hir-code (car recipe)))
+                    (descriptor (svref (svref payload 1) (cdr recipe)))
+                    (scratch (make-array (+ 6 (svref descriptor 7)) :initial-element 0))
+                    (references (make-hash-table)) (preferences nil))
+               (dotimes (pass 2)
+                 (loop for block across (svref descriptor 5) do
+                   (let ((code (svref block 2)) (pc 0))
+                     (loop while (< pc (length code)) do
+                       (setq pc (read-hir-code-instruction code pc scratch))
+                       (let ((spec (svref *hir-code-operations* (svref scratch 0))))
+                         (cond
+                           ((and (zerop pass) (member (first spec)
+                              '(:function-reference :function-reference-inline :function-reference-notinline))
+                              (eq (svref (svref payload 0) (svref scratch 4)) 'consp))
+                            (setf (gethash (1- (svref scratch 2)) references) t))
+                           ((and (= pass 1) (member (first spec) '(:call :call-primary))
+                                 (gethash (svref scratch 7) references))
+                            (push (null (seventh spec)) preferences))))))))
+               preferences)))
+    (unwind-protect
+        (every (lambda (policy)
+          (proclaim (list 'optimize (list 'space (first policy))
+                                   (list 'speed (second policy)) '(debug 0)))
+          (multiple-value-bind (raw captured)
+              (eval '(let ((captured (list :captured)))
+                       (values (lambda (object effect)
+                                 (declare (inline consp) (optimize (debug 0)))
+                                 (values captured (consp (funcall effect object))))
+                               captured)))
+            (and (not (compiled-function-p raw))
+              (nth-value 1 (function-lambda-expression raw))
+              (let* ((compiled (compile nil raw))
+                     (preferences (sharing-preferences compiled))
+                     (expected (> (first policy) (second policy)))
+                     (effects nil))
+                (setf (car captured) :changed)
+                (and preferences
+                  (every (lambda (preference) (eq preference expected)) preferences)
+                  (let ((results (multiple-value-list
+                          (funcall compiled '(x)
+                            (lambda (object) (push :effect effects)
+                              (values object :discarded))))))
+                    (and (eq (first results) captured)
+                      (equal results '((:changed) t))
+                      (equal effects '(:effect)))))))))
+          '((0 3) (3 1)))
+      (proclaim (list 'optimize (list 'space (ash saved-policy -2))
+                               (list 'speed (logand saved-policy 3))
+                               (list 'debug saved-debug))))))`);
+
   vm.mountFile('/soundness.lisp', `(in-package :cl-user)
     (defparameter *soundness-graph* '#1=("λ𝄞" #2=(:shared) #2# . #1#))
     (defparameter *soundness-functions*
@@ -756,6 +1002,59 @@ try {
            (= (funcall (svref graph 0) 0) 42)
            (eq (svref graph 3) (funcall (svref graph 4) :arguments)))))`;
   check(graphCheck);
+  // The image loader feeds current binary record descriptions directly from
+  // a byte-valued string; decoding must preserve records and the input string.
+  check(`(let* ((text (map 'string #'code-char
+                         (loop for code below 256 collect code)))
+      (records (vector '(0) (list 3 text) '(5 1 0 0) '(5 1 2 0)
+                       '(4 "KEYWORD" "COMMON-LISP" 0) '(11 0 0 (-1 1))
+                       '(6 (1) 0 (1))))
+      (octets (compiler-primitive 15 records 0))
+      (packed (map 'string #'code-char octets))
+      (saved (copy-seq packed)) (size (length packed)))
+    (labels ((decode (source start end) (compiler-primitive 16 source start end))
+             (reject (source start end)
+               (and (handler-case (progn (decode source start end) nil)
+                      (error (condition) (not (null (princ-to-string condition)))))
+                    (equalp (decode packed 0 size) records))))
+      (and (equalp (decode packed 0 size) records)
+        ;; General strings use their actual view, including displacement.
+        (equalp (decode (make-array size :element-type 'character
+                         :displaced-to (concatenate 'string "pad" packed)
+                         :displaced-index-offset 3) 0 size) records)
+        (equalp (decode (concatenate 'string (string (code-char 256)) packed
+                                    (string (code-char 256))) 1 (1+ size)) records)
+        (reject packed 0 (1- size)) (reject packed -1 size)
+        (reject packed 1 0) (reject packed 0 (1+ size))
+        (reject "" 0 0) (reject packed size size)
+        (reject (make-array 0 :element-type 'character :displaced-to packed) 0 0)
+        ;; A nonbyte in an otherwise valid byte-string payload must not be
+        ;; copied through as a wider character by the binary decoder.
+        (let ((raw (map 'string #'code-char
+                        (compiler-primitive 15 (string (code-char 255))))))
+          (setf (char raw (1- (length raw))) (code-char 256))
+          (reject raw 0 (length raw)))
+        (equal packed saved) (= (length packed) size))))`);
+  recover();
+  // Compact arrays reconstruct the public record graph, including self and
+  // mutual references. Other dimensions and reference orders stay valid.
+  check(`(let* ((records #((6 (1) 0 (0)) (6 (2) 0 (0 1))
+                           (6 (0) 0 ()) (6 (2) 0 (1 1)) (6 (1 1) 0 (0))))
+                (bytes (compiler-primitive 15 records 0))
+                (packed (map 'string #'code-char bytes)))
+    (labels ((decode (text) (compiler-primitive 16 text 0 (length text)))
+             (reject (octets)
+               (and (handler-case (progn (decode (map 'string #'code-char octets)) nil)
+                      (error (condition) (not (null (princ-to-string condition)))))
+                    (equalp (decode packed) records))))
+      (and (equalp (decode packed) records)
+           (every #'reject
+             '((10 0 1 14 0 0 0) (10 0 1 14 2 0 0)
+               (10 2 1 14 1 0 1) (10 0 1 14 1 0 1)
+               (10 0 1 14 1 1 0) (10 0 1 14 1 0)
+               (10 0 2 14 2 0 0 14 1 0 0)
+               (10 0 1 14 128 128 128 128 8 0 0))))))`);
+  recover();
   for (const invalid of [
     "(vector '(5 0 9 0))", "(vector '(12 0 0 0 7 0))",
     "(vector '(12 1 9 0 -1 0))", "(let ((record (list 0))) (setf (cdr record) record) (vector record))",
@@ -790,6 +1089,8 @@ try {
   assert.ok(payloadStart !== undefined, 'The compiled file contains its current FASL payload.');
   const corruptions = [
     ['magic', copy => {copy[payloadStart] ^= 255;}],
+    ['missing required grammar feature', copy => {copy[payloadStart + 4] ^= 16;}],
+    ['unknown grammar feature', copy => {copy[payloadStart + 4] |= 32;}],
     ['directory offset', copy => {
       // The current FASL header is five u32s, then four-u32 directory entries:
       // kind, key, payload-relative offset and size. Corrupt the first offset.

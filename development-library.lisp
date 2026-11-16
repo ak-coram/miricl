@@ -165,29 +165,32 @@
   (unless (%string-element-type-p element-type)
     (error 'type-error :datum element-type :expected-type '(satisfies %string-element-type-p)))
   (%%sequence-construction 0 size initial-element (null element-type)))
-(defun %sequence-result-type-p (type)
-  (or (member (if (consp type) (car type) type)
-        '(list null cons string base-string simple-string simple-base-string vector simple-vector bit-vector simple-bit-vector))
-      (and (consp type)
-           (member (car type) '(array simple-array))
-           (or (eql (third type) 1)
-               (and (consp (third type)) (null (cdr (third type))))))))
-(defun %sequence-result-kind (type)
-  (unless (%sequence-result-type-p type)
-    (let ((expanded (%%derived-type 2 type nil nil)))
-      (when (%classp expanded) (setq expanded (class-name expanded)))
-      (unless (eq expanded type)
-        (return-from %sequence-result-kind (%sequence-result-kind expanded))))
-    (error 'type-error :datum type :expected-type '(satisfies %sequence-result-type-p)))
-  (let ((head (if (consp type) (car type) type)))
-    (cond ((member head '(list null cons)) 0)
-          ((member head '(string base-string simple-string simple-base-string)) 1)
-          ((member head '(bit-vector simple-bit-vector)) 3)
-          ((and (consp type) (member head '(array simple-array vector)) (cdr type)
-                (not (eq (cadr type) '*)))
-           (let ((upgraded (upgraded-array-element-type (cadr type))))
-             (cond ((eq upgraded 'character) 1) ((eq upgraded 'bit) 3) ((null upgraded) 4) (t 2))))
-          (t 2))))
+;; These shared classifiers belong to the runtime. Keep their predicates
+;; from library initialization when public function definitions change.
+(let ((predicate #'consp) (test #'eq))
+  (defun %sequence-result-type-p (type)
+    (or (member (if (funcall predicate type) (car type) type)
+          '(list null cons string base-string simple-string simple-base-string vector simple-vector bit-vector simple-bit-vector))
+        (and (funcall predicate type)
+             (member (car type) '(array simple-array))
+             (or (eql (third type) 1)
+                 (and (funcall predicate (third type)) (null (cdr (third type))))))))
+  (defun %sequence-result-kind (type)
+    (unless (%sequence-result-type-p type)
+      (let ((expanded (%%derived-type 2 type nil nil)))
+        (when (%classp expanded) (setq expanded (class-name expanded)))
+        (unless (funcall test expanded type)
+          (return-from %sequence-result-kind (%sequence-result-kind expanded))))
+      (error 'type-error :datum type :expected-type '(satisfies %sequence-result-type-p)))
+    (let ((head (if (funcall predicate type) (car type) type)))
+      (cond ((member head '(list null cons)) 0)
+            ((member head '(string base-string simple-string simple-base-string)) 1)
+            ((member head '(bit-vector simple-bit-vector)) 3)
+            ((and (funcall predicate type) (member head '(array simple-array vector)) (cdr type)
+                  (not (funcall test (cadr type) '*)))
+             (let ((upgraded (upgraded-array-element-type (cadr type))))
+               (cond ((funcall test upgraded 'character) 1) ((funcall test upgraded 'bit) 3) ((null upgraded) 4) (t 2))))
+            (t 2)))))
 (let ((%sequence-default-character (code-char 0)))
 ;; The unspecified initial contents retain the target's chosen NUL character.
 ;; Capture it at library initialization so later CODE-CHAR redefinition cannot
@@ -375,9 +378,17 @@
     ;; Wrap from right to left so earlier bindings enclose later defaults.
     (%%while bindings
       (let* ((binding (pop bindings)) (target (car binding)) (value (cadr binding)))
-        (setq body (list (if (listp target)
-          (list '%%apply (list 'function (%destructure-lambda target value environment body type-defaults)) value)
-          (list* 'let (list (list target value)) body))))))
+        (setq body
+          (list (cond
+            ;; An empty pattern matches only NIL. Check before the ordinary
+            ;; function entry so native argument validation preserves this
+            ;; destructuring mismatch as a PROGRAM-ERROR.
+            ((null target)
+             (list 'if value (list 'error (list 'quote 'program-error))
+                   (cons 'locally body)))
+            ((listp target)
+             (list '%%apply (list 'function (%destructure-lambda target value environment body type-defaults)) value))
+            (t (list* 'let (list (list target value)) body)))))))
     (let ((function (list* 'lambda (reverse ordinary) body)))
       (if prefix
         (let* ((args (gensym)) (call (list '%%apply (list 'function function) args)))
@@ -836,6 +847,7 @@
 
 (defvar %debug-default-level 1)
 (defvar %safety-default-level 1)
+(defvar %size-default-policy 13)
 (defparameter %debug-declaration '(declare (optimize (debug 3))))
 
 (defun %optimize-debug-level (qualities inherited)
@@ -847,6 +859,17 @@
                    (or (atom quality) (= (length quality) 2)))
         (error 'program-error))
       (when (eq name 'debug) (setq inherited level)))))
+
+
+(defun %optimize-quality-level (qualities inherited quality-name)
+  ;; DEBUG 2 retains native instructions; DEBUG 3 enables interactive debugging.
+  (dolist (quality qualities inherited)
+    (let ((name (if (consp quality) (first quality) quality))
+          (level (if (consp quality) (second quality) 3)))
+      (unless (and (symbolp name) (integerp level) (<= 0 level 3)
+                   (or (atom quality) (= (length quality) 2)))
+        (error 'program-error))
+      (when (eq name quality-name) (setq inherited level)))))
 
 (defun %body-debug-level (body &optional inherited)
   (when (and (stringp (car body)) (cdr body)) (setq body (cdr body)))
@@ -912,7 +935,10 @@
         (optimize
           (let ((debug (%optimize-debug-level (cdr spec) %debug-default-level))
                 (safety (%optimize-safety-level (cdr spec) %safety-default-level)))
-            (setq %debug-default-level debug %safety-default-level safety)))
+            (setq %debug-default-level debug %safety-default-level safety
+                  %size-default-policy
+                  (+ (* 4 (%optimize-quality-level (cdr spec) (ash %size-default-policy -2) 'space))
+                     (%optimize-quality-level (cdr spec) (logand %size-default-policy 3) 'speed)))))
         (special
           (let ((names (cdr spec)))
             (%%while names (%%proclaim-variable (pop names)))))

@@ -6,6 +6,7 @@
 (defconstant +fasl-block-size+ 256)
 (defvar *binary-strings* nil)
 (defvar *binary-last-string* nil)
+(defvar *binary-prefixes* nil)
 (defvar *binary-limit* nil)
 
 (defun write-u32 (value stream)
@@ -60,9 +61,34 @@
                     (use-prefix (and (plusp prefix) (> prefix-bytes prefix-header)
                       (or (not latin1)
                           (< (+ prefix-header (uleb-size suffix-bytes) suffix-bytes)
-                             (+ (uleb-size (length value)) (length value)))))))
+                             (+ (uleb-size (length value)) (length value))))))
+                    (base-index (1- index))
+                    (best-size (if use-prefix
+                                   (+ prefix-header (uleb-size suffix-bytes) suffix-bytes)
+                                   (if latin1 (+ (uleb-size (length value)) (length value))
+                                       (+ (uleb-size (length bytes)) (length bytes)))))
+                    (node *binary-prefixes*) (matched-bytes 0))
+               ;; A prefix node retains its earliest string index: its ULEB
+               ;; can never be wider than a later index for the same prefix.
+               ;; Bound the extra work even for module-sized byte strings;
+               ;; the existing full previous-string comparison remains useful.
+               (loop for position below (min 64 (length value))
+                     for code = (char-code (char value position))
+                     for child = (gethash code node) do
+                 (incf matched-bytes (cond ((< code 128) 1) ((< code 2048) 2)
+                                          ((< code 65536) 3) (t 4)))
+                 (if child
+                     (let* ((suffix (- (length bytes) matched-bytes))
+                            (size (+ (uleb-size (car child)) (uleb-size (1+ position))
+                                     (uleb-size suffix) suffix)))
+                       (when (< size best-size)
+                         (setq best-size size use-prefix t base-index (car child)
+                               prefix (1+ position) prefix-bytes matched-bytes)))
+                     (setf child (cons index (make-hash-table))
+                           (gethash code node) child))
+                 (setq node (cdr child)))
                (if use-prefix
-                   (progn (write-byte 9 stream) (write-uleb (1- index) stream) (write-uleb prefix stream)
+                   (progn (write-byte 9 stream) (write-uleb base-index stream) (write-uleb prefix stream)
                      (write-uleb (- (length bytes) prefix-bytes) stream) (write-sequence bytes stream :start prefix-bytes))
                    ;; Byte-valued strings include native modules. Preserve
                    ;; their characters directly instead of expanding every
@@ -161,7 +187,8 @@
   ;; internal CDR edges are implicit; CAR edges and the last CDR remain explicit.
   ;; Runs never cross an independently addressable record block.
   (write-byte 10 stream) (write-uleb base stream) (write-uleb (length records) stream)
-  (loop with i = 0 with last-package = nil with last-namespace = nil while (< i (length records)) do
+  (loop with i = 0 with last-package = nil with last-namespace = nil
+        with array-budget = (length records) while (< i (length records)) do
    (let* ((record (aref records i)) (id (+ base i)) (run 1) (bitmap nil) (zero-tail nil))
     (case (first record)
       (0 (write-byte 1 stream))
@@ -182,6 +209,22 @@
            (error "Invalid saved slot reference."))
          ;; Zero denotes an unbound slot; NIL has its own nonnegative ID.
          (write-uleb (1+ reference) stream)))
+      (6
+       ;; Restrict expansion to this block, including a cumulative budget: many
+       ;; small interval descriptors must not allocate quadratically many refs.
+       (let* ((size (and (eql (list-length record) 4)
+                         (eql (list-length (second record)) 1) (first (second record))))
+              (references (and size (fourth record)))
+              (first (and (consp references) (car references))))
+         (if (and (typep size '(integer 1 #x7fffffff)) (<= size array-budget)
+                  (eql (list-length references) size)
+                  (typep first '(unsigned-byte 31)) (<= base first (- (+ base (length records)) size))
+                  (typep (third record) '(unsigned-byte 31)) (< (third record) (+ base (length records)))
+                  (loop for reference in references for expected from first always (eql reference expected)))
+             (progn (decf array-budget size)
+               (write-byte 14 stream) (write-uleb size stream)
+               (write-uleb (third record) stream) (write-uleb first stream))
+             (progn (write-byte 0 stream) (encode-value record stream)))))
       (otherwise
        (if (compact-cons-record-p record)
            (progn
@@ -216,7 +259,7 @@
 
 (defun decode-record-block (stream depth)
   (let* ((base (binary-uleb stream)) (count (binary-uleb stream)) (result nil)
-         (last-package nil) (last-namespace nil))
+         (last-package nil) (last-namespace nil) (array-budget count))
     (unless (and (<= (+ base count) #x7fffffff)
                  (<= count (- *binary-limit* (file-position stream))))
       (error "Invalid binary FASL record block."))
@@ -241,6 +284,14 @@
             (1 '(0))
             ((2 4) (list (if (= tag 2) 1 3) (decode-sequence-value stream (1+ depth))))
             (3 (list 2 (binary-uleb stream)))
+            (14
+             (let ((size (binary-uleb stream)) (type (binary-uleb stream))
+                   (first (binary-uleb stream)))
+               (unless (and (<= 1 size array-budget) (< type (+ base count))
+                            (<= base first (- (+ base count) size)))
+                 (error "Invalid binary FASL array interval."))
+               (decf array-budget size)
+               (list 6 (list size) type (loop for id from first below (+ first size) collect id))))
             (13
              (let ((class (binary-uleb stream)) (names (binary-uleb stream))
                    (size (binary-uleb stream)))
@@ -263,7 +314,8 @@
 (defun write-binary-chunk (value stream &optional record-base)
   (multiple-value-bind (bytes native) (compiler-primitive 15 value record-base)
     (when native (write-sequence bytes stream) (return-from write-binary-chunk (length bytes))))
-  (let ((*binary-strings* (make-hash-table :test 'equal)) (*binary-last-string* nil) (start (file-position stream)))
+  (let ((*binary-strings* (make-hash-table :test 'equal)) (*binary-last-string* nil)
+        (*binary-prefixes* (make-hash-table)) (start (file-position stream)))
     (if record-base (encode-record-block value record-base stream) (encode-value value stream))
     (- (file-position stream) start)))
 
@@ -353,9 +405,9 @@
     (write-byte 0 stream) (write-padded-uleb 0 stream) (write-byte 11 stream)
     (loop for character across "miricl.fasl" do (write-byte (char-code character) stream))
     (dolist (byte '(77 73 82 70)) (write-byte byte stream))
-    ;; Bits 2 and 3 identify executable initializers and the byte-valued string grammar; bit 1 records
-    ;; dense slots and bit 0 records optional metadata.
-    (write-u32 (logior 12 (if metadata 1 0) (if (find 11 records :key #'first) 2 0)) stream)
+    ;; Required bits 2, 3 and 4 identify executable initializers, byte-valued
+    ;; strings and bounded array intervals; bits 0/1 are metadata/dense slots.
+    (write-u32 (logior 28 (if metadata 1 0) (if (find 11 records :key #'first) 2 0)) stream)
     (write-u32 (length records) stream)
     (write-u32 chunks stream) (write-u32 +fasl-block-size+ stream)
     (dotimes (i (* chunks 16)) (write-byte 0 stream))
@@ -383,7 +435,7 @@
     (unless (= byte (read-byte stream)) (error "Invalid binary FASL magic.")))
   (let ((flags (read-u32 stream)) (records (read-u32 stream))
         (count (read-u32 stream)) (block-size (read-u32 stream)) (entries nil))
-    (unless (and (<= 12 flags 15) (= block-size +fasl-block-size+)
+    (unless (and (<= 28 flags 31) (= block-size +fasl-block-size+)
                  (<= records #x7fffffff) (<= count (floor (- end start 20) 16))
                  (<= records (- end start 20 (* count 16))))
       (error "Unsupported binary FASL header."))

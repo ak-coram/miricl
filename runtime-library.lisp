@@ -223,6 +223,7 @@ Tags 32..62 encode proper lists of 1..31 elements; 128..255 encode common
 symbols from the public and private tables. Tag 7 carries a counted spine and a dotted-tail flag.
 Tag 63 replays an earlier complete subform into fresh objects.
 Tag 127 references earlier string contents; decoding still creates a fresh string.
+String headers use bit 31 for a raw-byte body; other bodies contain ULEB character codes.
 Other tags abbreviate proper list prefixes or frequent integer constants
 from *RUNTIME-LIBRARY-PREFIXES*."
   (let ((bytes (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
@@ -296,10 +297,22 @@ from *RUNTIME-LIBRARY-PREFIXES*."
                       (multiple-value-bind (index present) (gethash form strings)
                          (if present
                             (progn (emit-byte 127) (uleb index))
-                            (progn
+                            (let ((length (length form)) (high-bytes 0) (byte-string-p nil))
+                              (unless (<= length #x7fffffff)
+                                (error "Library string length ~D exceeds the 31-bit format limit." length))
+                              (setf byte-string-p
+                                    (loop for char across form for code = (char-code char)
+                                          always (and (<= code 255)
+                                                      (progn (when (>= code 128) (incf high-bytes)) t))))
                               (setf (gethash form strings) (hash-table-count strings))
-                              (emit-byte 10) (uleb (length form))
-                              (loop for char across form do (uleb (char-code char)))))))
+                              ;; A flagged header occupies five ULEB bytes. Use
+                              ;; raw bytes only when their savings exceed that
+                              ;; header cost, keeping ordinary text unchanged.
+                              (let ((raw (and byte-string-p
+                                             (> high-bytes (- 5 (max 1 (ceiling (integer-length length) 7)))))))
+                                (emit-byte 10) (uleb (if raw (logior #x80000000 length) length))
+                                (loop for char across form do
+                                  (if raw (emit-byte (char-code char)) (uleb (char-code char)))))))))
                      (t (error "Unsupported library literal ~S" form)))))
       (mapc #'emit forms)) bytes))
 

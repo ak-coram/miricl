@@ -196,6 +196,25 @@
         (then (return (local.get $object))))
       (return (call $float (local.get $kind)
         (call $coerce-float (call $real (local.get $object)) (local.get $kind))))))
+  ;; Atomic sequence targets use the checked native copying kernel. COERCE
+  ;; must retain an object already of the requested type, including list spines
+  ;; and specialized or displaced vectors; validate only actual conversions.
+  (wat-symbol-case #@(call $id (local.get $type))
+    ((list null cons) #@(local.set $kind (i32.const 1)))
+    ((string base-string simple-string simple-base-string) #@(local.set $kind (i32.const 2)))
+    ((vector simple-vector) #@(local.set $kind (i32.const 3)))
+    ((bit-vector simple-bit-vector) #@(local.set $kind (i32.const 4))))
+  #@(if (local.get $kind)
+    (then
+      (if (call $typep (local.get $object) (local.get $type))
+        (then (return (local.get $object))))
+      (drop (call $proper-sequence-length (local.get $object)))
+      (local.set $result (call $concatenate-native
+        (call $cons (local.get $object) (ref.null eq)) (i32.sub (local.get $kind) (i32.const 1))))
+      (if (i32.eqz (call $typep (local.get $result) (local.get $type)))
+        (then (call $type-fail (local.get $object) (local.get $type)
+          (i32.const ,(runtime-error-code :expected-designator)))))
+      (return (local.get $result))))
   #@(local.set $expanded (call $expand-derived-type (local.get $type) (ref.null eq)))
   #@(if (i32.eqz (ref.eq (local.get $type) (local.get $expanded)))
     (then (return (call $coerce-native (local.get $object) (local.get $expanded)))))

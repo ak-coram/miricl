@@ -1623,6 +1623,8 @@
       (return (ref.null eq))))
   #@(if (i32.eq (local.get $mode) (i32.const 35))
     (then (return_call $fasl-dependencies (local.get $a) (local.get $b))))
+  #@(if (i32.eq (local.get $mode) (i32.const 52))
+    (then (return (call $symbol-value ,(clos-library-reference '%size-default-policy)))))
   #@(if (i32.eq (local.get $mode) (i32.const 36))
     (then (return (call $symbol-value ,(clos-library-reference '%safety-default-level)))))
   #@(if (i32.eq (local.get $mode) (i32.const 37))

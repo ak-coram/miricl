@@ -202,7 +202,7 @@
   (declare (type simple-vector block successor edges live))
   (let ((id (hir-block-id block)))
     (declare (type (unsigned-byte 32) id))
-    (unless (member successor (svref edges id) :test #'eq)
+    (unless (member successor (svref edges id) :test miricl::%compiler-eq-function)
       (push successor (svref edges id))
       (setf (svref live (the (unsigned-byte 32) (hir-block-id successor))) t) t)))
 
@@ -228,7 +228,7 @@
             (when (hir-block-parameters block)
               (let ((fact nil))
                 (dolist (predecessor (hir-block-predecessors block))
-                  (when (member block (svref edges (the (unsigned-byte 32) (hir-block-id predecessor))) :test #'eq)
+                  (when (member block (svref edges (the (unsigned-byte 32) (hir-block-id predecessor))) :test miricl::%compiler-eq-function)
                     (let* ((end (hir-block-terminator predecessor))
                            (inputs (hir-instruction-inputs end)))
                       (setq fact (hir-constant-join fact

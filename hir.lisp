@@ -58,7 +58,7 @@
 (define-hir-record hir-value id kind owner producer (type t))
 (define-hir-record hir-instruction opcode inputs output attributes origin effect (safety-level 1))
 (define-hir-record hir-binding name owner cell special-p captured-p assigned-p local)
-(define-hir-record hir-local definition variables functions targets types policy debug-level used-p function (safety-level 1) macro-context)
+(define-hir-record hir-local definition variables functions targets types policy debug-level used-p function (safety-level 1) macro-context (size-policy 13))
 (define-hir-record hir-target name owner block token captured-p)
 (define-hir-record hir-debug-site kind operator value variables functions targets types parent owner form macros)
 (defvar *hir-unit*)
@@ -74,6 +74,7 @@
 (defvar *hir-inline-budget* 128)
 (defvar *hir-debug-level* 1)
 (defvar *hir-safety-level* 1)
+(defvar *hir-size-policy* 13)
 (defvar *hir-source-path* nil)
 (defvar *hir-debug-sites* nil)
 (defvar *hir-macro-context* nil)
@@ -133,6 +134,12 @@
     (setq body (cdr body)))
   inherited)
 
+(defun native-size-policy (body inherited)
+  ;; Retain both priorities while lowering; partial declarations inherit.
+  (declare (type list body) (type (integer 0 15) inherited))
+  (+ (* 4 (native-optimization-level body 'space (ash inherited -2)))
+     (native-optimization-level body 'speed (logand inherited 3))))
+
 (defun native-debug-level (body inherited)
   (native-optimization-level body 'debug inherited))
 
@@ -160,6 +167,8 @@
   (declare (type symbol opcode kind effect) (type list inputs attributes)
            (type simple-vector *hir-block*))
   (when (hir-block-terminator *hir-block*) (error "HIR instruction after a terminator."))
+  (when (and (eq opcode :call) (<= (ash *hir-size-policy* -2) (logand *hir-size-policy* 3)))
+    (setq attributes '(:speed)))
   (let* ((instruction (make-hir-instruction-record opcode inputs nil attributes *hir-origin* effect
                         *hir-safety-level*))
          (output (and kind (hir-new-value kind instruction))))
@@ -233,9 +242,13 @@
                       (push (cons (list :ftype name) (second declaration)) policy)))
              ((optimize ignore ignorable dynamic-extent declaration))
              (otherwise
-              ;; Unknown declaration names remain opaque type facts. Only
-              ;; recognized type specifiers can enable native optimizations.
-              (dolist (name (cdr declaration)) (push (cons name (car declaration)) types)))))
+              ;; Proclaimed declaration names are not shorthand type names.
+              ;; Share the runtime's metadata without consulting host types.
+              (unless (and (symbolp (car declaration))
+                           (multiple-value-bind (key native)
+                               (compiler-primitive 10 1 "%DECLARATION-NAME")
+                             (and native key (get (car declaration) key))))
+                (dolist (name (cdr declaration)) (push (cons name (car declaration)) types))))))
          (pop body))
         (t (return))))
     (values body specials (nreverse types) (nreverse policy))))
@@ -349,7 +362,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                ;; instead of presenting semantic inlining recursion as a
                ;; structural source cycle to HIR-FORM's input guard.
                (not (loop for form in (cddr definition) thereis
-                      (member form *hir-source-path* :test #'eq))))
+                      (member form *hir-source-path* :test miricl::%compiler-eq-function))))
       binding)))
 
 (defun hir-inline-body (binding arguments)
@@ -365,6 +378,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
          (*hir-macro-context* (hir-local-macro-context info))
          (*hir-debug-level* (hir-local-debug-level info))
          (*hir-safety-level* (hir-local-safety-level info))
+         (*hir-size-policy* (native-size-policy (cddr definition) (hir-local-size-policy info)))
          (*hir-inlining* (cons binding *hir-inlining*))
          (*hir-dynamic* *hir-dynamic*) (entry *hir-dynamic*))
     (decf *hir-inline-budget* (hir-inline-size (cddr definition) 128))
@@ -896,13 +910,12 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
     (or result (hir-constant nil))))
 
 (defun hir-local-functions-form (form variables functions targets)
-  (let ((local functions) (bindings nil))
+  (let ((local functions) (bindings nil) (uninitialized (make-hash-table :test 'eq)))
     (dolist (definition (second form))
-      ;; Function cells are filled after closures are created. LABELS
-      ;; may capture these cells before that initialization write.
-      (let ((binding (make-hir-binding-record (first definition) *hir-function* nil nil nil t)))
+      (let ((binding (make-hir-binding-record (first definition) *hir-function*)))
         (setf (hir-binding-cell binding) (hir-emit :cell-new (list (hir-constant nil)) :single
                                          (list binding) :allocation))
+        (setf (gethash binding uninitialized) t)
         (push binding bindings) (push binding (hir-function-bindings *hir-function*))
         (push (cons (first definition) binding) local)))
     (setq bindings (nreverse bindings))
@@ -912,11 +925,12 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
           (if (eq (car form) 'labels) local functions) targets
           *hir-types* *hir-inline-policy*
           (native-debug-level (cddr definition) *hir-debug-level*) nil nil
-          (native-safety-level (cddr definition) *hir-safety-level*) *hir-macro-context*)))
+          (native-safety-level (cddr definition) *hir-safety-level*) *hir-macro-context* *hir-size-policy*)))
     (multiple-value-bind (body specials types policy) (hir-declarations (cddr form))
       (let* ((variables (hir-shadow-specials variables specials))
              (*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*))
              (*hir-safety-level* (native-safety-level (cddr form) *hir-safety-level*))
+             (*hir-size-policy* (native-size-policy (cddr form) *hir-size-policy*))
              (*hir-types* (hir-type-environment variables types))
              (*hir-inline-policy* (hir-inline-environment local policy))
              (entry *hir-block*) (prefix (hir-block-instructions entry))
@@ -943,11 +957,35 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                        (*hir-macro-context* (hir-local-macro-context info))
                        (*hir-debug-level* (hir-local-debug-level info))
                        (*hir-safety-level* (hir-local-safety-level info))
+                       (*hir-size-policy* (hir-local-size-policy info))
                        (function (hir-close (cons 'lambda (cdr definition)) (hir-local-variables info)
                                    (hir-local-functions info) (hir-local-targets info)
                                    (list (if (consp (first definition)) (second (first definition)) (first definition))))))
                   (setf (hir-local-function info) (first (hir-instruction-attributes (hir-value-producer function))))
-                  (hir-emit :cell-write (list (hir-cell-for-binding binding) function) :single nil :write)))))
+                  ;; A lexical function binding has no user assignment. Only
+                  ;; an earlier closure capture (including self-reference)
+                  ;; needs its cell before the function value is available.
+                  ;; Keep such cells mutable, and preserve debugger writes.
+                  (dolist (capture (hir-function-captures (hir-local-function info)))
+                    (when (gethash capture uninitialized)
+                      (setf (hir-binding-assigned-p capture) t)))
+                  (setf (gethash binding uninitialized) nil)
+                  (if (hir-binding-assigned-p binding)
+                      (hir-emit :cell-write (list (hir-cell-for-binding binding) function) :single nil :write)
+                      (let* ((cell (hir-value-producer (hir-binding-cell binding)))
+                             (tail (hir-block-instructions entry)))
+                        ;; Enclosing local-function forms retain instruction
+                        ;; list tails as insertion boundaries. Unlink only this
+                        ;; node: REMOVE may copy and lose those shared tails.
+                        (if (eq (car tail) cell)
+                            (setf (hir-block-instructions entry) (cdr tail))
+                            (progn
+                              (loop while (and (cdr tail) (not (eq (cadr tail) cell)))
+                                    do (setq tail (cdr tail)))
+                              (unless (cdr tail) (error "Local function cell has no instruction."))
+                              (setf (cdr tail) (cddr tail))))
+                        (setf (hir-instruction-inputs cell) (list function))
+                        (push cell (hir-block-instructions entry))))))))
           (setf (hir-block-instructions entry)
                   (append (ldiff instructions prefix) (hir-block-instructions entry))
                 (hir-block-terminator entry) terminator))
@@ -967,6 +1005,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
         (setq local (hir-shadow-specials local specials))
         (let ((result (let ((*hir-debug-level* (native-debug-level (cdddr form) *hir-debug-level*))
                            (*hir-safety-level* (native-safety-level (cdddr form) *hir-safety-level*))
+                           (*hir-size-policy* (native-size-policy (cdddr form) *hir-size-policy*))
                            (*hir-types* (hir-type-environment local types))
                            (*hir-inline-policy* (hir-inline-environment functions policy)))
                         (hir-body body local functions targets))))
@@ -1090,9 +1129,10 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   ;; source and lexical dynamic context in which its instructions are emitted;
   ;; *HIR-BLOCK* alone follows control flow between tasks. Branch boundaries
   ;; catch ended paths before lowering the next arm or continuation.
-  (let ((work nil) (result nil) (*hir-safety-level* *hir-safety-level*))
+  (let ((work nil) (result nil) (*hir-safety-level* *hir-safety-level*)
+        (*hir-size-policy* *hir-size-policy*))
     (declare (type list variables functions targets work)
-             (type (integer 0 3) *hir-safety-level*))
+             (type (integer 0 3) *hir-safety-level*) (type (integer 0 15) *hir-size-policy*))
     (labels
         ((defer (function &optional boundary)
            (push (list function boundary *hir-origin* *hir-debug-level* *hir-dynamic*
@@ -1100,8 +1140,9 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                    ;; policy as an immediate instead of allocating a seventh
                    ;; task slot or an otherwise empty environment list.
                    (if (or *hir-types* *hir-inline-policy* *hir-inlining* *hir-macro-context*)
-                       (list *hir-types* *hir-inline-policy* *hir-inlining* *hir-safety-level* *hir-macro-context*)
-                       *hir-safety-level*) *hir-source-path*) work))
+                       (list *hir-types* *hir-inline-policy* *hir-inlining*
+                         (+ *hir-safety-level* (* 4 *hir-size-policy*)) *hir-macro-context*)
+                       (+ *hir-safety-level* (* 4 *hir-size-policy*))) *hir-source-path*) work))
          (body (forms variables functions targets)
            (if (null forms) (setq result (hir-constant nil))
                (progn
@@ -1119,7 +1160,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                           (arguments (cdr forms) (cons (hir-single result) values)
                             function variables functions targets valuesp inline)))
                  (lower (car forms) variables functions targets))))
-         (bindings (remaining local pending sequential specials types policy forms entry functions targets debug-level safety-level)
+         (bindings (remaining local pending sequential specials types policy forms entry functions targets debug-level safety-level size-policy)
            (if remaining
                (let* ((binding (car remaining))
                       (name (if (consp binding) (first binding) binding)))
@@ -1131,7 +1172,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                             (bindings (cdr remaining)
                               local
                               (if sequential pending (cons (cons name value) pending))
-                              sequential specials types policy forms entry functions targets debug-level safety-level))))
+                              sequential specials types policy forms entry functions targets debug-level safety-level size-policy))))
                  (lower (if (consp binding) (second binding) nil) local functions targets))
                (progn
                  (dolist (binding (nreverse pending))
@@ -1143,12 +1184,13 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                  (setq local (hir-shadow-specials local specials))
                  (let ((*hir-debug-level* debug-level)
                        (*hir-safety-level* safety-level)
+                       (*hir-size-policy* size-policy)
                        (*hir-types* (hir-type-environment local types))
                        (*hir-inline-policy* (hir-inline-environment functions policy)))
                    (body forms local functions targets)))))
          (lower (form variables functions targets)
            (compiler-source-form form)
-           (when (and (consp form) (member form *hir-source-path* :test #'eq))
+           (when (and (consp form) (member form *hir-source-path* :test miricl::%compiler-eq-function))
              (compiler-input-fail "source form" form "circular executable form"))
            (let* ((environment (when *hir-source-environments*
                                  (gethash form *hir-source-environments*)))
@@ -1217,7 +1259,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                    ((eq (car form) 'progn) (body (cdr form) variables functions targets))
                    ((eq (car form) 'locally)
                     (let ((*hir-debug-level* (native-debug-level (cdr form) *hir-debug-level*))
-                          (*hir-safety-level* (native-safety-level (cdr form) *hir-safety-level*)))
+                          (*hir-safety-level* (native-safety-level (cdr form) *hir-safety-level*))
+                          (*hir-size-policy* (native-size-policy (cdr form) *hir-size-policy*)))
                       (multiple-value-bind (forms specials types policy) (hir-declarations (cdr form))
                         (let* ((variables (hir-shadow-specials variables specials))
                                (*hir-types* (hir-type-environment variables types))
@@ -1227,7 +1270,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                     (multiple-value-bind (forms specials types policy) (hir-declarations (cddr form))
                       (bindings (second form) variables nil (eq (car form) 'let*) specials types policy forms
                         *hir-dynamic* functions targets (native-debug-level (cddr form) *hir-debug-level*)
-                        (native-safety-level (cddr form) *hir-safety-level*))))
+                        (native-safety-level (cddr form) *hir-safety-level*)
+                        (native-size-policy (cddr form) *hir-size-policy*))))
                    ((eq (car form) 'the)
                     (unless (= (length form) 3) (error "Malformed THE."))
                     (defer (lambda () (setf (hir-value-type result)
@@ -1238,10 +1282,10 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                       (and (assoc 'values functions) (hir-function-reference 'values functions))
                       variables functions targets (not (assoc 'values functions))))
                    ((eq (car form) 'funcall)
-                    (when (null (cdr form)) (error "FUNCALL requires a function."))
                     (if (assoc 'funcall functions)
                         (arguments (cdr form) nil (hir-function-reference 'funcall functions) variables functions targets)
                         (progn
+                          (when (null (cdr form)) (error 'program-error))
                           (defer (lambda ()
                                    (arguments (cddr form) nil (hir-single result) variables functions targets)))
                           (lower (second form) variables functions targets))))
@@ -1290,7 +1334,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
           ;; Reuse this invocation's dynamic policy binding. Creating a fresh
           ;; binding for every continuation adds allocation and lookup work.
           ;; Nested HIR-FORM invocations still restore their caller's policy.
-          (setq *hir-safety-level* (if facts (fourth facts) context))
+          (let ((policy (if facts (fourth facts) context)))
+            (setq *hir-safety-level* (logand policy 3) *hir-size-policy* (ash policy -2)))
           (unless (catch 'hir-path-ended (funcall (first task)) t)
             (loop while (and work (not (second (car work)))) do (pop work))
             (unless work (throw 'hir-path-ended nil)))))
@@ -1560,6 +1605,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
         (setq local (hir-shadow-specials local specials))
         (let* ((*hir-types* (hir-type-environment local types))
                (*hir-inline-policy* (hir-inline-environment functions policy))
+               (*hir-size-policy* (native-size-policy (cddr form) *hir-size-policy*))
                (value (progn (hir-declared-argument-types *hir-function* local *hir-types*)
                              (hir-body body local functions targets))))
           (unless (hir-block-terminator *hir-block*)
@@ -1613,6 +1659,7 @@ Unsupported special operators and parameter syntax signal an error."
   (let ((*hir-unit* (make-hir-unit-record)) (*hir-specials* global-specials)
         (*hir-debug-level* (or (compiler-primitive 33 nil) 1)) (*hir-types* nil)
         (*hir-safety-level* (or (compiler-primitive 36 nil) 1))
+        (*hir-size-policy* (or (compiler-primitive 52 nil) 13))
         (*hir-inline-policy* nil) (*hir-inlining* nil)
         (*hir-source-path* (and (consp lambda-expression) (list lambda-expression)))
         (*hir-debug-sites* nil)
@@ -1664,7 +1711,7 @@ global definitions. Internal calls refer to this group's lexical definitions."
                       (:environment-restore 1 1 0 0) (:values 0 nil 0 0) (:values-list 1 1 0 0)
                       (:list 0 nil 0 0) (:value-ref 1 1 1 1) (:cell-new 1 1 1 1)
                       (:cell-read 1 1 0 0) (:cell-write 2 2 0 0) (:primary 1 1 0 0) (:copy 1 1 0 0)
-                      (:call 2 nil 0 0) (:control-call 4 nil 1 1) (:restart-signal 2 nil 1 1)
+                      (:call 2 nil 0 1) (:control-call 4 nil 1 1) (:restart-signal 2 nil 1 1)
                       (:multiple-value-call 2 nil 0 0) (:capture 0 0 2 2) (:closure 0 nil 1 1)
                       (:branch 1 1 2 2) (:jump 0 1 1 1) (:return 1 1 0 0)
                       (:block-return 2 3 0 1) (:throw 3 3 0 0) (:unreachable 0 0 0 0)
@@ -1772,7 +1819,7 @@ global definitions. Internal calls refer to this group's lexical definitions."
              (dolist (entry (hir-debug-site-types site))
                (unless (symbolp (car entry)) (binding (car entry)))
                (compiler-type-specifier (cdr entry) types-checked))))
-         (instruction (object)
+         (instruction (object function)
            (unless (%hir-instruction-p object)
              (compiler-input-fail "HIR instruction" object "invalid instruction record"))
            (let* ((opcode (hir-instruction-opcode object))
@@ -1810,6 +1857,9 @@ global definitions. Internal calls refer to this group's lexical definitions."
                             (eq (hir-value-kind (hir-instruction-output object)) :single))
                  (compiler-input-fail "HIR copy" object "copy requires single-value operands")))
              (case opcode
+               (:call
+                (unless (or (null attributes) (equal attributes '(:speed)))
+                  (compiler-input-fail "HIR call policy" attributes "expected NIL or (:SPEED)")))
                ((:argument :rest-argument :check-apply-arguments :checked-argument :value-ref :capture)
                 (unless (typep (first attributes) '(unsigned-byte 32))
                   (compiler-input-fail "HIR index" attributes "expected a nonnegative 32-bit index")))
@@ -1826,13 +1876,22 @@ global definitions. Internal calls refer to this group's lexical definitions."
                ((:block-enter :block-environment) (target (first attributes)))
                (:closure
                 (unless (gethash (first attributes) owners)
-                  (compiler-input-fail "HIR closure" attributes "function does not belong to this unit")))
+                  (compiler-input-fail "HIR closure" attributes "function does not belong to this unit"))
+                (unless (= n (compiler-list-length (hir-function-captures (first attributes)) "HIR captures"))
+                  (compiler-input-fail "HIR closure" object "operand count does not match the function's captures")))
                (:debug-step (debug-site (first attributes)))
                (:debug-resume (when (first attributes) (debug-site (first attributes))))
                ((:control-call :restart-signal)
                 (unless (typep (first attributes) '(unsigned-byte 32))
                   (compiler-input-fail "HIR control operation" attributes "expected a nonnegative operation code"))))
-             (when (eq opcode :capture) (capture-identity (second attributes)))
+             (when (eq opcode :capture)
+               (capture-identity (second attributes))
+               (unless (and (hir-instruction-output object)
+                            (member (hir-value-kind (hir-instruction-output object)) '(:single :dynamic)))
+                 (compiler-input-fail "HIR capture" object "capture must produce a single value or control token"))
+               (unless (and (< (first attributes) (length (hir-function-captures function)))
+                            (eq (second attributes) (nth (first attributes) (hir-function-captures function))))
+                 (compiler-input-fail "HIR capture" object "index and identity do not match the function's captures")))
              (when (member opcode '(:branch :jump :block-return))
                (dolist (block attributes)
                  (unless (%hir-block-p block)
@@ -1861,7 +1920,7 @@ global definitions. Internal calls refer to this group's lexical definitions."
           (compiler-input-fail "HIR environment" function "environment belongs to another function"))
         (dolist (item (hir-function-bindings function)) (binding item))
         (dolist (item (hir-function-captures function)) (capture-identity item))
-        (unless (member (hir-function-entry function) (hir-function-blocks function) :test #'eq)
+        (unless (member (hir-function-entry function) (hir-function-blocks function) :test miricl::%compiler-eq-function)
           (compiler-input-fail "HIR entry block" function "entry does not belong to this function"))
         (dolist (block (hir-function-blocks function))
           (unless (and (%hir-block-p block) (typep (hir-block-id block) '(unsigned-byte 32)))
@@ -1878,8 +1937,8 @@ global definitions. Internal calls refer to this group's lexical definitions."
               (compiler-input-fail "HIR block environment" block "environment belongs to another function")))
           (setf (gethash block producers) function)
           (dolist (op (hir-block-instructions block))
-            (instruction op) (setf (gethash op producers) function))
-          (instruction (hir-block-terminator block))
+            (instruction op function) (setf (gethash op producers) function))
+          (instruction (hir-block-terminator block) function)
           (setf (gethash (hir-block-terminator block) producers) function))))
     (maphash (lambda (site present)
                (declare (ignore present))

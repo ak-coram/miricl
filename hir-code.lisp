@@ -26,7 +26,8 @@
     (:call-primary 2 nil 0 t) (:checked-jump 0 1 1 nil t)
     (:call-primary 2 2 0 t) (:call-primary 3 3 0 t)
     (:call-primary 4 4 0 t) (:call-primary 5 5 0 t)
-    (:call-primary 6 6 0 t) (:copy 1 1 0 t) (:debug-step 0 0 1 nil) (:debug-resume 0 0 1 nil)) 'simple-vector))
+    (:call-primary 6 6 0 t) (:copy 1 1 0 t) (:debug-step 0 0 1 nil) (:debug-resume 0 0 1 nil)
+    (:call 2 nil 0 t nil :speed) (:call-primary 2 nil 0 t nil :speed)) 'simple-vector))
 
 (defun hir-code-error (object reason)
   (error 'hir-code-input-error :datum object :reason reason))

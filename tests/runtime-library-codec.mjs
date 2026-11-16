@@ -11,6 +11,7 @@ const prepare = bytes => {
 const read = () => vm.vm['test-library-read']();
 const same = (a, b) => Boolean(vm.vm['test-library-same'](a, b));
 const car = value => vm.vm['test-library-car'](value);
+const cdr = value => vm.vm['test-library-cdr'](value);
 const content = (value, source) => {
   vm.vm['test-library-bind'](value);
   assert.equal(vm.evaluate(`(equal * '${source})`).output, 'T\n');
@@ -50,6 +51,56 @@ try {
   boundary.forEach((_, index) => assert.ok(!same(values[boundaryStart + index],
     values[boundaryStart + boundary.length + index]), 'ULEB ID-width changes retain fresh objects.'));
 
+  prepare(await fs.readFile(process.argv[4]));
+  const strings = JSON.parse(await fs.readFile(process.argv[5], 'utf8'));
+  // EVALUATE reuses the input memory. Decode the complete fixture before
+  // evaluating content assertions, just as the source-spine fixture does.
+  const stringValues = strings.map(() => Array.from({length: 3}, read));
+  const stringContent = (value, codes) => {
+    vm.vm['test-library-bind'](value);
+    assert.equal(vm.evaluate(`(equal (map 'list #'char-code *) '(${codes.join(' ')}))`).output, 'T\n');
+  };
+  for (const [caseIndex, codes] of strings.entries()) {
+    const copies = stringValues[caseIndex];
+    const decodedStrings = copies.flatMap(value => [car(cdr(value)), car(cdr(cdr(value)))]);
+    decodedStrings.forEach(value => stringContent(value, codes));
+    for (let index = 0; index < decodedStrings.length; index++)
+      for (let previous = 0; previous < index; previous++)
+        assert.ok(!same(decodedStrings[index], decodedStrings[previous]),
+          'String references and completed-form replay allocate independent strings.');
+    assert.ok(!same(copies[0], copies[1]) && !same(copies[1], copies[2]));
+    if (codes.length) {
+      vm.vm['test-library-bind'](decodedStrings[0]);
+      const replacement = codes[0] === 0 ? 1 : 0;
+      vm.evaluate(`(setf (char * 0) (code-char ${replacement}))`);
+      stringContent(decodedStrings[0], [replacement, ...codes.slice(1)]);
+      decodedStrings.slice(1).forEach(value => stringContent(value, codes));
+    }
+  }
+
+  const uleb = value => {
+    const bytes = [];
+    do {
+      const low = value % 128;
+      value = Math.floor(value / 128);
+      bytes.push(low + (value ? 128 : 0));
+    } while (value);
+    return bytes;
+  };
+  // Both bodies use the current string header. Raw strings can include every
+  // byte, including zero; ordinary bodies retain full character codes.
+  for (const [header, body, codes] of [
+    [0x80000000, [], []],
+    [0x80000004, [0, 127, 128, 255], [0, 127, 128, 255]],
+    [3, [...uleb(0), ...uleb(256), ...uleb(0x10ffff)], [0, 256, 0x10ffff]],
+  ]) {
+    prepare(Uint8Array.from([10, ...uleb(header), ...body, 127, 0]));
+    const first = read(), second = read();
+    assert.ok(!same(first, second));
+    stringContent(first, codes);
+    stringContent(second, codes);
+  }
+
   for (const [valid, bytes] of [
     [0, [63, 0]], // No completed form; ID zero must not mean an unfinished ancestor.
     [0, [33, 63, 0]],
@@ -59,6 +110,15 @@ try {
     [0, [63, 128, 128, 128, 128, 16]], // Overflowed ID.
     [0, [7, 1]], // A dotted list needs a cons cell to receive the tail.
     [0, [10, 128, 128, 1]], // Truncated string length cannot allocate an unbounded array.
+    [0, [10, ...uleb(0x80000005), 0, 128, 255]], // Truncated raw body.
+    [0, [10, ...uleb(0xffffffff)]], // Masked huge raw length rejected before allocation.
+    [0, [10, ...uleb(0x7fffffff)]], // Huge ordinary length rejected before allocation.
+    [0, [10, 128, 128, 128, 128, 16]], // String-header overflow past u32.
+    [0, [10, 128, 128, 128, 128, 128]], // Unterminated fifth header byte.
+    [0, [10, 1, 128]], // Truncated ordinary character code.
+    [0, [10, 1, 128, 128, 128, 128, 16]], // Ordinary character code overflow.
+    [0, [127, 0]], // No string header available for a reference.
+    [1, [10, ...uleb(0x80000001), 255, 127, 1]], // Raw string reference out of bounds.
   ]) rejection(() => {
     prepare(Uint8Array.from(bytes));
     for (let index = 0; index < valid; index++) read();
@@ -66,5 +126,5 @@ try {
   });
   rejection(() => vm.vm['test-library-prepare'](16777216));
   rejection(() => {prepare(Uint8Array.of(0)); vm.vm['test-library-exhaust'](); read();});
-  console.log('Bootstrap library codec: fresh-object round trips, completed IDs, malformed input and recovery pass.');
+  console.log('Bootstrap library codec: byte/Unicode strings, fresh-object round trips, completed IDs, malformed input and recovery pass.');
 } finally {vm.close();}

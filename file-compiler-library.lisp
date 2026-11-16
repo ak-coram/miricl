@@ -371,9 +371,27 @@
        (%file-block-flush)
        (setq %file-block-active nil %file-block-entries nil)))))
 
+(defun %file-policy-parameters (parameters)
+  ;; Delayed blocks retain the definition-time global policy for defaults.
+  ;; Body OPTIMIZE declarations start after these initializer expressions.
+  (miricl-compiler::compiler-lambda-list parameters)
+  (if (intersection parameters '(&optional &key &aux))
+      (let ((mode nil)
+            (declaration (list 'declare (list 'optimize
+              (list 'space (ash %size-default-policy -2))
+              (list 'speed (logand %size-default-policy 3))))))
+        (mapcar (lambda (spec)
+          (cond ((member spec '(&optional &key &aux)) (setq mode t) spec)
+                ((eq spec '&rest) (setq mode nil) spec)
+                ((and mode (consp spec) (cdr spec))
+                 (list* (car spec) (list 'locally declaration (second spec)) (cddr spec)))
+                (t spec))) parameters))
+      parameters))
+
 (defun %file-block-defun (form environment compile-time-too)
   (when (and %file-block-active (null environment) (eq (car form) 'defun))
     (let* ((name (second form)) (body (cdddr form))
+           (parameters (%file-policy-parameters (third form)))
            (doc (when (and (stringp (car body)) (cdr body)) (pop body)))
            (declarations nil))
       (when (assoc name %file-block-definitions :test #'equal)
@@ -385,14 +403,16 @@
         (push (pop body) declarations))
       (let* ((%compilation-complete t)
              (body (append (list (list 'declare (list 'optimize
-                                       (list 'debug %debug-default-level) (list 'safety %safety-default-level))))
+                                       (list 'debug %debug-default-level) (list 'safety %safety-default-level)
+                                       (list 'space (ash %size-default-policy -2))
+                                       (list 'speed (logand %size-default-policy 3)))))
                         %file-top-declarations (nreverse declarations)
                         (list (list* 'block (if (consp name) (second name) name) body))))
              (source-p (%debug-form-p (list* 'lambda (third form) body)))
              ;; Debug lowering needs the original lexical names and macro
              ;; bindings. Prepared siblings keep their resolved call markers.
-             (parts (if source-p (cons (third form) body)
-                        (%compile-lambda-parts (third form) body environment))))
+             (parts (if source-p (cons parameters body)
+                        (%compile-lambda-parts parameters body environment))))
         (when source-p (setq %file-block-source-p t))
         (push (if (and %compilation-complete (not source-p)) (%%compile 2 name parts) (cons name parts)) %file-block-definitions)
         (setq %file-block-complete (and %file-block-complete %compilation-complete)))

@@ -259,7 +259,7 @@ Objects inside MEMBER and EQL remain literal data, including cyclic objects."
     (loop while work do
       (let* ((job (pop work)) (tail (car job)) (path (cdr job)) (mode nil))
         (loop while (consp tail) do
-          (when (member tail path :test #'eq)
+          (when (member tail path :test miricl::%compiler-eq-function)
             (compiler-input-fail "macro lambda list" parameters "circular destructuring syntax"))
           (push tail path)
           (let ((spec (car tail)))

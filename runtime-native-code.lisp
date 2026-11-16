@@ -1137,6 +1137,10 @@
   (:export-raw "native-eq-inline")
   #@(extern.convert_any (call $bool (ref.eq ,(native-object '(local.get $left)) ,(native-object '(local.get $right))))))
 
+(define-runtime-function $native-eq-test (($left externref) ($right externref)) (i32)
+  (:export-raw "native-eq-test")
+  #@(ref.eq ,(native-object '(local.get $left)) ,(native-object '(local.get $right))))
+
 (define-runtime-function $native-eql-inline (($left externref) ($right externref)) (externref)
   (:export-raw "native-eql-inline")
   #@(extern.convert_any (call $bool (call $eql ,(native-object '(local.get $left)) ,(native-object '(local.get $right))))))
@@ -2032,7 +2036,7 @@
   ($native-add-int64-checked) ($native-sub-int64-checked) ($native-mul-int64-checked)
   ($native-lt-int64) ($native-gt-int64) ($native-le-int64) ($native-ge-int64) ($native-eq-int64) ($native-ne-int64)
   ($native-vector-ref) ($native-boolean)
-  ($native-eq-inline) ($native-eql-inline) ($native-eql-test) ($native-length-inline) ($native-list-length-inline) ($native-vector-length-inline)
+  ($native-eq-inline) ($native-eq-test) ($native-eql-inline) ($native-eql-test) ($native-length-inline) ($native-list-length-inline) ($native-vector-length-inline)
   ($native-gethash-inline) ($checked-gethash-primary) ($native-gethash-primary-inline) ($native-puthash-inline)
   ($native-consp-inline) ($native-simple-vector-p-inline) ($native-vector-p-inline)
   ($native-string-p-inline) ($native-integer-p-inline) ($native-character-p-inline)

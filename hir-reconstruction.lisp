@@ -64,7 +64,8 @@
                     ;; liveness pass can scalarize this pair again; consumers
                     ;; need no second set of call/type/control-flow rules.
                     (let* ((group (svref vs next-group))
-                           (call (make-hir-instruction-record :call inputs group nil nil :call (svref scratch 1))))
+                           (call (make-hir-instruction-record :call inputs group
+                                    (when (seventh spec) '(:speed)) nil :call (svref scratch 1))))
                       (incf next-group)
                       (setf (hir-value-kind group) :multiple (hir-value-producer group) call
                             (hir-instruction-opcode instruction) :primary
@@ -81,6 +82,7 @@
                             (otherwise :single))))
                   (setf (hir-instruction-attributes instruction)
                     (case opcode
+                      (:call (when (seventh spec) '(:speed)))
                       ((:constant :global-read :global-write :dynamic-bind)
                        (list (svref literals a)))
                       (:function-reference

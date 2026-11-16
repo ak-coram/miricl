@@ -761,6 +761,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                  ((member target '("native-cdr-list-inline" "native-cdr-inline-checked") :test #'equal)
                   (write-line "call $cdr" out))
                  ((string= target "native-eq-inline") (write-line "ref.eq call $bool" out))
+                 ((string= target "native-eq-test") (write-line "ref.eq" out))
                  ((string= target "native-eql-inline") (write-line "call $eql call $bool" out))
                  ((string= target "native-eql-test") (write-line "call $eql" out))
                  ((string= target "native-cons") (write-line "call $cons" out))
