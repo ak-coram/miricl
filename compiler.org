@@ -9,6 +9,81 @@ code and initialization effects, and emits portable or native bundles.
 This document describes the implemented pipeline and its contracts. Source
 files named below contain the corresponding compiler and runtime interfaces.
 
+** Lesson: reject large default-on analysis expansions without measured returns
+
+Evaluation found that the staged SSA, constant/relational and
+effect-analysis expansion added substantial shipped compiler code and
+analysis work, with little return on the applications measured so
+far. Do not repeat this approach: a collection of individually
+plausible optimizations is not evidence that their combined
+implementation belongs in the default image.
+
+The comparison used matching fresh images and application artifacts. The
+baseline was HEAD plus the isolated =POP=/=PUSH= local-variable rename in
+=native-outline-code=: the uncorrected runtime source packer mistook its
+binding list for a macro call and could not bootstrap. No image compression
+was added. Raw bytes, rather than download compression, determine the budget.
+
+| Measurement                                      | Baseline | Staged  |
+|--------------------------------------------------+----------+---------|
+| Default image, raw bytes                         |  1017822 | 1083602 |
+| Fixed original compiler corpus, emitted bytes    |   268677 |  269963 |
+| Fixed corpus, warmed native median seconds       |   23.391 |  26.046 |
+| Life native application, raw bytes               |  3767297 | 3765749 |
+| Maxima native application, raw bytes              |  8783547 | 8767936 |
+| Maxima source compilation, seconds               |  298.564 | 336.433 |
+| Maxima native compilation, seconds               |  590.237 | 620.570 |
+
+The default image grew by 65780 bytes and exceeded the 1 MiB raw limit by
+35026 bytes. Three warmed fixed-corpus samples showed 11.35% more compilation
+time and 0.479% more emitted code. Its output was validated and instantiated
+without installing another compiler generation.
+
+Life saved only 1548 application bytes; runtime plus application grew by
+64232 bytes. Three alternating fresh-process runtime pairs, using drivers
+compiled once and equal warmups, showed small differences whose direction
+changed between sessions. Maxima saved 15611 application bytes, but runtime
+plus application grew by 50169 bytes. Source compilation took 12.68% longer
+and native compilation 5.14% longer. Its warmed factoring, rational
+simplification and integration medians were approximately 2.0%, 7.5% and 4.9%
+slower, respectively, with matching results. These are observations on these
+workloads, not a conclusion about every application: FriCAS, ACL2, Coalton and
+McCLIM comparisons were still pending at this checkpoint.
+
+Sampling profiles implicated added private-cell SSA, local constant/budget
+work, predicate reuse and effect/relational planning. The unchanged low-level
+optimizer and outlining used slightly less sampled CPU. A bounded fuel counter
+prevents unbounded reasoning; it does not make repeated scans, per-cell maps,
+dominance construction and budget charging inexpensive.
+
+Small typed witnesses did establish useful facts: raw block parameters saved
+64 bytes in a loop, cross-call constants saved 14--26 bytes, and dominating EQL
+reuse saved 8 bytes. Those local wins did not justify the complete default
+expansion, including its new retained-code format and runtime validation cost.
+Conversely, native helper inventories are not net removal savings. Speculative
+generic-call planning and native multiple-result workers accounted for only
+7632 exclusive code/literal bytes; that was insufficient evidence that removing
+them could recover the deficit. A separately built compact planner/simple-cell
+refactor saved only 538 bytes in the complete image and remained over budget.
+
+Use the following admission discipline for future work:
+
+- Establish a source-pinned fixed original compiler corpus and representative
+  application baselines before adding a substantial analysis. Measure warmed
+  native compilation separately from interpreted bootstrap, and keep benchmark
+  drivers, diagnostics and results outside the repository.
+- Keep the default raw image within budget as the mechanism is introduced.
+  Do not defer the cost or assume unrelated established features can be removed
+  later. Require a measured whole-output ablation before making that trade.
+- Gate expensive work on an actual eligible consumer and reuse existing facts
+  where ownership permits. A general framework, extra fixed point or broader
+  fact domain needs evidence beyond a few tiny witness functions. Preserve
+  useful small generic type rules with modest cost; this result is not a reason
+  to abandon the type-proof foundation.
+- Salvage only independently justified pieces, then rebuild and remeasure the
+  combined result. Do not restore the rejected broad expansion under another
+  name without new representative evidence and an affordable implementation.
+
 ** Compilation and execution interfaces
 
 =compile-to-hir= lowers a lambda to semantic HIR. =compile-hir= produces a
@@ -179,9 +254,23 @@ DEBUG 2 retains module bytes for disassembly. DEBUG 3 selects the source
 evaluator at public evaluation boundaries for interactive debugging.
 
 Local declarations override inherited policy, and proclamations affect
-subsequent compilation. Inlining uses bounded source-size heuristics; it does
-not select different growth budgets from SPEED, SPACE or COMPILATION-SPEED.
-INLINE encourages expansion within those limits and NOTINLINE vetoes it.
+subsequent compilation. SPEED, SPACE and COMPILATION-SPEED share a checked
+six-bit policy, retained through compact HIR and native module preparation.
+A conservative function summary takes the greatest SPEED and
+COMPILATION-SPEED and least SPACE of its lexical scopes. This lets a local
+speed-oriented region veto whole-function outlining. SAFETY and DEBUG retain
+their separate contracts.
+
+Inlining uses bounded source-size heuristics controlled by the caller's
+SPEED/SPACE policy. At SPEED 1, the automatic candidate, explicit INLINE
+candidate and total growth bounds are respectively 32/192/384 source nodes
+for SPACE 0, 24/160/192 for SPACE 1, 20/160/128 for SPACE 2 and 16/128/128 for
+SPACE 3. Higher SPEED permits more growth; SPACE exceeding SPEED keeps the
+default compact bounds. COMPILATION-SPEED independently bounds source scans.
+These remain source-growth estimates, not estimates of complete emitted
+module cost after simplification. INLINE encourages expansion within those
+limits and NOTINLINE vetoes it. Callee declarations remain in force, while
+expansion growth uses the caller's policy.
 =:inline nil= disables automatic small-function inlining for a module.
 The shipped compiler source policy selects SAFETY 0, DEBUG 0 and canonical
 primitive inlining for its kernels without changing user compilation defaults.

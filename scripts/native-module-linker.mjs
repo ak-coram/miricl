@@ -217,13 +217,16 @@ export function nativeModuleToWat(bytes, moduleIndex, declarations, entries, cal
         const function_ = `$${prefix}-${moduleIndex}-${i}`;
         declarations.push(function_);
         const signature = types[functionTypes[i]];
-        assert.ok(signature && [2, 5].includes(signature.parameters.length) &&
-          signature.parameters.every(type => type === 'externref'), 'Unsupported compiler entry parameters');
-        assert.deepEqual(signature.results, ['externref'], 'Compiler entries return one Lisp value');
-        if (entries.includes(function_))
-          assert.equal(signature.parameters.length, 2, 'Compiler factory keeps its checked packet entry');
-        const entryType = signature.parameters.length === 2 ? '$native-entry' : '$native-direct-entry';
-        bodies.push(`(func ${function_} (type ${entryType}) (param ${signature.parameters.join(' ')}) (result externref)\n${locals.join('\n')}\n${instructions.join('\n')}\n)`);
+        assert.ok(signature, 'Missing compiler function signature');
+        if (entries.includes(function_)) {
+          assert.deepEqual(signature.parameters, ['externref', 'externref'],
+            'Compiler factory keeps its checked packet entry');
+          assert.deepEqual(signature.results, ['externref'], 'Compiler factory returns one Lisp value');
+        }
+        // Private outline helpers have exact scalar/reference signatures and
+        // may return changed locals alongside their ordinary result.
+        const result = signature.results.length ? ` (result ${signature.results.join(' ')})` : '';
+        bodies.push(`(func ${function_} (param ${signature.parameters.join(' ')})${result}\n${locals.join('\n')}\n${instructions.join('\n')}\n)`);
       }
     }
     position = end;

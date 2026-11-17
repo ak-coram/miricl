@@ -847,7 +847,7 @@
 
 (defvar %debug-default-level 1)
 (defvar %safety-default-level 1)
-(defvar %size-default-policy 13)
+(defvar %size-default-policy 29)
 (defparameter %debug-declaration '(declare (optimize (debug 3))))
 
 (defun %optimize-debug-level (qualities inherited)
@@ -937,7 +937,8 @@
                 (safety (%optimize-safety-level (cdr spec) %safety-default-level)))
             (setq %debug-default-level debug %safety-default-level safety
                   %size-default-policy
-                  (+ (* 4 (%optimize-quality-level (cdr spec) (ash %size-default-policy -2) 'space))
+                  (+ (* 16 (%optimize-quality-level (cdr spec) (ash %size-default-policy -4) 'compilation-speed))
+                     (* 4 (%optimize-quality-level (cdr spec) (logand 3 (ash %size-default-policy -2)) 'space))
                      (%optimize-quality-level (cdr spec) (logand %size-default-policy 3) 'speed)))))
         (special
           (let ((names (cdr spec)))

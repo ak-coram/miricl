@@ -287,6 +287,7 @@ the module, the number of smaller bodies and the number of unsupported bodies."
                             (setf (gethash function mappings) mapping))))
                       (wasm-u32 (length body)) (module-write-bytes body)))))))))
       (values
+        (outline-wasm-module
         (if (zerop changed) bytes
             (coerce (with-wasm-bytes
               (module-write-bytes (subseq bytes 0 8))
@@ -296,5 +297,128 @@ the module, the number of smaller bodies and the number of unsupported bodies."
                              (equalp (subseq payload 0 5) #(4 110 97 109 101)))
                     (setq payload (module-local-names payload mappings label-mappings)))
                   (module-write-section (car section) payload))))
-              '(simple-array (unsigned-byte 8) (*))))
+              '(simple-array (unsigned-byte 8) (*)))))
         changed unsupported))))
+;; Host-only WAT identities survive GC type adaptation and whole-image linking.
+(defvar *wasm-outline-policies* (make-hash-table :test 'equal))
+(defun record-wasm-outline-policy (name policy)
+  (when (and (plusp (length name)) (char= (char name 0) #\$)) (setq name (subseq name 1)))
+  (let ((previous (gethash name *wasm-outline-policies*)))
+    (setf (gethash name *wasm-outline-policies*)
+      (if previous
+          (+ (max (logand previous 3) (logand policy 3))
+             (* 4 (min (logand 3 (ash previous -2)) (logand 3 (ash policy -2))))
+             (* 16 (max (ash previous -4) (ash policy -4))))
+          policy))))
+
+(defun module-outline-policies (sections)
+  (dolist (section sections)
+    (when (zerop (car section))
+      (let ((input (wasm-input (cdr section))))
+        (when (equalp (module-name input) #(109 105 114 105 99 108 46 112 111 108 105 99 121))
+          (let* ((count (module-uleb input)) (end (length (cdr section))))
+            (unless (= (+ (wasm-input-position input) count) end)
+              (error "Malformed Wasm compilation policies."))
+            (let ((policies (module-span input count)))
+              (unless (every (lambda (policy) (< policy 64)) policies)
+                (error "Invalid Wasm compilation policy."))
+              (return-from module-outline-policies policies))))))))
+
+(defun module-outline-names (sections policies)
+  ;; Keep metadata out of the runtime's exports and literal graph. WAT name
+  ;; sections are still present here, before distribution stripping.
+  (dolist (section sections)
+    (when (zerop (car section))
+      (let ((input (wasm-input (cdr section))))
+        (when (equalp (module-name input) #(110 97 109 101))
+          (loop while (< (wasm-input-position input) (length (cdr section))) do
+            (let* ((id (module-byte input)) (payload (module-span input (module-uleb input))))
+              (when (= id 1)
+                (let ((names (wasm-input payload)))
+                  (dotimes (i (module-uleb names))
+                    (let* ((index (module-uleb names)) (name (map 'string #'code-char (module-name names)))
+                           (policy (gethash name *wasm-outline-policies*)))
+                      (when (and policy (< index (length policies))) (setf (aref policies index) policy)))))))))))))
+
+(defun native-module-outline-policies (bytes module)
+  ;; Recover the named linker identities of a compiler-produced module.
+  (let ((input (wasm-input bytes 8)) (sections nil))
+    (loop while (< (wasm-input-position input) (length bytes)) do
+      (let ((id (module-byte input))) (push (cons id (module-span input (module-uleb input))) sections)))
+    (let ((policies (module-outline-policies sections)))
+      (unless policies (error "Native compiler module has no compilation policies."))
+      (loop for policy across policies for i from 0 collect
+        (cons (format nil "compiler-~D-~D" module i) policy)))))
+
+(defun outline-wasm-module (bytes &optional (budget *native-outlining-budget*))
+  ;; Host build adapter. Keep the shared matching/rewriting core independent of
+  ;; recursive GC type parsing and the rest of the full-image binary format.
+  (unless (plusp budget) (return-from outline-wasm-module bytes))
+  (let ((input (wasm-input bytes 8)) (sections nil) (types nil)
+        (imported nil) (defined nil) (records nil) (helpers nil) (replacements nil) (policies nil))
+    (handler-case
+        (loop while (< (wasm-input-position input) (length bytes)) do
+          (let* ((id (module-byte input)) (payload (module-span input (module-uleb input))))
+            (push (cons id payload) sections)
+            (case id
+              (1 (setq types (module-types payload)))
+              (2 (setq imported (module-import-functions payload)))
+              (3 (let ((functions (wasm-input payload)))
+                   (setq defined (loop repeat (module-uleb functions) collect (module-uleb functions))))))))
+      (unsupported-wasm-optimization () (return-from outline-wasm-module bytes)))
+    (setq sections (nreverse sections))
+    (let* ((functions (coerce (append imported defined) 'vector))
+           (signatures (map 'vector (lambda (index) (let ((type (aref types index)))
+                              (list (aref type 1) (aref type 2)))) functions)))
+      (let ((code (wasm-input (cdr (assoc 10 sections)))))
+        (unless (= (module-uleb code) (length defined)) (error "Mismatched Wasm code section."))
+        (dotimes (i (length defined))
+          (let* ((body (module-span code (module-uleb code)))
+                 (effects (make-hash-table :test 'eq))
+                 (record (handler-case
+                    (multiple-value-bind (ops parameters locals localtypes)
+                        (module-read-body body (aref types (aref functions (+ i (length imported)))) types functions effects)
+                      (declare (ignore parameters locals)) (list body ops localtypes effects))
+                    (unsupported-wasm-optimization () (list body nil nil nil)))))
+            (push record records))))
+      (setq records (coerce (nreverse records) 'vector)
+            policies (or (module-outline-policies sections) (make-array (length records) :initial-element 29)))
+      (unless (= (length policies) (length records)) (error "Mismatched Wasm compilation policy count."))
+      (let ((named (make-array (length functions) :initial-element 29)))
+        (module-outline-names sections named)
+        (dotimes (i (length policies))
+          (let ((policy (aref named (+ i (length imported)))))
+            (unless (= policy 29) (setf (aref policies i) policy)))))
+      (multiple-value-setq (replacements helpers)
+        (native-outline-code records signatures
+          (map 'vector (lambda (record policy) (and (second record) policy)) records policies) budget)))
+    (unless helpers (return-from outline-wasm-module bytes))
+    (with-wasm-bytes
+      (wasm-append bytes 0 8)
+      (dolist (section sections)
+        (module-write-section (car section)
+          (case (car section)
+            ((1 3)
+             (let ((payload (wasm-input (cdr section))))
+               (with-wasm-bytes
+                 (wasm-u32 (+ (module-uleb payload) (length helpers)))
+                 (wasm-append (wasm-input-bytes payload) (wasm-input-position payload))
+                 (loop for helper in helpers for i from (length types) do
+                   (if (= (car section) 3) (wasm-u32 i)
+                       (progn
+                         (wasm-byte #x60)
+                         (dolist (list (cdr helper))
+                           (wasm-u32 (length list))
+                           (dolist (type list) (dolist (byte type) (wasm-byte byte))))))))))
+            (10 (with-wasm-bytes
+                  (wasm-u32 (+ (length replacements) (length helpers)))
+                  (dolist (body (append replacements (mapcar #'first helpers)))
+                    (wasm-u32 (length body)) (wasm-append body))))
+            (0 (let ((input (wasm-input (cdr section))))
+                 (if (equalp (module-name input) #(109 105 114 105 99 108 46 112 111 108 105 99 121))
+                     (with-wasm-bytes
+                       (wasm-name "miricl.policy") (wasm-u32 (+ (length policies) (length helpers)))
+                       (loop for policy across policies do (wasm-byte policy))
+                       (dotimes (i (length helpers)) (wasm-byte 0)))
+                     (cdr section))))
+            (otherwise (cdr section))))))))

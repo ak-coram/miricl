@@ -378,7 +378,8 @@
   (if (intersection parameters '(&optional &key &aux))
       (let ((mode nil)
             (declaration (list 'declare (list 'optimize
-              (list 'space (ash %size-default-policy -2))
+              (list 'compilation-speed (ash %size-default-policy -4))
+              (list 'space (logand 3 (ash %size-default-policy -2)))
               (list 'speed (logand %size-default-policy 3))))))
         (mapcar (lambda (spec)
           (cond ((member spec '(&optional &key &aux)) (setq mode t) spec)
@@ -404,7 +405,8 @@
       (let* ((%compilation-complete t)
              (body (append (list (list 'declare (list 'optimize
                                        (list 'debug %debug-default-level) (list 'safety %safety-default-level)
-                                       (list 'space (ash %size-default-policy -2))
+                                       (list 'compilation-speed (ash %size-default-policy -4))
+                                       (list 'space (logand 3 (ash %size-default-policy -2)))
                                        (list 'speed (logand %size-default-policy 3)))))
                         %file-top-declarations (nreverse declarations)
                         (list (list* 'block (if (consp name) (second name) name) body))))
@@ -412,7 +414,12 @@
              ;; Debug lowering needs the original lexical names and macro
              ;; bindings. Prepared siblings keep their resolved call markers.
              (parts (if source-p (cons parameters body)
-                        (%compile-lambda-parts parameters body environment))))
+                        (let ((parts (%compile-lambda-parts parameters body environment)))
+                          ;; Normalization moves body declarations into LET*.
+                          ;; Its binder scaffolding keeps the definition policy.
+                          (if (intersection parameters '(&optional &key &aux))
+                              (cons (car parts) (cons (copy-tree (first body)) (cdr parts)))
+                              parts)))))
         (when source-p (setq %file-block-source-p t))
         (push (if (and %compilation-complete (not source-p)) (%%compile 2 name parts) (cons name parts)) %file-block-definitions)
         (setq %file-block-complete (and %file-block-complete %compilation-complete)))

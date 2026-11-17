@@ -674,7 +674,11 @@
   (bootstrap-symbol-name-bytes *runtime-symbols*
     (lambda (symbol)
       (logior (cond ((keywordp symbol) 1) ((member symbol *mop-symbols*) 2)
-                   ((member symbol *extension-symbols*) 3) (t 0))
+                   ((member symbol *extension-symbols*) 3)
+                   ;; Runtime substrate identities need early bindings, but
+                   ;; are private implementation symbols, not CL exports.
+                   ((eq (symbol-package symbol) (find-package :miricl-runtime)) 11)
+                   (t 0))
         (if (or (member symbol *runtime-special-operators*) (member symbol *runtime-macros*)) 4 0)))))
 
 (defun bootstrap-private-symbol-bytes (symbols &optional primitives)
@@ -703,17 +707,21 @@
   #@(i32.add (local.get $position) (local.get $length)))
 
 (define-runtime-function $bootstrap-symbol
-    (($id i32) ($name :nullable-object) ($p :nullable-object) ($scope i32))
+    (($id i32) ($name :nullable-object) ($p :nullable-object) ($flags i32))
     ()
   (:locals ($symbol :nullable-object))
   #@(if (local.get $id)
       (then (local.set $symbol ,(wat-new-object :symbol :n #@(local.get $id)
-        :a #@(local.get $name) :b #@(local.get $p) :f #@(f64.convert_i32_u (local.get $scope))))
+        :a #@(local.get $name) :b #@(local.get $p)
+        :f #@(f64.convert_i32_u (i32.and (local.get $flags) (i32.const 4)))))
             (call $register-symbol (ref.as_non_null (local.get $symbol)))))
-  #@(call $add-entry (local.get $symbol) (local.get $p) (i32.const 2))
+  #@(call $add-entry (local.get $symbol) (local.get $p)
+    (if (result i32) (i32.and (local.get $flags) (i32.const 8))
+      (then (i32.const 1)) (else (i32.const 2))))
   ;; Retain qualified access for older host integrations, without exporting
   ;; implementation extensions from the standard COMMON-LISP package.
-  #@(if (ref.eq (local.get $p) (global.get $implementation-package))
+  #@(if (i32.and (ref.eq (local.get $p) (global.get $implementation-package))
+                 (i32.eqz (i32.and (local.get $flags) (i32.const 8))))
     (then (call $add-entry (local.get $symbol) (global.get $cl-package) (i32.const 1))))
   #@(if (ref.eq (local.get $p) (global.get $keyword-package))
       (then (call $install-keyword (local.get $symbol)))))
@@ -771,7 +779,7 @@
           (then (global.get $mop-package))
           (else (if (result (ref null eq)) (i32.eq (i32.and (local.get $kind) (i32.const 3)) (i32.const 3))
             (then (global.get $implementation-package)) (else (global.get $cl-package)))))))
-      (i32.and (local.get $kind) (i32.const 4)))
+      (i32.and (local.get $kind) (i32.const 12)))
     ;; F is unused by symbols. A scope marker lets ordinary applications use
     ;; APPLY's dynamic boundary without a second save/restore in EVAL.
     (local.set $id (i32.add (local.get $id) (i32.const 1))) (br $next)))

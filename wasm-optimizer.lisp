@@ -757,3 +757,187 @@
         (compiler-statistic :lowering/wasm-input-bytes nil (length bytes))
         (compiler-statistic :lowering/wasm-output-bytes nil (length result))
         (values result mapping)))))
+(defvar *native-outlining-budget* 1000000)
+(defvar *native-outlining-minimum-bytes* 0)
+(defvar *native-outlining-minimum-saving* 512)
+
+;;;; Repeated straight-line Wasm regions. Records and signatures are private,
+;;;; validated emitter/decoder data; this is not a public bytecode boundary.
+
+(defun native-outline-result (op bytes types signatures)
+  ;; NIL is an unknown stack type, never evidence for a helper signature.
+  (let ((code (native-op-code op)) (argument (native-op-argument op)))
+    (case code
+      ((#x20 #x22) (aref types argument))
+      (#x10 (first (second (aref signatures argument))))
+      ((#x41 #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #xa7 #xd1 #xd3) '(#x7f))
+      ((#x42 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xac) '(#x7e))
+      (#xd0 (let ((start (1+ (native-op-start op))))
+              (if (and (= (native-op-end op) (1+ start))
+                       (member (aref bytes start) '(#x6f #x6e #x6d #x70)))
+                  (list (aref bytes start))
+                  (cons #x63 (coerce (subseq bytes start (native-op-end op)) 'list)))))
+      (#xfb (case (or argument (aref bytes (1+ (native-op-start op))))
+              (#x1a '(#x6e)) (#x1b '(#x6f))
+              ((#x1d #x1e) '(#x7f))
+              ((#x16 #x17)
+               (cons (if (= (or argument (aref bytes (1+ (native-op-start op)))) #x16) #x64 #x63)
+                 (coerce (subseq bytes (+ 2 (native-op-start op)) (native-op-end op)) 'list))))))))
+
+(defun native-outline-region (body ops types start end last-uses stack)
+  ;; Alpha-renaming respects aliases. A local read before its first write is
+  ;; an input; other locals begin with a dominating write inside the helper.
+  (let ((locals nil) (inputs nil) (written nil) (output nil))
+    (loop for i from start below end for op = (aref ops i)
+          for code = (native-op-code op) for index = (native-op-argument op)
+          when (member code '(#x20 #x21 #x22)) do
+            (pushnew index locals)
+            (if (= code #x20)
+                (unless (member index written) (pushnew index inputs))
+                (pushnew index written)))
+    (setq locals (nreverse locals) inputs (nreverse inputs))
+    (dolist (index locals)
+      (when (and (member index written) (>= (aref last-uses index) end)) (push index output)))
+    (setq output (nreverse output))
+    (unless (and (<= (length inputs) 6) (<= (length output) 4) (<= (length locals) 12))
+      (return-from native-outline-region nil))
+    (let* ((temporaries (remove-if (lambda (index) (member index inputs)) locals))
+           (order (append inputs temporaries))
+           (code (with-wasm-bytes
+                   (loop for i from start below end for op = (aref ops i) do
+                     (if (member (native-op-code op) '(#x20 #x21 #x22))
+                         (progn (wasm-byte (native-op-code op))
+                           (wasm-u32 (position (native-op-argument op) order)))
+                         (wasm-append body (native-op-start op) (native-op-end op))))))
+           (parameters (mapcar (lambda (index) (aref types index)) inputs))
+           (results (append (reverse stack) (mapcar (lambda (index) (aref types index)) output)))
+           (local-types (mapcar (lambda (index) (aref types index)) temporaries))
+           (helper (with-wasm-bytes
+                     (wasm-u32 (length temporaries))
+                     (dolist (type local-types) (wasm-u32 1) (dolist (byte type) (wasm-byte byte)))
+                     (wasm-append code)
+                     (dolist (index output) (wasm-byte #x20) (wasm-u32 (position index order))) (wasm-byte #x0b))))
+      (unless (or *native-module-stack-effects*
+                  (every (lambda (type) (and (= (length type) 1)
+                                             (member (first type) '(#x6f #x7f #x7e #x70))))
+                         (append parameters results local-types)))
+        (return-from native-outline-region nil))
+      ;; Key owns the complete normalized bytes and types, not a lossy hash.
+      (list (list (map 'string #'code-char helper) parameters results)
+            helper parameters results inputs output))))
+
+(defun native-outline-site (region index)
+  (with-wasm-bytes
+    (dolist (local (fifth region)) (wasm-byte #x20) (wasm-u32 local))
+    (wasm-byte #x10) (wasm-u32 index)
+    (dolist (local (reverse (sixth region))) (wasm-byte #x21) (wasm-u32 local))))
+
+(defun native-outline-code (records signatures eligible &optional (budget *native-outlining-budget*))
+  "Share repeated regions in checked private body records.
+RECORDS contain bytes, decoded operations, local types and exact stack effects.
+SIGNATURES contain raw parameter/result types in final function-index order.
+ELIGIBLE contains each body's packed SPACE/SPEED/COMPILATION-SPEED policy.
+Return replacement bodies and (body parameters results) helper records."
+  (let ((groups (make-hash-table :test 'equal)) (group-count 0) (occurrences 0)
+        (candidates nil) (selected nil) (helpers nil) (work budget))
+    (dotimes (function (length records))
+      (let ((record (aref records function)))
+        (when (and record (aref eligible function) (plusp work)
+                   (plusp (logand 3 (ash (aref eligible function) -2)))
+                   (<= (logand 3 (aref eligible function)) (logand 3 (ash (aref eligible function) -2))))
+          (let* ((body (first record)) (ops (second record)) (types (third record))
+                 (policy (aref eligible function))
+                 (space (logand 3 (ash policy -2)))
+                 (minimum (max *native-outlining-minimum-bytes* (case space (1 256) (2 128) (otherwise 64))))
+                 (function-work (case (ash policy -4) (0 200000) (1 100000) (2 25000) (otherwise 4000)))
+                 (*native-module-stack-effects* (fourth record))
+                 (last-uses (make-array (length types) :initial-element -1)))
+            ;; A moved store must remain visible if a handler in this activation
+            ;; catches a transfer. Keep these functions intact, including their
+            ;; handler-free regions; a smaller proof can relax this later.
+            (unless (find #x1f ops :key (lambda (op) (native-op-code op)))
+              (loop for op across ops for i from 0 when (member (native-op-code op) '(#x20 #x21 #x22))
+                    do (setf (aref last-uses (native-op-argument op)) i))
+              (dotimes (start (length ops))
+                (when (and (plusp work) (plusp function-work) (member (native-op-code (aref ops start)) '(#x20 #x41 #x42 #xd0)))
+                  (let ((stack nil) (depth 0))
+                    (loop for end from start below (min (length ops) (+ start 128))
+                          for op = (aref ops end) for code = (native-op-code op) do
+                      (decf work) (decf function-work)
+                      ;; Control, tails, REF.FUNC and unknown operations are
+                      ;; barriers. Regions neither consume an outside operand
+                      ;; nor introduce a new branch or retained recursive frame.
+                      (unless (and (plusp work) (plusp function-work) (or (/= code #x10) (= (aref body (native-op-start op)) #x10))
+                                   (member code '(#x10 #x1a #x20 #x21 #x22 #x41 #x42 #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd0 #xd1 #xd3 #xfb)))
+                        (return))
+                      (multiple-value-bind (pops pushes)
+                          (if (= code #x10)
+                              (let ((signature (aref signatures (native-op-argument op))))
+                                (values (length (first signature)) (length (second signature))))
+                              (native-op-stack op))
+                        (unless (and (<= pops depth) (<= pushes 1)) (return))
+                        (dotimes (i pops) (pop stack)) (decf depth pops)
+                        (when (plusp pushes)
+                          (push (native-outline-result op body types signatures) stack) (incf depth)))
+                      (when (and (member (- end start) '(15 23 31 39 47 63 79 95 127)) (<= depth 1)
+                                 (every #'identity stack)
+                                 (>= (- (native-op-end op) (native-op-start (aref ops start))) minimum))
+                        (let ((region (native-outline-region body ops types start (1+ end) last-uses stack)))
+                          (when region
+                            (let* ((key (first region)) (group (gethash key groups)))
+                              (when (and (null group) (< group-count 2048))
+                                ;; Group: representative region and occurrences.
+                                (setq group (list region nil)) (setf (gethash key groups) group)
+                                (incf group-count) (push group candidates))
+                              (when (and group (< occurrences 8192))
+                                ;; A site owns its local numbering, even when
+                                ;; all normalized bytes match another function.
+                                (push (list function (native-op-start (aref ops start))
+                                            (native-op-end op) region) (second group))
+                                (incf occurrences)))))))))))))))
+    (let ((occupied (make-array (length records) :initial-element nil)))
+      ;; Larger total byte savings first. Price the actual parameter traffic,
+      ;; helper, signature, body/function counts and bounded section growth.
+      (labels ((saving (group sites index)
+                 (let* ((region (first group)) (helper (second region))
+                        (parameters (third region)) (results (fourth region)))
+                   (- (loop for site in sites sum
+                        (- (- (third site) (second site)) (length (native-outline-site (fourth site) index))))
+                      (length helper) (wasm-u32-width (length helper))
+                      (loop for type in (append parameters results) sum (length type))
+                      (wasm-u32-width (length parameters)) (wasm-u32-width (length results)) 16)))
+               (available (site)
+                 (not (some (lambda (other) (and (< (second site) (third other))
+                                                 (< (second other) (third site))))
+                            (aref occupied (first site))))))
+        (setq candidates (stable-sort candidates #'>
+          :key (lambda (group) (saving group (second group) (length signatures)))))
+        (dolist (group candidates)
+          (when (< (length helpers) 64)
+            (let ((sites nil) (index (+ (length signatures) (length helpers))))
+              (dolist (site (reverse (second group)))
+                (when (and (available site)
+                           (not (some (lambda (other) (and (= (first other) (first site))
+                                                          (< (second site) (third other))
+                                                          (< (second other) (third site)))) sites)))
+                  (push site sites)))
+              (when (and (cdr sites) (>= (saving group sites index) *native-outlining-minimum-saving*))
+                (let ((region (first group)))
+                  (push (list (second region) (third region) (fourth region)) helpers))
+                (dolist (site sites)
+                  (push site (aref occupied (first site)))
+                  (push (list site (native-outline-site (fourth site) index)) selected))))))
+        (values
+          (loop for record across records for i from 0 collect
+            (let ((body (and record (first record)))
+                  (sites (sort (remove-if-not (lambda (entry) (= (first (first entry)) i)) selected)
+                               #'< :key (lambda (entry) (second (first entry))))))
+              (if sites
+                  (with-wasm-bytes
+                    (let ((cursor 0))
+                      (dolist (entry sites)
+                        (wasm-append body cursor (second (first entry))) (wasm-append (second entry))
+                        (setq cursor (third (first entry))))
+                      (wasm-append body cursor)))
+                  body)))
+          (nreverse helpers))))))

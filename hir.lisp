@@ -53,12 +53,12 @@
 
 (define-hir-record hir-unit functions)
 (define-hir-record hir-function name parent parameters environment entry blocks captures bindings values
-  (value-count 0) (block-count 0) (debug-level 1))
+  (value-count 0) (block-count 0) (debug-level 1) (optimization-policy 29))
 (define-hir-record hir-block id parameters instructions terminator predecessors environment)
 (define-hir-record hir-value id kind owner producer (type t))
 (define-hir-record hir-instruction opcode inputs output attributes origin effect (safety-level 1))
 (define-hir-record hir-binding name owner cell special-p captured-p assigned-p local)
-(define-hir-record hir-local definition variables functions targets types policy debug-level used-p function (safety-level 1) macro-context (size-policy 13))
+(define-hir-record hir-local definition variables functions targets types policy debug-level used-p function (safety-level 1) macro-context (size-policy 29))
 (define-hir-record hir-target name owner block token captured-p)
 (define-hir-record hir-debug-site kind operator value variables functions targets types parent owner form macros)
 (defvar *hir-unit*)
@@ -72,10 +72,12 @@
 (defvar *hir-function-index* nil)
 (defvar *hir-inlining* nil)
 (defvar *hir-inline-small-functions* nil)
-(defvar *hir-inline-budget* 128)
+(defvar *hir-inline-budget* 0)
+(defvar *hir-inline-work* 0)
+(defvar *hir-inline-growth-policy* nil)
 (defvar *hir-debug-level* 1)
 (defvar *hir-safety-level* 1)
-(defvar *hir-size-policy* 13)
+(defvar *hir-size-policy* 29)
 (defvar *hir-source-path* nil)
 (defvar *hir-debug-sites* nil)
 (defvar *hir-macro-context* nil)
@@ -136,10 +138,26 @@
   inherited)
 
 (defun native-size-policy (body inherited)
-  ;; Retain both priorities while lowering; partial declarations inherit.
-  (declare (type list body) (type (integer 0 15) inherited))
-  (+ (* 4 (native-optimization-level body 'space (ash inherited -2)))
+  ;; Two bits each for SPEED, SPACE and COMPILATION-SPEED. Partial declarations
+  ;; inherit; compile effort does not change run-time safety or debug contracts.
+  (declare (type list body) (type (integer 0 63) inherited))
+  (+ (* 16 (native-optimization-level body 'compilation-speed (ash inherited -4)))
+     (* 4 (native-optimization-level body 'space (logand 3 (ash inherited -2))))
      (native-optimization-level body 'speed (logand inherited 3))))
+
+(defun hir-note-optimization-policy (&optional form)
+  ;; Whole-function machine passes must respect every lexical source scope.
+  ;; A speed-oriented inner scope can conservatively veto outlining its owner.
+  ;; LOCALLY enters its declared policy before any governed operation.
+  (let ((old (hir-function-optimization-policy *hir-function*))
+        (new (if (and (consp form) (eq (car form) 'locally))
+                 (native-size-policy (cdr form) *hir-size-policy*)
+                 *hir-size-policy*)))
+    (unless (= old new)
+      (setf (hir-function-optimization-policy *hir-function*)
+        (+ (max (logand old 3) (logand new 3))
+           (* 4 (min (logand 3 (ash old -2)) (logand 3 (ash new -2))))
+           (* 16 (max (ash old -4) (ash new -4))))))))
 
 (defun native-debug-level (body inherited)
   (native-optimization-level body 'debug inherited))
@@ -168,8 +186,6 @@
   (declare (type symbol opcode kind effect) (type list inputs attributes)
            (type simple-vector *hir-block*))
   (when (hir-block-terminator *hir-block*) (error "HIR instruction after a terminator."))
-  (when (and (eq opcode :call) (<= (ash *hir-size-policy* -2) (logand *hir-size-policy* 3)))
-    (setq attributes '(:speed)))
   (let* ((instruction (make-hir-instruction-record opcode inputs nil attributes *hir-origin* effect
                         *hir-safety-level*))
          (output (and kind (hir-new-value kind instruction))))
@@ -355,11 +371,24 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
     (declare (type fixnum size) (type list work))
     (loop while work do
       (let ((next (pop work)))
-        (incf size)
+        (incf size) (incf *hir-inline-work*)
         (when (> size limit) (return-from hir-inline-size nil))
         (when (and (consp next) (not (eq (car next) 'quote)))
           (dolist (child next) (push child work)))))
     size))
+
+(defun hir-inline-limit (kind)
+  ;; These are bounded source-growth estimates, before machine-code outlining.
+  ;; Retained helpers, imports and literals still contribute to final module size.
+  (let* ((policy (or *hir-inline-growth-policy* *hir-size-policy*))
+         (space (logand 3 (ash policy -2))) (speed (logand policy 3)))
+    (case kind
+      (:work (ash 1024 (* 2 (- 3 (ash *hir-size-policy* -4)))))
+      (:growth (cond ((> space speed) 128) ((= space speed) 192) (t 384)))
+      (otherwise
+       (cond ((> space speed) (if kind (- 224 (* 32 space)) (- 28 (* 4 space))))
+             ((= space speed) (if kind 160 24))
+             (t (if kind 192 (+ 24 (* 8 (- speed space))))))))))
 
 (defun hir-inline-candidate (name arguments functions)
   (declare (type list arguments functions))
@@ -384,7 +413,6 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                         (and (symbolp parameter) parameter (not (eq parameter t)) (not (keywordp parameter))
                              (not (member parameter lambda-list-keywords)))) parameters)
                (= (length parameters) (length (remove-duplicates parameters)))
-               (hir-inline-size (cddr definition) (min *hir-inline-budget* (if (eq policy 'inline) 128 16)))
                ;; A recursive call can revisit its definition's source while
                ;; that definition is being lowered out of line. Distinct
                ;; definitions may also share body conses. Keep such calls
@@ -392,7 +420,11 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                ;; structural source cycle to HIR-FORM's input guard.
                (not (loop for form in (cddr definition) thereis
                       (member form *hir-source-path* :test miricl::%compiler-eq-function))))
-      binding)))
+      (let* ((limit (min (hir-inline-limit (eq policy 'inline))
+                        (- (hir-inline-limit :growth) *hir-inline-budget*)
+                        (- (hir-inline-limit :work) *hir-inline-work*)))
+             (size (and (plusp limit) (hir-inline-size (cddr definition) limit))))
+        (when size (incf *hir-inline-budget* size) binding)))))
 
 (defun hir-inline-body (binding arguments)
   (declare (type simple-vector binding) (type list arguments)
@@ -401,6 +433,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   ;; its definition's lexical environment so caller shadowing cannot capture
   ;; free variables, functions, blocks, or declaration facts.
   (let* ((info (hir-binding-local binding)) (definition (hir-local-definition info))
+         (*hir-inline-growth-policy* (or *hir-inline-growth-policy* *hir-size-policy*))
          (variables (hir-local-variables info)) (functions (hir-local-functions info))
          (targets (hir-local-targets info)) (*hir-types* (hir-local-types info))
          (*hir-inline-policy* (hir-local-policy info))
@@ -410,7 +443,6 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
          (*hir-size-policy* (native-size-policy (cddr definition) (hir-local-size-policy info)))
          (*hir-inlining* (cons binding *hir-inlining*))
          (*hir-dynamic* *hir-dynamic*) (entry *hir-dynamic*))
-    (decf *hir-inline-budget* (hir-inline-size (cddr definition) 128))
     (multiple-value-bind (body specials types policy) (hir-declarations (cddr definition) t)
       (loop for name in (second definition) for value in arguments do
         (setq variables (hir-bind-value name value variables specials)))
@@ -1164,7 +1196,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   (let ((work nil) (result nil) (*hir-safety-level* *hir-safety-level*)
         (*hir-size-policy* *hir-size-policy*))
     (declare (type list variables functions targets work)
-             (type (integer 0 3) *hir-safety-level*) (type (integer 0 15) *hir-size-policy*))
+             (type (integer 0 3) *hir-safety-level*) (type (integer 0 63) *hir-size-policy*))
     (labels
         ((defer (function &optional boundary)
            (push (list function boundary *hir-origin* *hir-debug-level* *hir-dynamic*
@@ -1242,6 +1274,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                                    form))
                   (site (when (and *hir-debug-info-enabled* (= *hir-debug-level* 3)) *hir-origin*))
                  (*hir-source-path* (if (consp form) (cons form *hir-source-path*) *hir-source-path*)))
+             (hir-note-optimization-policy form)
              (when site
                (hir-emit :debug-step nil nil (list site) :debug)
                (defer (lambda ()
@@ -1384,6 +1417,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
 (defun hir-recursive-form (form variables functions targets)
   (let ((*hir-origin* (if (and *hir-debug-sites* (gethash *hir-origin* *hir-debug-sites*))
                           *hir-origin* form)))
+    (hir-note-optimization-policy form)
     (when (>= *hir-debug-level* 2)
       (setf (hir-function-debug-level *hir-function*)
             (max *hir-debug-level* (hir-function-debug-level *hir-function*))))
@@ -1524,8 +1558,10 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
          (*hir-safety-level* (native-safety-level (cddr form) *hir-safety-level*))
          (*hir-types* *hir-types*)
          (*hir-function* (make-hir-function-record name parent (second form)
-                           nil nil nil nil nil nil 0 0 *hir-debug-level*))
-         (*hir-origin* form) (*hir-block* (hir-new-block)) (*hir-inline-budget* 128)
+                           nil nil nil nil nil nil 0 0 *hir-debug-level*
+                           (native-size-policy (cddr form) *hir-size-policy*)))
+         (*hir-origin* form) (*hir-block* (hir-new-block)) (*hir-inline-budget* 0)
+         (*hir-inline-work* 0) (*hir-inline-growth-policy* nil)
          (*hir-dynamic* (hir-new-value :dynamic *hir-function*)))
     (setf (hir-function-entry *hir-function*) *hir-block*)
     (setf (hir-block-environment *hir-block*) *hir-dynamic*)
@@ -1686,7 +1722,7 @@ Unsupported special operators and parameter syntax signal an error."
   (let ((*hir-unit* (make-hir-unit-record)) (*hir-specials* global-specials)
         (*hir-debug-level* (or (compiler-primitive 33 nil) 1)) (*hir-types* nil)
         (*hir-safety-level* (or (compiler-primitive 36 nil) 1))
-        (*hir-size-policy* (or (compiler-primitive 52 nil) 13))
+        (*hir-size-policy* (or (compiler-primitive 52 nil) 29))
         (*hir-inline-policy* nil) (*hir-inlining* nil) (*hir-function-index* nil)
         (*hir-source-path* (and (consp lambda-expression) (list lambda-expression)))
         (*hir-debug-sites* nil)
@@ -1772,8 +1808,9 @@ global definitions. Internal calls refer to this group's lexical definitions."
                      (= (hir-function-value-count function) values)
                      (typep (hir-function-block-count function) '(unsigned-byte 32))
                      (= (hir-function-block-count function) blocks)
-                     (typep (hir-function-debug-level function) '(integer 0 3)))
-          (compiler-input-fail "HIR function" function "invalid value/block counts or debug level")))
+                     (typep (hir-function-debug-level function) '(integer 0 3))
+                     (typep (hir-function-optimization-policy function) '(integer 0 63)))
+          (compiler-input-fail "HIR function" function "invalid counts, debug level or optimization policy")))
       (dolist (item (hir-function-values function))
         (unless (%hir-value-p item) (compiler-input-fail "HIR value" item "invalid value record"))
         (when (gethash item value-owners) (compiler-input-fail "HIR value" item "duplicate value"))
@@ -1863,7 +1900,11 @@ global definitions. Internal calls refer to this group's lexical definitions."
                (compiler-input-fail "HIR instruction" (list opcode (hir-instruction-origin object))
                  "unknown opcode or invalid operand/attribute count or safety level"))
              (dolist (input inputs) (value input))
-             (when (hir-instruction-output object) (value (hir-instruction-output object)))
+             (when (hir-instruction-output object)
+               (let ((output (hir-instruction-output object)))
+                 (value output)
+                 (unless (and (eq (hir-value-owner output) function) (eq (hir-value-producer output) object))
+                   (compiler-input-fail "HIR instruction output" output "output has the wrong owner or producer"))))
              ;; Value-group representation is an executable IR contract, not
              ;; a client assertion usable as a cardinality certificate.
              (when (member opcode '(:values :call :multiple-value-call :control-call :restart-signal))

@@ -31,6 +31,7 @@
           (setf (svref bs i) (make-hir-block-record i)))
         (setf (hir-function-values f) (coerce vs 'list)
               (hir-function-debug-level f) (svref d 12)
+              (hir-function-optimization-policy f) (svref d 13)
               (hir-function-blocks f) (coerce bs 'list)
               (hir-function-block-count f) (length bs)
               (hir-function-environment f) (svref vs (svref d 2))

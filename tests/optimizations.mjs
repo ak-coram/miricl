@@ -186,6 +186,32 @@ try {
   assert.equal(pressure.output, 'T\n', 'Literal-heavy retained frames preserve recursion capacity and effects.');
   console.log('Optimizations: literal-heavy non-tail recursion completes without excessive retained-frame pressure.');
 
+  // Repeated substantial regions should pay for their private helpers while
+  // retaining callback effects, ordinary primary values and the final values.
+  check('module outlining shares large regions without changing effects or values', `(let*
+    ((definitions (loop for i below 10 collect
+       (list 'defun (intern (format nil "OPTIMIZATION-OUTLINE-~D" i)) '(x callback)
+         '(declare (optimize (space 3) (speed 1) (debug 0)))
+         (list 'let* '((a (funcall callback x x x x x x))
+                       (b (funcall callback a a a a a a))
+                       (c (funcall callback b b b b b b)))
+           (list 'values 'c i)))))
+     (plain (let ((miricl-compiler::*native-outlining-budget* 0))
+       (multiple-value-list (miricl-compiler:compile-native-module definitions :inline nil))))
+     (shared (multiple-value-list (miricl-compiler:compile-native-module definitions :inline nil))))
+    (and (< (length (second shared)) (length (second plain)))
+      (loop for variant in (list plain shared) always
+        (loop for entry in (first variant) for i from 0 always
+          (let ((effects nil))
+            (and (equal (multiple-value-list
+                   (funcall (cdr entry) 40
+                     (lambda (&rest arguments)
+                       (push (first arguments) effects)
+                       (values (apply #'+ arguments) :discarded))))
+                 (list 8640 i))
+                 (equal effects '(1440 240 40))))))))`);
+  console.log('Optimizations: whole-module outlining reduces repeated code and preserves callback effects and multiple values.');
+
   // Declared hot paths deliberately exercise inlining and scalar lowering.
   // The assertions concern legal input, effects and values, not a prescribed
   // lowering strategy or the optimizer's private representation.

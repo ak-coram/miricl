@@ -3,6 +3,7 @@
 // node tests/soundness.mjs [miricl.wasm]
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import {Script, createContext} from 'node:vm';
 import {Miricl} from '../scripts/miricl.mjs';
 
 const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
@@ -853,7 +854,138 @@ try {
     (setf (cdr object) object)
     (and (eq object (funcall (compile-native (list 'lambda nil (list 'quote object)))))
       (equal (funcall (compile-native (list 'lambda '(x) (list 'list shared shared))) 1) '(2 2))))`);
+  // Optimization declarations survive retained-code round trips without
+  // changing values or turning advisory metadata into an unchecked boundary.
+  check(`(loop for space from 0 to 3 for speed in '(3 2 1 0)
+      for effort from 0 to 3 always
+      (let* ((source (list 'lambda '(x)
+              (list 'declare (list 'optimize (list 'space space) (list 'speed speed)
+                (list 'compilation-speed effort) '(debug 0))) '(values x nil)))
+             (unit (compile-to-hir source))
+             (wire (emit-hir-code-checked unit))
+             (decoded (validate-hir-code wire))
+             (exported (copy-hir-code decoded))
+             (rebuilt (hir-code-to-unit-checked decoded))
+             (expected (+ speed (* 4 space) (* 16 effort))))
+        (and (= expected (hir-function-optimization-policy (first (hir-unit-functions unit))))
+          (= expected (hir-function-optimization-policy (first (hir-unit-functions rebuilt))))
+          (equalp wire exported)
+          (every (lambda (function)
+            (equal (multiple-value-list (funcall function 42)) '(42 nil)))
+            (list (load-hir-code exported) (compile-native-hir exported))))))`);
+  // OPTIMIZE is a free declaration: lambda initializers inherit their outer
+  // scope. Whole-function sharing must conservatively retain both policies.
+  check(`(let ((outer (compiler-primitive 52 nil)))
+    (loop for space from 0 to 3 for speed in '(3 2 1 0)
+      for effort from 0 to 3 always
+      (let* ((source (list 'lambda '(x &optional (y x) &aux (z y))
+              (list 'declare (list 'optimize (list 'space space) (list 'speed speed)
+                (list 'compilation-speed effort) '(debug 0))) '(values z nil)))
+             (unit (compile-to-hir source)) (wire (emit-hir-code-checked unit))
+             (expected (+ (max speed (logand outer 3))
+               (* 4 (min space (logand 3 (ash outer -2))))
+               (* 16 (max effort (ash outer -4))))))
+        (and (= expected (hir-function-optimization-policy (first (hir-unit-functions unit))))
+          (every (lambda (function)
+            (and (equal (multiple-value-list (funcall function 42)) '(42 nil))
+                 (equal (multiple-value-list (funcall function 42 43)) '(43 nil))))
+            (list (load-hir-code wire) (compile-native-hir wire)))))))`);
+  for (const policy of ['-1', '64', 'nil'])
+    reject(`(let* ((unit (compile-to-hir '(lambda () 42)))
+        (function (first (hir-unit-functions unit))))
+      (setf (hir-function-optimization-policy function) ${policy})
+      (emit-native-module unit))`, /optimization policy/);
+  for (const policy of ['-1', '256', 'nil'])
+    reject(`(let* ((wire (emit-hir-code-checked (compile-to-hir '(lambda () 42))))
+        (descriptor (svref (svref wire 1) 0)))
+      (setf (svref descriptor (1- (length descriptor))) ${policy})
+      (load-hir-code wire))`, /function descriptor/, 'hir-code-input-error');
   console.log('Soundness: compiler boundaries reject malformed graphs and recover.');
+
+  for (const consumer of ['emit-native-module', 'emit-hir-code'])
+    reject(`(let* ((unit (lower-source-to-hir
+          '(lambda (flag) (if flag (values 1 2) (values 3 4)))))
+        (function (first (hir-unit-functions unit)))
+        (join (find-if (lambda (block) (hir-block-parameters block))
+                       (hir-function-blocks function)))
+        (parameters (hir-block-parameters join)))
+      (setf (cdr parameters) parameters)
+      (${consumer} unit))`, /circular/, 'compiler-input-error');
+
+  for (const consumer of ['emit-native-module', 'emit-hir-code'])
+    reject(`(let* ((unit (lower-source-to-hir
+          '(lambda (flag) (if flag (values 1 2) (values 3 4)))))
+        (function (first (hir-unit-functions unit)))
+        (join (find-if (lambda (block) (hir-block-parameters block))
+                       (hir-function-blocks function)))
+        (instruction (first (hir-block-instructions (hir-function-entry function)))))
+      (setf (hir-instruction-output instruction) (first (hir-block-parameters join)))
+      (${consumer} unit))`, /output|producer/, 'compiler-input-error');
+
+  for (const consumer of ['emit-native-module', 'emit-hir-code']) {
+    for (const mutation of [
+      '(setf (hir-value-owner output) (second (hir-unit-functions unit)))',
+      '(setf (hir-value-producer output) (hir-function-entry function))',
+    ]) reject(`(let* ((unit (lower-source-to-hir '(lambda () (lambda () 42))))
+        (function (first (hir-unit-functions unit)))
+        (instruction (find-if (lambda (instruction) (hir-instruction-output instruction))
+                       (hir-block-instructions (hir-function-entry function))))
+        (output (hir-instruction-output instruction)))
+      ${mutation}
+      (${consumer} unit))`, /output|owner|producer/, 'compiler-input-error');
+  }
+
+  // Block-group metadata is untrusted current-format input. Check both
+  // callable loading and native reconstruction, with recovery after each
+  // malformed descriptor. The scalar parameter field encodes register+1.
+  for (const consumer of ['load-hir-code', 'compile-native-hir']) {
+    reject(`(let* ((wire (emit-hir-code-checked (compile-to-hir
+          '(lambda (flag) (declare (optimize (debug 0)))
+             (if flag (values 1 2) (values 3 4))))))
+        (descriptor (svref (svref wire 1) 0))
+        (blocks (unpack-hir-blocks (svref descriptor 5)))
+        (join (find-if (lambda (block) (plusp (svref block 0))) blocks)))
+      (setf (svref join 0) (1+ (svref descriptor 1)))
+      (setf (svref descriptor 5) (pack-hir-blocks blocks))
+      (${consumer} wire))`, /block descriptor|parameter|register/, 'hir-code-input-error');
+    reject(`(let* ((wire (emit-hir-code-checked (compile-to-hir '(lambda () 42))))
+        (descriptor (svref (svref wire 1) 0)))
+      (setf (svref descriptor 1) #x7fffffff)
+      (${consumer} wire))`, /register count/, 'hir-code-input-error');
+  }
+
+  // Exercise the complete retained-code transport contract. Parallel DO stepping
+  // permutes live locals across backedges; both branches assign a live value.
+  check(`(let* ((wire (emit-hir-code (compile-to-hir
+        '(lambda (n choose empty effect)
+           (declare (optimize (debug 0)))
+           (let ((state :seed))
+             (do ((i n (1- i)) (a :a b) (b :b c) (c :c a))
+                 ((zerop i) (if empty (values) (values a b c state)))
+               (funcall effect i)
+               (if choose (setq state (multiple-value-list (values a b)))
+                          (setq state (multiple-value-list (values b c))))))))))
+      (decoded (validate-hir-code wire))
+      (exported (copy-hir-code decoded))
+      (rebuilt (hir-code-to-unit exported)))
+    (verify-hir rebuilt)
+    (every (lambda (function)
+      (let ((effects nil))
+        (labels ((effect (i) (push i effects) (values :ignored :extra)))
+          (and (equal (multiple-value-list (funcall function 0 t nil #'effect))
+                      '(:a :b :c :seed))
+               (null effects)
+               (equal (multiple-value-list (funcall function 1 t nil #'effect))
+                      '(:b :c :a (:a :b)))
+               (equal effects '(1))
+               (progn (setq effects nil)
+                 (equal (multiple-value-list (funcall function 2 nil nil #'effect))
+                        '(:c :a :b (:c :a))))
+               (equal effects '(1 2))
+               (null (multiple-value-list (funcall function 3 t t #'effect)))))))
+      (list (load-hir-code exported) (compile-native-hir exported)
+            (compile-native-hir (emit-hir-code rebuilt)))))`);
+  console.log('Soundness: retained code preserves parallel loop transfers, effects and values, and rejects malformed metadata with recovery.');
 
   // Construct corrupt wire using the private emitter only as a fixture. A
   // well-formed byte stream is not proof of lexical or control-flow semantics
@@ -907,6 +1039,177 @@ try {
     (let* ((unit (compile-to-hir '(lambda (x) (if x (values nil nil) (values)))))
            (facts (hir-result-arities-checked unit)))
       (null (gethash (first (hir-unit-functions unit)) facts))))`);
+  // Closed-call facts belong to one emission. The default first entry remains
+  // open even when valid public HIR also creates and calls its closure.
+  check(`(let* ((unit (compile-to-hir '(lambda ()
+        (declare (optimize (debug 0)))
+        (flet ((worker (flag) (if flag :true :false)))
+          (declare (notinline worker)) (worker nil)))))
+      (worker (hir-local-function (hir-binding-local
+        (find 'worker (hir-function-bindings (first (hir-unit-functions unit)))
+          :key (lambda (binding) (hir-binding-name binding)))))))
+    (setf (hir-unit-functions unit) (cons worker (remove worker (hir-unit-functions unit))))
+    (verify-hir unit)
+    (multiple-value-bind (bytes literals) (emit-native-module unit)
+      (let ((native (compiler-primitive 17 bytes literals nil)))
+        (and (eq :true (funcall native t)) (eq :false (funcall native nil))))))`);
+
+  check(`(let* ((unit (compile-to-hir '(lambda ()
+        (declare (optimize (debug 0)))
+        (flet ((worker (flag) (if flag :true :false)))
+          (declare (notinline worker)) (worker nil)))))
+      (worker (hir-local-function (hir-binding-local
+        (find 'worker (hir-function-bindings (first (hir-unit-functions unit)))
+          :key (lambda (binding) (hir-binding-name binding))))))
+      (before (emit-hir-code unit)))
+    (and (verify-hir unit)
+      (multiple-value-bind (bytes literals) (emit-native-module unit)
+        (eq :false (funcall (compiler-primitive 17 bytes literals nil))))
+      (equalp before (emit-hir-code unit))
+      (multiple-value-bind (bytes literals) (emit-native-module unit :entries (list worker))
+        (let ((native (compiler-primitive 17 (cons bytes 0) (first literals) nil)))
+          (and (eq :true (funcall native t)) (eq :false (funcall native nil)))))
+      (equalp before (emit-hir-code unit))
+      (progn
+        (setf (hir-unit-functions unit) (cons worker (remove worker (hir-unit-functions unit))))
+        (verify-hir unit)
+        (multiple-value-bind (bytes literals) (emit-native-module unit)
+          (let ((native (compiler-primitive 17 bytes literals nil)))
+            (and (eq :true (funcall native t)) (eq :false (funcall native nil))))))))`);
+
+  // Public value-list order is independent of IDs. A long forwarded closure
+  // alias returned to outside callers must keep unrestricted arguments.
+  check(`(let* ((unit (compile-to-hir '(lambda () (declare (optimize (debug 0)))
+                 (flet ((worker (flag) (if flag :true :false)))
+                   (declare (notinline worker)) (worker nil)))))
+       (root (first (hir-unit-functions unit)))
+       (closure (loop for block in (hir-function-blocks root)
+                      thereis (find :closure (hir-block-instructions block)
+                                :key (lambda (i) (hir-instruction-opcode i)))))
+       (exit (find-if (lambda (b) (eq :return (hir-instruction-opcode (hir-block-terminator b))))
+                     (hir-function-blocks root)))
+       (value (hir-instruction-output closure)) (chain nil))
+  (dotimes (index 120)
+    (let* ((out (make-hir-value-record (hir-function-value-count root) :single root nil t))
+           (copy (make-hir-instruction-record :copy (list value) out nil nil :pure)))
+      (incf (hir-function-value-count root)) (push out (hir-function-values root))
+      (setf (hir-value-producer out) copy) (push copy chain) (setq value out)))
+  (let* ((out (make-hir-value-record (hir-function-value-count root) :multiple root nil t))
+         (group (make-hir-instruction-record :values (list value) out nil nil :pure)))
+    (incf (hir-function-value-count root)) (push out (hir-function-values root))
+    (setf (hir-value-producer out) group
+          (hir-block-instructions exit) (append (hir-block-instructions exit) (nreverse chain) (list group))
+          (hir-instruction-inputs (hir-block-terminator exit)) (list out)
+          (hir-function-values root) (reverse (hir-function-values root))))
+  (verify-hir unit)
+  (multiple-value-bind (bytes literals) (emit-native-module unit)
+    (let ((callback (funcall (compiler-primitive 17 bytes literals nil))))
+      (and (eq :true (funcall callback t)) (eq :false (funcall callback nil))))))`);
+
+  // Explicit sibling exports share their lexical literal bank in every entry
+  // order, including an exported parent beside its no-capture children.
+  check(`(let* ((unit (compile-to-hir '(lambda () (declare (optimize (debug 0)))
+                  (flet ((one (flag) (if flag :one-true :one-false))
+                         (two (flag) (if flag :two-true :two-false)))
+                    (declare (notinline one two)) (values (one nil) (two nil))))))
+       (root (first (hir-unit-functions unit)))
+       (one (hir-local-function (hir-binding-local (find 'one (hir-function-bindings root)
+                           :key (lambda (b) (hir-binding-name b))))))
+       (two (hir-local-function (hir-binding-local (find 'two (hir-function-bindings root)
+                           :key (lambda (b) (hir-binding-name b)))))))
+  (verify-hir unit)
+  (loop for entries in (list (list one two) (list two one) (list root one two) (list two one root)) always
+    (multiple-value-bind (bytes literals) (emit-native-module unit :entries entries)
+      (loop for entry in entries for bank in literals for index from 0 always
+        (let ((function (compiler-primitive 17 (cons bytes index) bank nil)))
+          (cond ((eq entry root) (equal (multiple-value-list (funcall function)) '(:one-false :two-false)))
+                ((eq entry one) (and (eq (funcall function t) :one-true) (eq (funcall function nil) :one-false)))
+                (t (and (eq (funcall function t) :two-true) (eq (funcall function nil) :two-false)))))))))`);
+
+  // Factory entries escape through ordinary list construction, including the
+  // default-all entry selection. Only explicitly private helpers are closed.
+  for (const entries of ['', ":entry-points '(soundness-ipcp-root)", ':entry-points nil']) {
+    check(`(let ((module (compile-native-module
+        '((defun soundness-ipcp-worker (flag)
+            (declare (optimize (debug 0))) (if flag :true :false))
+          (defun soundness-ipcp-root ()
+            (declare (notinline soundness-ipcp-worker) (optimize (debug 0)))
+            (soundness-ipcp-worker nil))) :inline nil ${entries})))
+      ${entries === ':entry-points nil' ? '(null module)' : `(and
+        (eq :false (funcall (cdr (assoc 'soundness-ipcp-root module))))
+        ${entries === '' ? `(let ((worker (cdr (assoc 'soundness-ipcp-worker module))))
+          (and (eq :true (funcall worker t)) (eq :false (funcall worker nil))))` : 't'})`})`);
+  }
+
+  // Primary truth cannot discard an ordinary worker call, its argument
+  // effects, a secondary VALUES error, or the distinction between groups.
+  for (const returned of ['(values)', '(values nil)', '(values nil :second :third)']) {
+    check(`(let ((effects nil) (function (compile-native '(lambda (effect full)
+          (declare (optimize (debug 0)))
+          (flet ((worker (left right)
+                   (funcall effect :body) ${returned}))
+            (declare (notinline worker))
+            (if full
+              (multiple-value-list (worker (funcall effect :left) (funcall effect :right)))
+              (if (worker (funcall effect :left) (funcall effect :right)) :true :false)))))))
+      (and (eq :false (funcall function (lambda (event) (push event effects)) nil))
+        (equal effects '(:body :right :left))
+        (progn (setq effects nil)
+          (and (equal (funcall function (lambda (event) (push event effects)) t)
+                      '${returned === '(values)' ? 'nil' : returned === '(values nil)' ? '(nil)' : '(nil :second :third)'})
+            (equal effects '(:body :right :left))))))`);
+  }
+  check(`(let ((events nil) (function (compile-native '(lambda (effect bad)
+        (declare (optimize (debug 0)))
+        (flet ((worker (x)
+                 (declare (inline car) (optimize (safety 1)))
+                 (funcall effect :body) (values nil (car x))))
+          (declare (notinline worker))
+          (if (worker (progn (funcall effect :argument) bad)) :true :false))))))
+    (and (handler-case
+        (progn (funcall function (lambda (event) (push event events)) :invalid) nil)
+        (type-error () (equal events '(:body :argument))))
+      (eq :false (funcall function (lambda (event) (push event events)) '(17)))))`);
+  // Unsupported argument protocols keep their ordinary default/supplied-p
+  // effects, and one malformed call must not seal the other call sites.
+  check(`(let ((events nil) (function (compile-native '(lambda (effect)
+        (declare (optimize (debug 0)))
+        (flet ((worker (flag &optional (extra (progn (funcall effect :default) :default) supplied))
+                 (values flag extra supplied)))
+          (declare (notinline worker))
+          (list (if (worker nil) :true :false)
+                (multiple-value-list (worker nil :explicit))))))))
+    (and (equal (funcall function (lambda (event) (push event events)))
+                '(:false (nil :explicit t)))
+      (equal events '(:default))))`);
+  check(`(let ((function (compile-native '(lambda (bad effect)
+        (declare (optimize (debug 0)))
+        (flet ((worker (flag) (declare (ignore flag)) nil))
+          (declare (notinline worker))
+          (if bad (worker (funcall effect :first) (funcall effect :second))
+            (if (worker nil) :true :false)))))) (events nil))
+    (and (eq :false (funcall function nil (lambda (event) (push event events))))
+      (handler-case
+        (progn (funcall function t (lambda (event) (push event events))) nil)
+        (program-error () (equal events '(:second :first))))
+      (eq :false (funcall function nil (lambda (event) (push event events))))))`);
+  console.log('Soundness: closed-call facts retain open entries, fresh emission ownership, effects, arity and complete value groups.');
+  // A primary return fact describes successful returns; it cannot replace a
+  // call that diverges. Interrupt it using the same VM boundary as ANSI, then
+  // prove that ordinary compilation still works in the unwound VM.
+  evaluate(`(setf (symbol-function 'soundness-ipcp-diverge)
+    (compile-native '(lambda (flag)
+      (declare (optimize (debug 0)))
+      (labels ((worker (flag) (if flag nil (worker flag))))
+        (declare (notinline worker))
+        (if (worker flag) :true :false))))) (values)`);
+  try {
+    const context = createContext({run: () => evaluate('(soundness-ipcp-diverge nil)')});
+    assert.throws(() => new Script('run()').runInContext(context, {timeout: 250}),
+      error => error.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT');
+  } finally {vm.vm.unwind();}
+  recover();
+
   // Wide, valid nonalias operands still consume provenance work. Keep this
   // graph proof-only: it deliberately exceeds the bounded audit's work cap.
   check(`(let* ((unit (lower-source-to-hir '(lambda (x effect)
@@ -1267,6 +1570,55 @@ try {
     '(lambda (flag) (let ((x 7)) (when flag (setq x 8)) x))',
   ]) check(`(not (hir-type-proves-p (soundness-proven-result '${source}) '(eql 7)))`);
   check("(hir-type-proves-p (soundness-proven-result '(lambda () 7)) '(eql 7))");
+  // A false n-ary comparison can fail after its first pair. Relational
+  // proofs must not turn that arm into the inverse of the first comparison.
+  for (const [operator, arguments_, expected] of [
+    ['<', '1 2 1', 't'], ['<=', '1 2 1', 't'],
+    ['>', '2 1 2', 't'], ['>=', '2 1 2', 't'],
+    ['=', '1 1 2', 't'], ['/=', '1 2 2', 't'],
+  ]) check(`(let ((function (compile-native
+      '(lambda (a b c)
+         (declare (type (integer -10 10) a b c) (inline ${operator})
+                  (optimize (debug 0) (safety 0)))
+         (if (${operator} a b c) :all (${operator} a b))))))
+    (eq (funcall function ${arguments_}) ${expected}))`);
+  // Integer storage proofs must cover every incoming value. An assertion in
+  // the arithmetic scope ends before a later, unrestricted assignment.
+  check(`(let* ((function (compile-native
+        '(lambda (n replacement)
+           (declare (type (integer 0 8) n) (inline + <)
+                    (optimize (debug 0) (safety 0)))
+           (let ((x 1099511627776))
+             (dotimes (i n)
+               (setq x (+ (the (integer 0 4503599627370495) x) 1))
+               (setq x replacement))
+             x))))
+      (token (list :retained)) (large (expt 2 90)))
+    (and (= (funcall function 0 token) 1099511627776)
+         (eq (funcall function 1 token) token)
+         (eql (funcall function 1 1/2) 1/2)
+         (eql (funcall function 1 0.5d0) 0.5d0)
+         (eql (funcall function 1 large) large)
+         (= (funcall function 2 42) 42)))`);
+  // Earlier boxed observations remain snapshots when integer loop state is
+  // stored without boxes. The same edges also carry the reference history.
+  check(`(let* ((base 1099511627776)
+      (function (compile-native
+        '(lambda (n)
+           (declare (type (integer 0 8) n) (inline + <)
+                    (optimize (debug 0) (safety 0)))
+           (let ((x 1099511627776) (y 1099511627786) (history nil))
+             (declare (type (integer 0 4503599627370495) x y))
+             (dotimes (i n)
+               (let ((old x)) (setq x (+ y 1) y (+ old 2)))
+               (push (list x y) history))
+             (values x y (nreverse history)))))))
+    (and (equal (multiple-value-list (funcall function 0))
+                (list base (+ base 10) nil))
+         (equal (multiple-value-list (funcall function 2))
+                (list (+ base 3) (+ base 13)
+                      (list (list (+ base 11) (+ base 2))
+                            (list (+ base 3) (+ base 13)))))))`);
   // Widen a recurrence's storage without losing the finite range supplied by
   // its declared operand reads. Executable-only proofs still ignore promises.
   evaluate(`(defparameter *soundness-bounded-recurrence*
@@ -1588,6 +1940,83 @@ try {
       (handler-case (progn (funcall function :dotted) nil) (type-error () t)))`);
   }
 
+  // Field and bit facts must meet all paths and end at observations. ANSI
+  // covers the individual operators; these exercise their optimized composition.
+  for (const safety of [0, 3]) {
+    check(`(let ((function (compile-native '(lambda (change)
+        (declare (inline cons car cdr rplaca) (optimize (safety ${safety}) (debug 0)))
+        (let ((object (cons :old :tail)))
+          (when change (rplaca object :new))
+          (values (car object) (cdr object)))))))
+      (and (equal (multiple-value-list (funcall function nil)) '(:old :tail))
+        (equal (multiple-value-list (funcall function t)) '(:new :tail))))`);
+    check(`(let ((function (compile-native '(lambda (value)
+        (declare (inline cons car rplaca eq) (optimize (safety ${safety}) (debug 0)))
+        (let* ((object (cons :old nil)) (first (rplaca object :intermediate))
+               (last (rplaca object value)))
+          (values (eq first object) (eq last object) (car object) :extra))))))
+      (equal (multiple-value-list (funcall function :final)) '(t t :final :extra)))`);
+    check(`(let ((function (compile-native '(lambda ()
+        (declare (inline cons car rplaca) (optimize (safety ${safety}) (debug 0)))
+        (let ((object (cons :old nil)))
+          (rplaca object :observed)
+          (let ((observed (car object)))
+            (rplaca object :final) (values observed (car object))))))))
+      (equal (multiple-value-list (funcall function)) '(:observed :final)))`);
+    check(`(let ((function (compile-native '(lambda (observe)
+        (declare (inline cons car rplaca) (optimize (safety ${safety}) (debug 0)))
+        (let ((object (cons :old nil)))
+          (handler-case
+            (progn (rplaca object :observed) (funcall observe object)
+              (rplaca object :final))
+            (error () (values (car object) :recovered))))))))
+      (equal (multiple-value-list
+        (funcall function (lambda (object)
+          (unless (eq (car object) :observed) (throw 'soundness-wrong-store nil))
+          (error "Observe the preceding store")))) '(:observed :recovered)))`);
+    check(`(let ((function (compile-native '(lambda (value choose)
+        (declare (type integer value) (inline logand logior evenp)
+          (optimize (safety ${safety}) (debug 0)))
+        (evenp (if choose (logand value -2) (logior value 1)))))))
+      (and (funcall function 37 t) (not (funcall function 37 nil))))`);
+    check(`(let ((function (compile-native '(lambda (input)
+        (declare (type integer input) (inline logand logior evenp)
+          (optimize (safety ${safety}) (debug 0)))
+        (let ((value (logand input -2)))
+          (funcall (lambda () (setq value (logior value 1))))
+          (evenp value))))))
+      (not (funcall function 37)))`);
+    check(`(let ((effects nil)
+        (function (compile-native '(lambda (effect)
+          (declare (inline logand evenp) (optimize (safety ${safety}) (debug 0)))
+          (values (evenp (logand (funcall effect) -2)) :extra)))))
+      (and (equal (multiple-value-list
+          (funcall function (lambda () (push :operand effects) (values 37 :discarded))))
+        '(t :extra)) (equal effects '(:operand))))`);
+  }
+  check(`(let ((function (compile-native '(lambda (value)
+      (declare (integer value) (inline evenp) (optimize (safety 3) (debug 0)))
+      (evenp value)))))
+    (and (handler-case (progn (funcall function 2.0) nil) (type-error () t))
+      (funcall function 2) (not (funcall function 3))))`);
+  // Run redefinition against the sealed compiler: its implementation can use
+  // the primitive whose application binding this test temporarily replaces.
+  check(`(let* ((source '(lambda (value)
+        (declare (inline evenp logand) (optimize (safety 3) (debug 0)))
+        (evenp (logand value -2))))
+      (captured (compile-native source))
+      (ordinary (compile-native '(lambda (value) (evenp value))))
+      (replacement (compile-native '(lambda (value)
+        (declare (ignore value)) (values :replacement :extra))))
+      (original (symbol-function 'evenp)))
+    (unwind-protect
+      (progn (setf (symbol-function 'evenp) replacement)
+        (and (funcall captured 37)
+          (equal (multiple-value-list (funcall ordinary 37)) '(:replacement :extra))
+          (equal (multiple-value-list (funcall (compile-native source) 37))
+            '(:replacement :extra))))
+      (setf (symbol-function 'evenp) original)))`);
+
   // ANSI leaves redefining CL primitives undefined. MIRICL explicitly supports
   // it unless an INLINE/sealed contract permits capturing the old definition.
   for (const [predicate, arguments_] of [['consp', 'object'], ['eq', 'object object']]) {
@@ -1735,13 +2164,15 @@ try {
                                (eq (hir-instruction-opcode probe) :call))
                       (let ((tag (constant (third (hir-instruction-inputs probe)))))
                         (when (keywordp tag)
-                          (push (cons tag (null (hir-instruction-attributes instruction))) flags)))))))))))
+                          (let ((policy (hir-function-optimization-policy function)))
+                            (push (cons tag (> (logand 3 (ash policy -2))
+                                               (logand policy 3))) flags))))))))))))
       flags)))
 
 (defun soundness-policy-probe (tag object) (declare (ignore tag)) object) (values)`);
   const savedSize = Number(evaluate('(values (compiler-primitive 52 nil))').trim());
   const savedDebug = Number(evaluate('(values (compiler-primitive 33 nil))').trim());
-  if (!Number.isInteger(savedSize) || savedSize < 0 || savedSize > 15
+  if (!Number.isInteger(savedSize) || savedSize < 0 || savedSize > 63
       || !Number.isInteger(savedDebug) || savedDebug < 0 || savedDebug > 3)
     throw Error('Invalid initial optimization policy');
   try {
@@ -1778,7 +2209,8 @@ try {
           (cl-user::soundness-policy-late '(x)) (not (cl-user::soundness-policy-late 17))))`);
     }
   } finally {
-    evaluate(`(proclaim '(optimize (space ${savedSize >> 2}) (speed ${savedSize & 3})
+    evaluate(`(proclaim '(optimize (space ${(savedSize >> 2) & 3}) (speed ${savedSize & 3})
+      (compilation-speed ${savedSize >> 4})
       (debug ${savedDebug}))) (values)`);
   }
 
@@ -1786,27 +2218,15 @@ try {
 // source function has a live lexical environment and retains no debug source.
 check(`(let ((saved-policy (compiler-primitive 52 nil))
     (saved-debug (compiler-primitive 33 nil)))
-  (labels ((sharing-preferences (function)
+  (labels ((retained-policy (function)
              (let* ((recipe (compiler-primitive 44 function))
                     (payload (validate-hir-code (car recipe)))
-                    (descriptor (svref (svref payload 1) (cdr recipe)))
-                    (scratch (make-array (+ 6 (svref descriptor 7)) :initial-element 0))
-                    (references (make-hash-table)) (preferences nil))
-               (dotimes (pass 2)
-                 (loop for block across (svref descriptor 5) do
-                   (let ((code (svref block 2)) (pc 0))
-                     (loop while (< pc (length code)) do
-                       (setq pc (read-hir-code-instruction code pc scratch))
-                       (let ((spec (svref *hir-code-operations* (svref scratch 0))))
-                         (cond
-                           ((and (zerop pass) (member (first spec)
-                              '(:function-reference :function-reference-inline :function-reference-notinline))
-                              (eq (svref (svref payload 0) (svref scratch 4)) 'consp))
-                            (setf (gethash (1- (svref scratch 2)) references) t))
-                           ((and (= pass 1) (member (first spec) '(:call :call-primary))
-                                 (gethash (svref scratch 7) references))
-                            (push (null (seventh spec)) preferences))))))))
-               preferences)))
+                    (functions (svref payload 1)) (index (cdr recipe)))
+               ;; A retained factory may capture a live external cell through
+               ;; its argument. Read its validated metadata without requiring
+               ;; a closed lexical graph for another native compilation.
+               (and (typep index '(unsigned-byte 31)) (< index (length functions))
+                    (svref (svref functions index) 13)))))
     (unwind-protect
         (every (lambda (policy)
           (proclaim (list 'optimize (list 'space (first policy))
@@ -1820,12 +2240,12 @@ check(`(let ((saved-policy (compiler-primitive 52 nil))
             (and (not (compiled-function-p raw))
               (nth-value 1 (function-lambda-expression raw))
               (let* ((compiled (compile nil raw))
-                     (preferences (sharing-preferences compiled))
-                     (expected (> (first policy) (second policy)))
+                     (preference (retained-policy compiled))
+                     (expected (+ (* 4 (first policy)) (second policy)
+                                  (* 16 (ash saved-policy -4))))
                      (effects nil))
                 (setf (car captured) :changed)
-                (and preferences
-                  (every (lambda (preference) (eq preference expected)) preferences)
+                (and (= preference expected)
                   (let ((results (multiple-value-list
                           (funcall compiled '(x)
                             (lambda (object) (push :effect effects)
@@ -1834,7 +2254,8 @@ check(`(let ((saved-policy (compiler-primitive 52 nil))
                       (equal results '((:changed) t))
                       (equal effects '(:effect)))))))))
           '((0 3) (3 1)))
-      (proclaim (list 'optimize (list 'space (ash saved-policy -2))
+      (proclaim (list 'optimize (list 'space (logand 3 (ash saved-policy -2)))
+                               (list 'compilation-speed (ash saved-policy -4))
                                (list 'speed (logand saved-policy 3))
                                (list 'debug saved-debug))))))`);
 

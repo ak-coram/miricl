@@ -473,7 +473,10 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
           t)))))
 
 (defun kernel-emit-native-module (unit selected descriptor entries)
-  (let* ((facts (and descriptor (kernel-fixed-callback-facts unit selected descriptor)))
+  ;; Kernel literals are resolved by the worker adapter before whole-image
+  ;; outlining. Its selected worker ABI does not include private helpers.
+  (let* ((miricl-compiler::*native-outlining-budget* 0)
+         (facts (and descriptor (kernel-fixed-callback-facts unit selected descriptor)))
          (callbacks (kernel-fixed-callback-emitter facts))
          (miricl-compiler::*wasm-fixed-call-emitter*
            (lambda (inputs)
@@ -1110,7 +1113,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                            (gethash (first record) dependencies))))))))
       (with-output-to-string (out)
         (labels ((emit (record share)
-                   (destructuring-bind (index debug arity original pool) record
+                   (destructuring-bind (index debug arity original pool policy) record
                      ;; No function object or closure survives the closed-group
                      ;; proof. Literals are resolved by KERNEL-WORKER-WAT before
                      ;; comparison, so equal pools never justify sharing.
@@ -1122,6 +1125,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                             (previous (and key (gethash key *kernel-shared-workers*))))
                        (setf (gethash index *kernel-module-workers*) (or previous original)
                              (gethash index done) t)
+                       (miricl-compiler::record-wasm-outline-policy (or previous original) policy)
                        (unless previous
                          (setf (gethash index emitted)
                            (kernel-worker-wat bytes index original arity :object interruptible pool))
@@ -1164,13 +1168,23 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
               for previous = (assoc index records) do
           (when (and previous (not (equalp pool (fifth previous))))
             (error "Runtime helpers share code with different literal ownership: ~S." entry))
+          (when previous
+            (setf (sixth previous)
+              (miricl-compiler::record-wasm-outline-policy (fourth previous)
+                (if (>= (miricl-compiler::hir-function-debug-level function) 2) 0
+                    (miricl-compiler::hir-function-optimization-policy function)))))
           (unless previous
             (setf (gethash index *kernel-module-workers*) (format nil "~A-worker~D" name slot))
             (push (list index (miricl-compiler::hir-function-debug-level function) arity
-                        (gethash index *kernel-module-workers*) pool) records)))
+                        (gethash index *kernel-module-workers*) pool
+                        (if (>= (miricl-compiler::hir-function-debug-level function) 2) 0
+                    (miricl-compiler::hir-function-optimization-policy function))) records)))
         (let* ((slot (position selected children)) (arity (miricl-compiler::native-fixed-arity selected))
                (index (kernel-export-index bytes (format nil "direct-entry~D-~D" slot arity)))
                (group (list bytes (nreverse records) index arity name result interruptible)))
+          (miricl-compiler::record-wasm-outline-policy name
+            (if (>= (miricl-compiler::hir-function-debug-level selected) 2) 0
+                (miricl-compiler::hir-function-optimization-policy selected)))
           (if defer group (kernel-link-helper-group group)))))))
 
 (defun runtime-kernel-wat (wat-name entry &key (result :object) interruptible fixed-callbacks)
@@ -1212,6 +1226,9 @@ Unsupported dependencies and captures are errors, never fallbacks."
                              (unless arity (error "Runtime kernel requires fixed arity: ~S." entry))
                              (multiple-value-bind (bytes literals)
                                  (kernel-emit-native-module unit (first children) fixed-callbacks children)
+                               (miricl-compiler::record-wasm-outline-policy (miricl:wat-string wat-name)
+                                 (if (>= (miricl-compiler::hir-function-debug-level (first children)) 2) 0
+                                     (miricl-compiler::hir-function-optimization-policy (first children))))
                                (kernel-worker-wat bytes
                                  (kernel-export-index bytes (format nil "direct-entry0-~D" arity))
                                  (miricl:wat-string wat-name) arity result interruptible (first literals))))))))))))

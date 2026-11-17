@@ -1148,7 +1148,8 @@ Return primary type facts and executable branch premises as separate values."
                 (let ((target (gethash input references)))
                   (when (and target
                          (not (and (eq opcode :call) (= index 1)))
-                         (not (eq opcode :copy)))
+                         (not (and (eq opcode :copy)
+                                   (eq target (gethash (hir-instruction-output instruction) references)))))
                     (setf (gethash target escaped) t))))))))
       ;; Explicit Wasm exports admit callers outside this unit, even when a
       ;; function's only HIR references appear to be private direct calls.

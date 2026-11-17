@@ -3762,8 +3762,14 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
 (defun native-literal-groups (entries)
   (let ((groups (make-hash-table :test 'eq)))
     (dolist (entry entries)
-      (setf (gethash entry groups) (list (make-array 16 :adjustable t :fill-pointer 0)
-                                       (make-hash-table :test 'eq))))
+      ;; Nested bare entries use the same bank as their lexical root and
+      ;; siblings, exactly as EMIT-NATIVE-FUNCTION-BODY selects it.
+      (let* ((root (loop for root = entry then (hir-function-parent root)
+                         while (hir-function-parent root) finally (return root)))
+             (group (or (gethash root groups)
+                        (setf (gethash root groups)
+                          (list (make-array 16 :adjustable t :fill-pointer 0) (make-hash-table :test 'eq))))))
+        (setf (gethash entry groups) group)))
     groups))
 
 (defun native-function-indices (functions)
@@ -4387,6 +4393,52 @@ the named-entry format for hosts that translate individual Wasm workers."
           (emit-native-module-with-results unit entries entry-tables))
         (values-list result))))
 
+(defun native-outline-bodies (bodies)
+  ;; Final function/import numbers are stable here. Helpers stay private and
+  ;; cannot alter a closure's literal bank, checked entry or tail-call ABI.
+  ;; The runtime kernel adapter translates one worker at a time; its complete
+  ;; linked image uses the same pass through OUTLINE-WASM-MODULE instead.
+  (let* ((count (length bodies)) (body-signatures (make-array count :initial-element '((:object :object) :object)))
+         (eligible (make-array count :initial-element nil)) (records nil))
+    (dolist (function *native-functions*)
+      (let ((index (gethash function *native-function-indices*)))
+        (when index
+          (setf (aref body-signatures index) (native-result-signature function))
+          ;; Coalesced bodies satisfy every caller's most restrictive policy.
+          (let ((previous (aref eligible index))
+                (policy (if (>= (hir-function-debug-level function) 2) 0
+                            (hir-function-optimization-policy function))))
+            (setf (aref eligible index)
+              (if previous
+                  (+ (max (logand previous 3) (logand policy 3))
+                     (* 4 (min (logand 3 (ash previous -2)) (logand 3 (ash policy -2))))
+                     (* 16 (max (ash previous -4) (ash policy -4))))
+                  policy))))))
+    (when (or *wasm-debug* *wasm-closed-worker-functions*
+              (not (plusp *native-outlining-budget*)) (< count 2))
+      (return-from native-outline-bodies (values bodies nil eligible)))
+    (labels ((raw (type) (list (ecase type (:object #x6f) (:i32 #x7f) (:i64 #x7e) (:function #x70))))
+             (signature (signature)
+               (list (mapcar #'raw (first signature))
+                     (mapcar #'raw (if (listp (second signature)) (second signature) (list (second signature))))))
+             (native-type (bytes) (ecase (first bytes) (#x6f :object) (#x7f :i32) (#x7e :i64) (#x70 :function))))
+      (loop for body in bodies for i from 0 do
+        (let* ((parameters (first (aref body-signatures i))) (types (mapcar #'raw parameters))
+               (position 0) (groups nil))
+          (multiple-value-setq (groups position) (native-read-uleb body position))
+          (dotimes (group groups)
+            (multiple-value-bind (size next) (native-read-uleb body position)
+              (setq position (1+ next) types (append types (make-list size :initial-element (list (aref body next)))))))
+          (push (list body (native-read-ops body) (coerce types 'vector) nil) records)))
+      (multiple-value-bind (replacements helpers)
+          (native-outline-code (coerce (nreverse records) 'vector)
+            (map 'vector #'signature (append (mapcar #'cdr *native-imports*) (coerce body-signatures 'list))) eligible)
+        (when helpers
+          (compiler-statistic :optimization/outlined-region nil (length helpers)))
+        (values (append replacements (mapcar #'first helpers))
+                (mapcar (lambda (helper) (list (mapcar #'native-type (second helper)) (mapcar #'native-type (third helper)))) helpers)
+                (concatenate 'vector eligible (make-array (length helpers) :initial-element 0)))))))
+
 (defun emit-native-module-with-results (unit entries entry-tables)
   "Emit a verified unit. Internal callers must retain ownership until emission."
   (declare (type hir-unit unit) (type list entries))
@@ -4409,9 +4461,10 @@ the named-entry format for hosts that translate individual Wasm workers."
          (*wasm-optimization-barriers* (hir-optimization-barriers unit))
          (*wasm-result-callees* (hir-result-callees unit *wasm-optimization-barriers*))
          (*hir-inline-definitions* (make-hash-table :test 'equal))
+         (analysis-entries (or entries (list (first (hir-unit-functions unit)))))
          ;; These roots come directly from validated instruction operands.
          (type-analysis (multiple-value-list
-                         (infer-hir-types-checked unit (native-type-roots unit) t entries nil *wasm-result-callees*)))
+                         (infer-hir-types-checked unit (native-type-roots unit) t analysis-entries nil *wasm-result-callees*)))
          (*wasm-inferred-types* (first type-analysis))
          (*wasm-type-guards* (second type-analysis))
          (*wasm-debug* (some (lambda (function) (>= (hir-function-debug-level function) 2)) *native-functions*))
@@ -4447,7 +4500,7 @@ the named-entry format for hosts that translate individual Wasm workers."
           (*wasm-inline-references* (make-hash-table :test 'eq)))
     (native-plan-inline-vectors unit)
     (native-plan-inline-simple unit)
-    (native-plan-generic-calls unit entries)
+    (native-plan-generic-calls unit analysis-entries)
     (native-keep-shared-references unit)
     (setq *wasm-proper-list-checks*
       (hir-proper-list-checks unit *wasm-inline-simple-calls*
@@ -4484,6 +4537,9 @@ the named-entry format for hosts that translate individual Wasm workers."
     (let* ((*native-imports* *native-imports*)
          (bodies (emit-native-bodies entries))
          (bodies (native-prune-module bodies entries))
+         (outlining (multiple-value-list (native-outline-bodies bodies)))
+         (bodies (first outlining)) (outline-signatures (second outlining))
+         (outline-policies (third outlining))
          (direct-exports
            (loop for entry in (or entries (list (first *native-functions*))) for i from 0
                  for worker = (or (gethash entry *wasm-boxed-result-workers*) (gethash entry *wasm-direct-workers*))
@@ -4500,9 +4556,12 @@ the named-entry format for hosts that translate individual Wasm workers."
          (type-prefix (if *wasm-object-types* 2 0))
          (signatures (remove-duplicates
                        (append (mapcar #'cdr *native-imports*) (list '((:object :object) :object))
-                         (mapcar #'native-result-signature *native-functions*)
+                         (mapcar #'native-result-signature *native-functions*) outline-signatures
                          (when *wasm-exceptions* (list '(nil nil)))) :test #'equal))
          (bytes (progn
+           (loop for signature in outline-signatures
+                 for i from (- (length bodies) (length outline-signatures))
+                 do (setf (aref body-types i) signature))
            (maphash (lambda (worker source) (declare (ignore source))
              (let ((index (gethash worker *native-function-indices*)))
                (when index (setf (aref body-types index) (native-result-signature worker))))) *wasm-worker-origins*)
@@ -4538,6 +4597,11 @@ the named-entry format for hosts that translate individual Wasm workers."
                  '((:object :object) :object)) signatures :test #'equal))))))
            (when (first entry-sections) (wasm-append (first entry-sections)))
            (wasm-append (second entry-sections))
+           ;; Current-version compilation policy survives FASLs, native bundle
+           ;; linking and the final runtime-image pass without public exports.
+           (wasm-section 0 (with-wasm-bytes
+             (wasm-name "miricl.policy") (wasm-u32 (length outline-policies))
+             (loop for policy across outline-policies do (wasm-byte (or policy 0)))))
            (wasm-section 10 (with-wasm-bytes
              (wasm-u32 (length bodies))
              (dolist (body bodies) (wasm-u32 (length body)) (wasm-append body))))))))
@@ -4627,7 +4691,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    read-hir-code-instruction validate-hir-code copy-hir-code verify-hir-code-operands
                    verify-hir-code-dominance hir-code-to-unit hir-code-to-unit-checked
                    hir-special-p hir-declarations hir-intersect-types hir-type-environment hir-bound-type-environment hir-declared-argument-types
-                   native-optimization-level native-size-policy native-debug-level native-safety-level
+                   native-optimization-level native-size-policy native-debug-level native-safety-level hir-note-optimization-policy hir-inline-limit
                    native-canonical-builtin-code native-builtin-code emit-native-object-types wasm-literal wasm-list wasm-arguments
                    native-removable-p native-live-inputs native-direct-cells native-forward-blocks native-reachable-blocks native-loop-region-order native-loop-plan native-live-values native-local-layout native-single-calls native-full-groups native-proven-truth native-proof-reachable-blocks native-scalar-groups native-plan-branch-tests native-stable-predicate-p native-predicate-source native-predicate-key native-plan-cons-forwarding native-plan-predicate-reuse native-predicate-aliases native-block-targets native-single-return-target-p
                    native-argument-usage native-direct-workers native-direct-worker-body native-optimize-typed-body native-direct-wrapper native-boxed-result-worker native-direct-fallback native-direct-relocations
@@ -4663,7 +4727,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-to-hir compile-module-to-hir compile-native-module
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
-                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module
+                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module native-outline-result native-outline-region native-outline-site native-outline-code native-outline-bodies
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
                    definition-info namespace form-written-variables form-references
                    miricl::%normalize-lambda-1 miricl::%normalize-lambda

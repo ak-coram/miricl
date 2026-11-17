@@ -282,7 +282,7 @@
                      (< (svref function 2) (svref function 1))
                      (typep (svref function 5) 'simple-string)
                      (simple-vector-p (svref function 7)) (evenp (length (svref function 7)))
-                     (typep (svref function 9) '(integer 0 3)))
+                     (typep (svref function 9) '(unsigned-byte 8)))
           (hir-code-error function "invalid function descriptor"))
         (let* ((registers (svref function 1)) (blocks (unpack-hir-blocks (svref function 5)))
                (block-copy blocks) (bytes 0) (max-inputs 0) (targets nil) (single-calls 0))
@@ -369,7 +369,8 @@
             (svref function 3) (svref function 4) block-copy
             (copy-hir-debug-info (svref function 6) registers (svref function 4))
             max-inputs (coerce (nreverse targets) 'simple-vector) (copy-seq (svref function 7))
-            (copy-hir-parameters (svref function 8)) single-calls (svref function 9))))))
+            (copy-hir-parameters (svref function 8)) single-calls
+            (logand 3 (svref function 9)) (ash (svref function 9) -2))))))
     (vector literals copy)))
 
 (defun validate-hir-function-recipe (recipe &optional header-p)
@@ -431,7 +432,8 @@
         (svref function 4)
         (pack-hir-blocks (svref function 5))
         (copy-hir-debug-info (svref function 6) (svref function 1) (svref function 4))
-        (copy-seq (svref function 9)) (copy-hir-parameters (svref function 10)) (svref function 12))) (svref payload 1)))))
+        (copy-seq (svref function 9)) (copy-hir-parameters (svref function 10))
+        (+ (svref function 12) (* 4 (svref function 13))))) (svref payload 1)))))
 
 (defun disassemble-hir-code (payload &optional (index 0))
   "Print executable HIR without requiring the compiler or retained source."

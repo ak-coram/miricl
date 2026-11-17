@@ -21,8 +21,8 @@
         ;; available without making every definition pay frontend costs.
         (list (lower-runtime-library
                 `(setq miricl-compiler:*compile-evaluations* ,(when *include-compiler* :interpreted)))))
-      (destructuring-bind (wat names roots records) *native-compiler-image*
-        (declare (ignore wat))
+      (destructuring-bind (wat names roots records policies) *native-compiler-image*
+        (declare (ignore wat policies))
         (let ((packed (compiler-image-records-string records)))
           (labels ((filter-form (form)
                      (cond
@@ -71,12 +71,15 @@
                 (with-standard-io-syntax
                   (let ((*read-eval* nil))
                     (destructuring-bind (names codes roots records) (read in)
-                      (declare (ignore codes))
-                      (setf *native-compiler-image*
+                      (let ((policies (loop for code in codes for i from 0 append
+                                        (miricl-compiler::native-module-outline-policies (coerce code 'vector) i))))
+                        (dolist (entry policies)
+                          (miricl-compiler::record-wasm-outline-policy (car entry) (cdr entry)))
+                        (setf *native-compiler-image*
                         (list (uiop:read-file-string wat)
                               (loop for (package name) in names
                                     when (equal package "MIRICL-COMPILER") collect name)
-                              roots records)))))))
+                              roots records policies))))))))
           (uiop:delete-file-if-exists wat)
           (uiop:delete-file-if-exists manifest)))))
   *native-compiler-image*)

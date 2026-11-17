@@ -298,11 +298,13 @@
               (register (hir-function-environment function)) (hir-block-id (hir-function-entry function))
               (length (hir-function-captures function)) blocks debug
               (svref plan 4) (coerce (nreverse (svref plan 5)) 'simple-vector)
-              types parameters (svref plan 6) (hir-function-debug-level function))
+              types parameters (svref plan 6) (hir-function-debug-level function)
+              (hir-function-optimization-policy function))
           (vector (hir-function-name function) (svref plan 2)
             (register (hir-function-environment function)) (hir-block-id (hir-function-entry function))
             (length (hir-function-captures function))
-            (pack-hir-blocks blocks) debug types parameters (hir-function-debug-level function)))))))
+            (pack-hir-blocks blocks) debug types parameters
+            (+ (hir-function-debug-level function) (* 4 (hir-function-optimization-policy function)))))))))
     (vector (coerce literals 'simple-vector) descriptors)))
 
 (defun hir-unit-function (unit)
@@ -335,13 +337,13 @@
            (arguments nil) (variables nil) (functions nil) (targets nil) (factory nil) (macros nil)
            (*hir-unit* (make-hir-unit-record)) (*hir-specials* nil)
            (*hir-debug-level* (if debugger-p 2 (or (compiler-primitive 33 nil) 1)))
-           (*hir-size-policy* (or (compiler-primitive 52 nil) 13))
+           (*hir-size-policy* (or (compiler-primitive 52 nil) 29))
            (*hir-macro-context* nil) (*hir-debug-write-types* t)
            (*hir-safety-level* 3) (*hir-types* nil) (*hir-inline-policy* nil) (*hir-inlining* nil)
            (*hir-function-index* nil)
            (*hir-inline-small-functions* nil) (*hir-debug-info-enabled* (not debugger-p)) (*hir-debug-sites* nil)
            (*hir-source-path* nil) (*hir-origin* nil)
-           (*hir-function* (make-hir-function-record nil nil nil nil nil nil nil nil nil 0 0 2))
+           (*hir-function* (make-hir-function-record nil nil nil nil nil nil nil nil nil 0 0 2 *hir-size-policy*))
            (*hir-block* (hir-new-block)) (*hir-dynamic* (hir-new-value :dynamic *hir-function*)))
       (setf (hir-function-entry *hir-function*) *hir-block*
             (hir-function-environment *hir-function*) *hir-dynamic*
