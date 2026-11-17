@@ -42,7 +42,7 @@
                    ,@(loop for root in roots for index from 0 collect
                      `(let ((%fasl-work (%fasl-object ,root)))
                         (dolist (entry (funcall (%%compile 20 ,index (cadr %fasl-work) nil)))
-                          (setf (symbol-function (car entry)) (cdr entry)
+                          (setf (fdefinition (car entry)) (cdr entry)
                                 (gethash (car entry) miricl-compiler::*native-compiler-functions*) t))))
                    (%invalidate-all-dispatch)
                    (setq miricl-compiler::*compiler-state* :ready

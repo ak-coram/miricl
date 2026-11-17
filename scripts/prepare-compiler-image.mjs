@@ -14,6 +14,14 @@ try {
     (setq *compiler-bootstrapping* t)
     (defparameter *image-sources* (mapcar (lambda (name)
       (list name (compiler-source-policy (compiler-function-source name)))) *native-compiler-seeds*))
+    ;; Capture the same original runtime corpus before compiler preparation.
+    ;; Runtime functions retain their declarations, including SAFETY and DEBUG.
+    (defparameter *image-runtime-sources*
+      (mapcar (lambda (name)
+        (multiple-value-bind (source captured) (function-lambda-expression (fdefinition name))
+          (unless (and source (not captured))
+            (error "Native runtime image function has no closed source: ~S" name))
+          (list name source))) *native-runtime-image-functions*))
     (multiple-value-bind (installed unsupported) (compile-compiler)
       (unless (and (= (length installed) (length *image-sources*)) (null unsupported))
         (error "Compiler bootstrap failed: ~S" unsupported)))
@@ -30,11 +38,16 @@ try {
         (dolist (entry *image-sources*)
           (push (list (and (symbol-package (first entry)) (package-name (symbol-package (first entry))))
                       (symbol-name (first entry))) names))
-        (let* ((*wasm-bootstrap-direct-workers* t)
-               (unit (compile-module-to-hir
-                      (mapcar (lambda (entry) (list* 'defun (first entry) (cdr (second entry)))) *image-sources*)
-                      :inline nil)))
-          (multiple-value-bind (code literals) (emit-native-module-checked unit nil)
+        ;; The compiler owns its sealed internal bindings. Runtime entries are
+        ;; separate singleton modules, so their calls to public functions retain
+        ;; ordinary global lookup and redefinition behavior. Factories preserve
+        ;; the actual private symbols and general (including SETF) function names.
+        (dolist (sources (cons *image-sources* (mapcar #'list *image-runtime-sources*)))
+          (let* ((*wasm-bootstrap-direct-workers* t)
+                 (unit (compile-module-to-hir
+                        (mapcar (lambda (entry) (list* 'defun (first entry) (cdr (second entry)))) sources)
+                        :inline nil)))
+            (multiple-value-bind (code literals) (emit-native-module-checked unit nil)
             ;; One factory shares the module's literals and closes over its
             ;; internal function bindings. Preserve only its literal graph;
             ;; runtime startup creates and installs the native entry points.
@@ -46,7 +59,7 @@ try {
             (unless (= 42 (funcall (compile-native '(lambda (x) (+ x 2))) 40))
               (error "Module-compiled compiler failed its compilation check"))
             (push (coerce code 'list) codes)
-            (push (funcall dump (list :module literals)) roots)))
+              (push (funcall dump (list :module literals)) roots))))
         (with-open-file (out "/compiler-image.lisp" :direction :output :if-exists :supersede)
           (let ((*print-readably* t) (*print-pretty* nil) (*print-circle* t) (*print-base* 10) (*print-radix* nil))
             (write (list (nreverse names) (nreverse codes) (nreverse roots)

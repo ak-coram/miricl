@@ -4573,6 +4573,15 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
         (when debug (setq factory (compiler-primitive 34 factory debug 0)))
         (values (funcall factory) bytes unit)))))
 
+(defparameter *native-runtime-image-functions*
+  ;; These shared runtime paths are also reached by native applications.
+  ;; Keep their original declarations and compile each separately: the sealed
+  ;; compiler must not capture public runtime bindings such as MEMBER or MAPC.
+  '(miricl::%qualified miricl::%primary miricl::%auxiliary
+    miricl::%execute-standard miricl::%around
+    miricl::%dispatch-cache-permitted-p miricl::%quote miricl::%coerce
+    mapc nreverse member (setf slot-value) (setf cdr)))
+
 (defparameter *native-compiler-seeds*
   '(compiler-primitive record-compilation-statistic compilation-statistics-report
                    wasm-byte wasm-append wasm-u32 wasm-u32-width wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call
