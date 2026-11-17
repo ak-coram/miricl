@@ -38,9 +38,9 @@ try {
         (dolist (entry *image-sources*)
           (push (list (and (symbol-package (first entry)) (package-name (symbol-package (first entry))))
                       (symbol-name (first entry))) names))
-        ;; The compiler owns its sealed internal bindings. Runtime entries are
-        ;; separate singleton modules, so their calls to public functions retain
-        ;; ordinary global lookup and redefinition behavior. Factories preserve
+        ;; The compiler owns its sealed internal bindings. Runtime entries stay
+        ;; in separate singleton modules; private runtime calls retain their live
+        ;; bindings while standard CL calls use their ANSI definitions. Factories preserve
         ;; the actual private symbols and general (including SETF) function names.
         (dolist (sources (cons *image-sources* (mapcar #'list *image-runtime-sources*)))
           (let* ((*wasm-bootstrap-direct-workers* t)

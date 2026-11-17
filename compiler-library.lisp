@@ -5,9 +5,6 @@
 (defvar %file-load-values nil)
 (defvar %file-lexical-names nil)
 (defvar %compiler-source-path nil)
-;; Compiler identity callbacks keep the original standard function object.
-;; User function references continue to observe the ordinary global binding.
-(defvar %compiler-eq-function #'eq)
 
 (defun %file-lexical-name (index)
   (declare (type (unsigned-byte 32) index) (type vector %file-lexical-names))
@@ -555,7 +552,7 @@
            (setq form (macroexpand form environment))
            (when (fboundp 'miricl-compiler::compiler-source-form)
              (miricl-compiler::compiler-source-form form)
-             (when (and (consp form) (member form %compiler-source-path :test %compiler-eq-function))
+             (when (and (consp form) (member form %compiler-source-path :test #'eq))
                (miricl-compiler::compiler-input-fail "source form" form "circular executable form")))
            (let ((%compiler-source-path (if (consp form) (cons form %compiler-source-path) %compiler-source-path)))
             (cond

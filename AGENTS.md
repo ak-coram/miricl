@@ -67,6 +67,17 @@ and periodically compare full Maxima, FriCAS, ACL2 and Coalton compilations.
 
 # Common Lisp semantics
 
+ANSI Common Lisp is the authority for language semantics, not the current
+implementation. Preserve defined ANSI behavior; do not make accidental current
+behavior or behavior whose consequences ANSI leaves undefined into a compiler
+contract. In particular, optimizations may rely on the standard definitions of
+COMMON-LISP functions: redefining or binding CL:EQL and other standard functions
+where ANSI forbids it need not be supported or guarded. This does not relax
+redefinition and identity requirements for ordinary user functions, or the
+contracts of explicit MIRICL extensions such as scheduling and debugging.
+Tests must follow this distinction rather than constrain optimizations to
+undefined behavior of the current implementation.
+
 Consult the [Common Lisp HyperSpec](https://www.lispworks.com/documentation/HyperSpec/Front/index.htm)
 when implementing Common Lisp functions. Check the relevant entries
 for argument and return types, multiple values, copying and sharing,

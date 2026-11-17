@@ -283,11 +283,6 @@ an arity. Recompute after any HIR mutation."
           (unless changed (return))))
       (values facts callees)))))
 
-(defvar *hir-inline-definitions* nil
-  "Canonical INLINE definitions selected for one analysis/emission.
-Share this snapshot with lowering so a cooperative redefinition cannot turn
-a proved type predicate back into an ordinary call with different semantics.")
-
 (defun hir-value-type-at (type index)
   (declare (type (unsigned-byte 32) index))
   ;; THE and FTYPE constrain values without imposing an exact value count.
@@ -321,7 +316,7 @@ arguments and literal objects are never recursively compared."
              (unless (equal a b) (return-from hir-type-equal-p nil)))
             (eql (unless (eql (second a) (second b)) (return-from hir-type-equal-p nil)))
             ((and or not cons values member)
-             (unless (member b (gethash a seen) :test miricl::%compiler-eq-function)
+             (unless (member b (gethash a seen) :test #'eq)
                (push b (gethash a seen))
                (let ((x (cdr a)) (y (cdr b)) (literal (eq (car a) 'member)))
                  (loop while (and x y) do
@@ -647,12 +642,12 @@ provide no candidate, and no DEFTYPE or SATISFIES code is executed here."
         (return value))
       (setq value (first (hir-instruction-inputs producer))))))
 
-(defun hir-type-truth-premise (test cache &optional cells)
+(defun hir-type-truth-premise (test &optional cells)
   "Recover a truth or canonical type predicate through immutable temporaries.
 The third value is a type established by a positive predicate, an integer
 predicate name, or NIL for ordinary truth. CELLS records actual private uses,
 not client binding flags."
-  (declare (type simple-vector test) (type hash-table cache))
+  (declare (type simple-vector test))
   (let ((current test) (inverse nil) (predicate nil))
     (dotimes (depth 32)
       (let ((producer (hir-value-producer current)))
@@ -664,22 +659,22 @@ not client binding flags."
            (setq current (first (hir-instruction-inputs producer))))
           (:call
            (unless (= (length (hir-instruction-inputs producer)) 3) (return))
-           (case (hir-inline-primitive producer cache)
+           (case (hir-inline-primitive producer)
              ((null not)
               (setq predicate t inverse (not inverse)
                     current (third (hir-instruction-inputs producer))))
              ((consp simple-vector-p vectorp stringp symbolp integerp characterp)
               (return-from hir-type-truth-premise
                 (values (third (hir-instruction-inputs producer)) inverse
-                  (case (hir-inline-primitive producer cache)
+                  (case (hir-inline-primitive producer)
                     (consp 'cons) (simple-vector-p 'simple-vector) (vectorp 'vector) (stringp 'string) (symbolp 'symbol) (integerp 'integer) (characterp 'character)))))
              ((zerop minusp plusp)
-              ;; Numeric predicates currently select their canonical inline
-              ;; implementation only at SAFETY 0. Other calls stay replaceable.
+              ;; Keep the existing SAFETY 0 gate for numeric premises;
+              ;; checked calls retain their ordinary error boundaries.
               (when (zerop (hir-instruction-safety-level producer))
                 (return-from hir-type-truth-premise
                   (values (third (hir-instruction-inputs producer)) inverse
-                    (hir-inline-primitive producer cache))))
+                    (hir-inline-primitive producer))))
               (return))
              (otherwise (return))))
           (:cell-read
@@ -707,7 +702,6 @@ A budget limits cost; stopping early only loses optimization opportunities."
   (declare (type hir-unit unit))
   (let ((cells (make-hash-table :test 'eq)) (guards (make-hash-table :test 'eq))
         (barriers (make-hash-table :test 'eq))
-        (primitives (or *hir-inline-definitions* (make-hash-table :test 'equal)))
         (size 0))
     (dolist (function (hir-unit-functions unit))
       (incf size (hir-function-value-count function))
@@ -747,7 +741,7 @@ A budget limits cost; stopping early only loses optimization opportunities."
             (let* ((branch (hir-block-terminator block))
                    (test (and (eq (hir-instruction-opcode branch) :branch)
                               (first (hir-instruction-inputs branch))))
-                   (premise (and test (multiple-value-list (hir-type-truth-premise test primitives cells))))
+                   (premise (and test (multiple-value-list (hir-type-truth-premise test cells))))
                    (observed (first premise))
                    (producer (and observed (hir-value-producer observed)))
                    (cell (and (%hir-instruction-p producer)
@@ -824,25 +818,19 @@ A budget limits cost; stopping early only loses optimization opportunities."
                                         (push successor pending)))))))))))))))))))
     guards))
 
-(defun hir-inline-primitive (instruction cache)
-  (declare (type simple-vector instruction) (type hash-table cache))
+(defun hir-inline-primitive (instruction)
+  (declare (type simple-vector instruction))
   (let* ((reference (second (hir-instruction-inputs instruction)))
          (producer (hir-value-producer reference))
          (attributes (and (%hir-instruction-p producer)
                           (eq (hir-instruction-opcode producer) :function-reference)
                           (hir-instruction-attributes producer)))
          (name (first attributes)))
-    ;; INLINE is the contract that permits relying on the definition selected
-    ;; at compilation. Ordinary calls retain their unrestricted result types.
-    (when (and (eq (second attributes) 'inline) (member name '(char char-code code-char sbit row-major-aref length integer-length mod truncate cons list list* consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor lognot ash)))
-      (multiple-value-bind (canonical found) (gethash name cache)
-        (unless found
-          (setq canonical
-            (and (fboundp name)
-                 (multiple-value-bind (actual native) (compiler-primitive 19 name)
-                   (or (not native) (= actual (native-canonical-builtin-code name))))))
-          (setf (gethash name cache) canonical))
-        (and canonical name)))))
+    ;; Exact standard CL functions have their ANSI definitions for ordinary
+    ;; calls too. Same-print-name user symbols and supplied functions do not.
+    ;; Keep NOTINLINE opaque: consumers may use these facts to remove a call.
+    (when (and (not (eq (second attributes) 'notinline)) (member name '(char char-code code-char sbit row-major-aref length integer-length mod truncate cons list list* consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor lognot ash)))
+      name)))
 
 (defun hir-integer-identity (name left right)
   "Return :LEFT or :RIGHT when integer types prove a binary result is that operand."
@@ -1087,14 +1075,13 @@ Captured cells and debug-enabled functions keep conservative inferred types."
   (compiler-list-length roots "type-inference roots")
   (compiler-list-length entries "type-inference entry points")
   (dolist (entry entries)
-    (unless (member entry (hir-unit-functions unit) :test miricl::%compiler-eq-function)
+    (unless (member entry (hir-unit-functions unit) :test #'eq)
       (compiler-input-fail "type-inference entry point" entry "function does not belong to this HIR unit")))
   (dolist (root roots)
-    (unless (and (%hir-value-p root) (member (hir-value-owner root) (hir-unit-functions unit) :test miricl::%compiler-eq-function)
-                 (member root (hir-function-values (hir-value-owner root)) :test miricl::%compiler-eq-function))
+    (unless (and (%hir-value-p root) (member (hir-value-owner root) (hir-unit-functions unit) :test #'eq)
+                 (member root (hir-function-values (hir-value-owner root)) :test #'eq))
       (compiler-input-fail "type-inference root" root "value does not belong to this HIR unit")))
-  (let ((*hir-inline-definitions* nil))
-    (values (infer-hir-types-checked unit roots rootsp entries))))
+  (values (infer-hir-types-checked unit roots rootsp entries)))
 
 (defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts)
   "Internal inference kernel; UNIT and ROOTS have passed the public boundary.
@@ -1104,14 +1091,13 @@ Return primary type facts and executable branch premises as separate values."
   ;; Many initialization units contain no operations using inferred types.
   (when (and rootsp (null roots))
     (return-from infer-hir-types-checked (make-hash-table :test 'eq)))
-  (let* ((*hir-inline-definitions* (or *hir-inline-definitions* (make-hash-table :test 'equal)))
-        (facts (make-hash-table :test 'eq)) (sources (make-hash-table :test 'eq))
+  (let* ((facts (make-hash-table :test 'eq)) (sources (make-hash-table :test 'eq))
         (users (make-hash-table :test 'eq)) (calls (make-hash-table :test 'eq))
         (references (make-hash-table :test 'eq)) (candidates (make-hash-table :test 'eq))
         (escaped (make-hash-table :test 'eq)) (sites (make-hash-table :test 'eq))
         (opaque (make-hash-table :test 'eq)) (queued (make-hash-table :test 'eq))
         (required (make-hash-table :test 'eq)) (growth (make-hash-table :test 'eq)) (work nil)
-        (primitives *hir-inline-definitions*) (intrinsics (make-hash-table :test 'eq))
+        (intrinsics (make-hash-table :test 'eq))
         (guards (hir-type-branch-guards unit))
         (callees (or callee-facts (hir-result-callees unit (hir-optimization-barriers unit)))))
     (declare (type hash-table facts sources users calls references candidates escaped
@@ -1192,7 +1178,7 @@ Return primary type facts and executable branch premises as separate values."
                   (:call
                    (let ((target (hir-result-callee (second inputs) callees)))
                      (if target (progn (setf (gethash value calls) target) (edge target value))
-                         (let ((primitive (hir-inline-primitive producer primitives)))
+                         (let ((primitive (hir-inline-primitive producer)))
                            (when primitive
                              (setf (gethash value intrinsics) primitive)
                              (dolist (input (cddr inputs)) (edge input value))))))))))))

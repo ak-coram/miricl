@@ -638,7 +638,7 @@
       (local.set $values (call $eval-list (call $cdr (call $cdr (local.get $args))) (local.get $env)))
       (local.set $result (if (result (ref null eq)) (ref.is_null (local.get $values))
         (then (call $list-set-native (i32.const 0) (local.get $first) (local.get $value) (ref.null eq)
-          (call $fdefinition (call $symbol (i32.const ,(runtime-symbol-id 'eql)))) (ref.null eq)))
+          (call $canonical-builtin-function (i32.const ,(runtime-symbol-id 'eql)) (i32.const 0)) (ref.null eq)))
         (else (call $apply (call $symbol (i32.const ,(runtime-symbol-id 'adjoin)))
           (call $cons (local.get $first) (call $cons (local.get $value) (local.get $values)))))))
       (call $write-captured-place (local.get $names) (local.get $result) (local.get $env))

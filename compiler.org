@@ -146,11 +146,17 @@ success; full consumers retain =native-call= .
 
 Direct closed calls and frame omission require the applicable effect/debug contract. Dynamic
 state, cleanup, captured exits and unknown calls retain ordinary dispatch. Global calls
-resolve live bindings at the required point; operand effects cannot be moved across
-resolution. Canonical INLINE lowering checks the selected primitive, and ordinary
-specializations guard replacements with generic fallback. Method specializers alone are not
+resolve live user bindings at the required point; operand effects cannot be moved across
+resolution. Standard primitive lowering retains argument, overflow and bounds checks without
+guarding forbidden redefinition of COMMON-LISP functions. Method specializers alone are not
 body type assertions: public METHOD-FUNCTION calls bypass generic applicability, and class/MOP
 changes invalidate unguarded class assumptions.
+
+Standard COMMON-LISP function names have their ANSI definitions; preserving their forbidden
+redefinition is not an optimization contract. Existing compact checked plans can therefore
+handle ordinary standard calls without an explicit INLINE declaration. NOTINLINE still
+requires out-of-line calls. Same-name symbols in other packages, user functions, supplied
+callbacks and extensible generic-function protocols retain their ordinary contracts.
 
 Tail calls whose complete group flows to return use Wasm tail-call operations for supported
 lexical and computed native callees, including FUNCALL/APPLY/MVC. Checks, global redefinition,

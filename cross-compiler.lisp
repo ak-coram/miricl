@@ -853,8 +853,8 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                     (1+ call-base) call-base call-base (1+ call-base) target))
                  ((equal (cdr (assoc target miricl-compiler::*native-imports* :test #'equal))
                          '((:object :i64 :i64) :object))
-                  ;; Preserve the resolved function guard and full scalar
-                  ;; operands when a newly proved range selects this ABI.
+                  ;; Keep the function context for arbitrary-precision fallback
+                  ;; and the full scalar operands selected by the range proof.
                   (format out "local.set ~D local.set ~D local.set ~D~%local.get ~D extern.convert_any local.get ~D local.get ~D call $~A any.convert_extern ref.cast (ref null eq)~%"
                     integer-right integer-left call-base call-base integer-left integer-right target))
                  ((member target '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4" "native-character-code" "native-character-ref" "native-character-ref-inline" "native-character-code-inline" "native-character-code-at-inline") :test #'equal)

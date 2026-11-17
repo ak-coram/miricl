@@ -55,7 +55,7 @@
   (wat-fail-when #@(i32.eq (i32.and (local.get $seen) (i32.const 6)) (i32.const 6)) :wrong-arity)
   #@(local.set $negate (i32.ne (i32.and (local.get $seen) (i32.const 4)) (i32.const 0)))
   #@(if (i32.eqz (i32.and (local.get $seen) (i32.const 2)))
-    (then (local.set $test (call $fdefinition (call $symbol (i32.const ,(runtime-symbol-id 'eql)))))))
+    (then (local.set $test (call $canonical-builtin-function (i32.const ,(runtime-symbol-id 'eql)) (i32.const 0)))))
   #@(if (i32.eqz (i32.and (local.get $seen) (i32.const 8)))
     (then (local.set $start (call $int (i32.const 0)))))
   #@(if (i32.eqz (local.get $family))

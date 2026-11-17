@@ -62,7 +62,7 @@
   #@(local.set $negate (i32.ne (i32.and (local.get $seen) (i32.const 4)) (i32.const 0)))
   #@(if (i32.eqz (ref.is_null (local.get $key))) (then (local.set $key (call $callable (local.get $key)))))
   #@(if (i32.eqz (i32.and (local.get $seen) (i32.const 6)))
-    (then (local.set $test (call $fdefinition (call $symbol (i32.const ,(runtime-symbol-id 'eql)))))))
+    (then (local.set $test (call $canonical-builtin-function (i32.const ,(runtime-symbol-id 'eql)) (i32.const 0)))))
   #@(local.set $function (call $callable (if (result (ref null eq)) (local.get $mode)
     (then (local.get $item)) (else (if (result (ref null eq)) (local.get $negate)
       (then (local.get $test-not)) (else (local.get $test)))))))

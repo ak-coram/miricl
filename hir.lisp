@@ -492,7 +492,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
           ;; a structural source cycle to HIR-FORM. Scan only capped syntax.
           (when (and size plain
                      (not (loop for form in (cddr definition) thereis
-                            (member form *hir-source-path* :test miricl::%compiler-eq-function))))
+                            (member form *hir-source-path* :test #'eq))))
             (multiple-value-bind (body specials) (hir-declarations (cddr definition) t)
               (let ((constants nil) (dynamic-cost 0))
                 (loop for parameter in parameters for actual in arguments do
@@ -1248,6 +1248,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
 (defun hir-literal-membership (form functions)
   (declare (type list functions))
   (when (and (consp form) (eq (car form) 'member) (< *hir-debug-level* 2)
+             (not (eq (cdr (assoc 'member *hir-inline-policy* :test #'equal)) 'notinline))
              (not (hir-lexical-function-entry 'member functions)) (not (macro-function 'member)))
     ;; IF may recognize this call before its normal lowering task. Validate
     ;; syntax before inspecting it; quoted data can still be dotted or cyclic.
@@ -1352,7 +1353,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                    (body forms local functions targets)))))
          (lower (form variables functions targets)
            (compiler-source-form form)
-           (when (and (consp form) (member form *hir-source-path* :test miricl::%compiler-eq-function))
+           (when (and (consp form) (member form *hir-source-path* :test #'eq))
              (compiler-input-fail "source form" form "circular executable form"))
            (let* ((environment (when *hir-source-environments*
                                  (gethash form *hir-source-environments*)))
@@ -2100,7 +2101,7 @@ global definitions. Internal calls refer to this group's lexical definitions."
           (compiler-input-fail "HIR environment" function "environment belongs to another function"))
         (dolist (item (hir-function-bindings function)) (binding item))
         (dolist (item (hir-function-captures function)) (capture-identity item))
-        (unless (member (hir-function-entry function) (hir-function-blocks function) :test miricl::%compiler-eq-function)
+        (unless (member (hir-function-entry function) (hir-function-blocks function) :test #'eq)
           (compiler-input-fail "HIR entry block" function "entry does not belong to this function"))
         (dolist (block (hir-function-blocks function))
           (unless (and (%hir-block-p block) (typep (hir-block-id block) '(unsigned-byte 32)))

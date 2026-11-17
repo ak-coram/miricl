@@ -208,8 +208,8 @@ try {
                   '((42) (:mode :object :name :value)))
            (= *soundness-slot-calls* 1))))`);
   console.log('Soundness: fixed primitive aliases retain identity, validation, recovery, operand order and custom MOP callbacks.');
-  // Public bootstrap functions also escape as saved objects. Rebinding their
-  // public names must not replace those objects or bypass their arity checks.
+  // Public function objects also escape through ordinary user aliases.
+  // Rebinding an alias must preserve the saved object and its arity checks.
   check(`(let* ((items (list :first :second))
       (object (make-instance 'soundness-mop-record))
       (one (compile-native '(lambda (function a) (funcall function a))))
@@ -217,15 +217,16 @@ try {
       (replacement (compile-native '(lambda (&rest arguments)
         (declare (ignore arguments)) (values :replacement :extra)))))
     (every (lambda (entry)
-      (destructuring-bind (name arguments expected) entry
-        (let ((saved (fdefinition name)))
+      (destructuring-bind (public-name arguments expected) entry
+        (let ((name (gensym "SOUNDNESS-ALIAS-")) (saved (fdefinition public-name)))
+          (setf (fdefinition name) saved)
           (labels ((invoke ()
                      (if (cdr arguments)
                        (funcall two saved (car arguments) (cadr arguments))
                        (funcall one saved (car arguments))))
                    (recover ()
                      (and (equal (multiple-value-list (invoke)) (list expected))
-                       (if (eq name 'copy-list) (not (eq (invoke) items)) t))))
+                       (if (eq public-name 'copy-list) (not (eq (invoke) items)) t))))
             (and
               (handler-case
                 (progn (if (cdr arguments) (funcall one saved nil)
@@ -238,14 +239,20 @@ try {
                     (equal (multiple-value-list (apply (fdefinition name) arguments))
                            '(:replacement :extra))))
                 (setf (fdefinition name) saved))
-              (recover))))))
+              (prog1 (recover) (fmakunbound name)))))))
       (list (list 'nth (list 1 items) :second)
             (list 'nthcdr (list 1 items) (cdr items))
             (list 'list-length (list items) 2)
             (list 'copy-list (list items) items)
             (list 'slot-value (list object 'value) 42))))`);
-  check(`(let* ((saved (fdefinition 'nth))
-      (original-car (fdefinition 'car)) (original-tail (fdefinition 'nthcdr))
+  evaluate(`(defun soundness-alias-car (items) (car items))
+    (defun soundness-alias-nthcdr (count items) (nthcdr count items))
+    (setf (fdefinition 'soundness-alias-nth) (compile-native
+      '(lambda (count items) (values (soundness-alias-car (soundness-alias-nthcdr count items))))))
+    (values)`);
+  check(`(let* ((saved (fdefinition 'soundness-alias-nth))
+      (original-car (fdefinition 'soundness-alias-car))
+      (original-tail (fdefinition 'soundness-alias-nthcdr))
       (driver (compile-native '(lambda (function count items)
         (let ((events nil))
           (values (multiple-value-list
@@ -253,7 +260,6 @@ try {
                       (progn (push :count events) count)
                       (progn (push :items events) items)))
                   (reverse events))))))
-      ;; Expand PUSH and SETF before changing primitives used by source macros.
       (factory (compile-native '(lambda ()
         (let ((events nil))
           (values
@@ -266,11 +272,11 @@ try {
       (runner (compile-native '(lambda (driver saved items car-callback tail-callback
                                        original-car original-tail)
         (unwind-protect
-          (progn (setf (fdefinition 'car) car-callback
-                       (fdefinition 'nthcdr) tail-callback)
+          (progn (setf (fdefinition 'soundness-alias-car) car-callback
+                       (fdefinition 'soundness-alias-nthcdr) tail-callback)
             (multiple-value-list (funcall driver saved 1 items)))
-          (setf (fdefinition 'car) original-car
-                (fdefinition 'nthcdr) original-tail)))))
+          (setf (fdefinition 'soundness-alias-car) original-car
+                (fdefinition 'soundness-alias-nthcdr) original-tail)))))
       (items (list :first :second)))
     (multiple-value-bind (car-callback tail-callback read-events) (funcall factory)
       (let ((result (funcall runner driver saved items car-callback tail-callback
@@ -279,7 +285,7 @@ try {
              (equal (funcall read-events)
                     (list (list :nthcdr 1 items) '(:car (:current-tail))))
              (equal (multiple-value-list (funcall saved 1 items)) '(:second))))))`);
-  console.log('Soundness: public saved aliases survive rebinding and arity errors; NTH retains live callbacks, operand order and one value.');
+  console.log('Soundness: saved function objects retain identity and arity checks; user callbacks preserve operand order and one value.');
   // Initarg validation uses intrinsic method-selection caches. A warmed
   // constructor must observe method keyword changes without repeating hooks.
   check(`(progn
@@ -1745,7 +1751,7 @@ try {
   ]) {
     check(`(let ((effects 0)
         (function (compile-native '(lambda (value effect)
-          (declare (type ${type} value) (inline ${predicate})
+          (declare (type ${type} value)
             (optimize (safety 0) (debug 0)))
           (if (${predicate} (progn (funcall effect) value))
             :wrong (values :disjoint nil :extra))))))
@@ -1902,7 +1908,7 @@ try {
     ]) {
       check(`(let ((effects 0)
           (function (compile-native '(lambda (value effect)
-            (declare (inline consp) (optimize (safety ${safety}) (debug 0)))
+            (declare (optimize (safety ${safety}) (debug 0)))
             (if (consp value) :wrong
               (progn (funcall effect)
                 (unless (consp value) ${change})
@@ -1912,7 +1918,7 @@ try {
           '(:changed nil :extra)) (= effects 1)))`);
     }
     check(`(let ((function (compile-native '(lambda (value observe)
-      (declare (inline consp) (optimize (safety ${safety}) (debug 0)))
+      (declare (optimize (safety ${safety}) (debug 0)))
       (when observe (if (consp value) :cons :atom))
       (if (consp value) (values :cons nil :extra) (values :atom :extra))))))
       (every (lambda (observe)
@@ -1926,8 +1932,7 @@ try {
     for (const safety of [0, 3]) {
       for (const debug of [0, 2]) {
         check(`(let ((function (compile-native '(lambda (x y effect)
-            (declare (inline consp eq)
-              (optimize (space ${space}) (speed ${speed}) (safety ${safety}) (debug ${debug})))
+            (declare (optimize (space ${space}) (speed ${speed}) (safety ${safety}) (debug ${debug})))
             (values (consp (funcall effect :object x))
               (eq (funcall effect :left x) (funcall effect :right y))
               (if (consp x) :cons :atom) (if (eq x y) :same :different)))))
@@ -2072,112 +2077,129 @@ try {
       (evenp value)))))
     (and (handler-case (progn (funcall function 2.0) nil) (type-error () t))
       (funcall function 2) (not (funcall function 3))))`);
-  // Run redefinition against the sealed compiler: its implementation can use
-  // the primitive whose application binding this test temporarily replaces.
-  check(`(let* ((source '(lambda (value)
-        (declare (inline evenp logand) (optimize (safety 3) (debug 0)))
-        (evenp (logand value -2))))
-      (captured (compile-native source))
-      (ordinary (compile-native '(lambda (value) (evenp value))))
-      (replacement (compile-native '(lambda (value)
-        (declare (ignore value)) (values :replacement :extra))))
-      (original (symbol-function 'evenp)))
-    (unwind-protect
-      (progn (setf (symbol-function 'evenp) replacement)
-        (and (funcall captured 37)
-          (equal (multiple-value-list (funcall ordinary 37)) '(:replacement :extra))
-          (equal (multiple-value-list (funcall (compile-native source) 37))
-            '(:replacement :extra))))
-      (setf (symbol-function 'evenp) original)))`);
-
-  // ANSI leaves redefining CL primitives undefined. MIRICL explicitly supports
-  // it unless an INLINE/sealed contract permits capturing the old definition.
-  for (const [predicate, arguments_] of [['consp', 'object'], ['eq', 'object object']]) {
-    check(`(let* ((object (list :identity))
-        (ordinary (compile-native '(lambda (object) (${predicate} ${arguments_}))))
-        (indirect (compile-native '(lambda (object) (declare (notinline ${predicate}))
-          (${predicate} ${arguments_}))))
-        (captured (compile-native '(lambda (object) (declare (inline ${predicate}))
-          (${predicate} ${arguments_}))))
+  // Ordinary standard calls keep checked boundaries and operand effects when
+  // composed, including the debugger's retained-code configuration.
+  for (const debug of [0, 2]) {
+    check(`(let ((character (compile-native '(lambda (object index effect)
+          (declare (optimize (safety 3) (debug ${debug})))
+          (values (char-code (char (progn (funcall effect :string) object)
+                                  (progn (funcall effect :index) index))) :extra))))
+        (head (compile-native '(lambda (object effect)
+          (declare (optimize (safety 3) (debug ${debug})))
+          (values (car (progn (funcall effect :list) object)) :extra))))
+        (string (make-array 2 :element-type 'character :fill-pointer 0
+                   :initial-contents "ab"))
+        (events nil))
+      (labels ((effect (tag) (push tag events)))
+        (and (equal (multiple-value-list (funcall character string 1 #'effect))
+                    (list (char-code #\\b) :extra))
+          (equal events '(:index :string))
+          (progn (setq events nil)
+            (handler-case (progn (funcall character :not-a-string 0 #'effect) nil)
+              (type-error () (member :string events))))
+          (progn (setq events nil)
+            (handler-case (progn (funcall head :not-a-list #'effect) nil)
+              (type-error () (equal events '(:list)))))
+          (equal (multiple-value-list (funcall head (cons :head :tail) #'effect))
+                 '(:head :extra))
+          (equal (multiple-value-list (funcall head nil #'effect)) '(nil :extra))
+          (equal (multiple-value-list (funcall character string 1 #'effect))
+                 (list (char-code #\\b) :extra)))))`);
+  }
+  // Only exact CL symbols have standard result facts. Shadowed names keep
+  // live user dispatch, complete values and captured function identities.
+  evaluate(`(defpackage :soundness-shadow (:use :cl)
+    (:shadow :consp :eq :evenp :svref :list)) (values)`);
+  for (const [name, arguments_, expected] of [
+    ['consp', 'object', '(nil)'],
+    ['eq', 'object object', '(t)'],
+    ['evenp', '2', '(t)'],
+    ['svref', '#(42) 0', '(42)'],
+    ['list', 'object', '((:identity))'],
+  ]) {
+    check(`(let* ((name 'soundness-shadow::${name}) (object :identity)
+        (initial (compile-native '(lambda (&rest arguments) (declare (ignore arguments))
+          (values :initial :second))))
         (replacement (compile-native '(lambda (&rest arguments) (declare (ignore arguments))
-          (values :replacement :extra))))
-        (original (symbol-function '${predicate})))
-      (and (equal (multiple-value-list (funcall ordinary object)) '(t))
-        (unwind-protect
-          (progn (setf (symbol-function '${predicate}) replacement)
+          (values :replacement :extra)))))
+      (setf (symbol-function name) initial)
+      (let* ((ordinary (compile-native '(lambda (object)
+                 (declare (optimize (safety 3) (debug 0)))
+                 (soundness-shadow::${name} ${arguments_}))))
+             (indirect (compile-native '(lambda (object)
+                 (declare (notinline soundness-shadow::${name}))
+                 (soundness-shadow::${name} ${arguments_}))))
+             (standard (compile-native '(lambda (object) (cl:${name} ${arguments_}))))
+             (captured (symbol-function name))
+             (closure (funcall (compile-native '(lambda (saved object)
+               (lambda () (funcall saved object)))) captured object)))
+        (and (equal (multiple-value-list (funcall ordinary object)) '(:initial :second))
+          (equal (multiple-value-list (funcall standard object)) '${expected})
+          (progn (setf (symbol-function name) replacement)
             (and (equal (multiple-value-list (funcall ordinary object)) '(:replacement :extra))
               (equal (multiple-value-list (funcall indirect object)) '(:replacement :extra))
-              (equal (multiple-value-list (funcall captured object)) '(t))
+              (equal (multiple-value-list (funcall closure)) '(:initial :second))
+              (eq captured initial)
               (equal (multiple-value-list
-                (funcall (compile-native '(lambda (object) (declare (inline ${predicate}))
-                  (${predicate} ${arguments_}))) object)) '(:replacement :extra))))
-          (setf (symbol-function '${predicate}) original))
-        (equal (multiple-value-list (funcall ordinary object)) '(t))))`);
+                (funcall (compile-native '(lambda (object)
+                  (declare (inline soundness-shadow::${name}))
+                  (soundness-shadow::${name} ${arguments_}))) object)) '(:replacement :extra)))))))`);
   }
-  check(`(let ((function (compile-native '(lambda (v i)
-      (declare (optimize (safety 0)) (type simple-vector v) (fixnum i))
-      (list (svref v i))))) (original (symbol-function 'svref)))
-    (and (equal (funcall function #(42) 0) '(42))
-      (unwind-protect
-        (progn (setf (symbol-function 'svref)
-          (lambda (v i) (declare (ignore v i)) (values :replacement :extra)))
-          (equal (funcall function #(42) 0) '(:replacement)))
-        (setf (symbol-function 'svref) original))
-      (equal (funcall function #(42) 0) '(42))))`);
-  check(`(let* ((ordinary (compile-native '(lambda (x) (list x))))
-      (indirect (compile-native '(lambda (x) (declare (notinline list)) (list x))))
-      (captured (compile-native '(lambda (x) (declare (inline list)) (list x))))
-      (module (compile-native-module
-        '((defun module-list-default (x) (list x))
-          (defun module-list-notinline (x) (declare (notinline list)) (list x))
-          (defun module-list-inline (x) (declare (inline list)) (list x)))
-        :inline nil))
-      (module-ordinary (cdr (assoc 'module-list-default module)))
-      (module-indirect (cdr (assoc 'module-list-notinline module)))
-      (module-captured (cdr (assoc 'module-list-inline module)))
-      (ordinary-apply (compile-native '(lambda (x)
-        (apply (lambda (&rest result) result) (list x)))))
-      (captured-apply (compile-native '(lambda (x) (declare (inline list))
-        (apply (lambda (&rest result) result) (list x)))))
-      (replacement (compile-native '(lambda (x) (declare (ignore x)) (values :replacement :extra))))
-      (*wasm-builtin-codes* (make-hash-table :test 'eq))
-      (canonical (native-canonical-builtin-code 'list))
-      (original (symbol-function 'list)))
-    (unwind-protect
-      (progn (setf (symbol-function 'list) replacement)
-        (and (equal (multiple-value-list (funcall ordinary 1)) '(:replacement :extra))
-          (equal (multiple-value-list (funcall indirect 2)) '(:replacement :extra))
-          (equal (multiple-value-list (funcall captured 3)) '((3)))
-          (equal (multiple-value-list (funcall module-ordinary 1)) '(:replacement :extra))
-          (equal (multiple-value-list (funcall module-indirect 2)) '(:replacement :extra))
-          (equal (multiple-value-list (funcall module-captured 3)) '((3)))
-          (handler-case (progn (funcall ordinary-apply 4) nil)
-            (type-error (condition) (eq (type-error-datum condition) :replacement)))
-          (equal (funcall captured-apply 5) '(5))
-          ;; Query the per-emission eligibility check directly: interpreted
-          ;; compiler macros and MEMBER themselves depend on live LIST.
-          (not (= (native-builtin-code 'list) canonical))))
-      (setf (symbol-function 'list) original)))`);
+  check(`(let* ((name 'soundness-shadow::list) (original #'list)
+      (replacement (compile-native '(lambda (x) (declare (ignore x))
+        (values :replacement :extra)))))
+    (setf (symbol-function name) original)
+    (let* ((module (compile-native-module
+              '((defun soundness-module-list (x) (soundness-shadow::list x))
+                (defun soundness-module-list-notinline (x)
+                  (declare (notinline soundness-shadow::list)) (soundness-shadow::list x)))
+              :inline nil))
+           (callers (mapcar (lambda (name) (cdr (assoc name module)))
+             '(soundness-module-list soundness-module-list-notinline)))
+           (ordinary-apply (compile-native '(lambda (x)
+             (apply (lambda (&rest result) result) (soundness-shadow::list x))))))
+      (and (every #'functionp callers)
+        (every (lambda (function) (equal (funcall function 1) '(1))) callers)
+        (equal (funcall ordinary-apply 2) '(2))
+        (progn (setf (symbol-function name) replacement)
+          (and (every (lambda (function)
+                 (equal (multiple-value-list (funcall function 1)) '(:replacement :extra))) callers)
+            (handler-case (progn (funcall ordinary-apply 2) nil)
+              (type-error (condition) (eq (type-error-datum condition) :replacement))))))))`);
+  // Exercise both fixed and packet argument transport with fresh standard LIST
+  // results, primary argument values, and observable left-to-right effects.
   for (const count of [9, 129]) {
-    const parameters = Array.from({length: count}, (_, index) => `argument${index}`).join(' ');
-    const operands = Array.from({length: count}, () => 'x').join(' ');
-    check(`(let ((ordinary (compile-native '(lambda (x) (list ${operands}))))
-        (indirect (compile-native '(lambda (x) (declare (notinline list)) (list ${operands}))))
-        (captured (compile-native '(lambda (x)
-          (declare (inline list car length) (optimize (safety 0)))
-          (let ((result (list ${operands}))) (values (car result) (length result))))))
-        (replacement (compile-native '(lambda (${parameters})
-          (declare (ignore ${parameters})) (values :replacement :extra))))
-        (original (symbol-function 'list)))
-      (unwind-protect
-        (progn (setf (symbol-function 'list) replacement)
-          (and (equal (multiple-value-list (funcall ordinary 1)) '(:replacement :extra))
-            (equal (multiple-value-list (funcall indirect 2)) '(:replacement :extra))
-            (equal (multiple-value-list (funcall captured 3)) '(3 ${count}))))
-        (setf (symbol-function 'list) original)))`);
+    const operands = Array.from({length: count}, (_, index) =>
+      `(progn (funcall effect ${index}) (values x :discarded))`).join(' ');
+    for (const declaration of ['', '(notinline list)', '(inline list)']) {
+      check(`(let ((function (compile-native '(lambda (x effect)
+          (declare ${declaration} (optimize (safety 3) (debug 0)))
+          (list ${operands}))))
+          (events nil) (object (list :identity)))
+        (let* ((first (funcall function object (lambda (index) (push index events))))
+               (second (funcall function object (lambda (index) (declare (ignore index)))))
+               (expected (make-list ${count} :initial-element object)))
+          (and (equal (reverse events) (loop for index below ${count} collect index))
+            (equal first expected) (equal second expected)
+            (every (lambda (item) (eq item object)) first)
+            (loop for left on first for right on second always (not (eq left right)))
+            (progn (rplaca first :changed) (eq (car second) object)))))`);
+    }
+  }
+  // ANSI covers MEMBER generally; this targets quoted integer selection while
+  // retaining the original tail and first duplicate, including a bignum key.
+  for (const declaration of ['', '(notinline member)', '(inline member)']) {
+    check(`(let ((function (compile-native '(lambda (item)
+      (declare ${declaration} (optimize (safety 3) (debug 0)))
+      (values (member item '#1=(3 4 5 4 6 7 8 1180591620717411303424)) '#1#)))))
+    (every (lambda (key)
+      (multiple-value-bind (tail items) (funcall function key)
+        (let ((expected (member key items :test #'eql)))
+          (and (eq tail expected) (equal tail expected)))))
+      '(3 4 5 8 1180591620717411303424 0 9 4.0 #\\a)))`);
   }
   recover();
-  console.log('Soundness: proofs remain conservative across declarations, mutation and opaque types; primitive guards honor redefinition.');
+  console.log('Soundness: proofs remain conservative across declarations, mutation and opaque types; user names retain live dispatch and values.');
 
   // Constants used after recursion must not create large retained frames.
   // This case overflowed the ordinary browser-compatible stack when every

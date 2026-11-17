@@ -952,20 +952,18 @@
                (i64.lt_s (local.get $right) (i64.const 0)))))))))))
 
 (defun native-integer-entry-wat (function opcode result &optional checked)
-  (runtime-wat-sequence
-    #@(if (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
-                  (i32.const ,(1+ (runtime-symbol-id function))))
-      (then ,(runtime-wat-sequence (if checked
-        #@(block $overflow
-          (local.set $computed (,opcode (local.get $left) (local.get $right)))
-          (br_if $overflow (i32.eqz ,(native-integer-fit-wat function)))
-          (return (extern.convert_any (call ,result (local.get $computed)))))
-        #@(return (extern.convert_any (call ,result (,opcode (local.get $left) (local.get $right)))))))))
-    ;; Integer identity is EQL value identity. Only the redefined function path
-    ;; and overflow need boxed arguments; the common path stays scalar.
-    #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-      (call $cons (call $int64 (local.get $left))
-        (call $cons (call $int64 (local.get $right)) (ref.null eq)))))))
+  ;; These scalar entries are selected only for exact standard CL operations.
+  ;; Keep the function argument for the arbitrary-precision overflow path.
+  (if checked
+    (runtime-wat-sequence
+      #@(block $overflow
+        (local.set $computed (,opcode (local.get $left) (local.get $right)))
+        (br_if $overflow (i32.eqz ,(native-integer-fit-wat function)))
+        (return (extern.convert_any (call ,result (local.get $computed)))))
+      #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
+        (call $cons (call $int64 (local.get $left))
+          (call $cons (call $int64 (local.get $right)) (ref.null eq))))))
+    #@(extern.convert_any (call ,result (,opcode (local.get $left) (local.get $right))))))
 
 (defmacro define-native-integer-entry (name export function opcode result &optional checked)
   `(define-runtime-function ,name (($function externref) ($left i64) ($right i64)) (externref)
@@ -984,23 +982,20 @@
     (($function externref) ($left i64) ($right i64)) (externref)
   (:export-raw "native-ash-int64")
   (:locals ($computed i64))
-  #@(if (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
-                (i32.const ,(1+ (runtime-symbol-id 'ash))))
+  #@(if (i64.lt_s (local.get $right) (i64.const 0))
     (then
-      (if (i64.lt_s (local.get $right) (i64.const 0))
-        (then
-          ;; Wasm masks shift counts; Lisp saturates an arithmetic right
-          ;; shift once every value bit has been shifted out.
-          (return (extern.convert_any (call $int64
-            (if (result i64) (i64.le_s (local.get $right) (i64.const -64))
-              (then (select (i64.const -1) (i64.const 0) (i64.lt_s (local.get $left) (i64.const 0))))
-              (else (i64.shr_s (local.get $left) (i64.sub (i64.const 0) (local.get $right))))))))))
-      (if (i64.eqz (local.get $left)) (then (return (extern.convert_any (call $int (i32.const 0))))))
-      (if (i64.lt_u (local.get $right) (i64.const 64))
-        (then
-          (local.set $computed (i64.shl (local.get $left) (local.get $right)))
-          (if (i64.eq (i64.shr_s (local.get $computed) (local.get $right)) (local.get $left))
-            (then (return (extern.convert_any (call $int64 (local.get $computed))))))))))
+      ;; Wasm masks shift counts; Lisp saturates an arithmetic right
+      ;; shift once every value bit has been shifted out.
+      (return (extern.convert_any (call $int64
+        (if (result i64) (i64.le_s (local.get $right) (i64.const -64))
+          (then (select (i64.const -1) (i64.const 0) (i64.lt_s (local.get $left) (i64.const 0))))
+          (else (i64.shr_s (local.get $left) (i64.sub (i64.const 0) (local.get $right))))))))))
+  #@(if (i64.eqz (local.get $left)) (then (return (extern.convert_any (call $int (i32.const 0))))))
+  #@(if (i64.lt_u (local.get $right) (i64.const 64))
+    (then
+      (local.set $computed (i64.shl (local.get $left) (local.get $right)))
+      (if (i64.eq (i64.shr_s (local.get $computed) (local.get $right)) (local.get $left))
+        (then (return (extern.convert_any (call $int64 (local.get $computed))))))))
   ;; Positive shifts that overflow i64 use arbitrary-precision arithmetic.
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     (call $cons (call $int64 (local.get $left))
@@ -1021,10 +1016,7 @@
   (:locals ($data (ref $objects)))
   ;; A declaration proves the vector representation and immediate index.
   ;; Bounds errors retain the ordinary Lisp condition and offending datum.
-  ;; Share the redefinition guard rather than repeating it at each field read.
-  #@(if (i32.ne (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (local.get $code))
-    (then (return (extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-      (call $cons ,(native-object '(local.get $vector)) (call $cons (call $int (local.get $index)) (ref.null eq))))))))
+  ;; The function/code parameters keep the native import ABI unchanged.
   #@(local.set $data (call $vector-data ,(native-object '(local.get $vector))))
   #@(if (i32.ge_u (local.get $index) (array.len (local.get $data)))
     (then (return (extern.convert_any (call $vector-element ,(native-object '(local.get $vector))
@@ -1036,69 +1028,32 @@
   (:export-raw "native-vector-ref-trusted")
   ;; SAFETY 0: declarations and the access preconditions are trusted. WasmGC
   ;; casts and intrinsic array bounds still trap rather than corrupt memory.
-  #@(if (i32.ne (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (local.get $code))
-    (then (return (extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-      (call $cons ,(native-object '(local.get $vector)) (call $cons (call $int (local.get $index)) (ref.null eq))))))))
   #@(extern.convert_any (array.get $objects
     (call $vector-data ,(native-object '(local.get $vector))) (local.get $index))))
-
-(defun native-list-entry-wat (first second field)
-  (runtime-wat-sequence
-    #@(if (i32.or
-      (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
-        (i32.const ,(1+ (runtime-symbol-id first))))
-      (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
-        (i32.const ,(1+ (runtime-symbol-id second)))))
-      (then
-        (if (ref.is_null (local.get $list)) (then (return (ref.null extern))))
-        (return (extern.convert_any
-          (struct.get $obj ,field (ref.cast (ref $obj) ,(native-object '(local.get $list))))))))
-    #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-      (call $cons ,(native-object '(local.get $list)) (ref.null eq))))))
 
 (define-runtime-function $native-vector-ref-trusted64
     (($function externref) ($vector externref) ($index i64) ($code i32)) (externref)
   (:export-raw "native-vector-ref-trusted64")
-  ;; Keep the entire integer for a redefined function's ordinary call. Only
-  ;; the built-in unsafe access uses Wasm's unsigned i32 array index.
-  #@(if (i32.ne (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (local.get $code))
-    (then (return (extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-      (call $cons ,(native-object '(local.get $vector)) (call $cons (call $int64 (local.get $index)) (ref.null eq))))))))
+  ;; SAFETY 0 access uses Wasm's unsigned i32 array index.
   #@(extern.convert_any (array.get $objects
     (call $vector-data ,(native-object '(local.get $vector))) (i32.wrap_i64 (local.get $index)))))
 
 (define-runtime-function $native-car-list (($function externref) ($list externref)) (externref)
   (:export-raw "native-car-list")
-  (native-list-entry-wat 'car 'first '$a))
-
-(defun native-checked-list-entry-wat (first second field)
-  (runtime-wat-sequence
-    #@(if (i32.or
-        (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
-          (i32.const ,(1+ (runtime-symbol-id first))))
-        (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
-          (i32.const ,(1+ (runtime-symbol-id second)))))
-      (then
-        (if (ref.is_null (local.get $list)) (then (return (ref.null extern))))
-        (if (i32.eq (call $tag ,(native-object '(local.get $list))) (i32.const 7))
-          (then (return (extern.convert_any
-            (struct.get $obj ,field (ref.cast (ref $obj) ,(native-object '(local.get $list))))))))))
-    ;; Erroneous operands and redefined functions retain ordinary Lisp
-    ;; dispatch and conditions. The successful operation is one bounded read.
-    #@(return_call $native-call1 (local.get $function) (local.get $list))))
+  #@(return_call $native-car-list-inline (local.get $list)))
 
 (define-runtime-function $native-car-checked (($function externref) ($list externref)) (externref)
   (:export-raw "native-car-checked")
-  (native-checked-list-entry-wat 'car 'first '$a))
+  #@(return_call $native-car-inline-checked (local.get $list)))
 
 (define-runtime-function $native-cdr-checked (($function externref) ($list externref)) (externref)
   (:export-raw "native-cdr-checked")
-  (native-checked-list-entry-wat 'cdr 'rest '$b))
+  #@(return_call $native-cdr-inline-checked (local.get $list)))
 
 (define-runtime-function $native-vector-ref-inline (($vector externref) ($index i64)) (externref)
   (:export-raw "native-vector-ref-inline")
   ;; The compiler proved the representation and captured the canonical
-  ;; built-in definition under INLINE. No function or argument dispatch.
+  ;; standard operation with no NOTINLINE. No function or argument dispatch.
   #@(extern.convert_any (array.get $objects
     (call $vector-data ,(native-object '(local.get $vector))) (i32.wrap_i64 (local.get $index)))))
 
@@ -1147,23 +1102,12 @@
 
 (define-runtime-function $native-character-code (($function externref) ($character externref)) (externref)
   (:export-raw "native-character-code")
-  ;; Only the canonical function and a real character justify a raw field
-  ;; read. Other operands retain the ordinary TYPE-ERROR and recovery path.
-  #@(if (i32.and
-      (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
-        (i32.const ,(1+ (runtime-symbol-id 'char-code))))
-      (i32.eq (call $tag ,(native-object '(local.get $character))) (i32.const 16)))
-    (then (return (extern.convert_any (call $int (call $value-n
-      ,(native-object '(local.get $character))))))))
-  #@(return_call $native-call1 (local.get $function) (local.get $character)))
+  #@(return_call $native-character-code-inline (local.get $character)))
 
 (define-runtime-function $native-character-ref
     (($function externref) ($string externref) ($index externref)) (externref)
   (:export-raw "native-character-ref")
-  #@(if (i32.eq (struct.get $obj $n (ref.cast (ref $obj) ,(native-object '(local.get $function))))
-        (i32.const ,(1+ (runtime-symbol-id 'char))))
-    (then (return_call $native-character-ref-inline (local.get $string) (local.get $index))))
-  #@(return_call $native-call2 (local.get $function) (local.get $string) (local.get $index)))
+  #@(return_call $native-character-ref-inline (local.get $string) (local.get $index)))
 
 (define-runtime-function $native-character-code-inline (($character externref)) (externref)
   (:export-raw "native-character-code-inline")
@@ -1322,7 +1266,7 @@
 
 (define-runtime-function $native-cdr-list (($function externref) ($list externref)) (externref)
   (:export-raw "native-cdr-list")
-  (native-list-entry-wat 'cdr 'rest '$b))
+  #@(return_call $native-cdr-list-inline (local.get $list)))
 
 (define-runtime-function $native-car-list-inline (($list externref)) (externref)
   (:export-raw "native-car-list-inline")
