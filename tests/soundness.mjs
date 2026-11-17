@@ -873,6 +873,25 @@ try {
           (every (lambda (function)
             (equal (multiple-value-list (funcall function 42)) '(42 nil)))
             (list (load-hir-code exported) (compile-native-hir exported))))))`);
+  // Inline cost analysis must not execute an unknown macro to speculate about
+  // its emitted body. The actual lowering gets its single expansion normally.
+  evaluate(`(defvar *soundness-inline-expanded* nil)
+    (defmacro soundness-inline-expansion (value)
+      (when *soundness-inline-expanded* (error "Repeated speculative expansion"))
+      (setq *soundness-inline-expanded* t)
+      (list 'values value nil :expanded)) (values)`);
+  for (const effort of [0, 3]) {
+    check(`(let* ((*soundness-inline-expanded* nil)
+        (function (compile-native '(lambda (x)
+          (declare (optimize (speed 3) (space 1) (debug 0)
+            (compilation-speed ${effort})))
+          (flet ((worker (selected value)
+                   (if selected (soundness-inline-expansion value) (values))))
+            (declare (inline worker)) (worker t x))))))
+      (and *soundness-inline-expanded*
+        (equal (multiple-value-list (funcall function 42)) '(42 nil :expanded))
+        (equal (multiple-value-list (funcall function 43)) '(43 nil :expanded))))`);
+  }
   // OPTIMIZE is a free declaration: lambda initializers inherit their outer
   // scope. Whole-function sharing must conservatively retain both policies.
   check(`(let ((outer (compiler-primitive 52 nil)))
@@ -986,6 +1005,24 @@ try {
       (list (load-hir-code exported) (compile-native-hir exported)
             (compile-native-hir (emit-hir-code rebuilt)))))`);
   console.log('Soundness: retained code preserves parallel loop transfers, effects and values, and rejects malformed metadata with recovery.');
+
+  // Shared branch tails must remain valid through public retained-code
+  // validation and reconstruction, including definitions no longer executed.
+  check(`(let* ((wire (emit-hir-code (compile-to-hir
+        '(lambda (flag callback) (declare (optimize (debug 0)))
+           (if flag
+             (progn (funcall callback :left) (funcall callback :tail))
+             (progn (funcall callback :right) (funcall callback :tail)))))))
+      (exported (copy-hir-code (validate-hir-code wire)))
+      (rebuilt (hir-code-to-unit exported)))
+    (verify-hir rebuilt)
+    (every (lambda (function)
+      (loop for flag in '(t nil) always (let ((events nil))
+        (and (equal (multiple-value-list (funcall function flag (lambda (event)
+                 (push event events) (values event nil :extra)))) '(:tail nil :extra))
+          (equal (reverse events) (list (if flag :left :right) :tail))))))
+      (list (load-hir-code exported) (compile-native-hir exported)
+        (compile-native-hir (emit-hir-code rebuilt)))))`);
 
   // Construct corrupt wire using the private emitter only as a fixture. A
   // well-formed byte stream is not proof of lexical or control-flow semantics
@@ -1435,6 +1472,42 @@ try {
       (progn (setq effects nil)
         (handler-case (progn (funcall function 17 18 (lambda (x) (push x effects))) nil)
           (type-error () (equal effects '(:second :first)))))))`);
+
+  // Trimming private secondary results can make a formal newly unused. Its
+  // caller operands still run in order, and a checked secondary still signals.
+  for (const discard of [false, true]) {
+    const call = `(worker (funcall effect :kept)
+      (progn (funcall effect :checked) bad) (funcall effect :unused))`;
+    check(`(let ((function (compile-native '(lambda (bad effect)
+          (declare (optimize (debug 0) (safety 1)))
+          (flet ((worker (kept checked unused)
+                   (declare (inline car cons) (optimize (debug 0) (safety 1)))
+                   (values kept (car checked) (cons unused unused))))
+            (declare (notinline worker))
+            ${discard ? `(progn ${call} 42)` : `(values ${call})`})))))
+      (labels ((run (bad failure)
+                 (let ((events nil))
+                   (handler-case
+                     (values (funcall function bad (lambda (event)
+                               (push event events)
+                               (when (eq event failure) (error "Private operand failure"))
+                               17))
+                       (reverse events) nil)
+                     (error (condition) (values nil (reverse events) condition)))))
+               (recover ()
+                 (multiple-value-bind (answer events condition) (run '(18) nil)
+                   (and (= answer ${discard ? 42 : 17})
+                     (equal events '(:kept :checked :unused)) (null condition)))))
+        (and (recover)
+          (loop for failure in '(:kept :checked :unused)
+                for prefix in '((:kept) (:kept :checked) (:kept :checked :unused)) always
+            (multiple-value-bind (answer events condition) (run '(18) failure)
+              (and (null answer) (equal events prefix) (typep condition 'simple-error))))
+          (multiple-value-bind (answer events condition) (run :invalid nil)
+            (and (null answer) (equal events '(:kept :checked :unused))
+              (typep condition 'type-error)))
+          (recover))))`);
+  }
 
   // Open wide calls keep MIRICL's lookup-before-operands contract even when
   // their result is primary-only or discarded. A full consumer of the same

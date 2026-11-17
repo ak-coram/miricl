@@ -367,19 +367,88 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
 
 (defun hir-inline-size (form limit)
   (declare (type fixnum limit))
-  (let ((work (list form)) (size 0))
+  ;; Bound original syntax, including dead arms, independently of growth.
+  ;; PLAIN admits only syntax whose residual cost we model, which also cannot
+  ;; assign or capture parameter cells. Macro lookup never runs its expander.
+  (let ((work form) (size 0) (plain (null *hir-macro-context*)))
     (declare (type fixnum size) (type list work))
     (loop while work do
       (let ((next (pop work)))
         (incf size) (incf *hir-inline-work*)
-        (when (> size limit) (return-from hir-inline-size nil))
-        (when (and (consp next) (not (eq (car next) 'quote)))
-          (dolist (child next) (push child work)))))
-    size))
+        (when (or (> size limit) (> *hir-inline-work* (hir-inline-limit :work)))
+          (return-from hir-inline-size nil))
+        (when (consp next)
+          (let ((operator (car next)))
+            (unless (or (member operator '(quote if progn the values declare))
+                        (and (symbolp operator) (<= (length (symbol-name operator)) 64)
+                             (not (special-operator-p operator))
+                             (not (macro-function operator))))
+              (setq plain nil))
+            (unless (eq operator 'quote)
+              (dolist (child next)
+                ;; Charge allocation/traversal before queuing a wide form.
+                (when (or (> (incf size) limit)
+                          (> (incf *hir-inline-work*) (hir-inline-limit :work)))
+                  (return-from hir-inline-size nil))
+                (push child work)))))))
+    (values size plain)))
+
+(defun hir-inline-cost (form constants depth)
+  ;; Approximate emitted bytes, not source nodes. Reserve space at each call
+  ;; for import/helper/literal indices and adapters; assume its out-of-line
+  ;; body remains. No speculative emission, expansion, or user computation.
+  (declare (type fixnum depth))
+  (when (or (zerop depth) (> (incf *hir-inline-work*) (hir-inline-limit :work)))
+    (throw 'hir-inline-cost nil))
+  (when (and (consp form)
+             (not (or (member (car form) '(quote if progn the values))
+                      (and (symbolp (car form)) (not (special-operator-p (car form)))
+                           (not (macro-function (car form)))))))
+    (throw 'hir-inline-cost nil))
+  (cond
+    ((atom form)
+     (cond ((assoc form constants) 3)
+           ((and (symbolp form) form (not (eq form t)) (not (keywordp form))) 6)
+           ((or (null form) (eq form t) (and (integerp form) (<= -64 form 63))) 3)
+           ((or (and (symbolp form) (<= (length (symbol-name form)) 64))
+                (and (stringp form) (<= (length form) 64)))
+            (+ 12 (if (stringp form) (length form) 0)))
+           ((or (characterp form) (and (integerp form) (<= (- (ash 1 28)) form (ash 1 28)))) 8)
+           (t (throw 'hir-inline-cost nil))))
+    ((eq (car form) 'quote)
+     ;; A literal pool entry may survive even when its code is shared. Do not
+     ;; count its arbitrary object graph as executable syntax or assume free
+     ;; serialization. Repeated literals receive this charge at every site.
+     (let ((literal (second form)))
+       (cond ((member literal '(nil t)) 3)
+             ((and (symbolp literal) (<= (length (symbol-name literal)) 64)) 16)
+             ((and (stringp literal) (<= (length literal) 64)) (+ 16 (length literal)))
+             ((or (characterp literal)
+                  (and (integerp literal) (<= (- (ash 1 28)) literal (ash 1 28)))) 8)
+             (t (throw 'hir-inline-cost nil)))))
+    ((eq (car form) 'if)
+     (let* ((test (second form))
+            (fact (cond ((and (symbolp test) (assoc test constants)))
+                        ((and (consp test) (eq (car test) 'quote)) (cons nil (second test)))
+                        ((or (null test) (eq test t) (keywordp test) (numberp test)
+                             (characterp test) (stringp test)) (cons nil test)))))
+       (if fact (hir-inline-cost (if (cdr fact) (third form) (fourth form)) constants (1- depth))
+           (+ 8 (hir-inline-cost test constants (1- depth))
+              (hir-inline-cost (third form) constants (1- depth))
+              (hir-inline-cost (fourth form) constants (1- depth))))))
+    ((eq (car form) 'the)
+     (+ 8 (hir-inline-cost (third form) constants (1- depth))))
+    (t
+     (let ((cost (case (car form) (progn 0) (values 3) (otherwise 18))))
+       (dolist (child (cdr form) cost)
+         ;; Local traffic, multiple-value assembly and wider LEB indices are
+         ;; charged even when later lowering may coalesce them.
+         (incf cost (+ (if (eq (car form) 'progn) 0 2)
+                       (hir-inline-cost child constants (1- depth)))))))))
 
 (defun hir-inline-limit (kind)
-  ;; These are bounded source-growth estimates, before machine-code outlining.
-  ;; Retained helpers, imports and literals still contribute to final module size.
+  ;; Growth is an emitted-cost estimate. Syntax and analysis effort have their
+  ;; own caps; COMPILATION-SPEED never changes the caller's growth policy.
   (let* ((policy (or *hir-inline-growth-policy* *hir-size-policy*))
          (space (logand 3 (ash policy -2))) (speed (logand policy 3)))
     (case kind
@@ -406,25 +475,46 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
          (parameters (second definition))
          (policy (cdr (assoc binding *hir-inline-policy*))))
     (when (and info definition (< *hir-debug-level* 2) (< (hir-local-debug-level info) 2)
+               (null (nthcdr 24 *hir-inlining*)) (null (nthcdr 24 *hir-source-path*))
                (not (member binding *hir-inlining*))
                (not (eq policy 'notinline)) (or (eq policy 'inline) *hir-inline-small-functions*)
+               (null (nthcdr 16 parameters)) (null (nthcdr 16 arguments))
                (= (length arguments) (length parameters))
                (every (lambda (parameter)
                         (and (symbolp parameter) parameter (not (eq parameter t)) (not (keywordp parameter))
                              (not (member parameter lambda-list-keywords)))) parameters)
-               (= (length parameters) (length (remove-duplicates parameters)))
-               ;; A recursive call can revisit its definition's source while
-               ;; that definition is being lowered out of line. Distinct
-               ;; definitions may also share body conses. Keep such calls
-               ;; instead of presenting semantic inlining recursion as a
-               ;; structural source cycle to HIR-FORM's input guard.
-               (not (loop for form in (cddr definition) thereis
-                      (member form *hir-source-path* :test miricl::%compiler-eq-function))))
-      (let* ((limit (min (hir-inline-limit (eq policy 'inline))
-                        (- (hir-inline-limit :growth) *hir-inline-budget*)
-                        (- (hir-inline-limit :work) *hir-inline-work*)))
-             (size (and (plusp limit) (hir-inline-size (cddr definition) limit))))
-        (when size (incf *hir-inline-budget* size) binding)))))
+               (= (length parameters) (length (remove-duplicates parameters))))
+      (let ((*hir-macro-context* (hir-local-macro-context info)))
+        (multiple-value-bind (size plain)
+            (unless *hir-macro-context*
+              (hir-inline-size (cddr definition) (if (eq policy 'inline) 2048 512)))
+          ;; Shared definition conses and recursive lowering must not look like
+          ;; a structural source cycle to HIR-FORM. Scan only capped syntax.
+          (when (and size plain
+                     (not (loop for form in (cddr definition) thereis
+                            (member form *hir-source-path* :test miricl::%compiler-eq-function))))
+            (multiple-value-bind (body specials) (hir-declarations (cddr definition) t)
+              (let ((constants nil) (dynamic-cost 0))
+                (loop for parameter in parameters for actual in arguments do
+                  (if (hir-special-p parameter specials)
+                      ;; Binding and restoration remain observable even when
+                      ;; the parameter's result is unused or constant.
+                      (incf dynamic-cost 24)
+                      (cond ((and (consp actual) (eq (car actual) 'quote))
+                             (push (cons parameter (second actual)) constants))
+                            ((or (null actual) (eq actual t) (keywordp actual) (numberp actual)
+                                 (characterp actual) (stringp actual))
+                             (push (cons parameter actual) constants)))))
+                (let* ((cost (catch 'hir-inline-cost
+                               (hir-inline-cost (cons 'progn body) constants 24)))
+                       ;; Only the removed call and argument/result transfer get
+                       ;; credit. Retention of the callee, helpers and adapters
+                       ;; is the default even for a syntactically unique call.
+                       (growth (and cost (max 0 (- (+ cost 8 dynamic-cost (* 2 (length parameters)))
+                                                    (+ 12 (* 2 (length arguments))))))))
+                  (when (and growth (<= growth (hir-inline-limit (eq policy 'inline)))
+                             (<= (+ growth *hir-inline-budget*) (hir-inline-limit :growth)))
+                    (incf *hir-inline-budget* growth) binding))))))))))
 
 (defun hir-inline-body (binding arguments)
   (declare (type simple-vector binding) (type list arguments)

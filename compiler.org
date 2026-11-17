@@ -1,851 +1,243 @@
 * MIRICL compiler
 
-MIRICL compiles Common Lisp to Wasm and executes compact HIR in its Wasm
-runtime. The source frontend, type rules, semantic optimizer and native emitter
-are shared by the compiler running inside Wasm and the host bootstrap tools.
-The whole-program layer analyzes compiled-file definitions, retains reachable
-code and initialization effects, and emits portable or native bundles.
-
-This document describes the implemented pipeline and its contracts. Source
-files named below contain the corresponding compiler and runtime interfaces.
-
-** Lesson: reject large default-on analysis expansions without measured returns
-
-Evaluation found that the staged SSA, constant/relational and
-effect-analysis expansion added substantial shipped compiler code and
-analysis work, with little return on the applications measured so
-far. Do not repeat this approach: a collection of individually
-plausible optimizations is not evidence that their combined
-implementation belongs in the default image.
-
-The comparison used matching fresh images and application artifacts. The
-baseline was HEAD plus the isolated =POP=/=PUSH= local-variable rename in
-=native-outline-code=: the uncorrected runtime source packer mistook its
-binding list for a macro call and could not bootstrap. No image compression
-was added. Raw bytes, rather than download compression, determine the budget.
-
-| Measurement                                      | Baseline | Staged  |
-|--------------------------------------------------+----------+---------|
-| Default image, raw bytes                         |  1017822 | 1083602 |
-| Fixed original compiler corpus, emitted bytes    |   268677 |  269963 |
-| Fixed corpus, warmed native median seconds       |   23.391 |  26.046 |
-| Life native application, raw bytes               |  3767297 | 3765749 |
-| Maxima native application, raw bytes              |  8783547 | 8767936 |
-| Maxima source compilation, seconds               |  298.564 | 336.433 |
-| Maxima native compilation, seconds               |  590.237 | 620.570 |
-
-The default image grew by 65780 bytes and exceeded the 1 MiB raw limit by
-35026 bytes. Three warmed fixed-corpus samples showed 11.35% more compilation
-time and 0.479% more emitted code. Its output was validated and instantiated
-without installing another compiler generation.
-
-Life saved only 1548 application bytes; runtime plus application grew by
-64232 bytes. Three alternating fresh-process runtime pairs, using drivers
-compiled once and equal warmups, showed small differences whose direction
-changed between sessions. Maxima saved 15611 application bytes, but runtime
-plus application grew by 50169 bytes. Source compilation took 12.68% longer
-and native compilation 5.14% longer. Its warmed factoring, rational
-simplification and integration medians were approximately 2.0%, 7.5% and 4.9%
-slower, respectively, with matching results. These are observations on these
-workloads, not a conclusion about every application: FriCAS, ACL2, Coalton and
-McCLIM comparisons were still pending at this checkpoint.
-
-Sampling profiles implicated added private-cell SSA, local constant/budget
-work, predicate reuse and effect/relational planning. The unchanged low-level
-optimizer and outlining used slightly less sampled CPU. A bounded fuel counter
-prevents unbounded reasoning; it does not make repeated scans, per-cell maps,
-dominance construction and budget charging inexpensive.
-
-Small typed witnesses did establish useful facts: raw block parameters saved
-64 bytes in a loop, cross-call constants saved 14--26 bytes, and dominating EQL
-reuse saved 8 bytes. Those local wins did not justify the complete default
-expansion, including its new retained-code format and runtime validation cost.
-Conversely, native helper inventories are not net removal savings. Speculative
-generic-call planning and native multiple-result workers accounted for only
-7632 exclusive code/literal bytes; that was insufficient evidence that removing
-them could recover the deficit. A separately built compact planner/simple-cell
-refactor saved only 538 bytes in the complete image and remained over budget.
-
-Use the following admission discipline for future work:
-
-- Establish a source-pinned fixed original compiler corpus and representative
-  application baselines before adding a substantial analysis. Measure warmed
-  native compilation separately from interpreted bootstrap, and keep benchmark
-  drivers, diagnostics and results outside the repository.
-- Keep the default raw image within budget as the mechanism is introduced.
-  Do not defer the cost or assume unrelated established features can be removed
-  later. Require a measured whole-output ablation before making that trade.
-- Gate expensive work on an actual eligible consumer and reuse existing facts
-  where ownership permits. A general framework, extra fixed point or broader
-  fact domain needs evidence beyond a few tiny witness functions. Preserve
-  useful small generic type rules with modest cost; this result is not a reason
-  to abandon the type-proof foundation.
-- Salvage only independently justified pieces, then rebuild and remeasure the
-  combined result. Do not restore the rejected broad expansion under another
-  name without new representative evidence and an affordable implementation.
-
-** Compilation and execution interfaces
-
-=compile-to-hir= lowers a lambda to semantic HIR. =compile-hir= produces a
-function executed by the compact HIR interpreter. =emit-hir-code= and
-=load-hir-code= expose the retained-code boundary. =emit-native-module= emits
-Wasm bytes, literal pools and available debug metadata from validated HIR.
-=compile-native= compiles and instantiates a lambda; =compile-native-hir=
-compiles retained HIR without reconstructing its source.
-
-=compile-module-to-hir= accepts a group of =defun= forms and explicit entry
-points. =compile-native-module= compiles that group as one sealed module and
-returns entry functions, module bytes and HIR without changing global function
-bindings. Calls and =function= references inside the group resolve to its
-lexical definitions; symbol function designators keep global lookup semantics.
-Top-level evaluation and file loading are separate operations.
-
-#+begin_src lisp
-(miricl-compiler:compile-native-module
- '((defun successor (x) (+ x 1))
-   (defun answer (x) (successor x)))
- :entry-points '(answer))
-#+end_src
-
-*** Evaluation policy and compiler images
-
-=miricl-compiler:*compile-evaluations*= controls public evaluation boundaries:
-REPL input, object requests, =eval= and source forms read by =load=. Recursive
-interpreter calls retain their lexical environments. Loading a compiled file
-executes its existing code instead of compiling the source again.
-
-When native evaluation is enabled, top-level =progn= and executing =eval-when=
-forms are processed in order. Function bodies and variable initializers use
-the native compiler; package, declaration and other environment operations
-retain their evaluator handling. Atomic forms and quoted objects use direct
-evaluation. A dynamic guard prevents compiler helpers from recursively
-triggering automatic compilation. Macro expansion, load-time evaluation and
-execution use the target's objects and the caller's dynamic bindings.
-Compilation or execution errors propagate without an automatic retry.
-
-The =:interpreted= evaluation policy lowers ordinary forms to checked compact
-HIR and executes them without native compilation. DEBUG 3 selects this path
-even when native evaluation is enabled. The compiler-free image also selects
-HIR when native compilation is requested but unavailable. NIL currently keeps
-the source-evaluation route used by bootstrap and remaining lexical adapters.
-
-The default =miricl.wasm= image contains the precompiled compiler and starts
-with compiler state =:ready= and origin =:image=. Its evaluation policy enables
-native compilation. =miricl-cold.wasm= retains compiler code for interpreted
-use and bootstrap, with HIR evaluation and automatic native compilation disabled. The compiler-free
-=miricl-interpreter.wasm= retains scripting, portable code execution and native
-module loading without the optimizing compiler.
-
-The build runs the compiler interpreted inside Wasm, compiles its kernels to
-native Wasm, and emits its compiler definitions as a sealed module sharing
-literals and lexical function bindings. The ready image links that payload
-into the runtime; startup does not fetch or compile a separate compiler.
-ASDF is an explicitly loaded artifact.
-
-*** Compact HIR/debugger salvage checkpoint (2026-11-16)
-
-The shipped image retains the source evaluator for bootstrap, ordinary NIL
-evaluation and remaining source-closure adapters. Explicit =:interpreted=
-evaluation, minimal compilation and DEBUG 3 retain checked HIR execution and
-the writable HIR debugger. This checkpoint does not complete source-evaluator
-removal.
-
-The experimental additional native bootstrap frontend, its unrolled literal
-constructor and the duplicate cold compiler-source catalogue were removed.
-The ready image again links one self-compiled compiler payload. Shared target
-macro adapters remain host tooling and add no shipped image dependency.
-
-All images were rebuilt from the same frozen source copy. Raw and gzip level 9
-sizes, in bytes (later concurrent compiler edits are not covered):
-
-| Image         |     Raw | Gzip 9 |
-|---------------+---------+--------|
-| Cold          |  625863 | 304523 |
-| Compiler-free |  507660 | 237506 |
-| Native        | 1014518 | 392886 |
-| WASI REPL     | 2034476 | 787825 |
-
-The native image has 34058 bytes of raw headroom below 1 MiB. It is 266297
-raw bytes smaller than the failed native-bootstrap experiment, but 8962 bytes
-larger than the earlier validated HIR checkpoint; no net size optimization
-over that checkpoint is claimed. The current source also includes newer type
-proof rules, so these totals do not isolate debugger cost.
-
-The fresh build retained the required guest interpreted compiler bootstrap
-(224.109 seconds), followed by sealed module generation (43.038 seconds).
-These are build phase observations, not warmed throughput or application
-performance comparisons. A frozen source copy and matching image hashes
-were used after discovering that an earlier cached payload predated newer
-type-proof sources. A subsequent =wasm-compiler.lisp= optimization was preserved
-in the working tree and is outside this measured checkpoint.
-
-Validation passed native soundness, optimization and Node implementation
-checks, standalone compiler-free operation, full HIR debugger checks and
-214 selected upstream ANSI cases. WASI public evaluation/minimal compilation
-and rejection/recovery smoke checks passed; this is not a full ANSI or WASI
-thread-suite result. Ordinary and generic COMPILE, method redefinition,
-declared debugger writes and the existing primitive LIST redefinition
-regression are preserved. Temporary logs, measurements and the discarded
-experiment are archived under =/tmp/miricl-salvage-20261116/=.
-
-=ensure-compiler= handles source-image bootstrap. It records completion or
-failure, coordinates concurrent requests, and avoids recursive bootstrap.
-An explicitly selected =:interpreted= compiler state keeps its live Lisp
-implementation. Node and browser adapters instantiate generated modules;
-the WASI host executes linked code and portable FASLs but cannot dynamically
-instantiate emitted native modules.
-
-*** Host cross-compilation and runtime kernels
-
-=miricl/cross= loads the shared frontend, proof passes and emitter without
-Wasmtime or a guest bootstrap. =miricl-cross:compile-lambda= emits target bytes,
-literals and debug metadata. =miricl-cross:compile-module= also returns the HIR
-unit. Neither interface installs host function definitions or executes target
-code. Macros require an explicit target =*macroexpand-hook*= adapter, and
-=load-time-value= requires an explicit target evaluator. Host macro expansion
-and host =eval= are not substituted for these target operations.
-
-=miricl-cross:runtime-kernel-wat= compiles ordinary CL runtime kernels as
-sealed, closure-free helper groups. The linker checks call dependencies,
-literal ownership, captures and entry signatures before adapting reference
-arguments and a single result to the runtime ABI. Unsupported dependencies
-are errors. Private helpers can inline or share equivalent linked bodies.
-Raw callers manage multiple-value state; checked public adapters precede
-unchecked kernel code.
-
-An explicit fixed-callback contract identifies a saved immutable primitive
-supplied by a private runtime ingress. A bounded HIR proof intersects internal
-and recursive incoming calls, follows permitted copies and private cells,
-and refuses replacement, capture, escape or unknown provenance. Proved calls
-use the registered checked service directly, retaining active-thread
-checkpoints and successful-return value cleanup. The CLOS initialization
-kernels use this contract for their metadata callbacks; dynamic MOP operations
-inside those services remain dynamic.
-
-** Source lowering, policy and validation
-
-The frontend resolves lexical variables, local functions, macros and control
-targets to binding identities. =flet= definitions use the outer function
-environment; =labels= definitions share their recursive environment. Lambda
-list normalization preserves initialization order, optional and keyword
-processing, supplied-p variables, declarations and argument checks.
-
-Compiler source forms, macroexpansion results, public HIR and serialized code
-are checked before unchecked compiler internals. Checks cover proper and
-cyclic spines, names, lambda lists, type-specifier structure, record shapes,
-operand kinds, ownership, bounds, control edges and SSA dominance. Literal
-object graphs may contain sharing and cycles where their representation
-permits them. Diagnostics identify offending inputs with bounded summaries.
-An optimization proof does not replace structural validation.
-
-Local =type= declarations, abbreviated declarations and =the= attach scoped
-type assertions to HIR values and bindings. Nested declarations intersect;
-rebinding creates a new identity. Bound declarations follow the binding into
-its permitted initializer scope, while free declarations start in the body.
-=ftype= result declarations constrain result types without certifying an exact
-number of values.
-
-SAFETY and DEBUG are recorded with lexical scope, including deferred frontend
-work, initializers, closures and inline definitions. SAFETY defaults to 1.
-SAFETY 0 permits lowering based on unchecked declarations; public compiler and
-loader checks remain in place. DEBUG defaults to 1. DEBUG 0 permits frame
-omission for eligible bodies; levels below 2 omit retained native listings.
-DEBUG 2 retains module bytes for disassembly. DEBUG 3 selects the source
-evaluator at public evaluation boundaries for interactive debugging.
-
-Local declarations override inherited policy, and proclamations affect
-subsequent compilation. SPEED, SPACE and COMPILATION-SPEED share a checked
-six-bit policy, retained through compact HIR and native module preparation.
-A conservative function summary takes the greatest SPEED and
-COMPILATION-SPEED and least SPACE of its lexical scopes. This lets a local
-speed-oriented region veto whole-function outlining. SAFETY and DEBUG retain
-their separate contracts.
-
-Inlining uses bounded source-size heuristics controlled by the caller's
-SPEED/SPACE policy. At SPEED 1, the automatic candidate, explicit INLINE
-candidate and total growth bounds are respectively 32/192/384 source nodes
-for SPACE 0, 24/160/192 for SPACE 1, 20/160/128 for SPACE 2 and 16/128/128 for
-SPACE 3. Higher SPEED permits more growth; SPACE exceeding SPEED keeps the
-default compact bounds. COMPILATION-SPEED independently bounds source scans.
-These remain source-growth estimates, not estimates of complete emitted
-module cost after simplification. INLINE encourages expansion within those
-limits and NOTINLINE vetoes it. Callee declarations remain in force, while
-expansion growth uses the caller's policy.
-=:inline nil= disables automatic small-function inlining for a module.
-The shipped compiler source policy selects SAFETY 0, DEBUG 0 and canonical
-primitive inlining for its kernels without changing user compilation defaults.
-
-** Semantic HIR and retained code
-
-=hir.lisp= represents functions, basic blocks, SSA values, lexical bindings,
-captures and explicit control transfers. Instructions retain operation,
-operands, attributes, effect classification, scoped safety and available
-origin information. Multiple-value groups are distinct from primary values.
-Dynamic bindings, nonlocal targets and cleanup regions remain explicit.
-
-HIR trust follows ownership. Source and macroexpansion inputs are checked
-before lowering. Freshly lowered graphs remain compiler-owned through
-optimization, inference and emission, without full graph validation between
-passes. Predecessor construction is separate graph maintenance and runs after
-lowering or control-flow changes. Public HIR consumers validate on entry,
-including graphs returned earlier and subsequently mutated by their callers.
-No validation certificate survives external sharing or mutation.
-Consumed declaration and THE type syntax, and retained SETF names, are
-snapshotted when admitted from shared source, before later macroexpansion or
-load-time-value callbacks can mutate that source. Opaque type arguments and
-EQL/MEMBER literal objects retain their intended sharing.
-
-The private =emit-hir-code-checked= kernel can emit executable descriptors
-directly. =hir-unit-function= transfers those fresh private containers to the
-unexported =%%hir-function-checked= runtime constructor, avoiding a wire
-serialization, validation and decoding round trip during local evaluation.
-Neither helper accepts caller-owned HIR or executable payloads as a public
-API. =emit-hir-code= and =load-hir-code= remain checked public boundaries.
-Stored code is validated and copied once on ingestion; reconstruction reuses
-that private decoded snapshot and checks externally determined native operand,
-lexical-parent, register-definition and control-flow contracts before native
-optimization. Constructed record shapes need no additional integrity scan.
-
-=hir-optimize.lisp= simplifies this semantic graph before retained-code or
-native lowering. Private cell reads can use reaching SSA values when actual
-uses exclude aliases and capture. Joins forward a value only when every
-relevant predecessor agrees. Unresolved loop-carried assignments retain their
-cells. Forwarded copies preserve their own scoped assertions rather than
-changing the asserted type of a shared source value.
-
-Conditional constant propagation solves primary-value constants and executable
-edges together. It uses constants and structural value operations, without
-executing application functions. A selected branch retains its complete value
-group and literal identity. Empty-block forwarding preserves dynamic
-environments, and changed edges refresh predecessor information. Bounded
-queries discard provisional results when their work limit is exhausted.
-
-*** Compact executable HIR
-
-=hir-code.lisp= stores each function as bytecode with block metadata, register
-operands, literal references and captures. Register IDs express identity rather
-than definition order. Instruction headers retain safety policy and function
-references retain INLINE/NOTINLINE policy. Lowering-only source environments
-and producer/predecessor structures are not retained in each executable
-instruction. Parameter metadata contains names rather than executable defaults.
-
-The checked readers are shared by HIR execution, validation, disassembly and
-native reconstruction. They reject truncated data, invalid operations,
-excessive counts and out-of-range operands. Loading privately copies executable
-containers. Native reconstruction rebuilds semantic HIR and recomputes proof
-and lowering information rather than trusting serialized analysis tables.
-
-The Wasm register interpreter resolves lexical accesses before execution,
-keeps immutable private bindings unboxed as references, constructs capture
-vectors directly and specializes primary calls. Calls with up to four
-arguments have fixed-count wire encodings; larger calls retain variable counts
-and the general application path. Full-value consumers preserve the complete
-call protocol, and debugger evaluation retains general application frames.
-
-The decoder returns instruction metadata in Wasm results and gathers operand
-IDs into reusable scratch storage before callbacks or safepoints. Public
-scratch-buffer interfaces check their own bounds. A bounded transient cache
-can retain decoded instructions for revisited small blocks; it contains IDs
-and metadata, not cached Lisp values, and is excluded from snapshots.
-
-At DEBUG below 2, actual capture and use analysis can replace nonescaping
-lexical targets with checked local jumps. Captured targets retain dynamic
-extent checks. Transfers preserve the destination environment and validate
-multiple-value packets.
-
-** Shared type and value proofs
-
-=hir-types.lisp= implements target Common Lisp relationships used by inference,
-proof queries and native lowering. It handles nominal numeric and sequence
-families, unions, intersections, =member= and =eql= types, =mod= types and
-inclusive or exclusive integer intervals. Rank and element type participate
-in array and vector proofs. A rank-one array can prove VECTOR; SIMPLE-VECTOR
-also requires a simple array with exact element type T.
-
-Opaque specifiers remain unknown. Queries do not invoke host =subtypep=,
-expand arbitrary =deftype= definitions or execute =satisfies= predicates.
-Literal members retain =eql= identity, including cyclic objects. Structural
-comparisons memoize shared type graphs. Recursion and total-work bounds make
-failure to prove a relationship conservative.
-
-=infer-hir-types= computes fresh facts for an emission. It propagates constants,
-integer ranges, assignments and joins, derives local function returns, and
-propagates argument types only through known nonescaping calls. Explicit
-entries and escaping functions account for outside callers. Unknown global
-calls keep unknown results. The worklist requests the facts needed by current
-lowering and can also answer whole-unit queries. Facts do not overwrite source
-assertions, and HIR changes require recomputation.
-Interval widening retains canonical transfer bounds from owned operand
-assertions and literals, independently of the cycle's evolving facts.
-Unknown operands still lose the range; executable-only proofs ignore assertions.
-
-*** Control-flow premises and mutable state
-
-Truth tests and canonical inlined predicates narrow values in dominated
-regions. Every incoming path must establish a premise before it passes through
-a join. Outside entries, unresolved backedges, captured landing entries,
-aliases and writes prevent unsupported propagation. Private cells can retain
-a premise until their next write; a saved boolean cannot certify a subsequently
-changed cell. Actual graph uses supply capture and alias exclusions rather
-than client-maintained binding flags.
-
-Executed truth premises also feed a separate lowering channel at every SAFETY
-level. It can remove a dominated repeated test without borrowing unchecked
-declarations. Declaration-dependent numeric simplifications retain their
-safety restrictions. Direct condition lowering uses bounded NULL/non-NIL
-proofs under the consuming instruction's policy. Unknown truth keeps the
-runtime test, and operand effects stay in place.
-
-Canonical arithmetic propagates target integer intervals and identities.
-Singleton operands can establish identity results; disjoint integer ranges
-can prove EQ or EQL false, while equal singleton numeric values prove EQL
-rather than EQ identity. Floating-point and complex values retain their
-numeric contagion and ordinary operations. Union intervals are conservative
-hulls and do not turn gaps into evidence.
-
-Fresh canonical CONS operations establish local field observations. Copies
-preserve them; unknown effects or mutations invalidate them. A matching CAR
-or CDR can forward its original operand, and unobserved fresh allocation can
-be removed when effects and errors permit it. No declared cons-field type is
-assumed stable after mutation.
-
-Proper-list proofs are separate from the Common Lisp LIST type, which also
-includes dotted and circular conses. Bounded emission-local facts from NIL,
-fresh LIST construction, CONS with a proved proper tail, and successful checks
-can remove redundant APPLY
-list checks. Unknown effects discard mutable-spine facts. These facts are not
-persistent shape annotations.
-
-*** Exact multiple-value counts
-
-Result cardinality is independent of primary-value types. The result-count
-analysis distinguishes zero values from one NIL value and derives exact counts
-from executable VALUES groups, copies, equal-count joins and proved closed
-callees. Read-only function-cell identity comes from actual initialization,
-writes and use analysis, not descriptive local metadata or declarations.
-Unknown calls, unresolved cycles, captured barriers and exhausted work retain
-unknown counts.
-
-Native multiple-result workers are selected for eligible fixed-arity functions
-with zero through four arguments and a proved result count of two through
-four, with an actual correctly sized closed caller. The callee must satisfy
-the DEBUG 0 effect-safe local-call contract. Bootstrap and the host runtime
-kernel linker retain their separate ordinary/single-result worker contracts.
-
-The private body returns native Wasm results. SSA component locals and value
-demand let primary, full-value, tail and join consumers use those results
-without constructing a list. Checked public entries and ordinary direct ABI
-adapters pack values at general boundaries. The compiler does not reinterpret
-an arbitrary funcref from descriptor metadata. If rewriting cannot preserve
-the signature, emission retries with ordinary result lowering.
-
-** Native Wasm lowering
-
-=wasm-compiler.lisp= emits shared modules containing initializers, functions
-and closures. Runtime Lisp value slots use WasmGC =eqref=. Generated native
-module adapters use reference parameters for linking and convert at the runtime
-boundary; raw numeric locals are distinct from this Lisp reference ABI.
-Function objects retain literal pools, captures, entry identity and available
-debug information.
-
-*** Calls, closures and entries
-
-Public native entries use a checked function-and-argument-packet convention.
-Eligible fixed-arity functions with up to four arguments also have private
-workers accepting the function context and four reference operand slots.
-Thin checked adapters preserve public arity behavior. Multi-entry modules can
-share the public adapter, and verified argument-use masks avoid unnecessary
-extraction. The physical worker convention is not a general wide-argument ABI.
-
-General calls with a primary-only or discarded result use the checked
-=native-primary-call= adapter. It retains ordinary application and clears
-secondary values after success, without constructing a result list. Unknown
-return cardinality does not prevent this consumer-based lowering. Complete
-value-group consumers retain =native-call= and its full result representation.
-
-Known closed calls can use direct workers when their argument and result
-contracts agree. A bounded DEBUG 0 effect analysis permits frame omission only
-for eligible bodies without dynamic cleanup or tail-frame replacement. Unknown
-calls, dynamic state, captured exits and debugger-visible cases retain ordinary
-runtime dispatch. Scheduler checkpoints and required value-state cleanup remain.
-
-A deferred frame-omission experiment admitted ordinary non-tail calls and
-bounded, transitively proved private tail calls. On the same 289 original
-compiler definitions in one sealed bootstrap module, admitted exact-arity
-sites rose from 8 to 559, but emitted size grew from 277867 to 281675 raw bytes
-(gzip 80925 to 81878; Brotli 65585 to 66260). The five changed compiler helpers
-also grew by 1064 bytes when emitted together. Shared =native-callN= dispatch
-already has a compact call site; direct workers add checkpoints, unused operand
-slots and potentially wider function indices. Broader eligibility alone is
-therefore deferred. Investigate worker/adapter retention and compact calling
-conventions before expanding the default policy; throughput benefits remain
-unmeasured and require a separate speed-policy evaluation.
-
-Small local functions can inline into their caller with their original lexical
-environment. Argument expressions are evaluated before the body. Escaped or
-recursive functions retain entries; unreferenced local function objects and
-bodies can disappear. Identical bodies can share code while preserving distinct
-function objects, literals and captures.
-
-Immutable captured values are stored directly; mutable captures share heap
-cells. Closures whose captures already belong to the parent can reuse a bounded
-per-parent cache. Captures owned by the current invocation retain distinct
-vectors. Global calls resolve the current function binding. Literal/function
-lookup fusion preserves the resolution point before operand effects; caching
-an immutable function name does not cache its current definition.
-
-Canonical INLINE lowering checks the selected primitive definition at emission
-and shares that snapshot with proof queries. An existing replacement is not
-mistaken for the builtin. Ordinary and NOTINLINE calls retain dynamic lookup;
-ordinary specialized runtime helpers guard the resolved function object and
-fall back for replacements.
-
-Method specializers are not unconditional body type declarations. The public
-=METHOD-FUNCTION= adapter reaches the same body without generic applicability
-selection: direct calls to an INTEGER-specialized method can pass a string,
-and EQL-specialized methods can receive a different object. Saved specializers
-retain class-object identity when =FIND-CLASS= names are rebound; =CHANGE-CLASS=
-inside a callback also invalidates a class fact established on body entry.
-Future private specialized entries need guarded ingress, class-object facts
-and mutation/redefinition invalidation, while retaining ordinary escaping
-method functions. Speculative class candidates can retain exact runtime guards,
-but final native recipes currently discard transient generic-call plans.
-
-*** Tail calls and dynamic control
-
-A call whose complete value group flows directly to return can use Wasm
-=return_call= and the runtime's =return_call_ref= dispatch. This covers known
-lexical calls and computed native callees, including the builtin FUNCALL,
-APPLY and MULTIPLE-VALUE-CALL paths. Global redefinition, argument order,
-multiple values and checks remain observable.
-
-Calls with zero through four operands share fixed-arity tail helpers. A guarded
-native worker, or an eligible recent generic plan with at most three operands,
-receives the operands directly; other targets allocate the ordinary argument
-packet. The helpers retain live function selection, debugger entry, complete
-values, frame replacement and cooperative checkpoints. This reduces both code
-and allocation at the caller without duplicating dispatch machinery.
-
-Tail lowering is restricted by active dynamic bindings, captured nonlocal
-targets and DEBUG policy. Branch-local scopes do not inhibit unrelated calls.
-Outer cleanup and handler scopes retain their semantics. Interpreted and other
-unsupported callees use the ordinary application path.
-
-Dynamic calls preserve package, special-variable, handler, restart, catch and
-target state as required by their runtime wrappers. Backtrace identity and
-nonlocal cleanup remain explicit. Connecting a debugger alone does not disable
-all optimized tail calls; debug-enabled callees retain their interactive entry.
-
-*** Integers and scalar operations
-
-Integers use canonical target representations: signed i31 immediates, boxed
-signed-i64 scalar objects, and larger immutable sign/magnitude digit arrays.
-Target FIXNUM spans signed i64; BIGNUM covers other integers. Promotion and
-demotion follow values. Arithmetic does not silently wrap, and bit operations
-retain infinite two's-complement semantics.
-
-Proved signed-i64 computations can stay in numeric locals. Copies and primary
-extraction share the raw result; reference consumers materialize canonical
-Lisp integers. Multiple reference uses can share a box. Repeated immutable
-argument reads can cache an unboxed value at the original dominating read.
-Private cells can use numeric storage only when their initializer and every
-write prove a scalar integer and actual uses exclude escape or capture. Reads
-retain separate SSA snapshots so later stores cannot change earlier values.
-Unknown writes, debugger-visible state and captured entries retain references.
-Block parameters and ordinary private-call arguments retain the reference ABI.
-
-At SAFETY 0, canonical arithmetic and integer predicates can lower directly
-when operand and result proofs justify the instruction. Overflow checks remain
-where results can exceed signed i64; a FIXNUM operand declaration alone does
-not exclude bignum results. Ordinary scalar helpers guard the actual builtin
-and retain generic fallback. The shared native-call2 dispatcher also uses
-=br_on_cast_fail= for canonical ~+~ and ~<~ with actual i31 operands: the sum
-fits signed i32 and passes through canonical integer boxing/promotion.
-
-ASH uses target interval rules for counts and results. Safe one-sign scalar
-count ranges can use direct shifts; large right shifts saturate to sign rather
-than taking Wasm's masked count. Left shifts require a fitting result proof.
-LOGNOT complements and reverses interval endpoints. General shifts and wider
-integers retain arbitrary-precision helpers. Nonnegative division lowering
-requires proofs excluding division traps and rounding adjustment.
-
-*** Primitive, list and vector lowering
-
-Canonical predicates can use direct tag tests or raw integer conditions.
-Unobserved predicate results can feed branches without constructing a Lisp
-boolean; observed results keep their value and multiple-value behavior.
-Adjacent repeated nontrapping predicates can share results for identical SSA
-operands within a bounded effect-safe region.
-Canonical CHARACTERP shares the same dead-result, predicate-reuse and
-loop-invariant rules as the other immutable type predicates. Rebinding or
-reading mutable operands still prevents reuse of a stale result.
-
-Inline LIST constructs a fresh spine for its evaluated primary arguments.
-Canonical inline LIST* uses the same shared cons helpers for a fresh prefix,
-retaining its final arbitrary object as the tail. One argument forwards its
-primary value; two arguments reuse CONS and its field proofs. Zero arguments
-retain ordinary arity rejection, and NOTINLINE retains ordinary calls.
-List emission shares tail-first allocation helpers across argument packets,
-value groups and canonical list construction. Operand order and fresh cell
-identity remain intact. Literal-lambda APPLY and single-producer
-MULTIPLE-VALUE-CALL can lower into checked local bindings for supported lambda
-shapes; proper-list and arity validation precede unchecked reads. A sole
-=&rest= parameter can share APPLY's final list under its ordinary contract.
-
-Typed CAR/CDR and simple-vector operations use direct or specialized entries
-under their applicable safety and canonical-definition contracts. General
-sequence operations retain sequence validation and fill-pointer behavior.
-Hash access selects a primary-only entry when the presence value is unused,
-otherwise retaining the full result. Setter, default and operand effects keep
-their order. Character and array services retain checked representation and
-index handling at their boundaries. VECTOR-PUSH operations use direct append
-when capacity permits and the ordinary growth path otherwise.
-
-*** Control layout and loop motion
-
-Acyclic CFGs lower to nested blocks and forward branches. Reducible natural
-loops can use structured Wasm loops after bounded dominance, predecessor,
-nesting and topology checks. Crossing or irreducible regions, captured landing
-entries and exhausted queries retain dispatch. Remaining cyclic control flow
-uses dense dispatch targets for required backward and nonlocal entries;
-forward edges branch directly or fall through. Transfers preserve block
-arguments and dynamic environments, and backedges retain scheduling polls.
-
-Loop-invariant motion moves only supported canonical nonallocating operations
-whose operands dominate the selected placement. Scoped assertions inside a
-loop cannot justify speculation before it. Integer operations require fitting
-ranges; arithmetic motion additionally excludes numeric allocation. Mutable
-heap reads, arbitrary calls and general value groups remain in place.
-Immutable capture-slot addresses may move, while mutable contents stay in the
-loop. All such plans are temporary lowering data with bounded work.
-
-** Wasm optimization and module compaction
-
-=wasm-optimizer.lisp= supplies the shared native size and local passes. It
-computes CFG liveness, coalesces compatible noninterfering locals, folds copies,
-uses =local.tee= for adjacent stores and loads, and stackifies single-use values
-without moving or duplicating computations. Handler-bearing functions retain
-conservative local state. Numeric dispatch locals and typed non-defaultable
-references keep their required positions and initialization properties.
-
-The liveness solver summarizes blocks, reuses topology and iterates cyclic
-regions to a fixed point. Interference uses integer masks. Native decoder,
-liveness, stackification and instruction-simplification kernels execute in
-Wasm over the shared records; portable Lisp implementations support host
-compilation and unsupported encodings.
-
-Constant simplification uses exact Wasm integer wrapping, signed/unsigned
-comparisons and masked shifts. It folds supported null tests and constant
-branches, discards nontrapping unused producers, removes unreachable suffixes
-and untargeted void scopes, and rewrites affected branch depths. Division,
-conversions and trapping GC operations retain their effects. Exception and
-reference-cast branch scopes are handled conservatively.
-
-Literal caching is restricted by retained-frame pressure and profitability.
-Functions with retained calls or signaling/reentrant operations rematerialize
-literals. Eligible private workers can cache bounded immutable references;
-failed worker rewriting re-emits the general body without speculative caches.
-Immediate constants and dead instructions do not acquire cache slots.
-
-Module compaction pools literals, coalesces equal bodies, removes unreachable
-functions and imports, and relocates calls, function references, exports and
-element entries. It orders retained imports and eligible function bodies by
-use. Literal/function helper fusion prices complete section and index-width
-costs, not just instruction pairs. Adjacent null/CONS wrapping can reuse an
-already retained CELL helper when its encoded module cost permits it.
-
-Runtime imports use the =m= namespace with the common =native-= field prefix
-omitted. The adapter binds aliases to actual runtime function and exception
-objects. Current named factories and compact multi-entry tables are selected
-by complete section cost. Compact descriptors encode direct arity and argument
-usage; loading validates descriptor extent, table bounds and actual signatures
-before attachment. Arbitrary funcrefs are not cast from descriptive metadata.
-
-=wasm-module-optimizer.lisp= adapts the same body passes to host-built runtime
-modules. It decodes signatures and stack effects while preserving externally
-shared GC types and function signatures. Unsupported bodies remain unchanged.
-Host runtime WAT reachability separately removes unreferenced named functions
-while preserving exports, imports, start, elements and other external roots.
-Uncertain syntax or numeric references retain the original text.
-
-** Whole-program definitions and reachability
-
-=compile-file= records a =:miricl-ir= extension describing definition roots,
-references, effects and reflection barriers. Names use target package/name
-strings, including distinct SETF names. Standard defining forms are recognized
-before macroexpansion, and residual registration forms remain grouped with
-their definitions. Class/structure details retain target names, slots and
-inheritance. MAKE-LOAD-FORM and LOAD-TIME-VALUE recipes contribute their own
-dependencies and ordered effects.
-
-=analyze-file= reconstructs =ir-program=, =ir-unit= and =ir-node= records without
-loading the application. Entry points and explicitly retained definitions form
-the public root set; package exports alone do not root every definition.
-Calls, function values, symbol designators, globals and class/type references
-create dependency edges. A reachable generic retains its supplied methods.
-Extensions to runtime generics account for reachable supplied specializers,
-and generated structure accessors retain their owning definitions.
-
-Unknown initialization effects stay ordered roots. Observable class and
-metaclass initialization, shared slots, EQL-specializer evaluation and
-load-time object creation remain live. Literal initializers can permit unused
-bindings to disappear. Unbounded reflection or missing metadata conservatively
-retains the supplied program. Lexically uncalled local function bodies do not
-create spurious global edges; taking a local function as a value retains it.
-
-=shake-file= and =optimize-system= combine definition reachability with graph
-compaction. =:strip nil= retains all supplied definitions while still compacting
-representation; =:strip t= uses the selected root/dependency graph. This does
-not remove arbitrary facilities from the native runtime substrate.
-=compile-native-bundle= emits native initializers and closures. With =:load t=,
-each initializer executes before the next unit is decoded, preserving package,
-class, function and load-time dependencies.
-
-** Compiled files, native bundles and images
-
-=fasl-format.lisp= encodes independent indexed units in =miricl.fasl= custom
-sections. The current header contains the =MIRF= magic, flags, object count and
-chunk directory. Ordered root IDs, object blocks and optional analysis or
-definition indexes are separate chunks. =:index-definitions t= retains the
-optional definition index. Normal loading skips analysis metadata and decodes
-object blocks eagerly.
-
-Object edges are unit-local IDs, preserving sharing and cycles across blocks.
-Compact cons runs retain cell flags and final tails. Strings use checked chunk-
-local dictionaries, whole-string references, Unicode prefix/suffix encodings
-or byte-valued storage when appropriate. Directory offsets, extents, tags,
-counts and references are checked before use. Compiler and runtime consume
-the current format; generated-artifact compatibility across versions is not
-part of the format contract.
-
-Graph layout pools common atoms and lays out list spines before their CAR
-subgraphs. File compilation canonicalizes resolved lexical variable and local
-function names so equivalent immutable code can share permitted subgraphs.
-Quoted objects, uninterned symbols, cyclic structures, mutable load-time values
-and creation records retain the identities required by Common Lisp. Repeated
-top-level roots remain ordered evaluations even when code is shared.
-
-Native units share a module across their entries while preserving distinct
-literal vectors and function objects. The adapter instantiates shared modules
-once and retains the current entry-table or factory metadata needed to restore
-native functions. Saved images contain the linked runtime and reachable Lisp
-state, including module bytes, literal sharing and mutable captures. The codec
-checks current layout, field, array, reference and native-entry boundaries.
-Transient scheduler and decoded-code caches are not persistent roots.
-
-Bootstrap source packing is separate from public FASLs. It uses image-local
-symbol/list-prefix and integer dictionaries, checked string references and
-references to completed bounded subforms. Replay reconstructs fresh objects,
-checks reference bounds and work limits, and does not retain decoding tables
-through library evaluation. Runtime kernel linking and bootstrap packing use
-target symbol identities rather than host-private names.
-
-** Runtime integration
-
-The runtime combines representation/platform WAT with ordinary CL kernels
-compiled through the shared compiler. Public list, array, stream, package and
-metadata services validate their structures before unchecked kernel traversal.
-Runtime expansion kernels construct stream and iteration forms while retaining
-declaration order, lexical hooks, evaluation order and multiple values.
-
-Sequence fill, region copying, subsequence copying, concatenation and character
-scanning already use portable CL kernels. The remaining native sequence-length
-adapter is representation glue worth retaining until equivalent CL lowering is
-efficient. A measured portable =sequence-length-or-invalid= prototype used
-=array-has-fill-pointer-p=, =fill-pointer= and =array-total-size= to avoid the
-current =length= inline primitive's dependency on =proper-sequence-length=.
-In paired diagnostic images, warmed direct helper calls slowed by 9.54 times
-for simple vectors and 25.1 times for fill-pointer vectors; a 128-element list
-slowed by 5.8 percent. The portable image grew by 396 raw bytes and 90 gzip
-bytes. These are helper measurements, not application throughput measurements.
-Generated code repeatedly used generic array accessor calls, while equivalent
-SBCL code accessed vector metadata directly. Generic specialization or an
-independent native vector-length substrate could enable this port without
-duplicating sequence algorithms. Keep the current native adapter until that
-path is measured; moving representation checks to CL alone is not a size win.
-
-Small interpreter VALUES groups use primary, secondary and tertiary slots
-plus native result tuples. Overflow values use an owned checked list; legacy
-consumers materialize it lazily. MVB, NTH-VALUE and MVPROG1 capture or preserve
-the complete representation across callbacks and unwind. Public VALUES-LIST
-checks proper spines and snapshots aliases.
-
-Ordinary interpreted calls keep their first two evaluated arguments in native
-results. The collector follows each source CDR after evaluating its CAR;
-wider calls use checked owned overflow collection. Saved single-value builtins
-can use the shared fixed-call consumer without an intermediate argument list.
-Lexical replacements, post-operand global replacement, debugger mode and full-
-value functions retain ordinary application semantics. Direct VALUES uses its
-separate small-form snapshot rule.
-
-Lexical variables share mutable cells through binding views and environment
-lists. Type declarations can create distinct views sharing one value cell.
-Special variables, symbol macros, debugger names and captured targets retain
-their own runtime handling. Generic dispatch uses live method/function,
-version, cache, class and MOP checks; a private next-method context object is
-retained by nested and escaped CALL-NEXT-METHOD closures.
-Native standard method bodies share the direct-body adapter path while retaining
-that context, complete values and unwind cleanup. Their externally callable
-method functions keep the two-argument protocol.
-Generated accessors can reuse a proved slot plan when inherited primary methods
-follow them. Their next-method spines remain checked, and the same slot protocol,
-layout and redefinition guards control the specialization.
-
-DEBUG 3 compact HIR records the visible binding names and active control
-targets at each step site, including otherwise unused lexical cells. Frame
-evaluation shares those cells with program closures and retains lexical macro
-and symbol-macro expansion environments. Debugger assignments check declared
-types before changing cells, including assignments compiled inside escaping
-frame-created closures. RETURN-FROM and GO use the existing target tokens and
-dynamic cleanup machinery. Native Wasm does not yet carry equivalent stepping
-instrumentation.
-
-The shipped native compiler also compiles =hir-debug-check-write=, which
-runtime-generated HIR closures call for checked assignments. Its ordinary
-=TYPEP= and =ERROR= calls remain live; compiling the helper changes neither
-the assignment checks nor the debugging policy.
-
-Debug frames expose snapshots of scope metadata and selected cells rather
-than the executable register and capture arrays. Loading retained HIR copies
-and validates binding metadata and rejects invalid or circular debug ancestry.
-Literal object identities remain shared. The source evaluator still handles
-bootstrap, NIL evaluation, source closures and macro preparation; moving the
-debugger and portable compiled-file execution to HIR does not make it removable.
-
-=miricl:float-bits= and =miricl:bits-float= expose checked IEEE bit conversion.
-They preserve the selected single/double representation; ordinary arithmetic
-and readable printing retain their nonfinite-value rules. Compiled-file
-nonfinite literals use the existing load-time creation representation.
-
-** Source map and inspection
-
-- =compiler-input.lisp=: source/type/shape validation and bounded diagnostics.
-- =hir.lisp=: semantic frontend, declarations, binding identities and HIR checks.
-- =hir-code.lisp=, =hir-interpreter.lisp=, =hir-reconstruction.lisp=: retained
-  bytecode, execution, decoding and semantic reconstruction.
-- =hir-types.lisp=: target relationships, flow inference and result-count proofs.
-- =hir-optimize.lisp=: private-cell forwarding, constants, CFG and list facts.
-- =wasm-compiler.lisp=: native planning, lowering, module assembly and bootstrap.
-- =wasm-optimizer.lisp=, =wasm-module-optimizer.lisp=: shared Wasm body passes and
-  host module adaptation.
-- =wasm-disassembly.lisp=: listings of actual emitted native bodies.
-- =whole-program.lisp=, =fasl-format.lisp=: definition IR, reachability, object
-  graph compaction, bundle generation and indexed serialization.
-- =cross-compiler.lisp=: host target adapters and checked runtime-kernel linking.
-- =evaluation-library.lisp=, =compiler-library.lisp=: evaluation policy and file
-  compilation integration.
-- =runtime-hir.lisp=, =runtime-native-code.lisp=, =runtime-values.lisp= and
-  =scripts/miricl.mjs=: execution and native installation/image boundaries.
-
-DISASSEMBLE supports retained HIR without defining source forms or an optimizing
-compiler. It prints blocks, registers, captures, instructions and available
-names/types. DEBUG 2 native functions retain module bytes for native listings;
-=miricl-compiler::disassemble-native= also accepts emitted bytes and an actual
-function index without changing compilation policy.
-
-ANSI tests exercise interpreter and native language behavior. Focused core
-checks cover compiler-input rejection/recovery, proof and redefinition
-contracts, native/module loading, serialization and implementation boundaries.
-Optimization checks cover behavior such as deep tail calls, values/effects,
-safe inlining and retained recursive frames. WASI runtime checks remain
-separate from optimization checks requiring dynamic native instantiation.
+MIRICL shares a Common Lisp frontend, target type rules, semantic optimizer and Wasm emitter
+between the compiler running inside Wasm and host bootstrap tooling. Compact HIR also supplies
+portable execution. Whole-program analysis retains reachable definitions and ordered
+initialization effects, then emits portable or native bundles. This document describes current
+mechanisms and interfaces; AGENTS.md supplies project-wide semantics and development rules.
+
+** Interfaces and bootstrap
+
+=compile-to-hir= lowers a lambda to semantic HIR; =compile-hir= produces an interpreted
+function. =emit-hir-code= and =load-hir-code= expose checked retained code.
+=emit-native-module= emits Wasm, literals and available debug metadata. =compile-native=
+compiles and instantiates a lambda; =compile-native-hir= compiles retained HIR without
+reconstructing source.
+
+=compile-module-to-hir= accepts DEFUN forms and explicit entry points. =compile-native-module=
+returns entry functions, bytes and HIR for a sealed module without changing global bindings.
+Internal calls and FUNCTION references resolve lexical definitions; symbol designators retain
+global lookup. Top-level evaluation and loading remain separate operations.
+
+=miricl-compiler:*compile-evaluations*= controls REPL, EVAL and source LOAD boundaries. Native
+policy compiles executable forms while processing top-level PROGN, EVAL-WHEN, definitions and
+environment changes in order. Explicit =:interpreted= and DEBUG 3 use checked HIR execution.
+NIL retains the source route for bootstrap and remaining lexical adapters. A guard prevents
+compiler preparation from recursively compiling itself. Macro expansion and load-time
+evaluation use target objects and dynamic bindings; failures propagate.
+
+=miricl.wasm= links the precompiled compiler and starts =:ready= with origin =:image= .
+=miricl-cold.wasm= retains the source compiler for interpretation and bootstrap.
+=miricl-interpreter.wasm= supports scripting, portable code and native module loading without
+the optimizing compiler. The source evaluator still serves bootstrap, NIL evaluation, source
+closures and macro preparation. ASDF is loaded explicitly. The default browser image must
+remain below 1 MiB raw; compressed download size is a separate concern.
+
+The required bootstrap runs the compiler interpreted inside Wasm, compiles its kernels, and
+compiles its definitions into a sealed native payload with shared literals and lexical
+bindings. =ensure-compiler= coordinates requests, records failure or completion, and avoids
+recursive bootstrap. Explicit =:interpreted= state preserves live source definitions.
+Node/browser adapters instantiate emitted modules; WASI executes linked code and portable
+FASLs but cannot load generated native code dynamically.
+
+=miricl/cross= loads the same frontend, proofs and emitter on the host without a guest
+bootstrap. =miricl-cross:compile-lambda= emits target bytes, literals and debug metadata;
+=compile-module= also returns HIR. They neither install host definitions nor execute target
+code. Target macro and LOAD-TIME-VALUE adapters are explicit; host expansion and EVAL are not
+target semantics.
+
+** Frontend, ownership and policy
+
+The frontend assigns identities to lexical bindings, functions and control targets. FLET uses
+the outer function environment; LABELS shares recursive bindings. Lambda normalization
+preserves initialization order, declarations, optional/keyword processing, supplied-p
+variables and argument checks. TYPE and THE attach scoped assertions; nested assertions
+intersect and rebinding creates a new identity. FTYPE result types do not prove value counts.
+
+Untrusted source, macroexpansions, public HIR and serialized data are validated before
+unchecked internals: structure, cycles, names, types, ownership, bounds, SSA dominance and
+control edges. Literal graphs may share or cycle where permitted. Diagnostics identify
+offending input with bounded summaries. Fresh compiler-owned HIR need not be revalidated
+between passes, but changed edges require predecessor maintenance. Public consumers validate
+on every entry; no certificate survives external mutation. Admitted declaration/type syntax is
+snapshotted before callbacks can mutate shared source; literal identities and opaque type
+arguments retain their intended sharing.
+
+SAFETY and DEBUG retain lexical scope through deferred work and inlining. SAFETY 0 permits
+declaration-based unchecked lowering without bypassing public validation. DEBUG 0 permits
+eligible frame omission; DEBUG 2 retains native listings; DEBUG 3 selects interactive HIR.
+SPEED, SPACE and COMPILATION-SPEED are retained separately from those contracts.
+Whole-function policy summaries let local speed-oriented regions veto outlining. The compact
+deployment policy is =(optimize (space 3) (speed 1))= ; STRIP and visibility remain explicit.
+
+Inlining uses the caller's growth policy while preserving the callee's lexical bindings,
+declarations, SAFETY and DEBUG. INLINE encourages bounded expansion; NOTINLINE vetoes it;
+=:inline nil= disables automatic module inlining. The current estimator weights residual
+calls, argument/result traffic, literals, indices and adapters, and prunes IF arms for narrow
+literal-argument facts. It assumes out-of-line bodies remain and gives no sole-call removal
+bonus. This is a weighted approximation, not exact complete-module costing. Original syntax,
+nesting, total work and growth are bounded; opaque forms, macros and unsupported literals
+decline estimation. It does not expand macros or execute user code. COMPILATION-SPEED controls
+work independently of growth policy.
+
+** Semantic HIR and proofs
+
+HIR contains functions, blocks, SSA values, cells, captures and explicit transfers.
+Instructions carry effects, scoped safety and available origins; multiple-value groups remain
+distinct from primary values. Dynamic bindings, cleanup regions and nonlocal targets are
+explicit. Retained bytecode keeps register identity, block metadata, literals, policy and
+captures while omitting lowering-only source environments and producer structures.
+
+Checked readers serve execution, disassembly and native reconstruction. Loading copies
+executable containers once into private storage. Reconstruction checks externally determined
+operand, parent, register and control contracts, then recomputes analysis. Private
+=emit-hir-code-checked= and =%%hir-function-checked= avoid a serialization round trip only for
+fresh owned containers; public emission and loading remain checked. The interpreter has fixed
+small-call encodings, primary-call specialization and a bounded transient decoding cache
+excluded from snapshots. Full-value and debugger calls retain their general protocols.
+
+=hir-types.lisp= shares target relationships across inference, proof queries and lowering:
+nominal families, unions/intersections, EQL/MEMBER, MOD, integer intervals, array rank and
+element types. Opaque types remain unknown; proofs do not call host SUBTYPEP, expand arbitrary
+DEFTYPE or execute SATISFIES. EQL identity and cyclic literal handling remain intact.
+Depth/work limits yield no proof on exhaustion. Fresh inference propagates local values,
+ranges, joins and closed-call arguments/returns while accounting for outside callers at
+entries and escapes. HIR changes invalidate dependent facts.
+
+Dominated truth tests and canonical predicates narrow values only across paths that establish
+the premise. Aliases, writes, captured landings and unresolved entries prevent unsupported
+propagation. Executed truth facts are available at every SAFETY level; unchecked declarations
+retain their own restrictions. Arithmetic uses target intervals, contagion and bignum
+promotion. Fresh CONS field observations and proper-list facts are temporary and invalidated
+by mutation or unknown effects; LIST alone never proves a proper spine.
+
+Semantic simplification forwards unaliased private cells, propagates constants and executable
+edges, forwards empty blocks and preserves scoped assertions. Bounded branch-tail sharing
+sinks matching suffixes of exclusive sibling arms in an acyclic graph, with identical dynamic
+environments and corresponding SSA operands, literal/type identities and safety. It excludes
+environment/capture changes and never moves work before an arm's prefix. The losing suffix
+remains unreachable retained-HIR producer inventory: native reachability drops it, but
+portable bytecode need not shrink.
+
+** Native values, calls and control
+
+Lisp values use WasmGC =eqref= ; raw numeric locals remain separate. Function objects retain
+literals, captures, entry identity and available debug metadata. Public entries check a
+function-and-argument packet. Eligible fixed-arity private workers use five reference
+parameters: function context plus four operand slots. Checked adapters retain public arity
+behavior and verify actual signatures before attachment; metadata never authorizes casting an
+arbitrary funcref. This is not a variable-width or general wide-argument ABI.
+
+Known exact calls reuse private argument-use masks to omit unused value roots and pass NIL in
+unused physical slots. Producer effects, errors and evaluation order remain live. A bounded
+closed-use audit can trim private returns to their primary value, excluding roots, exports,
+escapes, captures, full-value uses, barriers and debugger/custom-worker contracts. Scalar
+VALUES then roots only its first operand; discarded producers still execute when observable.
+Analysis is emission-local, avoids recursive mask planning and invalidates affected caller
+plans. Public and escaping entries retain complete values.
+
+Result-count proofs independently distinguish zero values from one NIL. Executable VALUES,
+copies, equal-count joins and proved closed calls can give exact counts; FTYPE cannot.
+Eligible DEBUG 0 fixed-arity callees with a proved small result tuple and actual closed
+consumers can use native multiple-result workers. Primary/full/tail/join consumers use
+component locals; ordinary boundaries pack values. Failed signature-preserving rewriting falls
+back. General primary/discard calls use =native-primary-call= and clear secondary state after
+success; full consumers retain =native-call= .
+
+Direct closed calls and frame omission require the applicable effect/debug contract. Dynamic
+state, cleanup, captured exits and unknown calls retain ordinary dispatch. Global calls
+resolve live bindings at the required point; operand effects cannot be moved across
+resolution. Canonical INLINE lowering checks the selected primitive, and ordinary
+specializations guard replacements with generic fallback. Method specializers alone are not
+body type assertions: public METHOD-FUNCTION calls bypass generic applicability, and class/MOP
+changes invalidate unguarded class assumptions.
+
+Tail calls whose complete group flows to return use Wasm tail-call operations for supported
+lexical and computed native callees, including FUNCALL/APPLY/MVC. Checks, global redefinition,
+values, dynamic cleanup and scheduler polls remain. Unsupported calls use ordinary
+application. Immutable captures can be direct; mutable captures share cells. Distinct function
+objects and required capture identities survive body sharing and closure caching.
+
+Integers are canonical i31 immediates, boxed signed-i64 values or larger sign/magnitude
+integers; target FIXNUM spans signed i64. Proven scalar work can stay raw and share canonical
+boxing. Overflow, large shifts, division traps and infinite two's-complement semantics retain
+checks or general helpers. Private numeric cells require proofs for every write and no
+capture/escape; reads keep SSA snapshots. Predicates can feed branches directly; bounded reuse
+and loop motion require stable operands and nontrapping canonical operations. Typed
+list/vector operations retain safety, definition and boundary contracts; LIST/LIST* preserve
+fresh spines and operand order. APPLY/MVC binding rewrites check proper lists and arity before
+unchecked reads.
+
+Acyclic regions use forward structure; proved reducible natural loops use Wasm loops.
+Irreducible, captured or exhausted cases retain dense dispatch. Transfers preserve block
+arguments/environments and backedge scheduling. Native body passes perform liveness, local
+coalescing, copy/constant folding, stackification and scope simplification without moving
+effects or traps. Shared Lisp and Wasm kernels implement these passes. Module compaction pools
+literals, merges equal bodies, removes unreachable code/imports and relocates all references.
+Helper fusion and factory/table selection price encoded section costs. Runtime imports use
+namespace =m= and omit the =native-= field prefix.
+
+** Whole-program artifacts and runtime
+
+COMPILE-FILE records =:miricl-ir= definitions, references, effects and reflection barriers.
+=analyze-file= reconstructs definition IR without loading application code. Explicit
+entries/retention root reachability; package exports alone do not. Calls, designators,
+globals, classes, methods and load-time recipes add dependencies. Unknown initialization and
+observable creation remain ordered roots; missing metadata or unbounded reflection
+conservatively retains code. =shake-file= and =optimize-system= combine reachability with
+graph compaction. =:strip nil= retains supplied definitions; it does not disable
+representation compaction. =compile-native-bundle= emits initializers/closures, and =:load t=
+executes each initializer before decoding the next dependent unit.
+
+=fasl-format.lisp= writes indexed units in =miricl.fasl= custom sections with =MIRF= headers,
+roots, object blocks and optional analysis/definition indexes. Unit-local references preserve
+sharing/cycles. Checked directories, extents, counts, tags and references precede use.
+Canonical lexical naming and graph pooling preserve quoted, uninterned, mutable and load-time
+object identities. Native units share modules while keeping distinct literals/function
+objects. Images retain reachable Lisp state, native bytes and captures, excluding transient
+scheduler/decoder caches. Only matching current formats are supported. Bootstrap source
+packing is separate, bounded and checked, and uses target symbol identities rather than
+host-private names.
+
+Runtime CL kernels compile as sealed groups above representation/platform WAT. The kernel
+linker checks dependencies, ownership, captures and signatures; public validation precedes
+unchecked traversal. Fixed-callback proofs require immutable private ingress and reject
+replacement, capture, escape or unknown provenance. List/sequence/stream/package/metadata
+kernels share compiler sources; remaining representation adapters stay native until equivalent
+lowering is suitable. Host tooling is not a shipped runtime dependency.
+
+Runtime multiple values use small slots/native tuples and checked owned overflow storage,
+preserving full values across callbacks and unwind. Lexical binding views share mutable cells.
+Generic dispatch retains live method, version, class and MOP guards and escaped next-method
+context. HIR debugging shares visible cells with closures, checks declared writes and uses
+ordinary nonlocal cleanup. Frame metadata is copied/validated; executable arrays are not
+exposed. Native Wasm does not yet provide equivalent stepping instrumentation.
+
+** Source map and validation workflow
+
+- =compiler-input.lisp=, =hir.lisp=: validation, frontend, declarations and HIR.
+- =hir-types.lisp=, =hir-optimize.lisp=: target proofs and semantic transforms.
+- =hir-code.lisp=, =hir-interpreter.lisp=, =hir-reconstruction.lisp=: retained code.
+- =wasm-compiler.lisp=: native planning/emission and compiler bootstrap.
+- =wasm-optimizer.lisp=, =wasm-module-optimizer.lisp=: body/module passes.
+- =whole-program.lisp=, =fasl-format.lisp=: definition IR, bundles and codec.
+- =cross-compiler.lisp=: target adapters and runtime-kernel linking.
+- =evaluation-library.lisp=, =compiler-library.lisp=: evaluation/file integration.
+- =runtime-hir.lisp=, =runtime-native-code.lisp=, =runtime-values.lisp=,
+  =scripts/miricl.mjs=: runtime execution, installation and image boundaries.
+
+Iterate in persistent source-compiler Wasm and host cross-compiler REPLs, then confirm with
+matching precompiled images and application checks. Sealed native callers may retain old
+definitions after global redefinition. Runtime/import changes require matching images; host
+reloads must refresh packed source catalogues as well as image caches. Layout/registration
+changes require a fresh image check. DISASSEMBLE handles retained HIR; =disassemble-native=
+accepts emitted bytes and actual function index without changing policy.
+
+ANSI covers language behavior in interpreter/compiler modes. Focused soundness, optimization
+and implementation suites cover rejection/recovery, proofs, redefinition, values/effects, tail
+calls, codecs and platform boundaries. WASI runtime tests stay separate from dynamic-code
+optimization requirements. Gate analysis on eligible consumers, count its own shipped cost,
+and avoid broad frameworks without representative measured return. Compare a fixed original
+source corpus without installing successive compiler generations; keep experiment
+drivers/results temporary and report bootstrap, native throughput, application behavior and
+raw/compressed sizes separately.

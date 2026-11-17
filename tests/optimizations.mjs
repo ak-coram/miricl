@@ -212,6 +212,67 @@ try {
                  (equal effects '(1440 240 40))))))))`);
   console.log('Optimizations: whole-module outlining reduces repeated code and preserves callback effects and multiple values.');
 
+  // ANSI covers IF and values separately. This composition gives the branches
+  // different prefixes followed by the same effectful operation.
+  define('optimization-branch-tail', `(lambda (flag callback) ${policy}
+    (if flag
+      (progn (funcall callback :left) (funcall callback :tail))
+      (progn (funcall callback :right) (funcall callback :tail))))`);
+  check('common branch tails retain selected effects and complete value groups', `(loop
+    for flag in '(t nil) always
+      (loop for returned in '(nil (nil) (17 nil :third :four :five)) always
+        (let ((events nil))
+          (and (equal (multiple-value-list
+                 (optimization-branch-tail flag (lambda (event)
+                   (push event events)
+                   (if (eq event :tail) (values-list returned) (values :ignored :extra)))))
+                returned)
+            (equal (reverse events) (list (if flag :left :right) :tail))))))`);
+  check('common branch tails retain errors, ordering and recovery', `(loop for flag in '(t nil) always
+    (let ((prefix (if flag :left :right)))
+      (and (loop for failure in (list prefix :tail) always
+        (let ((events nil))
+          (handler-case
+            (progn (optimization-branch-tail flag (lambda (event)
+              (push event events) (when (eq event failure) (error "Branch callback")))) nil)
+            (simple-error ()
+              (equal (reverse events) (if (eq failure prefix) (list prefix) (list prefix :tail)))))))
+        (equal (multiple-value-list
+                 (optimization-branch-tail flag (lambda (event) (values event nil :recovered))))
+          '(:tail nil :recovered)))))`);
+  check('branch tails consume the selected branch-local value', `(let ((function
+    (miricl-compiler:compile-native '(lambda (flag callback) ${policy}
+      (if flag
+        (funcall callback (cons :left nil))
+        (funcall callback (cons :right nil)))))))
+    (loop for flag in '(t nil) always
+      (equal (multiple-value-list (funcall function flag
+               (lambda (object) (values object nil :extra))))
+        (list (list (if flag :left :right)) nil :extra))))`);
+
+  evaluate('(defvar *optimization-branch-scope* :outside) (values)');
+  define('optimization-branch-environment', `(lambda (flag callback) ${policy}
+    (if flag
+      (let ((*optimization-branch-scope* :left))
+        (unwind-protect (progn (funcall callback :left) (funcall callback :tail))
+          (funcall callback :cleanup)))
+      (let ((*optimization-branch-scope* :right))
+        (unwind-protect (progn (funcall callback :right) (funcall callback :tail))
+          (funcall callback :cleanup)))))`);
+  check('branch tails retain dynamic bindings and cleanup on returns and exits', `(loop
+    for flag in '(t nil) always (loop for escape in '(nil t) always
+      (let ((events nil) (scope (if flag :left :right)))
+        (and (equal (multiple-value-list
+               (catch 'optimization-branch-exit
+                 (optimization-branch-environment flag (lambda (event)
+                   (push (list event *optimization-branch-scope*) events)
+                   (if (and escape (eq event :tail))
+                     (throw 'optimization-branch-exit (values 17 nil :extra))
+                     (values 17 nil :extra)))))) '(17 nil :extra))
+          (equal (reverse events) (list (list scope scope) (list :tail scope) (list :cleanup scope)))
+          (eq *optimization-branch-scope* :outside)))))`);
+  console.log('Optimizations: common branch tails preserve effects, value groups, errors and dynamic cleanup.');
+
   // Declared hot paths deliberately exercise inlining and scalar lowering.
   // The assertions concern legal input, effects and values, not a prescribed
   // lowering strategy or the optimizer's private representation.
@@ -233,6 +294,44 @@ try {
     (= (optimization-inlined-check #(42) 0) 42)
     (handler-case (progn (optimization-inlined-check #(42) 1) nil) (type-error () t))
     (= (optimization-inlined-check #(43) 0) 43))`);
+
+  // A literal-selected small arm can make an otherwise large callee cheap.
+  // Its unused operands still run before checked callee code, under the
+  // caller's scope; the body retains its definition's lexical/dynamic scope.
+  evaluate('(defvar *optimization-inline-scope* :outside) (values)');
+  for (const [speed, space] of [[1, 3], [3, 1]]) {
+    for (const effort of [0, 3]) for (const directive of ['inline', 'notinline']) {
+      define('optimization-inline-literal', `(lambda (vector effect)
+        (declare (optimize (speed ${speed}) (space ${space})
+          (compilation-speed ${effort}) (safety 0) (debug 0)))
+        (let ((token :definition))
+          (flet ((worker (selected vector *optimization-inline-scope* unused)
+                   (declare (ignore unused) (optimize (safety 3) (debug 0)))
+                   (if selected
+                     (values token (svref vector 0) *optimization-inline-scope*)
+                     (progn ${Array(16).fill('(funcall effect :unselected)').join(' ')}
+                       (values :unselected nil)))))
+            (declare (${directive} worker))
+            (let ((token :caller))
+              (declare (ignore token))
+              (worker t (progn (funcall effect :vector) vector)
+                (progn (funcall effect :scope) :callee)
+                (funcall effect :unused))))))`);
+      check('literal inlining keeps operand order, scope, callee checks and recovery', `(let ((events nil))
+        (flet ((effect (event) (push event events)))
+          (and (equal (multiple-value-list
+                 (optimization-inline-literal #(42) #'effect)) '(:definition 42 :callee))
+            (equal (reverse events) '(:vector :scope :unused))
+            (eq *optimization-inline-scope* :outside)
+            (progn (setq events nil)
+              (handler-case (progn (optimization-inline-literal :bad #'effect) nil)
+                (type-error () (equal (reverse events) '(:vector :scope :unused)))))
+            (eq *optimization-inline-scope* :outside)
+            (progn (setq events nil)
+              (equal (multiple-value-list
+                (optimization-inline-literal #(43) #'effect)) '(:definition 43 :callee))))))`);
+    }
+  }
 
   define('optimization-mutable-loop', `(lambda (cell n)
     (declare (optimize (speed 3) (space 1) (safety 0))

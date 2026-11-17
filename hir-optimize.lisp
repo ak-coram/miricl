@@ -309,6 +309,114 @@
               (hir-instruction-attributes end) (list (first (hir-instruction-attributes end))))))))
   function)
 
+(defun hir-tail-pair-p (left right)
+  ;; Literal and declaration identities are intentional: EQUAL could merge
+  ;; distinct quoted objects, or traverse arbitrarily large client metadata.
+  (declare (type simple-vector left right))
+  (let ((a (hir-instruction-output left)) (b (hir-instruction-output right)))
+    (and (eq (hir-instruction-opcode left) (hir-instruction-opcode right))
+         (eq (hir-instruction-effect left) (hir-instruction-effect right))
+         (= (hir-instruction-safety-level left) (hir-instruction-safety-level right))
+         (= (length (hir-instruction-attributes left)) (length (hir-instruction-attributes right)))
+         (every #'eq (hir-instruction-attributes left) (hir-instruction-attributes right))
+         (null (nthcdr 16 (hir-instruction-inputs left)))
+         (null (nthcdr 16 (hir-instruction-inputs right)))
+         (= (length (hir-instruction-inputs left)) (length (hir-instruction-inputs right)))
+         (if a (and b (eq (hir-value-kind a) (hir-value-kind b))
+                      (eq (hir-value-type a) (hir-value-type b))) (null b)))))
+
+(defun hir-share-branch-tails (function)
+  "Sink a bounded common suffix of exclusive sibling arms to their join."
+  (declare (type simple-vector function))
+  ;; Start with reachable acyclic blocks. In particular, the ordinary SSA
+  ;; dominance contract then rules out sibling definitions in shared operands.
+  ;; Leave loops and their scheduling edges alone.
+  (when (> (hir-function-block-count function) 4096)
+    (return-from hir-share-branch-tails function))
+  (let ((order (hir-forward-blocks function)) (fuel 4096))
+    (declare (type (integer 0 4096) fuel))
+    (dolist (block order)
+      (when (zerop fuel) (return))
+      (decf fuel)
+      (let* ((end (hir-block-terminator block))
+             (left (first (hir-instruction-attributes end)))
+             (right (second (hir-instruction-attributes end))))
+        (when (and (eq (hir-instruction-opcode end) :branch) (not (eq left right))
+                   (null (hir-block-parameters left)) (null (hir-block-parameters right))
+                   (equal (hir-block-predecessors left) (list block))
+                   (equal (hir-block-predecessors right) (list block))
+                   (< (hir-block-id block) (hir-block-id left))
+                   (< (hir-block-id block) (hir-block-id right))
+                   (eq (hir-block-environment block) (hir-block-environment left))
+                   (eq (hir-block-environment left) (hir-block-environment right))
+                   (null (nthcdr 64 (hir-block-instructions left)))
+                   (null (nthcdr 64 (hir-block-instructions right))))
+          (let* ((a (hir-block-terminator left)) (b (hir-block-terminator right))
+                 (target (first (hir-instruction-attributes a)))
+                 (later (if (> (hir-block-id left) (hir-block-id right)) left right))
+                 (n (length (hir-block-instructions left)))
+                 (m (length (hir-block-instructions right))))
+            (when (and (<= (+ n m (hir-function-block-count function)) fuel)
+                       (member (hir-instruction-opcode a) '(:return :jump))
+                       (hir-tail-pair-p a b)
+                       (or (null target) (> (hir-block-id target) (hir-block-id later)))
+                       ;; Moving calls is safe; changing the active environment,
+                       ;; lexical identities or captured landing sites is not.
+                       (every (lambda (instruction)
+                                (member (hir-instruction-opcode instruction)
+                                  '(:constant :copy :primary :truth :values :values-list :value-ref
+                                    :list :function-reference :cell-read :cell-write
+                                    :global-read :global-write :call :multiple-value-call
+                                    :check-apply-list :check-apply-arguments)))
+                         (append (hir-block-instructions left) (hir-block-instructions right))))
+              (decf fuel (+ n m))
+              (let ((as (reverse (hir-block-instructions left)))
+                    (bs (reverse (hir-block-instructions right))) (pairs nil))
+                (loop repeat 12 while (and as bs (hir-tail-pair-p (car as) (car bs))) do
+                  (push (cons (pop as) (pop bs)) pairs))
+                ;; A match needs all operands either shared before the branch,
+                ;; or defined by corresponding operations inside this suffix.
+                (loop while pairs do
+                  (let ((map (mapcar (lambda (pair)
+                                       (cons (hir-instruction-output (cdr pair))
+                                             (hir-instruction-output (car pair)))) pairs)))
+                    (when (every (lambda (pair)
+                                   (every (lambda (x y) (or (eq x y) (eq x (cdr (assoc y map)))))
+                                     (hir-instruction-inputs (car pair))
+                                     (hir-instruction-inputs (cdr pair))))
+                            (cons (cons a b) pairs))
+                      (return)))
+                  (pop pairs))
+                (when (and pairs (<= (hir-function-block-count function) fuel))
+                  (decf fuel (hir-function-block-count function))
+                  (let* ((count (length pairs))
+                         (join (make-hir-block-record 0 nil (nthcdr (- n count) (hir-block-instructions left))
+                                 a nil (hir-block-environment left)))
+                         ;; Retain the losing definitions in unreachable inventory.
+                         ;; Public HIR and round trips require real producers for
+                         ;; every register, including unused registers.
+                         ;; No reachable external use can require a losing
+                         ;; definition: its arm cannot dominate the common exit.
+                         (unused (make-hir-block-record 0 nil (nthcdr (- m count) (hir-block-instructions right))
+                                   b nil (hir-block-environment right)))
+                         (blocks nil))
+                    (setf (hir-block-instructions left) (subseq (hir-block-instructions left) 0 (- n count))
+                          (hir-block-instructions right) (subseq (hir-block-instructions right) 0 (- m count)))
+                    (dolist (arm (list left right))
+                      (setf (hir-block-terminator arm)
+                        (make-hir-instruction-record :jump nil nil (list join) nil :control
+                          (hir-instruction-safety-level (hir-block-terminator arm)))))
+                    ;; Keep every surviving edge's forward/backward direction.
+                    (dolist (item (hir-function-blocks function))
+                      (push item blocks) (when (eq item later) (push join blocks)))
+                    (setf (hir-function-blocks function) (nconc (nreverse blocks) (list unused)))
+                    (incf (hir-function-block-count function) 2)
+                    (loop for item in (hir-function-blocks function) for id from 0 do
+                      (setf (hir-block-id item) id))
+                    (hir-refresh-predecessors function)
+                    (compiler-statistic :optimization/hir-branch-tail))))))))))
+  function)
+
 (defun hir-proper-list-checks (unit calls references barriers)
   "Prove redundant proper-list checks within one block of the current emission.
 CALLS and REFERENCES identify the canonical operations selected by lowering.
@@ -398,7 +506,8 @@ Unknown effects discard mutable spine facts; no fact crosses a block edge."
           (hir-forward-private-cells function (hir-private-cells function barriers))
           (hir-propagate-constants function)
           (hir-simplify-cfg function)
-          (hir-refresh-predecessors function))))
+          (hir-refresh-predecessors function)
+          (hir-share-branch-tails function))))
   unit)
 
 (defun optimize-hir (unit)
