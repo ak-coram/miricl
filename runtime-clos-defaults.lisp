@@ -280,7 +280,8 @@
       :fixed-callbacks '((3 %%clos-method-metadata))))))
 (defun $clos-find-slot-cl ()
   (runtime-function-definition '$clos-find-slot-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-find-slot-cl 'miricl-runtime:clos-find-slot-value))))
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-find-slot-cl 'miricl-runtime:clos-find-slot-value
+      :fixed-callbacks '((3 %%clos-method-metadata))))))
 
 (define-runtime-function $standard-shared-initialize
     (($object :nullable-object) ($slot-names :nullable-object) ($args :nullable-object)) (:nullable-object)

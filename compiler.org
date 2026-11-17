@@ -53,6 +53,10 @@ the outer function environment; LABELS shares recursive bindings. Lambda normali
 preserves initialization order, declarations, optional/keyword processing, supplied-p
 variables and argument checks. TYPE and THE attach scoped assertions; nested assertions
 intersect and rebinding creates a new identity. FTYPE result types do not prove value counts.
+When keyword parameter syntax reaches HIR lowering, an implicit or literal NIL initializer
+without a supplied-p variable uses the keyword value lookup directly: absence already returns
+NIL. Other initializers and supplied-p bindings retain the presence branch; final keyword
+validation remains in order.
 
 Untrusted source, macroexpansions, public HIR and serialized data are validated before
 unchecked internals: structure, cycles, names, types, ownership, bounds, SSA dominance and
@@ -268,6 +272,10 @@ replacement, capture, escape or unknown provenance. List/sequence/stream/package
 kernels share compiler sources; remaining representation adapters stay native until equivalent
 lowering is suitable. Host tooling is not a shipped runtime dependency.
 
+Effective-slot lookup uses the saved private metadata callback proof to call the checked
+metadata service directly. This removes generic callback transport while retaining slot-list
+validation before copying, live MOP slot-name reads, scheduling checkpoints and value handling.
+
 Runtime multiple values use small slots/native tuples and checked owned overflow storage,
 preserving full values across callbacks and unwind. Lexical binding views share mutable cells.
 Generic dispatch retains live method, version, class and MOP guards and escaped next-method
@@ -419,6 +427,12 @@ File/native lowering preserves zero/missing/extra values, operand effects, lexic
 symbol-macro scope, normalized defaults, mutable captures, special restoration and cleanup,
 with or without block compilation. General optional/keyword argument cursors remain.
 
+The file frontend's =%compile-lambda-parts= normalizes optional, keyword and auxiliary
+parameters through =%normalize-lambda= before lowering executable HIR. Its keyword bindings
+reuse a =%cell= result for presence and value. Native bundle compilation reconstructs retained
+HIR through =initializer-hir-unit= rather than repeating source normalization; frontend
+parameter changes therefore need not alter existing portable bundles.
+
 *** Owned method keyword profiles
 
 Method preparation captures implicit keyword symbols alongside the executable lambda list
@@ -472,8 +486,11 @@ mutable custom MOP readers preclude identity-only caching. Retained descriptors 
 both code and data to shipped artifacts.
 
 Argument/method-context transport, repeated keyword scans, interpreter callbacks and
-continuation capture remain candidates. Hidden method context leaves three user arguments in
-the fixed worker ABI. Wider transport needs immutable owned backing or a private
+continuation capture remain candidates. =hir-lambda= retains separate presence/value scans
+for effectful defaults and supplied-p bindings; =packet-keyword-index= scans from the packet's
+keyword start for each lookup. Sharing cursor or index facts needs activation-local ownership
+and must preserve defaults, leftmost duplicate keys and checked ingress. Hidden method context
+leaves three user arguments in the fixed worker ABI. Wider transport needs immutable owned backing or a private
 packet entry; a structural WasmGC type, completed foreign builder or trusted-call flag does
 not establish ownership. Public ingress remains checked.
 

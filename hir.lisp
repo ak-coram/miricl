@@ -1727,24 +1727,30 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                    (:required (setq value (hir-emit :argument nil :single (list index))))
                    (:aux (setq value (hir-single (hir-form (second spec) local functions targets))))
                    ((:optional :key)
-                    ;; Keep the packet private to this activation. Presence
-                    ;; is independent of the supplied argument's truth value.
-                    (setq present (if (eq mode :key)
-                                      (hir-emit :keyword-present nil :single (list key-start key) :read)
-                                      (hir-emit :argument-present nil :single (list index) :read)))
-                    (let ((yes (hir-new-block)) (no (hir-new-block)) (join (hir-new-block :multiple)))
-                      (hir-terminate :branch (list present) (list yes no))
-                      (setq *hir-block* yes)
-                      (hir-terminate :jump
-                        (list (hir-multiple
-                          (if (eq mode :key)
-                              (hir-emit :keyword-argument nil :single (list key-start key) :read)
-                              (hir-emit :argument nil :single (list index))))) (list join))
-                      (setq *hir-block* no)
-                      (let ((default (catch 'hir-path-ended (hir-single (hir-form (second spec) local functions targets)))))
-                        (unless (hir-block-terminator *hir-block*)
-                          (hir-terminate :jump (list (hir-multiple default)) (list join))))
-                      (setq *hir-block* join value (hir-single (first (hir-block-parameters join)))))))
+                    (if (and (eq mode :key) (null supplied) (null (second spec)))
+                        ;; Missing and supplied NIL have the same value when
+                        ;; no supplied-p binding observes their distinction.
+                        ;; Keep the final keyword check after all initializers.
+                        (setq value (hir-emit :keyword-argument nil :single (list key-start key) :read))
+                        (progn
+                          ;; Keep the packet private to this activation. Presence
+                          ;; is independent of the supplied argument's truth value.
+                          (setq present (if (eq mode :key)
+                                            (hir-emit :keyword-present nil :single (list key-start key) :read)
+                                            (hir-emit :argument-present nil :single (list index) :read)))
+                          (let ((yes (hir-new-block)) (no (hir-new-block)) (join (hir-new-block :multiple)))
+                            (hir-terminate :branch (list present) (list yes no))
+                            (setq *hir-block* yes)
+                            (hir-terminate :jump
+                              (list (hir-multiple
+                                (if (eq mode :key)
+                                    (hir-emit :keyword-argument nil :single (list key-start key) :read)
+                                    (hir-emit :argument nil :single (list index))))) (list join))
+                            (setq *hir-block* no)
+                            (let ((default (catch 'hir-path-ended (hir-single (hir-form (second spec) local functions targets)))))
+                              (unless (hir-block-terminator *hir-block*)
+                                (hir-terminate :jump (list (hir-multiple default)) (list join))))
+                            (setq *hir-block* join value (hir-single (first (hir-block-parameters join)))))))))
                  (setq local (hir-bind-value variable value local specials)) (push variable names)
                  (when types (setq *hir-types* (hir-bound-type-environment variable local types)))
                  (when supplied
