@@ -11,7 +11,8 @@
   '($object-serial $character-pages $nil-package $nil-name $next-symbol $symbols $symbol-pages
     $package-indexes $mop-package $implementation-package $packages $package-local-names
     $cl-package $keyword-package $package-bound $current-package $next-package
-    $value-bindings $function-bindings $setf-bindings $nil-plist $gentemp-counter $setf-functions $specials
+    $value-bindings $function-bindings $setf-bindings $standard-function-bindings $standard-setf-bindings
+    $nil-plist $gentemp-counter $setf-functions $specials
     $derived-types $derived-type-first $condition-classes $condition-class-index $class-bindings $clos-library-symbols
     $macro-bindings $compiler-macros $setf-expanders $symbol-macros $loop-library-symbols
     $loop-expansions $loop-expansion-slot $source-files $source-directories $source-deleted

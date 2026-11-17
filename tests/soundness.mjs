@@ -312,6 +312,28 @@ try {
         (reject) (= *soundness-initarg-cache-calls* 2)
         (typep (make-instance 'soundness-initarg-cache) 'soundness-initarg-cache))))`);
   console.log('Soundness: warmed initarg checks observe method keyword changes and invoke hooks once.');
+  // A fixed standard name still runs permitted methods. Compile the caller
+  // before installing and replacing a hook, and discard the constructor result.
+  check(`(progn
+    (defclass soundness-standard-constructor () ())
+    (defparameter *soundness-standard-constructor-calls* 0)
+    (let ((driver (compile-native '(lambda ()
+             (declare (optimize (safety 3) (debug 0)))
+             (make-instance 'soundness-standard-constructor) :done))))
+      (and (eq (funcall driver) :done)
+        (zerop *soundness-standard-constructor-calls*)
+        (progn
+          (defmethod initialize-instance :after
+              ((object soundness-standard-constructor) &key)
+            (incf *soundness-standard-constructor-calls*))
+          (and (eq (funcall driver) :done)
+            (= *soundness-standard-constructor-calls* 1)))
+        (progn
+          (defmethod initialize-instance :after
+              ((object soundness-standard-constructor) &key)
+            (incf *soundness-standard-constructor-calls* 10))
+          (and (eq (funcall driver) :done)
+            (= *soundness-standard-constructor-calls* 11))))))`);
   // A warmed generic must observe new applicability hooks and borrowed metadata.
   evaluate(`(defgeneric soundness-dispatch-protocol (x))
     (defvar *soundness-dispatch-protocol-calls* 0)
@@ -422,6 +444,32 @@ try {
     vm.vm['native-check-arguments'](owned, elements.length, elements.length);
   }
   console.log('Soundness: raw native packets preserve elements and reject invalid reads with recovery.');
+
+  // Canonical calls and shared list paths are public native boundaries too.
+  // Invalid identities, foreign objects and unchecked path codes must signal
+  // useful Lisp conditions while leaving subsequent compilation usable.
+  const identityCode = Number(evaluate("(native-canonical-builtin-code 'identity)").trim());
+  const pair = vm.vm['native-cons'](elements[0], null);
+  assert.equal(vm.vm['native-list-path'](pair, 2), elements[0]);
+  assert.equal(vm.vm['native-standard-call1'](identityCode, pair), pair);
+  assert.equal(vm.vm['native-set-list-path'](null, pair, 2), null);
+  assert.equal(vm.vm['native-list-path'](pair, 2), null);
+  for (const operation of [
+    () => vm.vm['native-standard-function-reference'](foreign),
+    () => vm.vm['native-standard-call0'](0),
+    () => vm.vm['native-standard-call1'](-0x80000000, null),
+    () => vm.vm['native-standard-call1'](identityCode, foreign),
+    () => vm.vm['native-standard-call2'](identityCode, null, foreign),
+    () => vm.vm['native-standard-call3'](identityCode, null, null, foreign),
+    () => vm.vm['native-standard-call4'](identityCode, null, null, null, foreign),
+    () => vm.vm['native-list-path'](foreign, 2),
+    () => vm.vm['native-list-path'](pair, 0),
+    () => vm.vm['native-list-path'](pair, 1),
+    () => vm.vm['native-list-path'](pair, -0x80000000),
+    () => vm.vm['native-set-list-path'](foreign, pair, 2),
+    () => vm.vm['native-set-list-path'](null, null, 2),
+  ]) rejectPacketOperation(operation);
+  console.log('Soundness: canonical standard calls and list paths reject malformed ingress with recovery.');
 
   // Capture a Lisp function through the adapter's ordinary callback bridge,
   // then exercise the checked native boundary directly with foreign storage.
@@ -1641,6 +1689,52 @@ try {
     (let* ((unit (compile-to-hir source))
            (facts (infer-hir-types-checked unit nil nil nil t)))
       (gethash (first (hir-unit-functions unit)) facts t))) (values)`);
+  // Standard result facts remain valid for out-of-line calls. Result counts
+  // are independent of primary types and remain unknown for forwarded values.
+  check(`(with-compilation-statistics (statistics)
+    (let ((function (compile-native '(lambda (value)
+      (declare (optimize (safety 3) (debug 0)))
+      (if (typep value '(integer 0 10)) (values (+ value 1) :inside)
+          (values 0 :outside))))))
+      (and (equal (multiple-value-list (funcall function 7)) '(8 :inside))
+        (equal (multiple-value-list (funcall function -1)) '(0 :outside))
+        (let ((rows (compilation-statistics-report statistics)))
+          (and (assoc :proof/branch-premise rows)
+            (every (lambda (row)
+              (and (keywordp (first row))
+                   (or (symbolp (second row)) (integerp (second row)))
+                   (typep (third row) '(integer 0 *)))) rows))))))`);
+  check(`(and
+    (hir-type-proves-p
+      (soundness-proven-result '(lambda (x) (declare (notinline abs)) (abs x))) 'real)
+    (hir-type-proves-p
+      (soundness-proven-result '(lambda (x) (declare (notinline reverse)) (reverse x))) 'sequence)
+    (loop for source in
+        '((lambda (x) (declare (notinline abs)) (abs x))
+          (lambda (x) (declare (notinline floor)) (floor x))
+          (lambda (function x) (funcall function x))
+          (lambda (arguments) (values-list arguments)))
+      for expected in '(1 2 nil nil) always
+        (let* ((unit (compile-to-hir source))
+               (facts (hir-result-arities-checked unit)))
+          (eql expected (gethash (first (hir-unit-functions unit)) facts)))))`);
+  // Canonical numeric predicates refine unbounded and bignum integer ranges;
+  // their truth facts must not depend on a scalar Wasm representation.
+  for (const type of ['integer', '(integer -1267650600228229401496703205376 1267650600228229401496703205376)']) {
+    for (const [predicate, alternate, expected] of [
+      ['plusp', '1', '(integer 1 *)'],
+      ['minusp', '-1', '(integer * -1)'],
+      ['zerop', '0', '(integer 0 0)'],
+    ]) {
+      check(`(let* ((unit (compile-to-hir
+          '(lambda (x)
+             (declare (type ${type} x) (notinline ${predicate})
+                      (optimize (safety 0) (debug 0)))
+             (if (${predicate} x) x ${alternate}))))
+          (facts (infer-hir-types unit)))
+        (hir-type-proves-p (gethash (first (hir-unit-functions unit)) facts t) '${expected}))`);
+    }
+  }
   for (const source of [
     '(lambda (x) (declare (type (eql 7) x)) x)',
     '(lambda (x) (the (eql 7) x))',
@@ -1723,6 +1817,37 @@ try {
   check(`(and (not (hir-type-proves-p 'soundness-opaque 'integer))
     (not (hir-type-proves-p '(satisfies soundness-predicate) 'integer))
     (hir-type-proves-p '(and integer (satisfies soundness-predicate)) 'integer))`);
+  // Query inference must leave opaque runtime work alone. These callbacks
+  // deliberately fail if compilation tries to answer the query itself.
+  for (const query of [
+    "(typep value 'soundness-opaque)",
+    "(typep value '(satisfies soundness-predicate))",
+    "(subtypep 'soundness-opaque 'integer)",
+    "(subtypep '(satisfies soundness-predicate) 'integer)",
+  ]) {
+    check(`(let ((function (compile-native '(lambda (value)
+        (declare (optimize (safety 3) (debug 0))) ${query}))))
+      (and (functionp function)
+        (let ((type (soundness-proven-result '(lambda (value) ${query}))))
+          (and (not (hir-type-proves-p type 'null))
+               (not (hir-type-proves-p type '(not null)))))))`);
+  }
+  // Quoted type operands bypass declaration parsing. A malformed spine or
+  // cycle must still finish inference without providing a branch proof.
+  check(`(let ((cycle (list 'or 'integer)) (nested 'integer))
+    (setf (cddr cycle) cycle)
+    (dotimes (i 20) (setq nested (list 'not nested)))
+    (and (every (lambda (type)
+      (handler-case
+        (let ((result (soundness-proven-result
+              (list 'lambda '(value) (list 'typep 'value (list 'quote type))))))
+          (and (not (hir-type-proves-p result 'null))
+               (not (hir-type-proves-p result '(not null)))))
+        (error (condition)
+          (let ((*print-circle* t)) (plusp (length (princ-to-string condition)))))))
+      (list cycle nested '(integer . 3) '(integer (0 1) 5)
+            '(not integer integer) '(mod 0)))
+      (= (funcall (compile-native '(lambda (value) (+ value 1))) 41) 42)))`);
   // An exhausted proof budget supplies no proof, even for a true relationship.
   check(`(and (not (hir-type-proves-p 'integer 'integer 0))
     (not (hir-type-proves-p 'integer 'integer 32 (list 0))))`);
@@ -2109,7 +2234,40 @@ try {
   // Only exact CL symbols have standard result facts. Shadowed names keep
   // live user dispatch, complete values and captured function identities.
   evaluate(`(defpackage :soundness-shadow (:use :cl)
-    (:shadow :consp :eq :evenp :svref :list)) (values)`);
+    (:shadow :consp :eq :evenp :svref :list :abs :class-name)) (values)`);
+  // Inventory membership alone supplies no generic-method result proof.
+  // Exact standardized function identity excludes other CL symbols and
+  // same-name user functions; malformed function-name shapes stay bounded.
+  check(`(and
+    (every #'standard-function-name-p
+      '(cl:abs cl:mapcar cl:compile-file cl:make-instance cl:class-name
+        (cl:setf cl:class-name) (cl:setf cl:documentation)))
+    (notany #'standard-function-name-p
+      '(cl:when cl:if cl:fixnum cl:*package* soundness-shadow::abs
+        (cl:setf cl:car) (cl:setf soundness-shadow::class-name)
+        (cl:setf cl:class-name :extra) (cl:setf . cl:class-name)))
+    (let ((name (list 'cl:setf 'cl:class-name)))
+      (setf (cddr name) name)
+      (not (standard-function-name-p name)))
+    (null (standard-function-result-count 'cl:funcall))
+    (null (standard-function-result-count 'cl:make-instance))
+    (not (hir-type-proves-p
+      (soundness-proven-result
+        '(lambda (x) (declare (notinline soundness-shadow::abs))
+           (soundness-shadow::abs x))) 'real)))`);
+  check(`(let ((effects nil)
+        (function (compile-native '(lambda (object effect)
+          (declare (optimize (safety 3) (debug 0)))
+          (setf (third (progn (funcall effect :object) object))
+                (progn (funcall effect :value) (values 42 :discarded)))))))
+    (flet ((effect (event) (push event effects)))
+      (and
+        (handler-case (progn (funcall function '(a b . c) #'effect) nil)
+          (type-error () (equal effects '(:value :object))))
+        (let ((object (list 'a 'b 'c 'd)))
+          (setq effects nil)
+          (and (equal (multiple-value-list (funcall function object #'effect)) '(42))
+            (equal effects '(:value :object)) (equal object '(a b 42 d)))))))`);
   for (const [name, arguments_, expected] of [
     ['consp', 'object', '(nil)'],
     ['eq', 'object object', '(t)'],
@@ -2197,6 +2355,83 @@ try {
         (let ((expected (member key items :test #'eql)))
           (and (eq tail expected) (equal tail expected)))))
       '(3 4 5 8 1180591620717411303424 0 9 4.0 #\\a)))`);
+  }
+  // Standard-operation facts describe executable values, including reads
+  // through immutable captures. Writes and mixed joins must retain complete
+  // values from an arbitrary replacement rather than inherit CAR's contract.
+  for (const [body, changed] of [
+    ["(let ((operation #'car)) (funcall operation object))", false],
+    ["(let ((operation (if choose #'car #'car))) (funcall operation object))", false],
+    ["(let ((operation #'car)) (funcall (lambda () (funcall operation object))))", false],
+    ["(let ((operation (if choose #'car replacement))) (funcall operation object))", true],
+    ["(let ((operation #'car)) (let ((call (lambda () (funcall operation object)))) (setq operation replacement) (funcall call)))", true],
+    ["(let ((operation #'car)) (let ((saved operation)) (funcall (lambda () (setq operation replacement))) (funcall saved object)))", false],
+  ]) {
+    check(`(let ((function (compile-native '(lambda (object replacement choose)
+          (declare (optimize (safety 3) (debug 0))) ${body})))
+        (replacement (lambda (object) (values :replacement object :extra)))
+        (object (list :head :tail)))
+      (and (equal (multiple-value-list (funcall function object replacement nil))
+                  ${changed ? '(list :replacement object :extra)' : "'(:head)"})
+        (equal (multiple-value-list (funcall function object replacement t))
+          ${changed && body.includes('if choose') ? "'(:head)" : changed ? '(list :replacement object :extra)' : "'(:head)"})))`);
+  }
+  check(`(let ((events nil)
+      (function (compile-native '(lambda (object effect)
+        (declare (optimize (safety 3) (debug 0)))
+        (funcall (progn (funcall effect :designator) #'car)
+                 (progn (funcall effect :argument) (values object :discarded)))))))
+    (and (equal (multiple-value-list
+        (funcall function '(:head) (lambda (event) (push event events)))) '(:head))
+      (equal events '(:argument :designator))
+      (progn (setq events nil)
+        (handler-case
+          (progn (funcall function 17 (lambda (event) (push event events))) nil)
+          (type-error () (equal events '(:argument :designator)))))
+      (eq (funcall function '(:recovered) (lambda (event) (declare (ignore event)))) :recovered)))`);
+  // Known test designators may select a checked shared search, while all
+  // designator/operand effects and the original tail or pair stay observable.
+  for (const name of ['member', 'assoc']) {
+    for (const declaration of ['', `(notinline ${name})`]) {
+      for (const control of [':test', ':test-not']) {
+        check(`(let* ((events nil)
+            (first (cons :first :one)) (match (cons :match :two))
+            (items ${name === 'assoc' ? '(list nil first match (cons :match :duplicate))' : "(list :first :match :match)"})
+            (function (compile-native '(lambda (item items effect)
+              (declare ${declaration} (optimize (safety 3) (debug 0)))
+              (let ((test (progn (funcall effect :test) #'${control === ':test' ? 'eql' : 'eq'})))
+                (${name} (progn (funcall effect :item) (values item :discarded))
+                         (progn (funcall effect :items) items)
+                         ${control} test :key (progn (funcall effect :key) nil)))))))
+          (labels ((effect (event) (push event events))
+                   (probe (item)
+                     (let ((answer (multiple-value-list (funcall function item items #'effect))))
+                       (and (null (cdr answer))
+                            (eq (car answer) ${name === 'assoc' ? 'match' : '(cdr items)'})))))
+            (and (probe ${control === ':test' ? ':match' : ':first'})
+              (equal events '(:key :items :item :test))
+              (handler-case (progn (funcall function :match 17 #'effect) nil)
+                (type-error (condition) (eq (type-error-datum condition) 17)))
+              (probe ${control === ':test' ? ':match' : ':first'}))))`);
+      }
+      check(`(let ((seen nil)
+          (function (compile-native '(lambda (items key)
+            (declare ${declaration} (optimize (safety 3) (debug 0)))
+            (${name} :match items :test #'eql :key key)))))
+        (let* ((first (list :first)) (match (list :match))
+            (items ${name === 'assoc' ? '(list nil (cons first :one) (cons match :two))' : '(list first match)'})
+            (expected ${name === 'assoc' ? '(third items)' : '(cdr items)'}))
+          (and (let ((answer (multiple-value-list
+              (funcall function items (lambda (object)
+                (push object seen) (values (car object) :discarded))))))
+              (and (null (cdr answer)) (eq (car answer) expected)))
+            (member first seen :test #'eq) (member match seen :test #'eq)
+            (handler-case
+              (progn (funcall function items (lambda (object)
+                (declare (ignore object)) (error "Search key callback"))) nil)
+              (simple-error () t))
+            (eq (funcall function items #'car) expected))))`);
+    }
   }
   recover();
   console.log('Soundness: proofs remain conservative across declarations, mutation and opaque types; user names retain live dispatch and values.');

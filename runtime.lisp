@@ -2,10 +2,53 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defun compact-bootstrap-package-forms (forms)
+  ;; READ-CLOS-LIBRARY establishes every file's private identities before its
+  ;; macros run. Subsequent files often repeat those same imports and exports.
+  ;; Keep each symbol's first installation, including generated record names;
+  ;; neither the private symbol table nor its identities change. Match only
+  ;; the generated preamble, not package operations in library source bodies.
+  (let ((imports (make-hash-table :test 'equal))
+        (exports (make-hash-table :test 'equal)))
+    (mapcar
+      (lambda (form)
+        (let* ((binding (and (consp form) (eq (car form) 'let)
+                             (consp (second form)) (first (second form))))
+               (name (and (consp binding) (consp (second binding))
+                          (consp (second (second binding)))
+                          (second (second (second binding)))))
+               (import-call (and (consp form) (third form)))
+               (export-call (and (consp form) (fourth form)))
+               (imported (and (consp import-call) (eq (car import-call) 'shadowing-import)
+                              (consp (second import-call)) (second (second import-call))))
+               (exported (and (consp export-call) (eq (car export-call) 'export)
+                              (consp (second export-call)) (second (second export-call)))))
+          (if (and (stringp name)
+                   (equal form
+                     `(let ((package (or (find-package ,name)
+                                         (make-package ,name :use '("CL")))))
+                        (shadowing-import ',imported package)
+                        (export ',exported package))))
+              (let* ((old-imports (gethash name imports))
+                     (old-exports (gethash name exports))
+                     (new-imports (remove-if (lambda (symbol) (member symbol old-imports)) imported))
+                     (new-exports (remove-if (lambda (symbol) (member symbol old-exports)) exported)))
+                (setf (gethash name imports) (union imported old-imports)
+                      (gethash name exports) (union exported old-exports))
+                `(let ,(second form)
+                   ,@(when new-imports `((shadowing-import ',new-imports package)))
+                   ,@(when new-exports `((export ',new-exports package)))))
+              form)))
+      forms)))
+
 (defun interpreter-wat (&key wasi (compiler t))
   (let* ((*include-compiler* compiler) (*source-bootstrap-p* t)
          (*native-compiler-image* (and compiler *native-compiler-image*))
-         (*clos-library* (if compiler *clos-library* *interpreter-library*))
+         (*clos-library* (if compiler
+                             (if *native-compiler-image*
+                                 (compact-bootstrap-package-forms *clos-library*)
+                                 *clos-library*)
+                             *interpreter-library*))
          (*clos-library-symbols* (if compiler *clos-library-symbols* (clos-library-symbols *clos-library*)))
          (*compile-evaluations-default* (and *native-compiler-image* (not wasi) t))
          (libraries (list (list *loop-library* *loop-library-symbols* 25 *loop-library-symbols*)

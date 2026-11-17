@@ -105,12 +105,48 @@
     (then (call $write-list-path (local.get $x) (call $int (local.get $code)) (local.get $value)))
     (else (call $read-list-path (local.get $x) (call $int (local.get $code))))))
 
+(define-runtime-function $checked-list-path-code (($code i32)) (:object)
+  ;; The high terminator bit requires a positive path of at least one step.
+  ;; Check the raw import boundary before entering the SAFETY 0 Lisp worker.
+  #@(if (i32.lt_s (local.get $code) (i32.const 2))
+    (then (call $type-fail (call $int (local.get $code))
+      (call $cons2 (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
+        (call $int (i32.const 2))
+        (call $cons (call $int (i32.const 2147483647)) (ref.null eq)))
+      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(call $int (local.get $code)))
+
+(define-runtime-function $native-list-path (($object externref) ($code i32)) (externref)
+  (:export-raw "native-list-path")
+  (:locals ($checked :nullable-object) ($path :object) ($result :nullable-object))
+  #@(local.set $checked (call $native-checked-value (local.get $object)))
+  #@(local.set $path (call $checked-list-path-code (local.get $code)))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(local.set $result (call $read-list-path (local.get $checked) (local.get $path)))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
+(define-runtime-function $native-set-list-path
+    (($value externref) ($object externref) ($code i32)) (externref)
+  (:export-raw "native-set-list-path")
+  (:locals ($checked :nullable-object) ($new :nullable-object) ($path :object) ($result :nullable-object))
+  ;; The value-first ABI matches a SETF writer. HIR evaluates place operands
+  ;; and the new value before loading these already computed operands.
+  #@(local.set $new (call $native-checked-value (local.get $value)))
+  #@(local.set $checked (call $native-checked-value (local.get $object)))
+  #@(local.set $path (call $checked-list-path-code (local.get $code)))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(local.set $result (call $write-list-path (local.get $checked) (local.get $path) (local.get $new)))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
 (define-runtime-section list-runtime-wat ()
   ($cons) ($cons2)
   ($car)
   ($cdr)
   ($length)
-  ($arity) ($arity0) ($arity1) ($arity2) ($arity3) ($list-accessor-code) ($read-list-path) ($write-list-path) ($list-accessor))
+  ($arity) ($arity0) ($arity1) ($arity2) ($arity3) ($list-accessor-code) ($read-list-path) ($write-list-path) ($list-accessor)
+  ($checked-list-path-code) ($native-list-path) ($native-set-list-path))
 
 (defun $member-eq ()
   (runtime-function-definition '$member-eq

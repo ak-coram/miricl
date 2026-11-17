@@ -268,6 +268,61 @@
   (runtime-function-definition '$search-list-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$search-list-cl 'miricl-runtime:search-list-values))))
 
+(define-runtime-function $native-search-list (($item externref) ($list externref) ($code i32)) (externref)
+  (:export-raw "native-search-list")
+  ;; Bits select EQL (otherwise EQ), ASSOC (otherwise MEMBER), and TEST-NOT.
+  ;; This entry has no key or application callbacks.
+  (:locals ($needle :nullable-object) ($original :nullable-object) ($cursor :nullable-object)
+           ($anchor :nullable-object) ($entry :nullable-object) ($value :nullable-object)
+           ($result :nullable-object) ($match i32) ($span i64) ($power i64))
+  #@(local.set $needle (call $native-checked-value (local.get $item)))
+  #@(local.set $original (call $native-checked-value (local.get $list)))
+  #@(if (i32.gt_u (local.get $code) (i32.const 7))
+    (then (call $type-fail (call $int (local.get $code))
+      (call $cons2 (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
+        (call $int (i32.const 0)) (call $cons (call $int (i32.const 7)) (ref.null eq)))
+      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(call $require-list (local.get $original))
+  #@(local.set $cursor (local.get $original))
+  #@(local.set $anchor (local.get $cursor))
+  #@(local.set $power (i64.const 1))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(block $done (loop $next
+    (br_if $done (ref.is_null (local.get $cursor)))
+    (local.set $entry (call $car (local.get $cursor)))
+    (local.set $value (local.get $entry))
+    (block $skip
+      (if (i32.and (local.get $code) (i32.const 2))
+        (then
+          (br_if $skip (ref.is_null (local.get $entry)))
+          (local.set $value (call $car (local.get $entry)))))
+      (local.set $match (if (result i32) (i32.and (local.get $code) (i32.const 1))
+        (then (call $eql (local.get $needle) (local.get $value)))
+        (else (ref.eq (local.get $needle) (local.get $value)))))
+      (if (i32.xor (local.get $match) (i32.shr_u (local.get $code) (i32.const 2)))
+        (then
+          (local.set $result (if (result (ref null eq)) (i32.and (local.get $code) (i32.const 2))
+            (then (local.get $entry)) (else (local.get $cursor))))
+          (br $done))))
+    ;; Brent's check observes visited cursors only. Early matches share their
+    ;; original tail; a miss cannot follow a stationary cycle indefinitely.
+    (local.set $cursor (call $cdr (local.get $cursor)))
+    (local.set $span (i64.add (local.get $span) (i64.const 1)))
+    (if (i32.eqz (ref.is_null (local.get $cursor)))
+      (then
+        (if (ref.eq (local.get $cursor) (local.get $anchor))
+          (then (call $type-fail (local.get $original)
+            (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'satisfies)))
+              (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'list-length))) (ref.null eq)))
+            (i32.const ,(runtime-error-code :expected-designator)))))
+        (if (i64.eq (local.get $span) (local.get $power))
+          (then (local.set $anchor (local.get $cursor)) (local.set $span (i64.const 0))
+            (local.set $power (i64.shl (local.get $power) (i64.const 1)))))))
+    (if (global.get $thread-active) (then (call $thread-checkpoint)))
+    (br $next)))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
 (define-runtime-function $search-list-native
     (($kind i32) ($mode i32) ($item :nullable-object) ($list :nullable-object)
      ($key :nullable-object) ($test :nullable-object) ($test-not :nullable-object)) (:nullable-object)
@@ -738,4 +793,4 @@
   ($copy-before-tail) ($tail-member-p) ($tail-difference)
   ($list-length-native) ($pair-lists-onto) ($pairlis-native) ($callable) ($mapping-argument-cl) ($mapping-argument) ($map-lists-cl) ($map-lists-native) ($map-sequence-result-cl) ($map-sequences-native) ($map-into-apply) ($bounded-index-cl) ($bounded-index)
   ($sequence-character-kind) ($sequence-character-needle) ($simple-predicate-value) ($sequence-key-value) ($sequence-item-match)
-  ($search-list-cl) ($search-list-native) ($list-exclusive-cl) ($list-exclusive-native) ($list-set-apply) ($list-set-values-cl) ($list-set-native) ($count-sequence-value-cl) ($count-sequence-native) ($list-copy-fixed) ($slot-operation-fixed) ($copy-list-native) ($slot-value-native) ($list-primitive))
+  ($search-list-cl) ($native-search-list) ($search-list-native) ($list-exclusive-cl) ($list-exclusive-native) ($list-set-apply) ($list-set-values-cl) ($list-set-native) ($count-sequence-value-cl) ($count-sequence-native) ($list-copy-fixed) ($slot-operation-fixed) ($copy-list-native) ($slot-value-native) ($list-primitive))

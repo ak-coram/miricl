@@ -205,6 +205,16 @@ scheduler/decoder caches. Only matching current formats are supported. Bootstrap
 packing is separate, bounded and checked, and uses target symbol identities rather than
 host-private names.
 
+Bootstrap initialization bytes use a bounded LZ encoding with literal runs and overlapping
+back references. A checked startup pass reconstructs the exact packed source bytes before
+the ordinary source reader runs; its object freshness, offsets, contract facts and private
+symbol identities are unchanged. The host encoder bounds its match search and the target
+checks input/output extents, backward distances and the decoded size before use. Native
+images also omit repeated imports/exports from generated package preambles after each exact
+symbol's first installation, retaining generated record names and ordered registrations.
+These mechanisms affect initialization storage and startup work, not optimization policy or
+steady-state compiler queries. The compiler-free image retains its scripting interface.
+
 Runtime CL kernels compile as sealed groups above representation/platform WAT. The kernel
 linker checks dependencies, ownership, captures and signatures; public validation precedes
 unchecked traversal. Fixed-callback proofs require immutable private ingress and reject
@@ -222,6 +232,7 @@ exposed. Native Wasm does not yet provide equivalent stepping instrumentation.
 ** Source map and validation workflow
 
 - =compiler-input.lisp=, =hir.lisp=: validation, frontend, declarations and HIR.
+- =standard-contracts.lisp=: target ANSI operation identities, signatures and semantic facts.
 - =hir-types.lisp=, =hir-optimize.lisp=: target proofs and semantic transforms.
 - =hir-code.lisp=, =hir-interpreter.lisp=, =hir-reconstruction.lisp=: retained code.
 - =wasm-compiler.lisp=: native planning/emission and compiler bootstrap.
@@ -247,3 +258,112 @@ and avoid broad frameworks without representative measured return. Compare a fix
 source corpus without installing successive compiler generations; keep experiment
 drivers/results temporary and report bootstrap, native throughput, application behavior and
 raw/compressed sizes separately.
+
+** ANSI standard-function contracts
+
+=standard-contracts.lisp= defines target ANSI operation identities independently of host
+FBOUNDP, host function types, package membership and runtime dispatch support. Recognition
+requires the exact standardized symbol or function name. The inventory has 638 symbol
+entries, including CALL-NEXT-METHOD and NEXT-METHOD-P as method-local operations rather than
+fixed global entries. The two explicitly standardized SETF function names, (SETF CLASS-NAME)
+and (SETF DOCUMENTATION), have separate descriptors. Standardized SETF places do not imply
+standardized setter function names.
+
+Each descriptor shares grouped, independently queried facts: argument arity and keywords,
+argument/result types, successful result count, reads/writes, callbacks, signaling, allocation,
+and sharing. All inventory entries and standardized SETF function names have arity and keyword
+metadata; 590 symbol entries have successful result-count facts. Variable-value forwarding,
+nonreturning control and method-sensitive operations can remain unknown. Missing properties
+mean unknown; explicit NIL properties are known false. Successful-call facts do not validate
+arguments, remove checks or establish purity. Generic signatures do not fix an effective
+method, and callback effects remain independent of an operation's own mutation/allocation.
+
+=standard-function-contract= accepts a symbol or bounded two-element SETF name and declines
+malformed names. =standard-function-property= returns a fact and a known flag. Result type,
+result count, predicate type and list-path queries expose the facts used by HIR and native
+planning. Unknown type facts fall back to T; unknown count facts never mean one value.
+
+*** HIR proofs and operation provenance
+
+Inference, predicate premises and exact result-count analysis consume the shared descriptors.
+NOTINLINE preserves semantic facts while prohibiting expansion. Integer predicate refinement
+supports unbounded and bignum intervals; declaration-derived unchecked facts retain their
+separate SAFETY restrictions. Native scalar result planning and eligible tail-result cleanup
+also consume shared count facts, independently of effects and argument checks.
+
+=hir-standard-operations= computes fresh semantic provenance through bounded primary-value
+flow, copies, compatible joins and certified private-cell reads. It shares primary-flow and
+ownership rules with executable-callee analysis and discards incomplete proofs on exhausted
+work. A declared FUNCTION type, closure identity or a user symbol currently bound to a CL
+function supplies no standard-operation proof. HIR mutation requires fresh maps. Computed
+calls retain designator evaluation and out-of-line invocation; provenance alone permits
+neither expansion nor removal of the function object from ordinary value consumers.
+
+TYPEP and SUBTYPEP use bounded target relationships for recognized literal symbolic types
+and a missing or literal NIL environment. Their calls remain checked and execute at the
+original point. TYPEP can establish a successful true or false primary result; SUBTYPEP only
+establishes true results where inclusion is proved. Opaque types, arbitrary DEFTYPE expansion
+and SATISFIES callbacks supply no proof. No false or uncertain SUBTYPEP result is inferred.
+
+*** Checked native linkage and list operations
+
+Implementation-owned standard function and setter indexes record the actual entries installed
+by STORE-FUNCTION. Builtin installation, replacement by compiled Lisp bodies and promotion to
+generic functions use the same route. Snapshot roots retain the indexes. Signed operation
+codes identify standard names without implying native availability; bootstrap fallback
+manufactures entries only for genuinely available native builtins. Lisp definitions require
+installation, and generic calls continue through live permitted methods and protocols.
+
+Eligible exact one-value calls with zero through four operands use shared checked
+=native-standard-call0= through =native-standard-call4= adapters. Other consumers and arities
+retain the general checked path. Exact standard references can avoid public binding lookup;
+ordinary user functions and arbitrary implementation setter names retain live resolution.
+Checked linkage needs no operand-type proof, while unchecked workers still require one.
+NOTINLINE calls remain out of line. Host runtime-kernel adapters retain their explicit linkage
+and conservatively decline these mixed-signature plans.
+
+Composite list reads use shared checked list paths, including under NOTINLINE, with NIL
+behavior and each intermediate CAR/CDR check preserved. Standard list-place DEFSETF expanders
+emit the prefix accessor or NTHCDR followed by RPLACA/RPLACD and return the stored value. These
+place expansions are separate from references to arbitrary (SETF accessor) function names.
+The compiler-free runtime receives generated expanders without the compiler's contract table.
+
+MEMBER and ASSOC can use a shared checked search when static controls establish default EQL,
+exact EQ/EQL tests or their TEST-NOT counterparts and no key callback. Unsupported or ambiguous
+controls retain ordinary calls. Operand/control evaluation remains live. Search returns the
+original matching tail or association entry, preserves first-match behavior and skips NIL
+association entries; ingress, traversed structure and cycle checks protect the runtime boundary.
+Scheduler checkpoints remain in shared call and traversal paths.
+
+Compact plans also cover ATOM, LISTP, FUNCTIONP and IDENTITY; broader one-value operations can
+use the checked standard-call adapters. Existing typed numeric/array plans retain their
+specific proof gates. Backend dead-result/stability decisions require explicit effect facts
+and accepted arity. LISTP means NIL-or-CONS, not a proper or acyclic spine. General arithmetic
+retains arbitrary-precision and contagion behavior. Runtime sequence classification, default
+character initialization and rational-interval arithmetic no longer carry captured standard
+functions solely to guard forbidden CL redefinition.
+
+*** Validation and remaining limits
+
+Focused matching source-runtime checks cover checked calls/accessors, NOTINLINE, dotted tails,
+ordinary user redefinition, live generic methods, RATIONALIZE, MAKE-SEQUENCE and malformed
+import rejection/recovery. Host source, contract, planner and proof checks also pass. Full
+matching precompiled bootstrap, ANSI/application confirmation and final native throughput and
+raw/compressed image measurements remain pending; focused checks do not establish them.
+
+The fixed original compiler-source corpus is the throughput reference: compiled output is
+validated and instantiated without installing another compiler generation. Measure complete
+modules and shipped contract/helper costs under the default SPACE 3/SPEED 1 policy. Record
+native throughput separately from interpreted bootstrap and retain the 1 MiB raw default-image
+budget. Inventory/signature coverage does not imply complete result/effect facts, specialized
+lowering for every operation, or complete symbolic type reasoning.
+
+Normative references: [[https://www.lispworks.com/documentation/HyperSpec/Body/11_abab.htm][CLHS 11.1.2.1.2]],
+[[https://www.lispworks.com/documentation/HyperSpec/Body/11_ababa.htm][exceptions]],
+[[https://www.lispworks.com/documentation/HyperSpec/Body/d_inline.htm][INLINE/NOTINLINE]],
+[[https://www.lispworks.com/documentation/HyperSpec/Front/X_AllSym.htm][standard symbol index]],
+[[https://www.lispworks.com/documentation/HyperSpec/Body/01_ddtd.htm][return-value notation]],
+[[https://www.lispworks.com/documentation/HyperSpec/Body/f_car_c.htm][composite accessors]],
+[[https://www.lispworks.com/documentation/HyperSpec/Body/f_mem_m.htm][MEMBER]],
+[[https://www.lispworks.com/documentation/HyperSpec/Body/f_assocc.htm][ASSOC]],
+[[https://www.lispworks.com/documentation/HyperSpec/Body/f_typep.htm][TYPEP]].

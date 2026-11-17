@@ -2076,32 +2076,24 @@ PROPER-TAIL-P retains APPLY's final-list boundary; LIST* accepts any tail."
 
 (export '(rational-in-interval-value))
 
-(defun rational-in-interval-value (a b inclusive operations)
+(defun rational-in-interval-value (a b inclusive)
   "Continued fractions for a checked nonnegative rational interval.
-NIL upper bound denotes infinity. OPERATIONS captures canonical +, -, *, / and
-TRUNCATE functions, independently of later global function redefinitions."
-  (declare (type simple-vector operations) (optimize (safety 0) (debug 0))
-           (inline svref < = zerop))
+NIL upper bound denotes infinity."
+  (declare (optimize (safety 0) (debug 0)) (inline < = zerop))
   (values
-   (let ((add (svref operations 0)) (subtract (svref operations 1))
-         (multiply (svref operations 2)) (divide (svref operations 3))
-         (quotient (svref operations 4))
-         (p0 0) (p1 1) (q0 1) (q1 0))
-     (declare (type function add subtract multiply divide quotient))
+   (let ((p0 0) (p1 1) (q0 1) (q1 0))
      (block found
        (tagbody fraction
-          (let* ((whole (funcall quotient a 1))
-                 (remainder (funcall subtract a whole))
+          (let* ((whole (truncate a 1))
+                 (remainder (- a whole))
                  (candidate (if (if inclusive (zerop remainder)) whole
-                                (funcall add whole 1))))
+                                (+ whole 1))))
             (if (if b (if (< candidate b) t (if inclusive (= candidate b))) t)
                 (return-from found
-                  (funcall divide
-                    (funcall add (funcall multiply p1 candidate) p0)
-                    (funcall add (funcall multiply q1 candidate) q0))))
-            (let ((next-p (funcall add (funcall multiply p1 whole) p0))
-                  (next-q (funcall add (funcall multiply q1 whole) q0))
-                  (next-a (funcall divide 1 (funcall subtract b whole)))
-                  (next-b (if (zerop remainder) nil (funcall divide 1 remainder))))
+                  (/ (+ (* p1 candidate) p0) (+ (* q1 candidate) q0))))
+            (let ((next-p (+ (* p1 whole) p0))
+                  (next-q (+ (* q1 whole) q0))
+                  (next-a (/ 1 (- b whole)))
+                  (next-b (if (zerop remainder) nil (/ 1 remainder))))
               (setq p0 p1 p1 next-p q0 q1 q1 next-q a next-a b next-b)))
           (go fraction))))))

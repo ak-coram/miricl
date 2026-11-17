@@ -27,7 +27,21 @@ const rejection = operation => {
   content(first, '(1 2 3)');
   content(second, '(1 2 3)');
 };
+const unpack = (offset, size, length) => {
+  vm.vm['test-library-unpack'](offset, size, length);
+  return new Uint8Array(vm.vm.memory.buffer, 0, length).slice();
+};
 try {
+  const compressionCases = JSON.parse(await fs.readFile(process.argv[6], 'utf8'));
+  for (const [raw, offset, size] of compressionCases.valid)
+    assert.deepEqual(unpack(offset, size, raw.length), Uint8Array.from(raw));
+  const [recoveryRaw, recoveryOffset, recoverySize] = compressionCases.valid.at(-1);
+  for (const [offset, size, length] of compressionCases.invalid) {
+    rejection(() => unpack(offset, size, length));
+    assert.deepEqual(unpack(recoveryOffset, recoverySize, recoveryRaw.length),
+      Uint8Array.from(recoveryRaw), 'Byte decompression recovers after rejection.');
+  }
+
   prepare(await fs.readFile(process.argv[3]));
   const sources = [
     '(1 2 3)', '(1 2 3)', '(4 5 6)', '(4 5 6)',
@@ -126,5 +140,5 @@ try {
   });
   rejection(() => vm.vm['test-library-prepare'](16777216));
   rejection(() => {prepare(Uint8Array.of(0)); vm.vm['test-library-exhaust'](); read();});
-  console.log('Bootstrap library codec: byte/Unicode strings, fresh-object round trips, completed IDs, malformed input and recovery pass.');
+  console.log('Bootstrap library codec: compressed bytes, byte/Unicode strings, fresh-object round trips, completed IDs, malformed input and recovery pass.');
 } finally {vm.close();}

@@ -153,16 +153,14 @@ Debugger-visible, escaping or mutated cells retain ordinary lookup."
           (unless (gethash instruction bad)
             (setf (gethash (hir-instruction-output instruction) sources) (list source)))))) initialized)))
 
-(defun hir-result-callees (unit barriers)
-  "Bounded executable code facts for this HIR invocation only.
-Same-target acyclic forwarding preserves the selected SSA closure as context.
-Unknown inputs, cycles and exhausted work provide no certificate."
-  (let ((callees (make-hash-table :test 'eq)) (fuel 65536)
-        (sources (hir-primary-flow unit barriers)) (active (make-hash-table :test 'eq)))
-    (unless sources (return-from hir-result-callees callees))
+(defun hir-primary-result-sources (unit barriers)
+  "Validated primary forwarding, including certified private-cell reads.
+Shared by executable-callee and standard-operation facts for this invocation."
+  (let ((fuel 65536) (sources (hir-primary-flow unit barriers)))
+    (unless sources (return-from hir-primary-result-sources nil))
     (hir-local-callee-flow unit barriers sources)
     (dolist (function (hir-unit-functions unit))
-      (when (minusp (decf fuel)) (return-from hir-result-callees callees))
+      (when (minusp (decf fuel)) (return-from hir-primary-result-sources nil))
       (unless (gethash function barriers)
         ;; Successful primary preflight bounds all instructions and operands
         ;; scanned by this shared helper, called once per function. Keep that
@@ -170,22 +168,22 @@ Unknown inputs, cycles and exhausted work provide no certificate."
         (let ((cells (hir-private-cells function barriers))
               (writes (make-hash-table :test 'eq)) (targets (make-hash-table :test 'eq)))
           (dolist (block (hir-function-blocks function))
-            (when (minusp (decf fuel)) (return-from hir-result-callees callees))
+            (when (minusp (decf fuel)) (return-from hir-primary-result-sources nil))
             (dolist (instruction (hir-block-instructions block))
-              (when (minusp (decf fuel)) (return-from hir-result-callees callees))
+              (when (minusp (decf fuel)) (return-from hir-primary-result-sources nil))
               (when (eq (hir-instruction-opcode instruction) :cell-write)
                 (push instruction (gethash (first (hir-instruction-inputs instruction)) writes)))))
           ;; Write-free allocations initialize the cell before every valid
           ;; SSA use, including allocations in nested conditional scopes.
           (maphash (lambda (cell private)
             (declare (ignore private))
-            (when (minusp (decf fuel)) (return-from hir-result-callees callees))
+            (when (minusp (decf fuel)) (return-from hir-primary-result-sources nil))
             (unless (gethash cell writes)
               (setf (gethash cell targets) (first (hir-instruction-inputs (hir-value-producer cell)))))) cells)
           ;; Assigned cells need initialization in the entry block, before
           ;; successor edges. A single write then dominates later blocks.
           (dolist (instruction (hir-block-instructions (hir-function-entry function)))
-            (when (minusp (decf fuel)) (return-from hir-result-callees callees))
+            (when (minusp (decf fuel)) (return-from hir-primary-result-sources nil))
             (let* ((inputs (hir-instruction-inputs instruction))
                    (cell (if (eq (hir-instruction-opcode instruction) :cell-new)
                              (hir-instruction-output instruction) (first inputs))))
@@ -200,42 +198,74 @@ Unknown inputs, cycles and exhausted work provide no certificate."
                  (when (gethash cell targets)
                    (setf (gethash (hir-instruction-output instruction) sources) (list (gethash cell targets))))))))
           (dolist (block (hir-function-blocks function))
-            (when (minusp (decf fuel)) (return-from hir-result-callees callees))
+            (when (minusp (decf fuel)) (return-from hir-primary-result-sources nil))
             (unless (eq block (hir-function-entry function))
               (dolist (instruction (hir-block-instructions block))
-                (when (minusp (decf fuel)) (return-from hir-result-callees callees))
+                (when (minusp (decf fuel)) (return-from hir-primary-result-sources nil))
                 (when (eq (hir-instruction-opcode instruction) :cell-read)
                   (let ((target (gethash (first (hir-instruction-inputs instruction)) targets)))
                     (when target (setf (gethash (hir-instruction-output instruction) sources) (list target)))))))))))
+    sources))
+
+(defun hir-primary-result-facts (unit sources leaf)
+  "Resolve compatible acyclic primary leaves within bounded depth and work.
+Facts describe operations or code, never function-object identity. Unknown
+ingress and cycles provide no fact; every invocation creates a fresh map."
+  (let ((facts (make-hash-table :test 'eq)) (fuel 65536)
+        (active (make-hash-table :test 'eq)))
+    (unless sources (return-from hir-primary-result-facts facts))
     ;; Memoization bounds shared DAG traversal;
     ;; an active dependency (including a loop parameter) remains unknown.
     (labels ((target (value depth)
                (when (or (null value) (> depth 64) (gethash value active)) (return-from target nil))
                (when (minusp (decf fuel)) (return-from target nil))
-               (multiple-value-bind (known found) (gethash value callees)
+               (multiple-value-bind (known found) (gethash value facts)
                  (when found (return-from target known)))
                (setf (gethash value active) t)
                (let* ((inputs (gethash value sources))
                       (code (if inputs
                                 (let ((first (target (first inputs) (1+ depth))))
                                   (and first (every (lambda (input) (eq first (target input (1+ depth)))) (rest inputs)) first))
-                                (hir-result-callee value))))
+                                (funcall leaf value))))
                  (remhash value active)
-                 (setf (gethash value callees) code))))
+                 (setf (gethash value facts) code))))
       (dolist (function (hir-unit-functions unit))
         (dolist (value (hir-function-values function))
-          (when (minusp fuel) (return-from hir-result-callees callees))
+          (when (minusp fuel) (return-from hir-primary-result-facts facts))
           (target value 0))))
-    callees))
+    facts))
 
-(defun hir-result-arities-checked (unit &optional callee-facts)
+(defun hir-result-callees (unit barriers)
+  "Bounded executable code facts for current validated HIR only."
+  (hir-primary-result-facts unit (hir-primary-result-sources unit barriers) #'hir-result-callee))
+
+(defvar *hir-standard-operations* nil)
+
+(defun hir-standard-operation-leaf (value)
+  "A global standard reference proves semantics, never object identity."
+  (let ((producer (hir-value-producer value)))
+    (when (and (%hir-instruction-p producer)
+               (eq (hir-instruction-opcode producer) :function-reference))
+      (let ((name (first (hir-instruction-attributes producer))))
+        (and (standard-function-name-p name) name)))))
+
+(defun hir-standard-operations (unit &optional (barriers (hir-optimization-barriers unit)))
+  "Fresh standard-operation facts for current validated HIR; discard on mutation.
+User symbols, declared FUNCTION types and closure identity supply no evidence.
+This is semantic provenance, never permission to inline a computed call."
+  (hir-primary-result-facts unit (hir-primary-result-sources unit barriers)
+                            #'hir-standard-operation-leaf))
+
+(defun hir-result-arities-checked (unit &optional callee-facts operation-facts)
   "Prove exact value counts from validated, current HIR, independently of types.
 NIL means unknown; integer zero is a proof of no values. Cycles and exhausted
-work retain unknown facts. No declarations or replaceable global names certify
-an arity. Recompute after any HIR mutation."
+work retain unknown facts. Standard operation contracts and executable closed
+callees certify arities; declarations and replaceable globals do not.
+Recompute after any HIR mutation."
   (let ((facts (make-hash-table :test 'eq))
         (incoming (make-hash-table :test 'eq))
-        (barriers (hir-optimization-barriers unit)) (fuel 65536))
+        (barriers (hir-optimization-barriers unit)) (fuel 65536)
+        (*hir-standard-operations* (or operation-facts (hir-standard-operations unit))))
    (let ((callees (or callee-facts (hir-result-callees unit barriers))))
     (labels ((join (sources)
                (when sources
@@ -268,7 +298,12 @@ an arity. Recompute after any HIR mutation."
                                  (case (hir-instruction-opcode origin)
                                    (:values (length (hir-instruction-inputs origin)))
                                    (:copy (gethash (first (hir-instruction-inputs origin)) facts))
-                                   (:call (gethash (hir-result-callee (second (hir-instruction-inputs origin)) callees) facts))
+                                   (:call
+                                    (or (gethash (hir-result-callee (second (hir-instruction-inputs origin)) callees) facts)
+                                        (let ((name (hir-inline-primitive origin)))
+                                          (when name
+                                            (standard-function-result-count name
+                                              (- (length (hir-instruction-inputs origin)) 2))))))
                                    (otherwise (unless (eq (hir-value-kind value) :multiple) 1))))
                                 (t (join (gethash value incoming))))))
                   (when count (setf (gethash value facts) count changed t)))))
@@ -642,6 +677,84 @@ provide no candidate, and no DEFTYPE or SATISFIES code is executed here."
         (return value))
       (setq value (first (hir-instruction-inputs producer))))))
 
+(defun hir-primary-constant (value)
+  "Read a literal through bounded primary forwarding; NIL,T is a NIL literal."
+  (dotimes (depth 32)
+    (unless value (return (values nil nil)))
+    (let ((producer (hir-value-producer value)))
+      (unless (%hir-instruction-p producer) (return (values nil nil)))
+      (case (hir-instruction-opcode producer)
+        (:constant (return (values (first (hir-instruction-attributes producer)) t)))
+        ((:copy :primary :values) (setq value (first (hir-instruction-inputs producer))))
+        (otherwise (return (values nil nil)))))))
+
+(defun hir-symbolic-target-type-p (type)
+  "Recognize a bounded closed subset of target type syntax without expansion.
+Opaque names, SATISFIES, parameterized FUNCTION and unsupported constructors
+remain unknown. Charge every spine and nested bound before proof queries;
+quoted literals need not already have passed declaration-type validation."
+  (let ((fuel 128))
+    (labels ((parts (item)
+               (let ((result nil))
+                 (loop while (consp item) do
+                   (when (minusp (decf fuel)) (return-from parts (values nil nil)))
+                   (push (car item) result) (setq item (cdr item)))
+                 (values (nreverse result) (null item))))
+             (integer-bound-p (bound)
+               (or (eq bound '*) (integerp bound)
+                   (and (consp bound)
+                        (multiple-value-bind (items proper) (parts bound)
+                          (and proper (= (length items) 1) (integerp (car items)))))))
+             (known (item depth)
+               (when (or (zerop depth) (minusp (decf fuel))) (return-from known nil))
+               (if (symbolp item)
+                   (not (null (member item '(nil t null boolean symbol keyword cons list
+                     number complex real rational ratio integer fixnum bignum bit
+                     signed-byte unsigned-byte float short-float single-float double-float long-float
+                     array simple-array vector simple-vector string simple-string base-string
+                     simple-base-string bit-vector simple-bit-vector sequence character base-char
+                     standard-char extended-char function compiled-function hash-table package readtable))))
+                   (and (consp item)
+                     (multiple-value-bind (items proper) (parts item)
+                       (and proper
+                         (case (car items)
+                           ((and or) (every (lambda (part) (known part (1- depth))) (cdr items)))
+                           (not (and (= (length items) 2) (known (second items) (1- depth))))
+                           (eql (= (length items) 2))
+                           (member t)
+                           (integer (and (<= 1 (length items) 3) (every #'integer-bound-p (cdr items))))
+                           ((signed-byte unsigned-byte)
+                            (and (<= 1 (length items) 2)
+                              (or (null (cdr items)) (eq (second items) '*)
+                                  (and (integerp (second items))
+                                    (>= (second items) (if (eq (car items) 'signed-byte) 1 0))))))
+                           (mod (and (= (length items) 2) (integerp (second items)) (plusp (second items))))
+                           (otherwise nil))))))))
+      (known type 16))))
+
+(defun hir-type-query-result-type (name types inputs)
+  "Primary successful-result facts for TYPEP/SUBTYPEP, keeping their calls.
+Use target relationships only, with a literal recognized type and null optional
+environment. SUBTYPEP's false and unknown answers are deliberately not inferred."
+  (unless (and (member name '(typep subtypep)) (<= 2 (length inputs) 3))
+    (return-from hir-type-query-result-type nil))
+  (when (third inputs)
+    (multiple-value-bind (environment known) (hir-primary-constant (third inputs))
+      (unless (and known (null environment)) (return-from hir-type-query-result-type nil))))
+  (multiple-value-bind (required known) (hir-primary-constant (second inputs))
+    (unless (and known (hir-symbolic-target-type-p required))
+      (return-from hir-type-query-result-type nil))
+    (case name
+      (typep
+       (cond ((null required) 'null)
+             ((hir-type-proves-p (first types) required) '(not null))
+             ((hir-type-proves-p (first types) (list 'not required)) 'null)))
+      (subtypep
+       (multiple-value-bind (source known) (hir-primary-constant (first inputs))
+         (when (and known (hir-symbolic-target-type-p source)
+                    (or (null source) (hir-type-proves-p source required)))
+           '(not null)))))))
+
 (defun hir-type-truth-premise (test &optional cells)
   "Recover a truth or canonical type predicate through immutable temporaries.
 The third value is a type established by a positive predicate, an integer
@@ -658,25 +771,32 @@ not client binding flags."
            (when predicate (return-from hir-type-truth-premise (values current inverse)))
            (setq current (first (hir-instruction-inputs producer))))
           (:call
-           (unless (= (length (hir-instruction-inputs producer)) 3) (return))
-           (case (hir-inline-primitive producer)
-             ((null not)
-              (setq predicate t inverse (not inverse)
-                    current (third (hir-instruction-inputs producer))))
-             ((consp simple-vector-p vectorp stringp symbolp integerp characterp)
-              (return-from hir-type-truth-premise
-                (values (third (hir-instruction-inputs producer)) inverse
-                  (case (hir-inline-primitive producer)
-                    (consp 'cons) (simple-vector-p 'simple-vector) (vectorp 'vector) (stringp 'string) (symbolp 'symbol) (integerp 'integer) (characterp 'character)))))
-             ((zerop minusp plusp)
-              ;; Keep the existing SAFETY 0 gate for numeric premises;
-              ;; checked calls retain their ordinary error boundaries.
-              (when (zerop (hir-instruction-safety-level producer))
+           (let* ((inputs (hir-instruction-inputs producer))
+                  (name (hir-inline-primitive producer)))
+             (when (and (eq name 'typep) (<= 4 (length inputs) 5))
+               (multiple-value-bind (type known) (hir-primary-constant (fourth inputs))
+                 (when (and known type (hir-symbolic-target-type-p type)
+                            (or (null (fifth inputs))
+                                (multiple-value-bind (environment known) (hir-primary-constant (fifth inputs))
+                                  (and known (null environment)))))
+                   (return-from hir-type-truth-premise (values (third inputs) inverse type)))))
+             (unless (= (length inputs) 3) (return))
+             (let ((type (and name (standard-function-predicate-type name))))
+             (cond
+               ((member name '(null not))
+                (setq predicate t inverse (not inverse)
+                      current (third (hir-instruction-inputs producer))))
+               ((member name '(zerop minusp plusp))
+                ;; Numeric premises retain their declaration/SAFETY contract,
+                ;; independently of the standard operation's identity.
+                (when (zerop (hir-instruction-safety-level producer))
+                  (return-from hir-type-truth-premise
+                    (values (third (hir-instruction-inputs producer)) inverse name)))
+                (return))
+               (type
                 (return-from hir-type-truth-premise
-                  (values (third (hir-instruction-inputs producer)) inverse
-                    (hir-inline-primitive producer))))
-              (return))
-             (otherwise (return))))
+                  (values (third (hir-instruction-inputs producer)) inverse type)))
+               (t (return))))))
           (:cell-read
            (when predicate (return-from hir-type-truth-premise (values current inverse)))
            (let* ((cell (first (hir-instruction-inputs producer)))
@@ -794,7 +914,8 @@ A budget limits cost; stopping early only loses optimization opportunities."
                                       (and (eq (hir-instruction-opcode instruction) :copy)
                                            (eq (hir-copy-source (hir-instruction-output instruction))
                                                (or source observed))))
-                              (compiler-statistic :proof/branch-premise (or restriction positive))
+                              (compiler-statistic :proof/branch-premise
+                                (if (consp restriction) (car restriction) (or restriction positive)))
                               (push (cons observed (if (member restriction '(zerop minusp plusp))
                                                       (cons restriction positive)
                                                       (if restriction
@@ -819,18 +940,25 @@ A budget limits cost; stopping early only loses optimization opportunities."
     guards))
 
 (defun hir-inline-primitive (instruction)
+  "The exact standard operation selected by a call, independent of inlining.
+Forward only primary-preserving SSA copies within bounded work. A standard
+name proves semantics, never identity of its runtime function object."
   (declare (type simple-vector instruction))
-  (let* ((reference (second (hir-instruction-inputs instruction)))
-         (producer (hir-value-producer reference))
-         (attributes (and (%hir-instruction-p producer)
-                          (eq (hir-instruction-opcode producer) :function-reference)
-                          (hir-instruction-attributes producer)))
-         (name (first attributes)))
-    ;; Exact standard CL functions have their ANSI definitions for ordinary
-    ;; calls too. Same-print-name user symbols and supplied functions do not.
-    ;; Keep NOTINLINE opaque: consumers may use these facts to remove a call.
-    (when (and (not (eq (second attributes) 'notinline)) (member name '(char char-code code-char sbit row-major-aref length integer-length mod truncate cons list list* consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >= zerop minusp plusp evenp oddp 1+ 1- + - * logand logior logxor lognot ash)))
-      name)))
+  (let ((reference (second (hir-instruction-inputs instruction))))
+    (when *hir-standard-operations*
+      (let ((name (gethash reference *hir-standard-operations*)))
+        (when name (return-from hir-inline-primitive name))))
+    (dotimes (depth 32)
+      (unless reference (return nil))
+      (let ((producer (hir-value-producer reference)))
+        (unless (%hir-instruction-p producer) (return nil))
+        (case (hir-instruction-opcode producer)
+          ((:copy :primary :values)
+           (setq reference (first (hir-instruction-inputs producer))))
+          (:function-reference
+           (let ((name (first (hir-instruction-attributes producer))))
+             (return (and (standard-function-name-p name) name))))
+          (otherwise (return nil)))))))
 
 (defun hir-integer-identity (name left right)
   "Return :LEFT or :RIGHT when integer types prove a binary result is that operand."
@@ -902,12 +1030,14 @@ hole, so keep the original interval in that case."
                                 (if native value (oddp low)))))
                      (if (if (eq name 'evenp) (not odd) odd) :true :false))))))))
       (case answer
-        (:true (compiler-statistic :proof/integer-predicate-true name) '(eql t))
+        (:true (compiler-statistic :proof/integer-predicate-true name)
+               (if (eq (standard-function-result-type name) 'boolean) '(eql t) '(not null)))
         (:false (compiler-statistic :proof/integer-predicate-false name) 'null)
-        (otherwise (compiler-statistic :proof/integer-predicate-unknown name) 'boolean)))))
+        (otherwise (compiler-statistic :proof/integer-predicate-unknown name)
+                   (standard-function-result-type name))))))
 
 (defun hir-integer-comparison-type (name left right)
-  "Prove comparison results from target integer intervals, otherwise BOOLEAN.
+  "Prove comparison truth from target integer intervals.
 Equal integer values suffice for EQL. EQ identity is not implied by equal
 numbers, including bignums, and is never proved true by this rule."
   (declare (type symbol name))
@@ -915,7 +1045,7 @@ numbers, including bignums, and is never proved true by this rule."
     (multiple-value-bind (c d integer-b) (hir-integer-interval right)
       (unless (and integer-a integer-b)
         (compiler-statistic :proof/integer-comparison-unknown name)
-        (return-from hir-integer-comparison-type 'boolean))
+        (return-from hir-integer-comparison-type (standard-function-result-type name)))
       (let ((answer
         (case name
           ((eq eql = /=)
@@ -928,17 +1058,20 @@ numbers, including bignums, and is never proved true by this rule."
           (> (cond ((and a d (> a d)) :true) ((and b c (<= b c)) :false)))
           (>= (cond ((and a d (>= a d)) :true) ((and b c (< b c)) :false))))))
         (case answer
-          (:true (compiler-statistic :proof/integer-comparison-true name) '(eql t))
+          (:true (compiler-statistic :proof/integer-comparison-true name)
+                 (if (eq (standard-function-result-type name) 'boolean) '(eql t) '(not null)))
           (:false (compiler-statistic :proof/integer-comparison-false name) 'null)
-          (otherwise (compiler-statistic :proof/integer-comparison-unknown name) 'boolean))))))
+          (otherwise (compiler-statistic :proof/integer-comparison-unknown name)
+                     (standard-function-result-type name)))))))
 
-(defun hir-inline-result-type (name types)
-  (declare (type symbol name) (type list types))
+(defun hir-inline-result-type (name types &optional inputs)
+  (declare (type list types))
   (when (member nil types) (return-from hir-inline-result-type nil))
+  (let ((fallback (standard-function-result-type name types)))
+  (let ((query (and inputs (hir-type-query-result-type name types inputs))))
+    (when query (return-from hir-inline-result-type query)))
   ;; These describe successful returns of canonical target operations. Keep
   ;; the target's Unicode repertoire independent of host CHAR-CODE-LIMIT.
-  (when (and (eq name 'char) (= (length types) 2))
-    (return-from hir-inline-result-type 'character))
   (when (and (eq name 'char-code) (= (length types) 1))
     (return-from hir-inline-result-type '(integer 0 #x10ffff)))
   (when (and (eq name 'code-char) (= (length types) 1))
@@ -946,30 +1079,21 @@ numbers, including bignums, and is never proved true by this rule."
       (return-from hir-inline-result-type
         (if (and known (<= 0 low high #x10ffff) (or (< high #xd800) (> low #xdfff)))
             'character '(or null character)))))
-  (when (and (eq name 'sbit) (= (length types) 2))
-    ;; A successful canonical SBIT returns one bit. Bounds, rank and array
-    ;; checks remain in lowering; this fact never validates its operands.
-    (return-from hir-inline-result-type '(integer 0 1)))
-  (when (and (eq name 'integer-length) (= (length types) 1))
-    ;; Successful canonical returns are nonnegative; do not assume a host
-    ;; word size or finite operand representation for arbitrary integers.
-    (return-from hir-inline-result-type 'unsigned-byte))
   (when (and (member name '(eq eql = /= < <= > >=)) (= (length types) 2))
     (return-from hir-inline-result-type
       (hir-integer-comparison-type name (first types) (second types))))
   (when (and (= (length types) 1) (member name '(zerop minusp plusp evenp oddp)))
     (return-from hir-inline-result-type (hir-integer-predicate-type name (first types))))
-  (when (and (= (length types) 1) (member name '(consp simple-vector-p vectorp stringp symbolp integerp characterp null not)))
+  (when (and (= (length types) 1) (standard-function-predicate-type name))
     (let* ((type (first types))
-           (positive (case name (consp 'cons) (simple-vector-p 'simple-vector) (vectorp 'vector) (stringp 'string) (symbolp 'symbol) (integerp 'integer) (characterp 'character) (otherwise 'null)))
+           (positive (standard-function-predicate-type name))
            ;; Ask the same target rules for the complement. In particular,
            ;; NIL is a symbol, and LIST cannot prove SYMBOLP false.
            (negative (list 'not positive)))
       (return-from hir-inline-result-type
-        (cond ((hir-type-proves-p type positive) '(eql t))
-              ((hir-type-proves-p type negative) 'null) (t 'boolean)))))
-  (when (and (eq name 'cons) (= (length types) 2))
-    (return-from hir-inline-result-type 'cons))
+        (cond ((hir-type-proves-p type positive)
+               (if (eq fallback 'boolean) '(eql t) '(not null)))
+              ((hir-type-proves-p type negative) 'null) (t fallback)))))
   (when (eq name 'list)
     (return-from hir-inline-result-type (if types 'cons 'null)))
   (when (and (eq name 'list*) types)
@@ -984,7 +1108,7 @@ numbers, including bignums, and is never proved true by this rule."
       (return-from hir-inline-result-type
         (if (and known (<= -9223372036854775808 low high 9223372036854775807))
             (progn (compiler-statistic :proof/integer-complement-range)
-                   (list 'integer (lognot high) (lognot low))) t))))
+                   (list 'integer (lognot high) (lognot low))) fallback))))
   (when (and (eq name 'length) (= (length types) 1))
     (let ((type (first types)))
       (when (or (eq type 'simple-vector) (and (consp type) (eq (first type) 'simple-vector)))
@@ -998,7 +1122,7 @@ numbers, including bignums, and is never proved true by this rule."
       ;; callbacks can still change an adjustable vector or its fill pointer.
       (when (hir-type-proves-p type 'vector)
         (return-from hir-inline-result-type '(integer 0 2147483647)))))
-  (when (= (length types) 2)
+  (when (and (symbolp name) (= (length types) 2))
     (let ((identity (hir-integer-identity name (first types) (second types))))
       (when identity
         (return-from hir-inline-result-type (if (eq identity :left) (first types) (second types)))))
@@ -1034,7 +1158,7 @@ numbers, including bignums, and is never proved true by this rule."
               (if (<= -9223372036854775808 low high 9223372036854775807)
                   (progn (compiler-statistic :proof/integer-shift-result-range
                            (if (minusp d) :right :left))
-                         (list 'integer low high)) t))))
+                         (list 'integer low high)) fallback))))
         (when (and integer-a integer-b (<= -9223372036854775808 a b 9223372036854775807)
                    (<= -9223372036854775808 c d 9223372036854775807))
           (when (member name '(+ - *))
@@ -1048,7 +1172,7 @@ numbers, including bignums, and is never proved true by this rule."
               ;; arithmetic. The ordinary call still promotes to a bignum.
               (return-from hir-inline-result-type
                 (if (<= -9223372036854775808 low high 9223372036854775807)
-                    (list 'integer low high) t))))
+                    (list 'integer low high) fallback))))
           (let ((bits (max (integer-length a) (integer-length b) (integer-length c) (integer-length d))))
             (case name
               (logand
@@ -1062,9 +1186,9 @@ numbers, including bignums, and is never proved true by this rule."
                      (list 'signed-byte (1+ bits)))))))))))
   ;; Stop expanding interval chains once they leave the scalar domain. This
   ;; keeps inference terminating for loops such as X := (ASH X 1).
-  ;; Exact integer primitives still retain their coarse successful-return type;
-  ;; this is not a finite-width proof and cannot enable unchecked scalar code.
-  (if (and (= (length types) 2) (member name '(ash logand))) 'integer t))
+  ;; Shared successful-return types are not finite-width proofs and cannot
+  ;; enable unchecked scalar code.
+  fallback))
 
 (defun infer-hir-types (unit &key (roots nil rootsp) entries)
   "Return fresh primary-value type facts keyed by HIR values and functions.
@@ -1083,7 +1207,7 @@ Captured cells and debug-enabled functions keep conservative inferred types."
       (compiler-input-fail "type-inference root" root "value does not belong to this HIR unit")))
   (values (infer-hir-types-checked unit roots rootsp entries)))
 
-(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts)
+(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts operation-facts)
   "Internal inference kernel; UNIT and ROOTS have passed the public boundary.
 Return primary type facts and executable branch premises as separate values."
   (declare (type hir-unit unit) (type list roots entries))
@@ -1098,6 +1222,7 @@ Return primary type facts and executable branch premises as separate values."
         (opaque (make-hash-table :test 'eq)) (queued (make-hash-table :test 'eq))
         (required (make-hash-table :test 'eq)) (growth (make-hash-table :test 'eq)) (work nil)
         (intrinsics (make-hash-table :test 'eq))
+        (*hir-standard-operations* (or operation-facts (hir-standard-operations unit)))
         (guards (hir-type-branch-guards unit))
         (callees (or callee-facts (hir-result-callees unit (hir-optimization-barriers unit)))))
     (declare (type hash-table facts sources users calls references candidates escaped
@@ -1234,7 +1359,7 @@ Return primary type facts and executable branch premises as separate values."
                              (cond ((gethash value calls) (joined value))
                                    ((gethash value intrinsics)
                                     (hir-inline-result-type (gethash value intrinsics)
-                                      (mapcar (lambda (input) (gethash input facts)) (cddr inputs))))
+                                      (mapcar (lambda (input) (gethash input facts)) (cddr inputs)) (cddr inputs)))
                                    (t (if proven-only t
                                           (hir-value-type-at (hir-function-result-type (hir-value-type (second inputs))) 0)))))
                             (otherwise t))))))
@@ -1253,15 +1378,11 @@ Return primary type facts and executable branch premises as separate values."
                          (otherwise
                           (if (and (consp (cdr premise))
                                    (member (cadr premise) '(zerop minusp plusp)))
-                              (let ((type (gethash (car premise) facts t)))
-                                ;; A scalar operand guarantees the backend
-                                ;; selects the canonical predicate. A wider
-                                ;; fallback can still call a replaced global
-                                ;; definition, so it supplies no branch premise.
-                                (multiple-value-bind (low high bounded) (hir-integer-bounds type)
-                                  (if (and bounded (<= -9223372036854775808 low high 9223372036854775807))
-                                      (hir-integer-branch-type type (cadr premise) (cddr premise))
-                                      type)))
+                              ;; Standard numeric predicates retain their ANSI
+                              ;; meaning at arbitrary integer width. This
+                              ;; premise grants no unchecked lowering contract.
+                              (hir-integer-branch-type (gethash (car premise) facts t)
+                                (cadr premise) (cddr premise))
                               (cdr premise)))))))
                    (hir-type-join previous refined))))
           (remhash value queued)

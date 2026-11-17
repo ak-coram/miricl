@@ -123,15 +123,37 @@
 
 (defvar *native-compiler-image* nil)
 (defvar *compile-evaluations-default* nil)
+
+(defun standard-list-place-expanders ()
+  "Choose standard list-place writers without fixing implementation SETF functions.
+Generate only source forms here; the compiler-free guest needs no contract table."
+  (let ((names (list* 'car 'cdr *list-accessors*)))
+    (loop for name in names
+          for path = (miricl-compiler::standard-function-list-path name)
+          when path collect
+      (let* ((prefix (butlast path))
+             (getter (find prefix names :test #'equal
+                           :key #'miricl-compiler::standard-function-list-path))
+             ;; Every composite path prefix has an accessor, except the
+             ;; longer ordinal CDR chains, for which NTHCDR shares traversal.
+             (parent (cond ((null prefix) 'object)
+                           (getter `(list ',getter object))
+                           ((every (lambda (step) (eq step :cdr)) prefix)
+                            `(list 'nthcdr ,(length prefix) object))
+                           (t (error "No standard list path prefix for ~S." name))))
+             (writer (if (eq (car (last path)) :car) 'rplaca 'rplacd)))
+        `(defsetf ,name (object) (value)
+           (list 'progn (list ',writer ,parent value) value))))))
+
 (defun read-clos-library (&optional (compiler t))
   ;; Record-macro expansion creates fresh lexical symbols. Keep their names
   ;; compact and independent of how much ASDF compiled before loading us.
   ;; GENSYM still creates distinct symbols throughout this library read.
   (let ((*gensym-counter* 0))
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
-                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
+                                  "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "standard-contracts.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
     unless (and (not compiler)
-               (member file '("whole-program.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp"
+               (member file '("whole-program.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "standard-contracts.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp"
                               "wasm-optimizer.lisp" "wasm-disassembly.lisp") :test #'equal)) append
     (with-open-file (in (asdf:system-relative-pathname :miricl file))
       (let* ((*package* (find-package :miricl))
@@ -146,6 +168,11 @@
                                            (second (assoc (second form) *native-javascript-functions* :test #'equal))))))
                           (lower-runtime-library
                             (if native `(setf (fdefinition ',(second form)) (function ,native)) form))))))
+        (when (equal file "development-library.lisp")
+          ;; Standardized places have fixed semantics, while an explicitly
+          ;; invoked implementation setter keeps its ordinary live binding.
+          (setf forms (append forms
+                        (mapcar #'lower-runtime-library (standard-list-place-expanders)))))
         (when (equal file "compiler-input.lisp")
           ;; Every guest has the checked list scanner. Call it directly,
           ;; avoiding the host-probing ABI and its multiple-value packet on
@@ -209,7 +236,7 @@
                   (otherwise form)))))
         ;; Establish the native package and symbol identities before DEFSTRUCT
         ;; generates accessors. Public exports are declared in PACKAGE.LISP.
-        (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp") :test #'equal)
+        (when (member file '("thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "standard-contracts.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp") :test #'equal)
           (let* ((package (find-package (cond ((equal file "thread-library.lisp") :miricl-threads)
                                             ((equal file "debugger-library.lisp") :miricl-debugger)
                                             ((equal file "bundle-library.lisp") :miricl-bundle)
@@ -261,7 +288,7 @@
   (runtime-library-bytes (compiler-image-library-forms) *clos-library-symbols* 24 *loop-library-symbols*))
 
 (defun clos-library-data ()
-  (runtime-library-data (clos-library-bytes)))
+  (runtime-library-data (compress-runtime-library-bytes (clos-library-bytes))))
 
 (named-readtables:in-readtable :miricl-wat)
 
@@ -874,6 +901,57 @@
   #@(global.set $cursor (i32.add (local.get $position) (i32.const 1)))
   #@(i32.load8_u (local.get $position)))
 
+(define-runtime-function $unpack-library-bytes
+    (($bytes (ref $bootstrap-bytes)) ($length i32)) ()
+  (:locals ($input i32) ($output i32) ($size i32) ($token i32)
+           ($count i32) ($distance i32) ($index i32))
+  ;; This representation compresses bytes, not Lisp objects. Reconstruct the
+  ;; complete checked source stream before its ordinary reader runs, retaining
+  ;; source offsets, fresh decoded objects and all private symbol identities.
+  (wat-fail-when #@(i32.gt_u (local.get $length) (i32.const 16777215)) :malformed-form)
+  #@(global.set $cursor (i32.const 0))
+  #@(call $reserve (local.get $length))
+  #@(local.set $size (array.len (local.get $bytes)))
+  #@(block $done (loop $next
+    (br_if $done (i32.eq (local.get $input) (local.get $size)))
+    (local.set $token (array.get_u $bootstrap-bytes (local.get $bytes) (local.get $input)))
+    (local.set $input (i32.add (local.get $input) (i32.const 1)))
+    (if (i32.lt_u (local.get $token) (i32.const 128))
+      (then
+        (local.set $count (i32.add (local.get $token) (i32.const 1)))
+        ,(wat-fail-when #@(i32.or
+          (i32.gt_u (local.get $count) (i32.sub (local.get $size) (local.get $input)))
+          (i32.gt_u (local.get $count) (i32.sub (local.get $length) (local.get $output)))) :malformed-form)
+        (local.set $index (i32.const 0))
+        (loop $literal
+          (i32.store8 (i32.add (local.get $output) (local.get $index))
+            (array.get_u $bootstrap-bytes (local.get $bytes) (i32.add (local.get $input) (local.get $index))))
+          (local.set $index (i32.add (local.get $index) (i32.const 1)))
+          (br_if $literal (i32.lt_u (local.get $index) (local.get $count))))
+        (local.set $input (i32.add (local.get $input) (local.get $count))))
+      (else
+        (local.set $count (i32.sub (local.get $token) (i32.const 124)))
+        ,(wat-fail-when #@(i32.or
+          (i32.lt_u (i32.sub (local.get $size) (local.get $input)) (i32.const 2))
+          (i32.gt_u (local.get $count) (i32.sub (local.get $length) (local.get $output)))) :malformed-form)
+        (local.set $distance (i32.or
+          (array.get_u $bootstrap-bytes (local.get $bytes) (local.get $input))
+          (i32.shl (array.get_u $bootstrap-bytes (local.get $bytes) (i32.add (local.get $input) (i32.const 1)))
+            (i32.const 8))))
+        ,(wat-fail-when #@(i32.or (i32.eqz (local.get $distance))
+          (i32.gt_u (local.get $distance) (local.get $output))) :malformed-form)
+        (local.set $input (i32.add (local.get $input) (i32.const 2)))
+        (local.set $index (i32.const 0))
+        ;; Forward byte copies intentionally expand overlapping matches.
+        (loop $match
+          (i32.store8 (i32.add (local.get $output) (local.get $index))
+            (i32.load8_u (i32.add (i32.sub (local.get $output) (local.get $distance)) (local.get $index))))
+          (local.set $index (i32.add (local.get $index) (i32.const 1)))
+          (br_if $match (i32.lt_u (local.get $index) (local.get $count))))))
+    (local.set $output (i32.add (local.get $output) (local.get $count)))
+    (br $next)))
+  (wat-fail-when #@(i32.ne (local.get $output) (local.get $length)) :malformed-form))
+
 (define-runtime-function $read-library-unsigned () (i32)
   (:locals ($position i32) ($value i32) ($shift i32) ($byte i32))
   #@(local.set $position (global.get $cursor))
@@ -1066,8 +1144,10 @@
   #@(call $reset-library-reader)
   #@(global.set $cursor (i32.const 0))
   #@(global.set $limit (i32.const ,(length (clos-library-bytes))))
-  #@(call $reserve (global.get $limit))
-  #@(memory.init $clos-library-data (i32.const 0) (i32.const 0) (global.get $limit))
+  #@(call $unpack-library-bytes
+    (array.new_data $bootstrap-bytes $clos-library-data (i32.const 0)
+      (i32.const ,(length (compress-runtime-library-bytes (clos-library-bytes)))))
+    (global.get $limit))
   #@(data.drop $clos-library-data)
   #@(call $prepare-library-reader)
   ;; Decode before evaluating: library forms may use the printer's scratch memory.
@@ -1104,4 +1184,4 @@
   ($direct-function) ($direct-function-call) ($structure-sequence-element) ($typed-structure-p)
   ($structure-access) ($print-structure-default) ($structure-copy) ($structure-make)
   ($named-class) ($set-named-class) ($clos-primitive) ($clos-find-class) ($class-subclassp) ($clos-typep)
-  ($read-library-byte) ($read-library-unsigned) ($read-library-integer) ($reset-library-reader) ($prepare-library-reader) ($read-library-string) ($library-symbol) ($read-library-literal) ($initialize-clos-symbols) ($initialize-clos))
+  ($read-library-byte) ($unpack-library-bytes) ($read-library-unsigned) ($read-library-integer) ($reset-library-reader) ($prepare-library-reader) ($read-library-string) ($library-symbol) ($read-library-literal) ($initialize-clos-symbols) ($initialize-clos))

@@ -56,7 +56,7 @@ if (action === 'submit') {
     vm.evaluate('(setq miricl-compiler:*compile-evaluations* nil miricl-compiler::*compiler-state* :interpreted)');
     const backendPresent = vm.evaluate("(if (fboundp 'miricl-compiler:emit-native-module) t nil)").output === 'T\n';
     const sources = backendPresent ? ['wasm-compiler'] : [
-      'whole-program', 'hir-reconstruction', 'compiler-statistics', 'hir-types',
+      'whole-program', 'hir-reconstruction', 'compiler-statistics', 'standard-contracts', 'hir-types',
       'hir-optimize', 'wasm-compiler', 'wasm-optimizer', 'wasm-disassembly',
     ];
     for (const source of sources)

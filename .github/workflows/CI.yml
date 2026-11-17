@@ -74,7 +74,8 @@ jobs:
           c-api: 'true'
       - name: Build once, reuse the cached core in the same Lisp process
         run: |
-          ros -L sbcl-bin run -- --load scripts/build-wasm.lisp --load scripts/build-html.lisp --load scripts/build-todo.lisp --quit
+          # A failed LOAD must stop the build before publishing partial artifacts.
+          ros -L sbcl-bin run -- --disable-debugger --load scripts/build-wasm.lisp --load scripts/build-html.lisp --load scripts/build-todo.lisp --quit
           node scripts/build-asdf.mjs build/asdf miricl.wasm miricl-asdf.wasm
       - name: Check TODO and shared application UI
         env:

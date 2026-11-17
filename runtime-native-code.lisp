@@ -615,6 +615,11 @@
             (then (return (extern.convert_any (local.get $value)))))))))
   #@(extern.convert_any (call $fdefinition ,(native-object '(local.get $name)))))
 
+(define-runtime-function $native-standard-function-reference (($name externref)) (externref)
+  (:export-raw "native-standard-function-reference")
+  #@(extern.convert_any (call $standard-function-reference
+    (call $native-checked-value (local.get $name)))))
+
 (define-runtime-function $native-literal-function (($function externref) ($index i32)) (externref)
   (:export-raw "native-literal-function")
   ;; Resolve the live function binding at the same point as the unfused pair.
@@ -953,20 +958,19 @@
 
 (defun native-integer-entry-wat (function opcode result &optional checked)
   ;; These scalar entries are selected only for exact standard CL operations.
-  ;; Keep the function argument for the arbitrary-precision overflow path.
+  ;; Overflow uses the same checked standard arithmetic worker directly.
   (if checked
     (runtime-wat-sequence
       #@(block $overflow
         (local.set $computed (,opcode (local.get $left) (local.get $right)))
         (br_if $overflow (i32.eqz ,(native-integer-fit-wat function)))
         (return (extern.convert_any (call ,result (local.get $computed)))))
-      #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-        (call $cons (call $int64 (local.get $left))
-          (call $cons (call $int64 (local.get $right)) (ref.null eq))))))
+      #@(extern.convert_any (call $op (i32.const ,(ecase function (+ 0) (- 1) (* 2)))
+        (call $int64 (local.get $left)) (call $int64 (local.get $right)))))
     #@(extern.convert_any (call ,result (,opcode (local.get $left) (local.get $right))))))
 
 (defmacro define-native-integer-entry (name export function opcode result &optional checked)
-  `(define-runtime-function ,name (($function externref) ($left i64) ($right i64)) (externref)
+  `(define-runtime-function ,name (($left i64) ($right i64)) (externref)
      (:export-raw ,export)
      ,@(when checked '((:locals ($computed i64))))
      (native-integer-entry-wat ',function ',opcode ',result ,checked)))
@@ -979,7 +983,7 @@
 (define-native-integer-entry $native-logxor-int64 "native-logxor-int64" logxor i64.xor $int64)
 
 (define-runtime-function $native-ash-int64
-    (($function externref) ($left i64) ($right i64)) (externref)
+    (($left i64) ($right i64)) (externref)
   (:export-raw "native-ash-int64")
   (:locals ($computed i64))
   #@(if (i64.lt_s (local.get $right) (i64.const 0))
@@ -997,9 +1001,8 @@
       (if (i64.eq (i64.shr_s (local.get $computed) (local.get $right)) (local.get $left))
         (then (return (extern.convert_any (call $int64 (local.get $computed))))))))
   ;; Positive shifts that overflow i64 use arbitrary-precision arithmetic.
-  #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-    (call $cons (call $int64 (local.get $left))
-      (call $cons (call $int64 (local.get $right)) (ref.null eq))))))
+  #@(extern.convert_any (call $ash-native
+    (call $int64 (local.get $left)) (call $int64 (local.get $right)))))
 (define-native-integer-entry $native-add-int64-checked "native-add-int64-checked" + i64.add $int64 t)
 (define-native-integer-entry $native-sub-int64-checked "native-sub-int64-checked" - i64.sub $int64 t)
 (define-native-integer-entry $native-mul-int64-checked "native-mul-int64-checked" * i64.mul $int64 t)
@@ -1011,12 +1014,11 @@
 (define-native-integer-entry $native-ne-int64 "native-ne-int64" /= i64.ne $bool)
 
 (define-runtime-function $native-vector-ref
-    (($function externref) ($vector externref) ($index i32) ($code i32)) (externref)
+    (($vector externref) ($index i32)) (externref)
   (:export-raw "native-vector-ref")
   (:locals ($data (ref $objects)))
   ;; A declaration proves the vector representation and immediate index.
   ;; Bounds errors retain the ordinary Lisp condition and offending datum.
-  ;; The function/code parameters keep the native import ABI unchanged.
   #@(local.set $data (call $vector-data ,(native-object '(local.get $vector))))
   #@(if (i32.ge_u (local.get $index) (array.len (local.get $data)))
     (then (return (extern.convert_any (call $vector-element ,(native-object '(local.get $vector))
@@ -1024,7 +1026,7 @@
   #@(extern.convert_any (array.get $objects (local.get $data) (local.get $index))))
 
 (define-runtime-function $native-vector-ref-trusted
-    (($function externref) ($vector externref) ($index i32) ($code i32)) (externref)
+    (($vector externref) ($index i32)) (externref)
   (:export-raw "native-vector-ref-trusted")
   ;; SAFETY 0: declarations and the access preconditions are trusted. WasmGC
   ;; casts and intrinsic array bounds still trap rather than corrupt memory.
@@ -1032,7 +1034,7 @@
     (call $vector-data ,(native-object '(local.get $vector))) (local.get $index))))
 
 (define-runtime-function $native-vector-ref-trusted64
-    (($function externref) ($vector externref) ($index i64) ($code i32)) (externref)
+    (($vector externref) ($index i64)) (externref)
   (:export-raw "native-vector-ref-trusted64")
   ;; SAFETY 0 access uses Wasm's unsigned i32 array index.
   #@(extern.convert_any (array.get $objects
@@ -2315,6 +2317,68 @@
     (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
       (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null eq))))))))
 
+;; Fixed primary-value calls use exact standard identities independently of
+;; inline expansion. The retained helpers are also suitable for NOTINLINE.
+;; Lookup uses implementation-owned installed entries, so Lisp functions and
+;; live generic protocols keep the same checked invocation paths as builtins.
+(define-runtime-function $native-standard-call0 (($code i32)) (externref)
+  (:export-raw "native-standard-call0")
+  #@(return_call $native-call0
+    (extern.convert_any (call $standard-function-code (local.get $code)))))
+
+(define-runtime-function $native-standard-call1 (($code i32) ($value externref)) (externref)
+  (:export-raw "native-standard-call1")
+  (:locals ($function :nullable-object) ($a :nullable-object) ($id i32) ($result :nullable-object))
+  #@(local.set $function (call $standard-function-code (local.get $code)))
+  #@(local.set $a (call $native-checked-value (local.get $value)))
+  #@(local.set $id (i32.sub (local.get $code) (i32.const 1)))
+  ;; These operations have no signaling/callback path after ingress checks.
+  ;; Shared semantic workers cover the other fixed operations without copies
+  ;; of their checks, allocation loops or arbitrary-precision arithmetic.
+  #@(block $ordinary
+    (block $done
+      ,(wat-symbol-case #@(local.get $id)
+        (identity #@(local.set $result (local.get $a)) #@(br $done))
+        (functionp #@(local.set $result (call $bool
+          (i32.eq (call $tag (local.get $a)) (i32.const 8)))) #@(br $done))
+        ((atom listp numberp) #@(local.set $result (call $bool
+          (call $simple-predicate-value (local.get $id) (local.get $a)))) #@(br $done)))
+      (br $ordinary))
+    (if (global.get $thread-active) (then (call $thread-checkpoint)))
+    (call $clear-values)
+    (return (extern.convert_any (local.get $result))))
+  #@(return_call $native-call1 (extern.convert_any (local.get $function)) (local.get $value)))
+
+(define-runtime-function $native-standard-call2
+    (($code i32) ($left externref) ($right externref)) (externref)
+  (:export-raw "native-standard-call2")
+  #@(drop (call $native-checked-value (local.get $left)))
+  #@(drop (call $native-checked-value (local.get $right)))
+  #@(return_call $native-call2
+    (extern.convert_any (call $standard-function-code (local.get $code)))
+    (local.get $left) (local.get $right)))
+
+(define-runtime-function $native-standard-call3
+    (($code i32) ($a externref) ($b externref) ($c externref)) (externref)
+  (:export-raw "native-standard-call3")
+  #@(drop (call $native-checked-value (local.get $a)))
+  #@(drop (call $native-checked-value (local.get $b)))
+  #@(drop (call $native-checked-value (local.get $c)))
+  #@(return_call $native-call3
+    (extern.convert_any (call $standard-function-code (local.get $code)))
+    (local.get $a) (local.get $b) (local.get $c)))
+
+(define-runtime-function $native-standard-call4
+    (($code i32) ($a externref) ($b externref) ($c externref) ($d externref)) (externref)
+  (:export-raw "native-standard-call4")
+  #@(drop (call $native-checked-value (local.get $a)))
+  #@(drop (call $native-checked-value (local.get $b)))
+  #@(drop (call $native-checked-value (local.get $c)))
+  #@(drop (call $native-checked-value (local.get $d)))
+  #@(return_call $native-call4
+    (extern.convert_any (call $standard-function-code (local.get $code)))
+    (local.get $a) (local.get $b) (local.get $c) (local.get $d)))
+
 (defun $native-value-arguments-cl ()
   (runtime-function-definition '$native-value-arguments-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$native-value-arguments-cl 'miricl-runtime:flatten-value-groups))))
@@ -2374,7 +2438,7 @@
   ($native-restore-environment) ($native-bind)
   ($native-block-enter) ($native-block-environment) ($native-block-return) ($native-block-match) ($native-block-values)
   ($native-control) ($native-restart-signal) ($native-throw)
-  ($native-global-read) ($native-global-write) ($native-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
+  ($native-global-read) ($native-global-write) ($native-function-reference) ($native-standard-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
   ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-read) ($native-cell-write)
   ($native-call) ($native-primary-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1)
@@ -2413,6 +2477,7 @@
   ($native-vector-set-inline)
   ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
   ($native-call0) ($native-call1) ($native-call2) ($native-call3) ($native-call4) ($native-generic-call)
+  ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)
   ($native-generic-fixed-tail-call)
   ($native-tail-call0) ($native-tail-call1) ($native-tail-call2) ($native-tail-call3) ($native-tail-call4))

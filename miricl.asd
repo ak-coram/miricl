@@ -16,6 +16,7 @@
                (:file "hir")
                (:file "hir-interpreter")
                (:file "hir-reconstruction")
+               (:file "standard-contracts")
                (:file "hir-types")
                (:file "hir-optimize")
                (:file "wasm-compiler")

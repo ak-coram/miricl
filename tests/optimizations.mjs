@@ -44,6 +44,7 @@ try {
     (equal (multiple-value-list (optimization-tail-indirect ${depth} 'optimization-tail-indirect)) '(42 :indirect)))`);
   // File preparation must retain indirect tail calls and the ordinary SETF
   // calling convention when its resolved forms become native Wasm.
+  evaluate('(defpackage :optimization-shadow (:use :cl) (:shadow :funcall)) (values)');
   vm.mountFile('/optimization-prepared.lisp', `
     (in-package :cl-user)
     (defun optimization-prepared-tail (n function) ${policy}
@@ -62,7 +63,8 @@ try {
                       (progn (push :value effects) 1))))
           (values value (reverse effects)))))
     (defun optimization-prepared-shadow () ${policy}
-      (flet ((funcall (x) (values (+ x 2) :shadow))) (funcall 40)))`);
+      (flet ((optimization-shadow::funcall (x) (values (+ x 2) :shadow)))
+        (optimization-shadow::funcall 40)))`);
   evaluate(`(compile-file "/optimization-prepared.lisp" :verbose nil :block-compile nil)
     (miricl-compiler:compile-native-bundle "/optimization-prepared.wasm" "/optimization-prepared-native.wasm")
     (load "/optimization-prepared-native.wasm") (values)`);

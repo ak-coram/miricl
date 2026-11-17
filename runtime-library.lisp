@@ -316,6 +316,70 @@ from *RUNTIME-LIBRARY-PREFIXES*."
                      (t (error "Unsupported library literal ~S" form)))))
       (mapc #'emit forms)) bytes))
 
+(defun compress-runtime-library-bytes (bytes)
+  "Pack bootstrap bytes into bounded literals and overlapping back references.
+Tokens 0..127 introduce 1..128 literal bytes. Tokens 128..255 copy 4..131
+bytes from a nonzero little-endian 16-bit backward distance. The decoder
+knows both extents from the generated runtime; no Lisp objects are shared."
+  (let* ((size (length bytes))
+         (heads (make-array 65536 :initial-element -1))
+         (previous (make-array size :initial-element -1))
+         (output (make-array 0 :element-type '(unsigned-byte 8)
+                              :adjustable t :fill-pointer 0))
+         (position 0) (literal-start 0))
+    (labels ((emit (byte) (vector-push-extend byte output))
+             (hash-at (index)
+               (logxor (ash (aref bytes index) 8)
+                       (ash (aref bytes (+ index 1)) 5)
+                       (ash (aref bytes (+ index 2)) 2)
+                       (aref bytes (+ index 3))))
+             (remember (index)
+               (when (<= (+ index 4) size)
+                 (let ((hash (hash-at index)))
+                   (setf (aref previous index) (aref heads hash)
+                         (aref heads hash) index))))
+             (flush-literals (end)
+               (loop while (< literal-start end) do
+                 (let ((count (min 128 (- end literal-start))))
+                   (emit (1- count))
+                   (loop for index from literal-start below (+ literal-start count)
+                         do (emit (aref bytes index)))
+                   (incf literal-start count)))))
+      (loop while (< position size) do
+        (let ((best-length 0) (best-distance 0))
+          (when (<= (+ position 4) size)
+            (let ((candidate (aref heads (hash-at position)))
+                  (limit (min 131 (- size position))))
+              ;; Chains are newest first, so an out-of-window candidate also
+              ;; excludes every older one. A fixed probe budget bounds work
+              ;; even for adversarial hash collisions or repetitive input.
+              (loop repeat 32 while (and (>= candidate 0)
+                                         (<= (- position candidate) 65535)) do
+                (let ((count 0))
+                  (loop while (and (< count limit)
+                                   (= (aref bytes (+ position count))
+                                      (aref bytes (+ candidate count))))
+                        do (incf count))
+                  (when (and (>= count 4) (> count best-length))
+                    (setf best-length count best-distance (- position candidate)))
+                  (when (= count limit) (return)))
+                (setf candidate (aref previous candidate)))))
+          (if (plusp best-length)
+              (progn
+                (flush-literals position)
+                (emit (+ 128 (- best-length 4)))
+                (emit (logand best-distance 255))
+                (emit (ash best-distance -8))
+                ;; Insert the copied positions too: subsequent matches may
+                ;; start inside this match, including distance-one runs.
+                (loop for index from position below (+ position best-length)
+                      do (remember index))
+                (incf position best-length)
+                (setf literal-start position))
+              (progn (remember position) (incf position)))))
+      (flush-literals size))
+    output))
+
 (defun runtime-library-data (bytes)
   (wat-fragment (with-output-to-string (out)
     (write-char #\" out)

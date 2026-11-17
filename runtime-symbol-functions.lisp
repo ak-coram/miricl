@@ -421,6 +421,71 @@
       (array.set $objects (global.get $canonical-builtin-functions) (local.get $slot) (local.get $function))))
   #@(local.get $function))
 
+(define-runtime-function $standard-function-flags (($id i32)) (i32)
+  ;; Exact target identities from the ANSI inventory, independent of native
+  ;; dispatch support. Method-local functions have no fixed global entry.
+  #@(if (i32.ge_u (local.get $id) (i32.const ,(length *runtime-symbols*)))
+    (then (return (i32.const 0))))
+  #@(i32.and (i32.const 3)
+    (i32.shr_u (array.get $digits (global.get $standard-function-flags)
+      (i32.shr_u (local.get $id) (i32.const 4)))
+      (i32.shl (i32.and (local.get $id) (i32.const 15)) (i32.const 1)))))
+
+(define-runtime-function $register-standard-function
+    (($name :nullable-object) ($value :nullable-object)) ()
+  (:locals ($id i32) ($setf i32))
+  #@(local.set $setf (i32.eqz (call $symbolp (local.get $name))))
+  #@(local.set $id (call $id (call $function-name-symbol (local.get $name))))
+  #@(if (i32.and (call $standard-function-flags (local.get $id))
+      (i32.shl (i32.const 1) (local.get $setf)))
+    (then (call $symbol-index-set
+      (if (result (ref $symbol-index)) (local.get $setf)
+        (then (global.get $standard-setf-bindings))
+        (else (global.get $standard-function-bindings)))
+      (local.get $id) (local.get $value)))))
+
+(define-runtime-function $standard-function-code (($code i32)) (:nullable-object)
+  (:locals ($id i32) ($setf i32) ($value :nullable-object))
+  ;; The signed code is an identity, never a promise of builtin availability.
+  ;; Check it before indexing; -1-CODE is safe even for the least i32 value.
+  #@(local.set $setf (i32.lt_s (local.get $code) (i32.const 0)))
+  #@(local.set $id (if (result i32) (local.get $setf)
+    (then (i32.sub (i32.const -1) (local.get $code)))
+    (else (i32.sub (local.get $code) (i32.const 1)))))
+  (wat-fail-when #@(i32.eqz (i32.and (call $standard-function-flags (local.get $id))
+    (i32.shl (i32.const 1) (local.get $setf)))) :malformed-form)
+  #@(local.set $value (call $symbol-index-get
+    (if (result (ref $symbol-index)) (local.get $setf)
+      (then (global.get $standard-setf-bindings))
+      (else (global.get $standard-function-bindings))) (local.get $id)))
+  ;; Sealed kernels can execute during bootstrap before public builtin
+  ;; installation. Only genuine dispatch-supported builtin identities have
+  ;; an early entry; Lisp bodies and generic protocols must be installed.
+  #@(if (ref.is_null (local.get $value))
+    (then (if (i32.and (call $native-function-flags (local.get $id))
+        (i32.shl (i32.const 1) (local.get $setf)))
+      (then (return_call $canonical-builtin-function (local.get $id) (local.get $setf))))))
+  #@(if (ref.is_null (local.get $value))
+    (then (global.set $undefined-name
+      (if (result (ref null eq)) (local.get $setf)
+        (then (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'setf)))
+          (call $cons (call $symbol (local.get $id)) (ref.null eq))))
+        (else (call $symbol (local.get $id)))))
+      ,(wat-fail :undefined-function)))
+  #@(local.get $value))
+
+(define-runtime-function $standard-function-reference (($name :nullable-object)) (:nullable-object)
+  (:locals ($id i32) ($setf i32))
+  #@(local.set $setf (i32.eqz (call $symbolp (local.get $name))))
+  #@(local.set $id (call $id (call $function-name-symbol (local.get $name))))
+  #@(if (i32.and (call $standard-function-flags (local.get $id))
+      (i32.shl (i32.const 1) (local.get $setf)))
+    (then (return_call $standard-function-code
+      (if (result i32) (local.get $setf)
+        (then (i32.sub (i32.const -1) (local.get $id)))
+        (else (i32.add (local.get $id) (i32.const 1)))))))
+  #@(call $fdefinition (local.get $name)))
+
 (define-runtime-function $kernel-function-reference (($name :nullable-object)) (:nullable-object)
   (:locals ($symbol :nullable-object) ($setf i32) ($id i32) ($mask i32))
   ;; This resolver is used only by trusted runtime-kernel FUNCTION references.
@@ -447,8 +512,9 @@
       (call $cons (call $symbol (local.get $id)) (ref.null eq)))))
 
 (define-runtime-function $store-function (($name :nullable-object) ($value :nullable-object)) (:nullable-object)
-  (:locals ($binding :nullable-object) ($setf i32) ($table (ref $symbol-index)) ($id i32))
+  (:locals ($binding :nullable-object) ($standard-name :nullable-object) ($setf i32) ($table (ref $symbol-index)) ($id i32))
   #@(call $invalidate-slot-access (local.get $name))
+  #@(local.set $standard-name (local.get $name))
   ;; Initializer closures acquire their global name when installed. Preserve
   ;; that name when the same function is subsequently installed as an alias.
   #@(if (ref.test (ref $native-function) (local.get $value))
@@ -466,6 +532,9 @@
               (then (global.get $setf-bindings)) (else (global.get $function-bindings))))
             (call $symbol-index-set (local.get $table) (local.get $id) (local.get $binding)))
       (else (struct.set $obj $a (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))) (local.get $value))))
+  ;; Track actual installation, including source-to-native replacement and
+  ;; ordinary-to-generic promotion. Never freeze a public binding on lookup.
+  #@(call $register-standard-function (local.get $standard-name) (local.get $value))
   #@(local.get $value))
 
 (define-runtime-function $set-fdefinition (($name :nullable-object) ($value :nullable-object)) (:nullable-object)
@@ -663,6 +732,18 @@
           (ref.null eq) (ref.null eq) (ref.null eq)))))))
 
 (define-runtime-section symbol-functions-runtime-wat ()
+  #@(global $standard-function-flags (ref $digits)
+    ,(let ((flags (make-array (ceiling (length *runtime-symbols*) 16) :initial-element 0)))
+       (loop for name in *runtime-symbols* for id from 0 do
+         (let ((bits (logior
+                      (if (and (miricl-compiler::standard-function-name-p name)
+                               (not (eq (miricl-compiler::standard-function-property name :kind)
+                                        :local-function))) 1 0)
+                      (if (miricl-compiler::standard-function-name-p `(setf ,name)) 2 0))))
+           (setf (aref flags (floor id 16))
+             (logior (aref flags (floor id 16)) (ash bits (* 2 (mod id 16)))))))
+       `(array.new_fixed $digits ,(length flags)
+          ,@(loop for word across flags collect `(i32.const ,word)))))
   #@(global $native-function-flags (ref $digits)
     ,(let ((flags (make-array (ceiling (length *runtime-symbols*) 8) :initial-element 0)))
        (loop for names in (list *runtime-functions*
@@ -677,6 +758,8 @@
   ($global-binding) ($register-global-binding)
   #@(global $function-bindings (ref $symbol-index) ,(empty-symbol-index-wat))
   #@(global $setf-bindings (ref $symbol-index) ,(empty-symbol-index-wat))
+  #@(global $standard-function-bindings (ref $symbol-index) ,(empty-symbol-index-wat))
+  #@(global $standard-setf-bindings (ref $symbol-index) ,(empty-symbol-index-wat))
   #@(global $canonical-builtin-functions (ref $objects)
     (array.new_default $objects (i32.const ,(* 2 (length *runtime-symbols*)))))
   #@(global $nil-plist (mut (ref null eq)) (ref.null eq))
@@ -696,5 +779,6 @@
   ($property-cell) ($put-property-box) ($remove-property-box) ($put-property) ($remprop) ($copy-list)
   ($function-documentation) ($function-lambda-expression-native) ($function-name-symbol) ($native-function-flags) ($fdefinition-accessor)
   ($function-binding) ($fdefinition) ($canonical-builtin-function) ($kernel-function-reference) ($kernel-setter-function-reference) ($store-function) ($set-fdefinition)
+  ($standard-function-flags) ($register-standard-function) ($standard-function-code) ($standard-function-reference)
   ($copy-symbol-cl) ($copy-symbol) ($generated-name-cl) ($generated-name) ($symbol-apply) ($symbol-setter)
   ($initialize-symbol-functions))

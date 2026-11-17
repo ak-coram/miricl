@@ -127,25 +127,25 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-tail-multiple-value-call" (:object :object :object) :object)
     ("native-int64" (:i64) :object)
     ("native-unbox-int64" (:object) :i64)
-    ("native-add-int64" (:object :i64 :i64) :object)
-    ("native-sub-int64" (:object :i64 :i64) :object)
-    ("native-mul-int64" (:object :i64 :i64) :object)
-    ("native-logand-int64" (:object :i64 :i64) :object)
-    ("native-logior-int64" (:object :i64 :i64) :object)
-    ("native-logxor-int64" (:object :i64 :i64) :object)
-    ("native-ash-int64" (:object :i64 :i64) :object)
-    ("native-add-int64-checked" (:object :i64 :i64) :object)
-    ("native-sub-int64-checked" (:object :i64 :i64) :object)
-    ("native-mul-int64-checked" (:object :i64 :i64) :object)
-    ("native-lt-int64" (:object :i64 :i64) :object)
-    ("native-gt-int64" (:object :i64 :i64) :object)
-    ("native-le-int64" (:object :i64 :i64) :object)
-    ("native-ge-int64" (:object :i64 :i64) :object)
-    ("native-eq-int64" (:object :i64 :i64) :object)
-    ("native-ne-int64" (:object :i64 :i64) :object)
-    ("native-vector-ref" (:object :object :i32 :i32) :object)
-    ("native-vector-ref-trusted" (:object :object :i32 :i32) :object)
-    ("native-vector-ref-trusted64" (:object :object :i64 :i32) :object)
+    ("native-add-int64" (:i64 :i64) :object)
+    ("native-sub-int64" (:i64 :i64) :object)
+    ("native-mul-int64" (:i64 :i64) :object)
+    ("native-logand-int64" (:i64 :i64) :object)
+    ("native-logior-int64" (:i64 :i64) :object)
+    ("native-logxor-int64" (:i64 :i64) :object)
+    ("native-ash-int64" (:i64 :i64) :object)
+    ("native-add-int64-checked" (:i64 :i64) :object)
+    ("native-sub-int64-checked" (:i64 :i64) :object)
+    ("native-mul-int64-checked" (:i64 :i64) :object)
+    ("native-lt-int64" (:i64 :i64) :object)
+    ("native-gt-int64" (:i64 :i64) :object)
+    ("native-le-int64" (:i64 :i64) :object)
+    ("native-ge-int64" (:i64 :i64) :object)
+    ("native-eq-int64" (:i64 :i64) :object)
+    ("native-ne-int64" (:i64 :i64) :object)
+    ("native-vector-ref" (:object :i32) :object)
+    ("native-vector-ref-trusted" (:object :i32) :object)
+    ("native-vector-ref-trusted64" (:object :i64) :object)
     ("native-vector-ref-inline" (:object :i64) :object)
     ("native-vector-set-inline" (:object :object :i64) :object)
     ("native-sbit-ref-inline" (:object :object) :object)
@@ -173,6 +173,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-cdr-checked" (:object :object) :object)
     ("native-car-inline-checked" (:object) :object)
     ("native-cdr-inline-checked" (:object) :object)
+    ("native-list-path" (:object :i32) :object)
+    ("native-set-list-path" (:object :object :i32) :object)
     ("native-car-list-inline" (:object) :object)
     ("native-cdr-list-inline" (:object) :object)
     ("native-eq-inline" (:object :object) :object)
@@ -212,6 +214,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-global-read" (:object :object) :object)
     ("native-global-write" (:object :object :object) :object)
     ("native-function-reference" (:object) :object)
+    ("native-standard-function-reference" (:object) :object)
     ("native-cons" (:object :object) :object)
     ("native-cons2" (:object :object :object) :object)
     ("native-list2" (:object :object) :object)
@@ -236,6 +239,12 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-call2" (:object :object :object) :object)
     ("native-call3" (:object :object :object :object) :object)
     ("native-call4" (:object :object :object :object :object) :object)
+    ("native-standard-call0" (:i32) :object)
+    ("native-standard-call1" (:i32 :object) :object)
+    ("native-standard-call2" (:i32 :object :object) :object)
+    ("native-standard-call3" (:i32 :object :object :object) :object)
+    ("native-standard-call4" (:i32 :object :object :object :object) :object)
+    ("native-search-list" (:object :object :i32) :object)
     ("native-poll" nil nil)
     ("native-return1" (:object) :object)
     ("native-bind" (:object :object :object) :object)
@@ -478,6 +487,65 @@ Bind to NIL to interpret forms, including forms without native lowering.")
             (if (consp name) (- -1 (miricl::runtime-symbol-id (second name)))
                 (1+ (miricl::runtime-symbol-id name))) 0))))
 
+(defun native-standard-function-name-p (name)
+  ;; Method-local names have no fixed global entry. SETF place metadata alone
+  ;; likewise does not establish a standardized SETF function definition.
+  (and (standard-function-name-p name)
+       (not (eq (standard-function-property name :kind) :local-function))))
+
+(defun native-standard-operation (value)
+  ;; Semantic provenance never permits removing the computed designator or
+  ;; expanding its call. Its producer and ordinary value consumers stay live.
+  (or (and *hir-standard-operations* (gethash value *hir-standard-operations*))
+      (hir-standard-operation-leaf value)))
+
+(defun native-search-list-code (name inputs)
+  "Select a shared checked EQ/EQL search from statically known controls."
+  (unless (and (member name '(member assoc)) (>= (length inputs) 4)
+               (evenp (length inputs)))
+    (return-from native-search-list-code nil))
+  (labels ((test-name (value)
+             (or (native-standard-operation value)
+                 (multiple-value-bind (literal known) (hir-primary-constant value)
+                   (and known (member literal '(eq eql)) literal)))))
+    (let ((test 'eql) (seen nil) (negate nil))
+      (loop for (key value) on (nthcdr 4 inputs) by #'cddr do
+        (multiple-value-bind (keyword known) (hir-primary-constant key)
+          (unless (and known (member keyword '(:key :test :test-not :allow-other-keys)))
+            (return-from native-search-list-code nil))
+          (unless (member keyword seen)
+            (push keyword seen)
+            (case keyword
+              (:key
+               (multiple-value-bind (key known) (hir-primary-constant value)
+                 (unless (and known (null key)) (return-from native-search-list-code nil))))
+              ((:test :test-not)
+               (setq test (test-name value) negate (eq keyword :test-not))
+               (unless (member test '(eq eql)) (return-from native-search-list-code nil)))))))
+      ;; Supplying both is an error even when either value is NIL.
+      (unless (and (member :test seen) (member :test-not seen))
+        (+ (if (eq name 'assoc) 2 0) (if (eq test 'eql) 1 0) (if negate 4 0))))))
+
+(defun native-list-path-code (name)
+  ;; The semantic contract supplies steps in evaluation order. Its bounded
+  ;; paths become the shared runtime worker's low-bit-first encoding.
+  (let ((code 0) (bit 1))
+    (dolist (step (standard-function-list-path name))
+      (when (eq step :cdr) (incf code bit))
+      (setq bit (* bit 2)))
+    (+ code bit)))
+
+(defun native-standard-effect-free-p (name arity)
+  ;; All four negative facts and the accepted arity must be explicit. ANSI
+  ;; inventory membership by itself supplies none of these guarantees.
+  (let ((limits (standard-function-property name :arity)))
+    (and limits (>= arity (car limits))
+         (or (null (cdr limits)) (<= arity (cdr limits)))
+         (every (lambda (property)
+                  (multiple-value-bind (value known) (standard-function-property name property)
+                    (and known (null value))))
+                '(:reads :writes :callbacks :may-signal)))))
+
 (defun emit-native-object-types ()
   ;; Match runtime-objects.lisp's two minimal canonical type groups exactly.
   ;; DIGITS is an independent i32 array. OBJ is a nonfinal recursive struct.
@@ -560,7 +628,10 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       (and *wasm-inline-simple-calls* (eq (hir-instruction-opcode instruction) :call)
            (let ((kind (gethash instruction *wasm-inline-simple-calls*)))
              (or (integerp kind)
-                 (member kind '(:eq :eql :consp :simple-vector-p :vectorp :stringp :symbolp :integerp :characterp :null :true :false
+                 (and kind (not (eq kind :standard-call))
+                      (native-standard-effect-free-p (hir-inline-primitive instruction)
+                        (- (length (hir-instruction-inputs instruction)) 2)))
+                 (member kind '(:true :false
                                 :left :right :cons :list :list-star :car :cdr :car-cons :cdr-cons :vector-length :evenp :oddp)))))
       (member (hir-instruction-opcode instruction)
         ;; The checked entry validates arguments independently. An unused
@@ -1003,7 +1074,16 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   ;; These canonical plans inspect immutable values or object identity/tags.
   ;; Mutable contents, allocation, general calls and checked accesses are out.
   (or (and (integerp kind) (<= #x50 kind #x59))
-      (member kind '(:eq :eql :null :consp :simple-vector-p :vectorp :stringp :symbolp :integerp :characterp :evenp :oddp))))
+      ;; Integer-only parity plans carry their own checked type proof.
+      (member kind '(:evenp :oddp))
+      (let* ((entry (assoc kind '((:eq eq 2) (:eql eql 2) (:null null 1)
+                                  (:consp consp 1) (:atom atom 1) (:listp listp 1)
+                                  (:functionp functionp 1) (:simple-vector-p simple-vector-p 1)
+                                  (:vectorp vectorp 1) (:stringp stringp 1) (:symbolp symbolp 1)
+                                  (:integerp integerp 1) (:characterp characterp 1))))
+             (name (second entry)))
+        (and entry (standard-function-property name :truth-result)
+             (native-standard-effect-free-p name (third entry))))))
 
 (defun native-predicate-source (value reused)
   (declare (type simple-vector value) (type (or null simple-vector) reused))
@@ -1270,7 +1350,9 @@ exhausted work budgets keep every incoming value group."
         (when (or (and (eq (hir-instruction-opcode instruction) :values)
                        (= (length (hir-instruction-inputs instruction)) 1))
                   (and (eq (hir-instruction-opcode instruction) :call)
-                       (or (gethash instruction *wasm-inline-vector-calls*)
+                       (or (eql (standard-function-result-count (hir-inline-primitive instruction)
+                                   (- (length (hir-instruction-inputs instruction)) 2)) 1)
+                           (gethash instruction *wasm-inline-vector-calls*)
                            (let ((kind (gethash instruction *wasm-inline-simple-calls*)))
                              ;; Canonical inline operations have known value
                              ;; counts even in a full multiple-value context.
@@ -1736,11 +1818,10 @@ exhausted work budgets keep every incoming value group."
                                    (<= . "native-le-int64") (>= . "native-ge-int64")
                                    (= . "native-eq-int64") (/= . "native-ne-int64")))))
          (arithmetic (member name '(+ - *)))
-         (widths (and opcode (mapcar #'native-integer-width (cddr inputs))))
-         (code (and opcode (native-canonical-builtin-code name))))
+         (widths (and opcode (mapcar #'native-integer-width (cddr inputs)))))
     (when (member name '(svref aref row-major-aref))
       (return-from emit-native-integer-call (emit-native-vector-call inputs safety)))
-    (unless (and code (plusp code) (every #'identity widths))
+    (unless (and opcode (every #'identity widths))
       (return-from emit-native-integer-call nil))
     (when (and arithmetic
                (not (if (eq name '*) (<= (+ (first widths) (second widths)) 64)
@@ -1750,7 +1831,6 @@ exhausted work budgets keep every incoming value group."
                          (let ((result-width (native-type-integer-width (hir-value-type output))))
                            (and result-width (<= result-width 64))))))
       (setq opcode (concatenate 'string opcode "-checked")))
-    (wasm-get function)
     (loop for operand in (cddr inputs) for width in widths do
       (emit-native-unboxed-integer operand width))
     (wasm-call opcode)
@@ -1772,15 +1852,13 @@ exhausted work budgets keep every incoming value group."
                     (not (eq (second (hir-instruction-attributes producer)) 'notinline))
                     (first (hir-instruction-attributes producer))))
          (width (and (member name '(svref aref row-major-aref))
-                     (native-simple-vector-value-p (third inputs)) (native-integer-width (fourth inputs))))
-         (code (and width (<= width (if (zerop safety) 64 31)) (native-canonical-builtin-code name))))
-    (unless (and code (plusp code)) (return-from emit-native-vector-call nil))
-    (wasm-get function) (wasm-get (third inputs))
+                     (native-simple-vector-value-p (third inputs)) (native-integer-width (fourth inputs)))))
+    (unless (and width (<= width (if (zerop safety) 64 31))) (return-from emit-native-vector-call nil))
+    (wasm-get (third inputs))
     (wasm-get (fourth inputs))
     (if (<= width 31)
         (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d))
         (wasm-call "native-unbox-int64"))
-    (wasm-integer code)
     (wasm-call (cond ((not (zerop safety)) "native-vector-ref")
                      ((<= width 31) "native-vector-ref-trusted")
                      (t "native-vector-ref-trusted64")))
@@ -1842,6 +1920,7 @@ exhausted work budgets keep every incoming value group."
                    (attributes (and (%hir-instruction-p producer)
                      (eq (hir-instruction-opcode producer) :function-reference)
                      (hir-instruction-attributes producer)))
+                   (standard-name (native-standard-operation reference))
                    (name (and (not (eq (second attributes) 'notinline)) (first attributes)))
                    (kind (case name
                      ((1+ 1- + - * logand logior logxor lognot ash < > <= >= = /= zerop minusp plusp evenp oddp)
@@ -1923,6 +2002,10 @@ exhausted work budgets keep every incoming value group."
                                  (case (length inputs)
                                    (3 :left) (4 :cons) (otherwise :list-star))))
                      (consp (and (= (length inputs) 3) :consp))
+                     (atom (and (= (length inputs) 3) :atom))
+                     (listp (and (= (length inputs) 3) :listp))
+                     (functionp (and (= (length inputs) 3) :functionp))
+                     (identity (and (= (length inputs) 3) :left))
                      (simple-vector-p (and (= (length inputs) 3) :simple-vector-p))
                      (vectorp (and (= (length inputs) 3) :vectorp))
                      (stringp (and (= (length inputs) 3) :stringp))
@@ -1965,6 +2048,22 @@ exhausted work budgets keep every incoming value group."
                      ((null not) (and (= (length inputs) 3) :null))
                      (otherwise (and (equal name '(setf gethash))
                                      (member (length inputs) '(5 6)) :puthash)))))
+              ;; These are compact checked calls, including under NOTINLINE.
+              ;; The shared worker preserves NIL and checks each intermediate
+              ;; CAR/CDR rather than expanding every composite path in callers.
+              (when (and (null kind) (null *wasm-fixed-call-emitter*) (= (length inputs) 3)
+                         (standard-function-list-path standard-name))
+                (setq kind :list-path))
+              (when (and (null kind) (null *wasm-fixed-call-emitter*)
+                         (native-search-list-code standard-name inputs))
+                (setq kind :search-list))
+              ;; Exact one-value standard operations can use a checked fixed
+              ;; entry without carrying a global function lookup. No purity,
+              ;; valid-argument or fixed-method claim follows from this plan.
+              (when (and (null kind) (null *wasm-fixed-call-emitter*) (<= 2 (length inputs) 6)
+                         (native-standard-function-name-p standard-name)
+                         (eql (standard-function-result-count standard-name (- (length inputs) 2)) 1))
+                (setq kind :standard-call))
               (when (and (equal name '(setf char)) (= (length inputs) 5))
                 (setq kind
                   (if (and (zerop (hir-instruction-safety-level instruction))
@@ -1983,7 +2082,7 @@ exhausted work budgets keep every incoming value group."
                          (not (gethash instruction *wasm-inline-vector-calls*)))
                 (setq kind :row-major-set))
               (when (and *wasm-inferred-types* (zerop (hir-instruction-safety-level instruction))
-                         (member name '(consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >=)))
+                         (member name '(consp atom listp functionp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >=)))
                 (let ((type (gethash (hir-instruction-output instruction) *wasm-inferred-types* t)))
                   (cond ((equal type '(eql t)) (setq kind :true))
                         ((eq type 'null) (setq kind :false)))))
@@ -1993,8 +2092,11 @@ exhausted work budgets keep every incoming value group."
                                (member kind '(:car :cdr :car-cons :cdr-cons :checked-car :checked-cdr)))
                       (setf (gethash block *wasm-cons-forward-blocks*) t))
                     (compiler-statistic :planning/inline-primitive kind)
-                    (setf (gethash instruction *wasm-inline-simple-calls*) kind
-                          (gethash reference *wasm-inline-references*) t)))))))))
+                    (setf (gethash instruction *wasm-inline-simple-calls*) kind)
+                    ;; Only an immediate canonical reference can disappear.
+                    ;; Computed designators retain their evaluation and identity.
+                    (when attributes
+                      (setf (gethash reference *wasm-inline-references*) t))))))))))
   (native-plan-character-code-fusion unit)
   *wasm-inline-simple-calls*)
 
@@ -2160,17 +2262,18 @@ exhausted work budgets keep every incoming value group."
   (let* ((function (second inputs)) (producer (hir-value-producer function))
            (name (and (%hir-instruction-p producer)
                       (eq (hir-instruction-opcode producer) :function-reference)
-                      (not (eq (second (hir-instruction-attributes producer)) 'notinline))
                       (first (hir-instruction-attributes producer))))
            (arity (- (length inputs) 2))
-           (eligible (case arity
-                       (1 (member name '(car first cdr rest identity not null consp atom symbolp
-                                         integerp numberp rationalp realp complexp floatp 1+ 1- length)))
-                       (2 (member name '(= /= + - * < > <= >= eq eql cons aref svref))))))
+           (eligible (eql (standard-function-result-count name arity) 1)))
       (when eligible
         (wasm-get function) (wasm-call "native-tail-enter") (wasm-byte #x1a)
         (unless (or (emit-native-integer-call inputs nil safety) (emit-native-list-call inputs safety))
-          (emit-native-fixed-call inputs))
+          (if (<= arity 4)
+              (emit-native-fixed-call inputs)
+              ;; The primary adapter uses active dynamic state; its legacy
+              ;; environment slot is ignored, as for other scalar calls.
+              (progn (wasm-null) (wasm-get function) (wasm-arguments (cddr inputs))
+                     (wasm-call "native-primary-call"))))
         (wasm-call "native-return1") (wasm-byte #x0f)
         t)))
 
@@ -2331,7 +2434,12 @@ exhausted work budgets keep every incoming value group."
       (:block-environment
        (wasm-get (first inputs))
        (when (hir-target-captured-p (first attributes)) (wasm-call "native-block-environment")))
-      (:function-reference (wasm-literal (first attributes)) (wasm-call "native-function-reference"))
+      (:function-reference
+       (wasm-literal (first attributes))
+       ;; Host kernel adapters own early-bootstrap reference resolution.
+       (wasm-call (if (and (null *wasm-fixed-call-emitter*)
+                           (native-standard-function-name-p (first attributes)))
+                      "native-standard-function-reference" "native-function-reference")))
       (:global-read (wasm-get (first inputs)) (wasm-literal (first attributes)) (wasm-call "native-global-read"))
       (:global-write
        (wasm-get (first inputs)) (wasm-literal (first attributes)) (wasm-get (second inputs))
@@ -2427,8 +2535,32 @@ exhausted work budgets keep every incoming value group."
              ((eq kind :list-star) (wasm-list (cddr inputs) t))
              ((eq kind :consp)
               (emit-native-tag-test (third inputs) 7 nil nil (null (hir-instruction-attributes instruction)) t))
+             ((eq kind :atom)
+              (emit-native-tag-test (third inputs) 7 nil nil t)
+              (wasm-byte #x45) (wasm-call "native-boolean"))
+             ((eq kind :listp)
+              (emit-native-tag-test (third inputs) 7 nil t)
+              (wasm-call "native-boolean"))
+             ((eq kind :functionp)
+              (emit-native-tag-test (third inputs) 8)
+              (wasm-call "native-boolean"))
              ((eq kind :symbolp)
               (emit-native-tag-test (third inputs) 6 nil t) (wasm-call "native-boolean"))
+             ((eq kind :standard-call)
+              ;; Retain proven typed workers before the general checked
+              ;; linkage. Their ABI no longer transports a function object.
+              (unless (emit-native-integer-call inputs output (hir-instruction-safety-level instruction))
+                (let ((name (native-standard-operation (second inputs))))
+                  (wasm-integer (native-canonical-builtin-code name))
+                  (dolist (input (cddr inputs)) (wasm-get input))
+                  (wasm-call (nth (- (length inputs) 2)
+                    '("native-standard-call0" "native-standard-call1" "native-standard-call2"
+                      "native-standard-call3" "native-standard-call4"))))))
+             ((eq kind :search-list)
+              (wasm-get (third inputs)) (wasm-get (fourth inputs))
+              (wasm-integer (native-search-list-code
+                (native-standard-operation (second inputs)) inputs))
+              (wasm-call "native-search-list"))
              ((member kind '(:evenp :oddp))
               (emit-native-unboxed-integer (third inputs) (native-integer-width (third inputs)))
               (wasm-byte #x42) (wasm-s32 1) (wasm-byte #x83)
@@ -2445,6 +2577,10 @@ exhausted work budgets keep every incoming value group."
                  (wasm-gc 2 1 (if (eq kind :car-cons) 4 5)) (wasm-gc #x1b))
                 (:checked-car (wasm-call "native-car-inline-checked"))
                 (:checked-cdr (wasm-call "native-cdr-inline-checked"))
+                (:list-path
+                 (wasm-integer (native-list-path-code
+                   (native-standard-operation (second inputs))))
+                 (wasm-call "native-list-path"))
                 ((:rplaca-cons :rplacd-cons)
                  ;; The proven CONS is mutable; the operation returns that
                  ;; same cons. Keep this store live even if its result is dead.
@@ -4390,13 +4526,13 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                              (setf svref) (setf aref) (setf row-major-aref) (setf char)) :test #'equal)
                              (and (zerop (hir-instruction-safety-level instruction))
                                   (member (first (hir-instruction-attributes producer))
-                                    '(consp simple-vector-p vectorp stringp symbolp integerp characterp null not)))))
+                                    '(consp atom listp functionp simple-vector-p vectorp stringp symbolp integerp characterp null not)))))
                 (dolist (input (cddr inputs)) (push input roots))
                 ;; Return-only arithmetic results also need range facts for
                 ;; choosing their boxed representation, even without a later
                 ;; numeric consumer to request those facts.
                 (when (member (first (hir-instruction-attributes producer))
-                              '(consp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >=
+                              '(consp atom listp functionp simple-vector-p vectorp stringp symbolp integerp characterp null not eq eql = /= < <= > >=
                                 1+ 1- + - * logand logior logxor lognot ash))
                   (push (hir-instruction-output instruction) roots))))))))
     roots))
@@ -4557,10 +4693,11 @@ the named-entry format for hosts that translate individual Wasm workers."
          (*wasm-generic-calls* (make-hash-table :test 'eq))
          (*wasm-optimization-barriers* (hir-optimization-barriers unit))
          (*wasm-result-callees* (hir-result-callees unit *wasm-optimization-barriers*))
+         (*hir-standard-operations* (hir-standard-operations unit *wasm-optimization-barriers*))
          (analysis-entries (or entries (list (first (hir-unit-functions unit)))))
          ;; These roots come directly from validated instruction operands.
          (type-analysis (multiple-value-list
-                         (infer-hir-types-checked unit (native-type-roots unit) t analysis-entries nil *wasm-result-callees*)))
+                         (infer-hir-types-checked unit (native-type-roots unit) t analysis-entries nil *wasm-result-callees* *hir-standard-operations*)))
          (*wasm-inferred-types* (first type-analysis))
          (*wasm-type-guards* (second type-analysis))
          (*wasm-debug* (some (lambda (function) (>= (hir-function-debug-level function) 2)) *native-functions*))
@@ -4572,7 +4709,7 @@ the named-entry format for hosts that translate individual Wasm workers."
          ;; workers. Its explicit closed-worker contract retains that lowering.
          (result-analysis (and *wasm-native-multiple-results* (not *wasm-closed-worker-functions*)
                                (not *compiler-bootstrapping*)
-                               (not *wasm-debug*) (multiple-value-list (hir-result-arities-checked unit *wasm-result-callees*))))
+                               (not *wasm-debug*) (multiple-value-list (hir-result-arities-checked unit *wasm-result-callees* *hir-standard-operations*))))
          (*wasm-result-arities* (first result-analysis))
          (*wasm-multiple-result-functions* (make-hash-table :test 'eq))
          (*wasm-boxed-result-workers* (make-hash-table :test 'eq))
@@ -4781,6 +4918,10 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
 
 (defparameter *native-compiler-seeds*
   '(compiler-primitive record-compilation-statistic compilation-statistics-report
+                   standard-function-contract standard-function-name-p standard-function-property
+                   standard-function-result-type standard-function-result-count
+                   standard-function-predicate-type standard-function-list-path
+                   native-standard-function-name-p native-standard-operation native-search-list-code native-list-path-code native-standard-effect-free-p
                    wasm-byte wasm-append wasm-u32 wasm-u32-width wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call
                    wasm-remember-local wasm-get wasm-set wasm-integer wasm-local wasm-null wasm-gc wasm-as-object
                    emit-native-tag-test
@@ -4815,7 +4956,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-capture hir-cell-for-binding
                    hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
                    hir-type-without-null hir-copy-source hir-type-truth-premise hir-type-branch-guards
-                   hir-inline-primitive hir-integer-identity hir-integer-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
+                   hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-symbolic-target-type-p hir-type-query-result-type hir-integer-identity hir-integer-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
                    hir-dispatch-candidate
                    hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells
                    hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-tail-pair-p hir-share-branch-tails hir-refresh-predecessors hir-proper-list-checks optimize-hir-checked optimize-hir

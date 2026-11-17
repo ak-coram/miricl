@@ -82,15 +82,6 @@
   (runtime-function-definition '$rational-in-interval-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$rational-in-interval-cl 'miricl-runtime:rational-in-interval-value))))
 
-(define-runtime-function $rational-interval-operations () (:nullable-object)
-  #@(if (ref.is_null (global.get $rational-interval-functions))
-    (then (global.set $rational-interval-functions (call $vector-new
-      (array.new_fixed $objects 5
-        ,@(loop for name in '(+ - * / truncate) collect
-            `(call $node (i32.const 8) (i32.const ,(1+ (runtime-symbol-id name)))
-               (ref.null eq) (ref.null eq) (ref.null eq))))))))
-  #@(global.get $rational-interval-functions))
-
 (define-runtime-function $check-rational-interval
     (($a :nullable-object) ($b :nullable-object) ($inclusive i32)) ()
   ;; Numeric kind and interval validation precede the SAFETY 0 CL worker.
@@ -122,7 +113,7 @@
   #@(block $failed (try_table (catch $transfer $failed)
     (call $check-rational-interval (local.get $a) (local.get $b) (local.get $inclusive))
     (local.set $result (call $rational-in-interval-cl (local.get $a) (local.get $b)
-      (call $bool (local.get $inclusive)) (call $rational-interval-operations)))
+      (call $bool (local.get $inclusive))))
     (global.set $extra-values (local.get $values))
     (global.set $value-count (local.get $count))
     (return (ref.as_non_null (local.get $result)))))
@@ -165,5 +156,4 @@
     (else (local.get $value))))
 
 (define-runtime-section rounding-runtime-wat ()
-  #@(global $rational-interval-functions (mut (ref null eq)) (ref.null eq))
-  ($rounding-native) ($rounding-apply) ($rational-interval-operations) ($rational-in-interval-cl) ($check-rational-interval) ($rational-in-interval) ($rationalize-native))
+  ($rounding-native) ($rounding-apply) ($rational-in-interval-cl) ($check-rational-interval) ($rational-in-interval) ($rationalize-native))

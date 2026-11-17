@@ -1,6 +1,7 @@
 *.fasl
 *.fas
 *.wasm
+*.wasm.gz
 miricl.html
 /todo.html
 /image-sizes.html
