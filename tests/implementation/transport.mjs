@@ -57,6 +57,21 @@ try {
         (list class slots defaults
           (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%STANDARD-CLASS-SLOTS"))
           (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%STANDARD-CLASS-DEFAULT-INITARGS")))))
+    (defgeneric transport-saved-next (a &optional b c d e &key marker))
+    (funcall (miricl-compiler:compile-native '(lambda ()
+      (defmethod transport-saved-next ((a t) &optional b c d e &key (marker :missing))
+        (declare (optimize (debug 0)))
+        (values a b c d e marker))
+      (defmethod transport-saved-next ((a integer) &optional b c d e &key marker)
+        (declare (optimize (debug 0)) (ignore b c d e marker))
+        (setq a 999)
+        (lambda () (call-next-method))))))
+    (defparameter *transport-saved-next*
+      (let ((driver (miricl-compiler:compile-native
+        '(lambda ()
+          (declare (optimize (debug 0)))
+          (transport-saved-next 1 nil 3 4 5 :marker nil)))))
+        (funcall driver) (funcall driver) (funcall driver)))
     (values)`, {eof: true});
   const saved = other.saveImage();
   const restored = await Miricl.instantiate(saved);
@@ -80,6 +95,9 @@ try {
         (handler-case (progn (funcall read-slots) nil) (program-error () t))
         (handler-case (progn (funcall read-defaults 3) nil) (error () t))
         (= (slot-value (make-instance class) 'value) 42)))`, {eof: true}).output, 'T\n');
+    assert.equal(restored.evaluate(`(equal (multiple-value-list (funcall *transport-saved-next*))
+      '(1 nil 3 4 5 nil))`, {eof: true}).output, 'T\n',
+    'An escaped next-method closure retains its original indexed arguments and complete values through image restore.');
   } finally {restored.close();}
   // Corrupt the Lisp payload inside a structurally valid Wasm custom section.
   // Rejection must not damage the original worker or a subsequent restore.

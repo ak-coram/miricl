@@ -137,7 +137,9 @@
   ;; to a surrounding Lisp target. Preserve the caller's multiple values too.
   #@(local.set $extra (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
-  #@(local.set $result (call $apply (local.get $a) (local.get $b)))
+  #@(local.set $result (call $apply (local.get $a)
+    (ref.cast (ref null eq) (any.convert_extern
+      (call $native-ingress-arguments (extern.convert_any (local.get $b)))))))
   #@(global.set $extra-values (local.get $extra))
   #@(global.set $value-count (local.get $count))
   #@(local.get $result))

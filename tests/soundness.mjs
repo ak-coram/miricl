@@ -343,26 +343,35 @@ try {
   console.log('Soundness: warmed generic dispatch observes applicability hooks and borrowed canonical metadata.');
   // The private native ABI accepts raw mutable eqref arrays. These standalone
   // stable WasmGC types canonicalize to that packet type across modules; the
-  // fixture constructs packets without depending on runtime layout indices.
+  // fixture constructs and mutates packets without runtime layout indices.
   const section = (id, bytes) => [id, bytes.length, ...bytes];
   const body = bytes => [bytes.length + 1, 0, ...bytes];
   const packets = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.from([
     0, 97, 115, 109, 1, 0, 0, 0,
-    ...section(1, [3, 0x5e, 0x6d, 1,
-      0x60, 2, 0x6f, 0x6f, 1, 0x6f, 0x60, 0, 1, 0x6f]),
-    ...section(3, [2, 1, 2]),
-    ...section(7, [2, 4, 109, 97, 107, 101, 0, 0,
-      5, 101, 109, 112, 116, 121, 0, 1]),
-    ...section(10, [2,
+    ...section(1, [5, 0x5e, 0x6d, 1,
+      0x60, 2, 0x6f, 0x6f, 1, 0x6f, 0x60, 0, 1, 0x6f,
+      0x60, 3, 0x6f, 0x7f, 0x6f, 0,
+      0x60, 7, ...Array(7).fill(0x6f), 1, 0x6f]),
+    ...section(3, [4, 1, 2, 3, 4]),
+    ...section(7, [4, 4, 109, 97, 107, 101, 0, 0,
+      5, 101, 109, 112, 116, 121, 0, 1,
+      3, 115, 101, 116, 0, 2, 4, 119, 105, 100, 101, 0, 3]),
+    ...section(10, [4,
       ...body([0x20, 0, 0xfb, 0x1a, 0xfb, 0x17, 0x6d,
         0x20, 1, 0xfb, 0x1a, 0xfb, 0x17, 0x6d,
         0xfb, 8, 0, 2, 0xfb, 0x1b, 0x0b]),
-      ...body([0x41, 0, 0xfb, 7, 0, 0xfb, 0x1b, 0x0b])]),
+      ...body([0x41, 0, 0xfb, 7, 0, 0xfb, 0x1b, 0x0b]),
+      ...body([0x20, 0, 0xfb, 0x1a, 0xfb, 0x16, 0,
+        0x20, 1, 0x20, 2, 0xfb, 0x1a, 0xfb, 0x17, 0x6d,
+        0xfb, 0x0e, 0, 0x0b]),
+      ...body([...Array.from({length: 7}, (_, index) =>
+        [0x20, index, 0xfb, 0x1a, 0xfb, 0x17, 0x6d]).flat(),
+        0xfb, 8, 0, 7, 0xfb, 0x1b, 0x0b])]),
   ]))).exports;
   const elements = [vm.javascript.makeText('packet element'), null];
-  const rejectArgument = (arguments_, index) => {
+  const rejectPacketOperation = operation => {
     assert.throws(() => {
-      try {vm.vm['native-argument'](arguments_, index);}
+      try {operation();}
       catch (cause) {
         assert.ok(cause instanceof WebAssembly.Exception, 'Reject through a Lisp condition, without a Wasm trap.');
         throw vm.failure(cause);
@@ -370,6 +379,8 @@ try {
     }, error => error.code > 0 && error.message.length > 0);
     recover();
   };
+  const rejectArgument = (arguments_, index) =>
+    rejectPacketOperation(() => vm.vm['native-argument'](arguments_, index));
   for (const [arguments_, expected] of [[packets.make(...elements), elements],
     [packets.empty(), []], [vm.vm['native-list2'](...elements), elements]]) {
     expected.forEach((value, index) => assert.equal(vm.vm['native-argument'](arguments_, index), value));
@@ -378,7 +389,157 @@ try {
     for (const index of [-1, -0x80000000]) rejectArgument(arguments_, index);
   }
   rejectArgument(vm.vm['native-cons'](elements[0], elements[0]), 1);
+  const owned = vm.vm['native-arguments'](elements.length);
+  rejectArgument(owned, 0); // Incomplete construction must not expose a private sentinel.
+  for (const [index, element] of elements.entries())
+    assert.equal(vm.vm['native-argument-set'](owned, index, element), owned);
+  assert.ok(vm.vm['native-argument-present'](owned, 1), 'Present NIL differs from an absent argument.');
+  assert.equal(vm.vm['native-argument-present'](owned, elements.length), null);
+  assert.equal(vm.vm['native-argument'](owned, 1), null);
+  const foreign = {invalidPacket: true};
+  for (const operation of [
+    () => vm.vm['native-arguments'](-1),
+    () => vm.vm['native-argument-set'](owned, -1, null),
+    () => vm.vm['native-argument-set'](owned, elements.length, null),
+    () => vm.vm['native-argument-set'](owned, 1, elements[0]),
+    () => vm.vm['native-argument-set'](vm.vm['native-arguments'](1), 0, foreign),
+    () => vm.vm['native-argument-set'](foreign, 0, null),
+    () => vm.vm['native-argument'](foreign, 0),
+    () => vm.vm['native-argument-present'](owned, -1),
+    () => vm.vm['native-argument-present'](foreign, 0),
+    () => vm.vm['native-check-arguments'](owned, -1, -1),
+    () => vm.vm['native-check-arguments'](owned, elements.length, 0),
+  ]) {
+    rejectPacketOperation(operation);
+    assert.equal(vm.vm['native-argument'](owned, 0), elements[0]);
+    vm.vm['native-check-arguments'](owned, elements.length, elements.length);
+  }
   console.log('Soundness: raw native packets preserve elements and reject invalid reads with recovery.');
+
+  // Capture a Lisp function through the adapter's ordinary callback bridge,
+  // then exercise the checked native boundary directly with foreign storage.
+  const packetFunction = expression => {
+    const callback = vm.javascript.callback;
+    let function_;
+    vm.javascript.callback = function (value) {
+      function_ = value;
+      return callback.call(this, value);
+    };
+    try {evaluate(`(js:callback ${expression}) (values)`);}
+    finally {vm.javascript.callback = callback;}
+    assert.ok(function_, 'The Lisp callback bridge supplied its function.');
+    return function_;
+  };
+  // Private binder packets admit finite dotted spines, but cycles must fail
+  // even when the requested slot occurs before the cycle. Repair the same
+  // object to check that rejection leaves its storage and the runtime usable.
+  for (const [length, entry] of [[1, 0], [3, 1], [4, 0]]) {
+    const fixture = vm.javascript.link(0, vm.vm['native-call'](null,
+      packetFunction(`(lambda ()
+        (let* ((items (make-list ${length})) (end (last items)))
+          (setf (cdr end) (nthcdr ${entry} items))
+          (cons items (lambda () (setf (cdr end) nil) items))))`), packets.empty()));
+    const cyclic = vm.javascript.link(0, fixture), repair = vm.javascript.link(1, fixture);
+    for (const operation of [
+      () => vm.vm['native-argument'](cyclic, 0),
+      () => vm.vm['native-argument-present'](cyclic, 0),
+      () => vm.vm['native-rest-argument'](cyclic, 0),
+      () => vm.vm['native-check-arguments'](cyclic, 0, -1),
+    ]) rejectPacketOperation(operation);
+    assert.equal(vm.javascript.link(0, vm.vm['native-call'](null, repair, packets.empty())), cyclic);
+    vm.vm['native-check-arguments'](cyclic, length, length);
+    assert.deepEqual(vm.javascript.list(vm.vm['native-rest-argument'](cyclic, 0), value => value),
+      Array(length).fill(null), 'Repair preserves every original argument slot.');
+  }
+  console.log('Soundness: private binder helpers reject circular spines and recover after in-place repair.');
+  evaluate(`(defgeneric soundness-owned-next (a &optional b c d e &key marker))
+    (funcall (compile-native '(lambda ()
+      (defmethod soundness-owned-next ((a t) &optional b c d e &key marker)
+        (declare (optimize (debug 0))) (values a b c d e marker))
+      (defmethod soundness-owned-next ((a integer) &optional b c d e &key marker)
+        (declare (optimize (debug 0)) (ignore b c d e marker))
+        (setq a 999) (lambda () (call-next-method)))))) (values)`);
+  const nextGeneric = packetFunction("#'soundness-owned-next");
+  // JavaScript numbers become Lisp floats; dispatch must select the INTEGER
+  // method that returns the escaped next-method closure.
+  const originalFirst = vm.javascript.fromJS(1n), changedFirst = vm.javascript.fromJS(99n);
+  const marker = vm.javascript.link(0,
+    vm.vm['native-call'](null, packetFunction("(lambda () :marker)"), packets.empty()));
+  const originalOperands = [originalFirst, null, vm.javascript.fromJS(3),
+    vm.javascript.fromJS(4), vm.javascript.fromJS(5), marker, null];
+  for (const call of [
+    (function_, args) => vm.vm['native-primary-call'](null, function_, args),
+    (function_, args) => vm.javascript.link(0, vm.vm['native-call'](null, function_, args)),
+    (function_, args) => vm.vm['native-tail-call'](function_, args),
+    (function_, args) => vm.vm['native-generic-call'](null, function_, args, 1),
+    (function_, args) => vm.javascript.link(9, function_, args),
+  ]) {
+    // Repeat the same call so the escaped context also comes from a warm
+    // mode19-eligible cache path (one required dispatch position, wide call).
+    let escaped, arguments_;
+    for (let warm = 0; warm < 3; warm++) {
+      arguments_ = packets.wide(...originalOperands);
+      escaped = call(nextGeneric, arguments_);
+    }
+    packets.set(arguments_, 0, changedFirst);
+    packets.set(arguments_, 1, elements[0]);
+    const values = vm.vm['native-call'](null, escaped, packets.empty());
+    assert.deepEqual(vm.javascript.list(values, value => value),
+      [originalFirst, null, ...originalOperands.slice(2, 5), null],
+      'Escaped CALL-NEXT-METHOD retains original argument slots and all values after foreign array mutation.');
+    // Completion through the fill-once builder also supplies no ownership
+    // authority: the canonical foreign mutator can still alias that storage.
+    const built = vm.vm['native-arguments'](originalOperands.length);
+    originalOperands.forEach((value, index) => vm.vm['native-argument-set'](built, index, value));
+    const builtEscaped = call(nextGeneric, built);
+    packets.set(built, 0, changedFirst);
+    assert.deepEqual(vm.javascript.list(vm.vm['native-call'](null, builtEscaped, packets.empty()), value => value),
+      [originalFirst, null, ...originalOperands.slice(2, 5), null]);
+    rejectPacketOperation(() => call(nextGeneric, vm.vm['native-arguments'](1)));
+  }
+  const sharedOperand = vm.vm['native-cons'](originalFirst, null);
+  const sharedPacket = packets.wide(originalFirst, sharedOperand, ...originalOperands.slice(2));
+  const sharedEscaped = vm.vm['native-primary-call'](null, nextGeneric, sharedPacket);
+  vm.vm['native-cell-write'](sharedOperand, changedFirst);
+  const sharedValues = vm.javascript.list(vm.vm['native-call'](null, sharedEscaped, packets.empty()), value => value);
+  assert.equal(sharedValues[1], sharedOperand, 'Snapshotting slots preserves referenced Lisp object identity.');
+  assert.equal(vm.vm['native-cell-read'](sharedValues[1]), changedFirst,
+    'Changes to an argument object remain visible through the original argument.');
+  console.log('Soundness: native ingress snapshots foreign raw slots before retaining escaped next-method calls.');
+
+  let initializerPacket;
+  vm.javascript.imports['soundness-packet'] = {mutate() {
+    packets.set(initializerPacket, 2, changedFirst);
+    packets.set(initializerPacket, 4, elements[0]);
+  }};
+  evaluate(`(js:define-import soundness-packet-mutate ("soundness-packet" "mutate") () :void)
+    (values)`);
+  const keywordList = vm.vm['native-primary-call'](null,
+    packetFunction("(lambda () (list :later :third :allow-other-keys))"), packets.empty());
+  const [later, third, allowOtherKeys] = vm.javascript.list(keywordList, value => value);
+  const initialized = packetFunction(`(compile-native '(lambda (a &key
+      (first (soundness-packet-mutate)) later third)
+    (declare (optimize (debug 0)) (ignore first)) (list a later third)))`);
+  const initializedType = vm.vm['core-object-type'](initialized);
+  const initializedReader = Object.keys(vm.vm).find(name => name.startsWith(`core-read:${initializedType}:`));
+  const initializedEntry = vm.vm[initializedReader](initialized)[initializedReader.split(':')[2].indexOf('e')];
+  for (const call of [
+    args => vm.javascript.link(0, vm.vm['native-call'](null, initialized, args)),
+    args => vm.vm['native-primary-call'](null, initialized, args),
+    args => vm.vm['native-tail-call'](initialized, args),
+    args => vm.vm['native-generic-call'](null, initialized, args, 1),
+    args => vm.javascript.link(9, initialized, args),
+    args => initializedEntry(initialized, args),
+  ]) {
+    initializerPacket = packets.wide(originalFirst, later, originalOperands[2],
+      third, originalOperands[3], allowOtherKeys, vm.javascript.true);
+    assert.deepEqual(vm.javascript.list(call(initializerPacket), value => value),
+      [originalFirst, originalOperands[2], originalOperands[3]],
+      'A callback in an earlier default cannot mutate later supplied argument slots.');
+    assert.equal(vm.vm['native-argument'](initializerPacket, 2), changedFirst,
+      'The initializer actually mutated the foreign source packet.');
+  }
+  delete vm.javascript.imports['soundness-packet'];
 
   // The image factory keeps its packet ABI while its children may use fixed
   // workers. Exercise that build policy without installing another compiler.
@@ -516,6 +677,22 @@ try {
       (setf (cdr last) nil)
       (and rejected (equal (multiple-value-list (eval form)) '(15))))`);
   }
+  // APPLY's public boundary requires a proper final list even though the
+  // private destructuring binder also accepts finite dotted spines.
+  for (const tail of ['arguments', ':dotted']) {
+    check(`(let* ((arguments (list 1 nil 3)) (end (last arguments))
+        (native (compile-native '(lambda (arguments) (apply #'list arguments)))))
+      (every (lambda (function)
+        (setf (cdr end) ${tail})
+        (let ((rejected
+            (handler-case (progn (funcall function arguments) nil)
+              (type-error (condition)
+                (and (type-error-expected-type condition)
+                  (plusp (length (princ-to-string condition))))))))
+          (setf (cdr end) nil)
+          (and rejected (equal (funcall function arguments) '(1 nil 3)))))
+        (list (lambda (arguments) (apply #'list arguments)) native)))`);
+  }
   for (const [source, reason] of [
     ["(compile-native '(lambda (x . tail) x))", /dotted tail/],
     ["(compile-native '(lambda (x x) x))", /duplicate parameter/],
@@ -593,6 +770,68 @@ try {
   ]) reject(`(let* ((unit (compile-to-hir '(lambda (x) (lambda () x))))
       (function (find-if (lambda (function) (hir-function-captures function)) (hir-unit-functions unit))))
     ${selectEntry})`, /entry requires a closure environment/);
+  // Private activation reads carry checked attributes through public HIR and
+  // the current wire codec. Ordinary lambda-list semantics live in ANSI tests.
+  for (const [opcode, attributes, reason] of [
+    [':argument-present', "'(-1)", /index/],
+    [':keyword-present', "'(0 17)", /symbol/],
+    [':keyword-argument', "'(-1 :sample)", /index/],
+    [':check-keywords', "'(0 (:sample . :tail) nil)", /dotted/],
+    [':check-keywords', "'(0 (17) nil)", /symbol/],
+    [':check-keywords', "'(0 (:sample) :yes)", /boolean/],
+    [':check-keywords', "(let ((keys (list :sample))) (setf (cdr keys) keys) (list 0 keys nil))", /circular/],
+  ]) reject(`(let* ((unit (lower-source-to-hir
+        '(lambda (&optional (x nil xp) &key (sample nil sp)) (values x xp sample sp))))
+      (instructions (mapcan (lambda (function)
+        (mapcan (lambda (block) (copy-list (hir-block-instructions block)))
+          (hir-function-blocks function))) (hir-unit-functions unit)))
+      (instruction (find ${opcode} instructions
+        :key (lambda (instruction) (hir-instruction-opcode instruction)))))
+    (setf (hir-instruction-attributes instruction) ${attributes})
+    (emit-hir-code unit))`, reason);
+
+  evaluate(`(defun soundness-keyword-wire ()
+      (emit-hir-code (compile-to-hir
+        '(lambda (&optional (x :default xp) &key ((soundness-key y) :other yp))
+           (values x xp y yp)))))
+    (defun soundness-keyword-descriptor-slot (wire)
+      (let* ((payload (validate-hir-code wire))
+             (functions (svref payload 1)))
+        (loop for function across functions do
+          (let ((scratch (make-array (+ 6 (svref function 7)) :initial-element 0)))
+            (loop for block across (svref function 5) do
+              (let ((pc 0) (code (svref block 2)))
+                (loop while (< pc (length code)) do
+                  (setq pc (read-hir-code-instruction code pc scratch))
+                  (when (eq (first (svref *hir-code-operations* (svref scratch 0))) :check-keywords)
+                    (return-from soundness-keyword-descriptor-slot (svref scratch 5))))))))
+        (error "Missing keyword descriptor"))) (values)`);
+  for (const descriptor of ["'(nil)", "'((17) nil)", "'((soundness-key . :tail) nil)",
+    "'((soundness-key) :yes)",
+    "(let ((keys (list 'soundness-key))) (setf (cdr keys) keys) (list keys nil))"]) {
+    reject(`(let* ((wire (soundness-keyword-wire))
+        (slot (soundness-keyword-descriptor-slot wire)))
+      (setf (svref (svref wire 0) slot) ${descriptor})
+      (load-hir-code wire))`, /keyword|symbol|circular|dotted/, 'hir-code-input-error');
+  }
+  check(`(let* ((wire (soundness-keyword-wire))
+      (decoded (validate-hir-code wire))
+      (slot (soundness-keyword-descriptor-slot wire))
+      (interpreted (load-hir-code wire))
+      (native (compile-native-hir (copy-hir-code decoded))))
+    ;; Both loading and exporting privately copy executable keyword metadata.
+    (setf (first (svref (svref wire 0) slot)) nil
+          (second (svref (svref wire 0) slot)) t)
+    (let ((exported (copy-hir-code decoded)))
+      (setf (first (svref (svref exported 0) slot)) nil
+            (second (svref (svref exported 0) slot)) t))
+    (every (lambda (function)
+      (and (equal (multiple-value-list (funcall function)) '(:default nil :other nil))
+        (equal (multiple-value-list (funcall function nil 'soundness-key nil)) '(nil t nil t))
+        (handler-case (progn (funcall function nil :unrecognized 1) nil) (program-error () t))
+        (equal (multiple-value-list (funcall function 7 'soundness-key 9)) '(7 t 9 t))))
+      (list interpreted native (load-hir-code (copy-hir-code decoded)))))`);
+  evaluate("(fmakunbound 'soundness-keyword-wire) (fmakunbound 'soundness-keyword-descriptor-slot) (values)");
   // Capture metadata describes the actual closure environment. Public HIR
   // must not name an absent slot or mistake the private child-cache slot for
   // a binding, even when the individual records and operands are well formed.
@@ -668,6 +907,203 @@ try {
     (let* ((unit (compile-to-hir '(lambda (x) (if x (values nil nil) (values)))))
            (facts (hir-result-arities-checked unit)))
       (null (gethash (first (hir-unit-functions unit)) facts))))`);
+  // Wide, valid nonalias operands still consume provenance work. Keep this
+  // graph proof-only: it deliberately exceeds the bounded audit's work cap.
+  check(`(let* ((unit (lower-source-to-hir '(lambda (x effect)
+        (declare (optimize (debug 0)))
+        (flet ((worker (y) (values y y)))
+          (declare (notinline worker))
+          (funcall #'worker (progn (funcall effect :operand) x))))))
+      (root (first (hir-unit-functions unit)))
+      (binding (find 'worker (hir-function-bindings root)
+        :key (lambda (binding) (hir-binding-name binding))))
+      (worker (hir-local-function (hir-binding-local binding)))
+      (barriers (hir-optimization-barriers unit))
+      (facts (hir-result-callees unit barriers))
+      (call (find-if (lambda (instruction)
+        (and (eq (hir-instruction-opcode instruction) :call)
+          (eq worker (hir-result-callee (second (hir-instruction-inputs instruction)) facts))))
+        (mapcan (lambda (block) (copy-list (hir-block-instructions block))) (hir-function-blocks root))))
+      (callee (and call (second (hir-instruction-inputs call))))
+      (group (find :values
+        (mapcan (lambda (block) (copy-list (hir-block-instructions block))) (hir-function-blocks worker))
+        :key (lambda (instruction) (hir-instruction-opcode instruction)))))
+    (and (verify-hir unit) callee (null (hir-result-callee callee))
+      (let ((sources (hir-primary-flow unit barriers)))
+        (and (null (gethash callee sources))
+          (progn (hir-local-callee-flow unit barriers sources) (gethash callee sources))))
+      (progn
+        (setf (hir-instruction-inputs group)
+          (make-list 100000 :initial-element (first (hir-instruction-inputs group))))
+        (verify-hir unit)
+        (and (null (hir-result-callee callee (hir-result-callees unit barriers)))
+          (let ((sources (make-hash-table :test 'eq)))
+            (setf (gethash :retained sources) :retained)
+            (hir-local-callee-flow unit barriers sources)
+            (and (null (gethash callee sources))
+              (eq :retained (gethash :retained sources))))))))`);
+  // A small unproved call retains selected closure context, operand order
+  // and the complete replacement return group after a conservative fallback.
+  check(`(let* ((unit (compile-to-hir '(lambda (flag replacement capture x effect)
+        (declare (optimize (debug 0)))
+        (flet ((worker (y) (values capture y)))
+          (declare (notinline worker))
+          (funcall (progn (funcall effect :selected) (if flag #'worker replacement))
+            (progn (funcall effect :operand) x))))))
+      (root (first (hir-unit-functions unit)))
+      (return (find :return (mapcar (lambda (block) (hir-block-terminator block)) (hir-function-blocks root))
+        :key (lambda (instruction) (hir-instruction-opcode instruction))))
+      (call (hir-value-producer (first (hir-instruction-inputs return))))
+      (effects nil)
+      (replacement (lambda (y) (values :replacement y :extra))))
+    (and (eq (hir-instruction-opcode call) :call)
+      (null (hir-result-callee (second (hir-instruction-inputs call))
+                 (hir-result-callees unit (hir-optimization-barriers unit))))
+      (let ((native (compile-native-hir (emit-hir-code-checked unit))))
+        (and (equal (multiple-value-list
+                 (funcall native t replacement 17 19 (lambda (event) (push event effects)))) '(17 19))
+          (equal effects '(:operand :selected))
+          (progn (setq effects nil)
+            (and (equal (multiple-value-list
+                   (funcall native nil replacement 23 29 (lambda (event) (push event effects))))
+                   '(:replacement 29 :extra))
+              (equal effects '(:operand :selected))))))))`);
+  // Executable same-code joins retain the selected closure's context and
+  // operand effects. NOTINLINE keeps the worker out of the caller's body.
+  for (const count of [2, 4]) for (const full of [false, true]) {
+    const returned = ['capture', ...Array(count - 1).fill('y')].join(' ');
+    const call = '(funcall selected (progn (funcall effect :operand) x))';
+    check(`(let ((effects nil) (function (compile-native '(lambda (flag capture x effect)
+          (declare (optimize (debug 0)))
+          (flet ((worker (y) (declare (optimize (debug 0))) (values ${returned})))
+            (declare (notinline worker))
+            (let ((selected (if flag #'worker (values #'worker (funcall effect :branch)))))
+              ${full ? `(multiple-value-list ${call})` : `(values ${call})`}))))))
+      (and (equal (funcall function t 17 19 (lambda (x) (push x effects)))
+                  ${full ? `'(17 ${Array(count - 1).fill('19').join(' ')})` : '17'})
+        (equal effects '(:operand))
+        (progn (setq effects nil)
+          (and (equal (funcall function nil 23 29 (lambda (x) (push x effects)))
+                      ${full ? `'(23 ${Array(count - 1).fill('29').join(' ')})` : '23'})
+            (equal effects '(:operand :branch))))))`);
+  }
+  // Mixed targets, unknown ingress and a captured mutable function variable
+  // must retain general dispatch and the replacement's complete return group.
+  for (const selection of [
+    "(if flag #'worker #'other)",
+    "(if flag #'worker replacement)",
+    `(let ((selected #'worker))
+       (flet ((replace () (setq selected replacement)))
+         (declare (notinline replace))
+         (unless flag (replace)) selected))`,
+    `(block chosen
+       (flet ((escape () (return-from chosen replacement)))
+         (declare (notinline escape))
+         (if flag #'worker (escape))))`,
+  ]) check(`(let* ((function (compile-native '(lambda (flag replacement x)
+        (declare (optimize (debug 0)))
+        (flet ((worker (y) (values y y))
+               (other (y) (declare (ignore y)) (values :replacement :second :third)))
+          (declare (notinline worker other))
+          (funcall ${selection} x)))))
+      (replacement (lambda (y) (declare (ignore y)) (values :replacement :second :third))))
+    (and (equal (multiple-value-list (funcall function t replacement 29)) '(29 29))
+      (equal (multiple-value-list (funcall function nil replacement 29)) '(:replacement :second :third))))`);
+  check(`(let* ((factory (compile-native '(lambda (flag)
+        (declare (optimize (debug 0)))
+        (flet ((worker (y) (declare (inline car) (optimize (safety 1))) (car y)))
+          (declare (notinline worker))
+          (let ((selected (if flag #'worker (values #'worker :ignored))))
+            (funcall selected '(17)) selected)))))
+      (worker (funcall factory nil)))
+    (and (handler-case (progn (funcall worker :invalid) nil)
+           (type-error (condition) (eq (type-error-datum condition) :invalid)))
+      (= 23 (funcall worker '(23)))))`);
+  check(`(let* ((unit (compile-to-hir '(lambda (flag replacement x)
+        (declare (optimize (debug 0)))
+        (flet ((worker (y) (values y y)))
+          (declare (notinline worker))
+          (let ((selected #'worker))
+            (when flag (setq selected replacement))
+            (funcall selected x))))))
+      (function (first (hir-unit-functions unit)))
+      (bindings (hir-function-bindings function))
+      (selected (find 'selected bindings :key (lambda (binding) (hir-binding-name binding))))
+      (worker (find 'worker bindings :key (lambda (binding) (hir-binding-name binding))))
+      (call (find :call (mapcan (lambda (block) (copy-list (hir-block-instructions block)))
+                          (hir-function-blocks function))
+                 :key (lambda (instruction) (hir-instruction-opcode instruction)))))
+    (setf (hir-binding-local selected) (hir-binding-local worker))
+    (verify-hir unit)
+    (and (null (hir-result-callee (second (hir-instruction-inputs call))
+                 (hir-result-callees unit (hir-optimization-barriers unit))))
+      (multiple-value-bind (bytes literals) (emit-native-module unit)
+        (let* ((native (compiler-primitive 17 bytes literals nil))
+               (replacement (lambda (y) (declare (ignore y)) (values :replacement :second :third))))
+          (and (equal (multiple-value-list (funcall native nil replacement 29)) '(29 29))
+            (equal (multiple-value-list (funcall native t replacement 29)) '(:replacement :second :third)))))))`);
+  // Capture identities describe a slot, not the executable cell supplied by
+  // every closure creation. Re-emission must audit a changed context operand.
+  check(`(let* ((unit (compile-to-hir '(lambda (stop replacement x)
+        (declare (optimize (debug 0)))
+        (labels ((worker (stop y) (if stop y (worker t y))))
+          (declare (notinline worker))
+          (worker stop x)))))
+      (root (first (hir-unit-functions unit)))
+      (replacement-binding (find 'replacement (hir-function-bindings root)
+        :key (lambda (binding) (hir-binding-name binding))))
+      (worker-binding (find 'worker (hir-function-bindings root)
+        :key (lambda (binding) (hir-binding-name binding))))
+      (worker (hir-local-function (hir-binding-local worker-binding)))
+      (closure (find-if (lambda (instruction)
+        (and (eq (hir-instruction-opcode instruction) :closure)
+             (eq (first (hir-instruction-attributes instruction)) worker)))
+        (mapcan (lambda (block) (copy-list (hir-block-instructions block))) (hir-function-blocks root))))
+      (recursive (find :call
+        (mapcan (lambda (block) (copy-list (hir-block-instructions block))) (hir-function-blocks worker))
+        :key (lambda (instruction) (hir-instruction-opcode instruction)))))
+    (emit-native-module unit)
+    (setf (first (hir-instruction-inputs closure)) (hir-binding-cell replacement-binding)
+          (hir-binding-captured-p replacement-binding) t (hir-binding-assigned-p replacement-binding) t)
+    (verify-hir unit)
+    (and (null (hir-result-callee (second (hir-instruction-inputs recursive))
+                 (hir-result-callees unit (hir-optimization-barriers unit))))
+      (multiple-value-bind (bytes literals) (emit-native-module unit)
+        (let* ((native (compiler-primitive 17 bytes literals nil))
+               (replacement (lambda (stop y) (declare (ignore stop)) (values :replacement y :extra))))
+          (and (= 29 (funcall native t replacement 29))
+            (equal (multiple-value-list (funcall native nil replacement 29)) '(:replacement 29 :extra)))))))`);
+  // A valid client mutation after emission invalidates the earlier join proof.
+  // Neither a retained certificate nor descriptive local metadata may seal it.
+  check(`(let* ((unit (compile-to-hir '(lambda (flag replacement x)
+        (declare (optimize (debug 0)))
+        (flet ((worker (y) (values y y)))
+          (declare (notinline worker))
+          (funcall (if flag #'worker (values #'worker :branch)) x)))))
+      (function (first (hir-unit-functions unit)))
+      (call (find :call (mapcan (lambda (block) (copy-list (hir-block-instructions block)))
+                      (hir-function-blocks function))
+                    :key (lambda (instruction) (hir-instruction-opcode instruction))))
+      (callee (second (hir-instruction-inputs call)))
+      (join (find-if (lambda (block) (hir-block-parameters block)) (hir-function-blocks function)))
+      (edge (hir-block-terminator (first (hir-block-predecessors join))))
+      (group (hir-value-producer (first (hir-instruction-inputs edge))))
+      (replacement-argument (find-if (lambda (value)
+        (let ((producer (hir-value-producer value)))
+          (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :argument)
+               (= 1 (first (hir-instruction-attributes producer)))))) (hir-function-values function))))
+    (and (hir-result-callee callee (hir-result-callees unit (hir-optimization-barriers unit)))
+      (progn
+        (emit-native-module unit)
+        (setf (first (hir-instruction-inputs group)) replacement-argument)
+        (verify-hir unit)
+        (and (null (hir-result-callee callee (hir-result-callees unit (hir-optimization-barriers unit))))
+          (let* ((native (compile-native-hir (emit-hir-code-checked unit)))
+                 (replacement (lambda (y) (declare (ignore y)) (values :replacement :second :third)))
+                 (answers (list (multiple-value-list (funcall native t replacement 29))
+                                (multiple-value-list (funcall native nil replacement 29)))))
+            (and (member '(29 29) answers :test #'equal)
+                 (not (null (member '(:replacement :second :third) answers :test #'equal)))))))))`);
   // A closed consumer and a later dynamic caller share the same function.
   // Its fixed native results preserve padding, complete returns and identity.
   for (const count of [2, 3, 4]) {
@@ -696,6 +1132,53 @@ try {
       (progn (setq effects nil)
         (handler-case (progn (funcall function 17 18 (lambda (x) (push x effects))) nil)
           (type-error () (equal effects '(:second :first)))))))`);
+
+  // Open wide calls keep MIRICL's lookup-before-operands contract even when
+  // their result is primary-only or discarded. A full consumer of the same
+  // dynamically replaced callee still receives its complete value group.
+  check(`(let* ((name 'soundness-wide-boundary)
+      (original (compile-native '(lambda (group b c d e f fail)
+        (declare (ignore b c d e f))
+        (when fail (error "Wide boundary failure"))
+        (values-list group))))
+      (replacement (compile-native '(lambda (&rest arguments)
+        (declare (ignore arguments)) (values :replacement nil :new))))
+      (primary (compile-native '(lambda (effect fail)
+        (let ((answer (soundness-wide-boundary (funcall effect) nil 3 4 5 6 fail)))
+          (values answer :caller)))))
+      (discard (compile-native '(lambda (effect fail)
+        (soundness-wide-boundary (funcall effect) nil 3 4 5 6 fail)
+        (values :discarded :caller))))
+      (full (compile-native '(lambda (effect fail)
+        (multiple-value-list
+          (soundness-wide-boundary (funcall effect) nil 3 4 5 6 fail))))))
+    (unwind-protect
+      (and
+        (loop for group in '(nil (nil) (:old nil :third 4 5 6 7 8 :last)) always
+          (loop for caller in (list primary discard full)
+                for expected in (list (list (car group) :caller)
+                                      '(:discarded :caller) (list group)) always
+            (let ((effects nil))
+              (setf (symbol-function name) original)
+              (and (equal (multiple-value-list
+                  (funcall caller (lambda ()
+                    (push :argument effects)
+                    (setf (symbol-function name) replacement) group) nil)) expected)
+                (equal effects '(:argument))
+                (equal (multiple-value-list
+                  (funcall primary (lambda () group) nil)) '(:replacement :caller))))))
+        (let ((effects nil))
+          (setf (symbol-function name) original)
+          (and (handler-case
+              (unwind-protect
+                (progn (funcall primary (lambda ()
+                  (push :argument effects)
+                  (setf (symbol-function name) replacement) nil) t) nil)
+                (push :cleanup effects))
+              (error () (equal effects '(:cleanup :argument))))
+            (equal (multiple-value-list
+              (funcall primary (lambda () nil) nil)) '(:replacement :caller)))))
+      (fmakunbound name)))`);
 
   // Macro headers are untrusted even when their bodies will be interpreted.
   // Conditions retain the input for inspection without printing cyclic data.

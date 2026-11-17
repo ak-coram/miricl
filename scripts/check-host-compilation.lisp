@@ -21,6 +21,7 @@
       (load (merge-pathnames "tests/runtime-wat-reachability.lisp" root))
       (load (merge-pathnames "tests/runtime-kernel-callbacks.lisp" root))
       (load (merge-pathnames "tests/runtime-library-codec.lisp" root))
+      (load (merge-pathnames "tests/native-module-linker.lisp" root))
       (format t "~&MIRICL host compilation and loading passed on ~A ~A.~%"
               (lisp-implementation-type) (lisp-implementation-version))
       (uiop:quit 0))

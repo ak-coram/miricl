@@ -996,7 +996,7 @@
 (defun no-applicable-method (gf &rest args) (error 'error))
 (defun no-next-method (gf method &rest args) (error 'error))
 (defun next-method-p () (and %next-context (not (not (%nth 4 %next-context)))))
-(defun %call-next (context args)
+(defun %call-next-list (context args)
   (unless context (error 'control-error))
   (when (%nth 5 context) (error 'control-error))
   (let ((gf (%nth 0 context)) (method (%nth 1 context))
@@ -1004,8 +1004,12 @@
     (when args
       (unless (%list-eq (compute-applicable-methods gf args) (compute-applicable-methods gf original))
         (error 'error)))
-    (if next (funcall next (if args args original))
+    (if next (funcall next (if (%argument-context-p context)
+                              (%make-argument-context (if args args original))
+                              (if args args original)))
         (apply 'no-next-method gf method (if args args original)))))
+(defun %call-next (context args)
+  (if (%argument-context-p context) (%call-next-packet context args) (%call-next-list context args)))
 (defun call-next-method (&rest args) (%call-next %next-context args))
 (defun %rewrite-next-items (items context)
   (if (consp items)
@@ -1026,11 +1030,11 @@
 (defun %primary (gf methods args)
   (if methods
       (let ((rest (cdr methods)))
-        (%invoke-method gf (car methods) rest args
+        (%context-invoke-method gf (car methods) rest args
           (if rest (lambda (newargs) (%primary gf rest newargs)) nil)))
-      (apply 'no-applicable-method gf args)))
+      (apply 'no-applicable-method gf (%context-rest args 0))))
 (defun %auxiliary (gf methods args)
-  (%%while methods (%invoke-method gf (pop methods) nil args nil)) nil)
+  (%%while methods (%context-invoke-method gf (pop methods) nil args nil)) nil)
 (defun %qualified (methods qualifier)
   (if methods
       (if (if qualifier (%list-eq (%get (car methods) :qualifiers) (list qualifier))
@@ -1040,7 +1044,7 @@
 (defun %execute-standard (gf methods args)
   (let ((primary (%qualified methods nil)) (before (%qualified methods :before))
         (after (%qualified methods :after)))
-    (unless primary (apply 'no-applicable-method gf args))
+    (unless primary (apply 'no-applicable-method gf (%context-rest args 0)))
     (%auxiliary gf before args)
     (let ((results (multiple-value-list (%primary gf primary args))))
       (%auxiliary gf (reverse after) args)
@@ -1050,9 +1054,9 @@
          (primary (%qualified methods name)) (result nil) (first t) (finished nil)
          (custom (get name '%combination)) (collected nil))
     (when (eq (cadr combination) :most-specific-last) (setq primary (reverse primary)))
-    (unless primary (apply 'no-applicable-method gf args))
+    (unless primary (apply 'no-applicable-method gf (%context-rest args 0)))
     (%%while (and primary (not finished))
-      (let ((value (%invoke-method gf (pop primary) nil args nil)))
+      (let ((value (%context-invoke-method gf (pop primary) nil args nil)))
         (cond (custom (push value collected))
               ((eq name 'list) (push value result))
               ((eq name 'progn) (setq result value))
@@ -1072,7 +1076,7 @@
 (defun %around (gf around methods args)
   (if around
       (let ((rest (cdr around)))
-        (%invoke-method gf (car around) rest args
+        (%context-invoke-method gf (car around) rest args
           (lambda (newargs) (%around gf rest methods newargs))))
       (if (eq (car (%get gf :method-combination-name)) 'standard)
           (%execute-standard gf methods args) (%short-combination gf methods args))))
@@ -1106,13 +1110,13 @@
           (if around
               (list '%around-plan (%quote gf) (%quote around)
                 (%quote (%compile-effective-function gf
-                          (list 'lambda '(%effective-args) (%expand-effective-form gf body))))
-                '%effective-args)
+                          (list 'lambda '(%effective-context) (%expand-effective-form gf body))))
+                '%effective-context)
               body))
-        (list '%around (%quote gf) (%quote (%qualified methods :around)) (%quote methods) '%effective-args))))
+        (list '%around (%quote gf) (%quote (%qualified methods :around)) (%quote methods) '%effective-context))))
 (defun %around-plan (gf methods primary args)
   (if methods
-      (%invoke-method gf (car methods) (cdr methods) args
+      (%context-invoke-method gf (car methods) (cdr methods) args
         (lambda (newargs) (%around-plan gf (cdr methods) primary newargs)))
       (funcall primary args)))
 (defun %invalidate-dispatch (gf)
@@ -1208,9 +1212,8 @@
           (when (%nth 3 part) (setq keyp t allowed (append (%nth 4 part) allowed)))
           (when (%member '&allow-other-keys params) (setq allow t))))
       (if keyp
-          (list 'progn (list '%check-keys
-            (list '%%nthcdr (+ (car profile) (cadr profile)) '%effective-args)
-            (%quote allowed) (not (not allow))) form)
+          (list 'progn (list '%context-check-keys '%effective-context
+            (+ (car profile) (cadr profile)) (%quote allowed) (not (not allow))) form)
           form))))
 (defun %interpret-generated-function (form)
   ;; The HIR compiler needs no native loader, including during compilation of
@@ -1236,8 +1239,11 @@
   (let* ((form (compute-effective-method gf (%get gf :method-combination) methods))
          (function (%%property-effective nil form gf args)))
     (or function
-        (%compile-effective-function gf (list 'lambda '(%effective-args)
-          (%effective-keyword-form gf methods (%expand-effective-form gf form)))))))
+        (let ((entry (%compile-effective-function gf (list 'lambda '(%effective-context)
+                 (%effective-keyword-form gf methods (%expand-effective-form gf form))))))
+          ;; Public callers still supply one proper Lisp argument list. The
+          ;; runtime's private entry supplies an opaque owned-packet context.
+          (%%structure-function entry gf entry 19)))))
 
 (defun %generic-call-candidate (name)
   (when (and (not %booting) (not %planning-generic-call) (not %compiling-effective-function)
@@ -1296,10 +1302,10 @@
                    (eq slot-token (%%invalidate-slot-access)))
           (%%generic-call-plan gf function (coerce (reverse guards) 'simple-vector) mask
                               version token slot-token))))))
-(defun %invoke-effective (gf args)
+(defun %invoke-effective (gf args &optional context)
   (if (%member (%get gf :name) '(compute-applicable-methods compute-effective-method compute-discriminating-function))
       (let ((methods (%compute-applicable gf args)))
-        (%around gf (%qualified methods :around) methods args))
+        (%around gf (%qualified methods :around) methods (or context args)))
       (let ((key nil) (mode 0) (cache nil) (function nil) (version %dispatch-version)
             (slot-token (%%invalidate-slot-access))
             (token (%get gf :cache-token)) (cache-permitted (%dispatch-cache-permitted-p gf)))
@@ -1316,7 +1322,7 @@
                 (setq function (caddr entry))))))
         (unless function
           (let ((methods (compute-applicable-methods gf args)))
-            (unless methods (return-from %invoke-effective (apply 'no-applicable-method gf args)))
+            (unless methods (return-from %invoke-effective (apply 'no-applicable-method gf (%context-rest args 0))))
             ;; Distinct class keys can select the same ordered method list.
             ;; Reuse its executable plan instead of expanding it again.
             (when cache-permitted
@@ -1337,7 +1343,7 @@
               (let ((old (%get gf :cache)))
                 (when (and old (not (= (car (car old)) %dispatch-version))) (setq old nil))
                 (setf (%get gf :cache) (cons (list version key function mode methods slot-token) old))))))
-        (funcall function args))))
+        (if context (%apply-effective function context) (funcall function args)))))
 (defun %expand-effective-form (gf form)
   (cond ((not (= (%%tag form) 7)) form)
         ((eq (car form) 'quote) form)
@@ -1345,28 +1351,28 @@
          (let ((method (%effective-method-object gf (cadr form)))
                (next (%map (lambda (method) (%effective-method-object gf method)) (caddr form))))
            (cond ((not (cddr form))
-                  (list '%invoke-method-without-next (%quote gf) (%quote method) '%effective-args))
-                 ((not next) (list '%invoke-method (%quote gf) (%quote method) nil '%effective-args nil))
-                 (t (list '%effective-call (%quote gf) (%quote method) (%quote next) '%effective-args)))))
+                  (list '%context-invoke-without-next (%quote gf) (%quote method) '%effective-context))
+                 ((not next) (list '%context-invoke-method (%quote gf) (%quote method) nil '%effective-context nil))
+                 (t (list '%effective-call (%quote gf) (%quote method) (%quote next) '%effective-context)))))
         (t (%map (lambda (x) (%expand-effective-form gf x)) form))))
 (defun %effective-method-object (gf method)
   (if (and (consp method) (eq (car method) 'make-method))
       (let* ((context (let ((*gensym-counter* 0)) (gensym "METHOD-CONTEXT")))
-             (function (%compile-effective-function gf (list 'lambda (list '%effective-args context)
+             (function (%compile-effective-function gf (list 'lambda (list '%effective-context context)
                (%rewrite-next (%expand-effective-form gf (cadr method)) context)))))
         (%%allocate (find-class 'standard-method)
           (list :qualifiers nil :lambda-list (%get gf :lambda-list) :specializers nil :generic-function gf
-            :function (lambda (args next) (funcall function args %next-context)))))
+            :function (lambda (args next) (funcall function (%make-argument-context args) %next-context)))))
       method))
 (defun %effective-call (gf method next args)
-  (%invoke-method gf method next args
+  (%context-invoke-method gf method next args
     (if next (lambda (newargs) (%effective-call gf (car next) (cdr next) newargs)) nil)))
 (defun %primary-effective (function gf method next)
   ;; The next-method chain belongs to the cached effective method, not to an
   ;; invocation. Only the context's original arguments vary between calls.
-  (let ((continuation (%compile-effective-function gf (list 'lambda '(%effective-args)
+  (let ((continuation (%compile-effective-function gf (list 'lambda '(%effective-context)
             (list '%effective-call (%quote gf) (%quote (car next))
-              (%quote (cdr next)) '%effective-args)))))
+              (%quote (cdr next)) '%effective-context)))))
     (%%structure-function function gf (list method next continuation) 9)))
 (defun compute-discriminating-function (gf)
   (%%generic-discriminator gf (lambda (args) (%invoke-effective gf args))))

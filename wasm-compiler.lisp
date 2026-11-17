@@ -195,6 +195,13 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-mod-general-inline" (:object :object) :object)
     ("native-truncate-primary-inline" (:object :object) :object)
     ("native-argument" (:object :i32) :object)
+    ("native-arguments" (:i32) :object)
+    ("native-argument-set" (:object :i32 :object) :object)
+    ("native-ingress-arguments" (:object) :object)
+    ("native-argument-present" (:object :i32) :object)
+    ("native-keyword-present" (:object :i32 :object) :object)
+    ("native-keyword-argument" (:object :i32 :object) :object)
+    ("native-check-keywords" (:object :i32 :object :i32) nil)
     ("native-rest-argument" (:object :i32) :object)
     ("native-check-arguments" (:object :i32 :i32) nil)
     ("native-check-apply-arguments" (:object :i32) nil)
@@ -211,6 +218,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-cell-read" (:object) :object)
     ("native-cell-write" (:object :object) :object)
     ("native-call" (:object :object :object) :object)
+    ("native-primary-call" (:object :object :object) :object)
     ("native-return" (:object) :object)
     ("native-attach-direct" (:object :function) :object)
     ("native-attach-direct-usage" (:object :function :i32) :object)
@@ -488,6 +496,16 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (dotimes (i (ash count -1)) (wasm-call "native-cons2"))
     (when (oddp count) (wasm-call "native-cons"))))
 
+(defun wasm-arguments (values)
+  ;; All operand effects have already run in HIR order. Build one owned raw
+  ;; array, filling its slots before publishing it to any application adapter.
+  ;; Setters return the packet, so construction needs no extra local or GC
+  ;; opcode/type declaration in the emitted module.
+  (declare (type list values))
+  (wasm-integer (length values)) (wasm-call "native-arguments")
+  (loop for value in values for index from 0 do
+    (wasm-integer index) (wasm-get value) (wasm-call "native-argument-set")))
+
 (defun native-removable-p (instruction)
   (declare (type simple-vector instruction))
   ;; These operations cannot signal or change observable state in valid HIR.
@@ -513,7 +531,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
         ;; parameter read or closure allocation has no additional observable
         ;; effect; initializer calls and global lookups remain live.
         '(:constant :copy :primary :truth :value-ref :values :list :capture
-          :argument :closure :cell-new :cell-read :block-enter :block-environment))))
+          :argument :argument-present :keyword-present :keyword-argument :rest-argument
+          :closure :cell-new :cell-read :block-enter :block-environment))))
 
 (defun native-live-inputs (instruction)
   (declare (type simple-vector instruction))
@@ -2100,22 +2119,7 @@ exhausted work budgets keep every incoming value group."
 
 (defun native-known-callee (value)
   (declare (type simple-vector value))
-  (loop repeat (hir-function-value-count (hir-value-owner value))
-        for producer = (hir-value-producer value)
-        while (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :copy))
-        do (setq value (first (hir-instruction-inputs producer))))
-  (let ((producer (hir-value-producer value)))
-    (when (%hir-instruction-p producer)
-      (case (hir-instruction-opcode producer)
-        (:closure (first (hir-instruction-attributes producer)))
-        (:cell-read
-         (let ((cell (hir-value-producer (first (hir-instruction-inputs producer)))))
-           (when (%hir-instruction-p cell)
-             (let* ((binding (case (hir-instruction-opcode cell)
-                               (:cell-new (first (hir-instruction-attributes cell)))
-                               (:capture (second (hir-instruction-attributes cell)))))
-                    (info (and (%hir-binding-p binding) (hir-binding-local binding))))
-               (when info (hir-local-function info))))))))))
+  (hir-result-callee value *wasm-result-callees*))
 
 (defun emit-native-tail-builtin (inputs safety)
   ;; These standard functions return exactly one value. Guard their resolved
@@ -2163,7 +2167,7 @@ exhausted work budgets keep every incoming value group."
         (if direct
             (dotimes (i 4)
               (if (< i (length (cddr inputs))) (wasm-get (nth (+ i 2) inputs)) (wasm-null)))
-            (wasm-list (cddr inputs) nil))
+            (wasm-arguments (cddr inputs)))
         (wasm-byte #x12)
         (when *wasm-function-relocations*
           (push (list (length *wasm-bytes*) entry)
@@ -2176,7 +2180,7 @@ exhausted work budgets keep every incoming value group."
     (wasm-get (second inputs))
     (if (<= count 4)
         (dolist (value (cddr inputs)) (wasm-get value))
-        (wasm-list (cddr inputs) nil))
+        (wasm-arguments (cddr inputs)))
     (let ((start (length *wasm-bytes*)))
       (wasm-call (if (<= count 4) (format nil "native-tail-call~D" count) "native-tail-call"))
       (setf (aref *wasm-bytes* start) #x12))))
@@ -2294,9 +2298,18 @@ exhausted work budgets keep every incoming value group."
       (:copy
        (let ((locals (and *wasm-multiple-result-locals* (native-value-slot *wasm-multiple-result-locals* output))))
          (if locals (emit-native-results (first inputs) (length locals)) (wasm-get (first inputs)))))
-      ((:argument :rest-argument)
+      ((:argument :rest-argument :argument-present)
        (wasm-local 1) (wasm-integer (first attributes))
-       (wasm-call (if (eq (hir-instruction-opcode instruction) :argument) "native-argument" "native-rest-argument")))
+       (wasm-call (case (hir-instruction-opcode instruction)
+                    (:argument "native-argument") (:argument-present "native-argument-present")
+                    (otherwise "native-rest-argument"))))
+      ((:keyword-present :keyword-argument)
+       (wasm-local 1) (wasm-integer (first attributes)) (wasm-literal (second attributes))
+       (wasm-call (if (eq (hir-instruction-opcode instruction) :keyword-present)
+                      "native-keyword-present" "native-keyword-argument")))
+      (:check-keywords
+       (wasm-local 1) (wasm-integer (first attributes)) (wasm-literal (second attributes))
+       (wasm-integer (if (third attributes) 1 0)) (wasm-call "native-check-keywords"))
       (:check-arguments
        (wasm-local 1) (wasm-integer (first attributes)) (wasm-integer (second attributes))
        (wasm-call "native-check-arguments"))
@@ -2525,8 +2538,13 @@ exhausted work budgets keep every incoming value group."
                        (emit-native-list-call inputs (hir-instruction-safety-level instruction)))
              (emit-native-fixed-call inputs))
            (progn (wasm-get (first inputs)) (wasm-get (second inputs))
-                  (wasm-list (cddr inputs) nil) (wasm-call "native-call")
-                  (when (native-value-slot *wasm-scalar-groups* output) (wasm-call "native-primary")))))
+                  (wasm-arguments (cddr inputs))
+                  ;; Primary-only and discarded results need no value list,
+                  ;; even when the resolved callee's value count is unknown.
+                  ;; Keep the complete group for every remaining consumer.
+                  (wasm-call (if (or (native-value-slot *wasm-scalar-groups* output)
+                                     (not (native-value-slot *wasm-live-values* output)))
+                                 "native-primary-call" "native-call")))))
       (:control-call
        (wasm-get (first inputs)) (wasm-integer (first attributes)) (wasm-get (second inputs))
        (if (member (first attributes) '(1 2 4 5 6 7)) (wasm-list (nthcdr 4 inputs) nil) (wasm-get (fourth inputs)))
@@ -3663,6 +3681,11 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
       (wasm-u32 (+ (if direct 0 1) raw-count)) (wasm-type :i32))
     (when (plusp wide-count) (wasm-u32 wide-count) (wasm-type :i64))
     (wasm-u32 count) (wasm-type :object)
+    ;; This entry is callable directly through its module export. Snapshot raw
+    ;; foreign slot storage before initializers, literal resolution or callbacks.
+    ;; Internal fixed workers remove this prologue when replacing packet reads
+    ;; with their already evaluated scalar Wasm parameters.
+    (wasm-local 1) (wasm-call "native-ingress-arguments") (wasm-byte #x21) (wasm-u32 1)
     (dolist (literal (svref plan 12))
       (let ((*wasm-literal-locals* nil)) (wasm-literal literal))
       (wasm-byte #x21) (wasm-u32 (gethash literal *wasm-literal-locals*)))
@@ -3792,6 +3815,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
   (let* ((ops (native-read-ops body)) (arity (native-fixed-arity function))
          (argument (position "native-argument" *native-imports* :key #'first :test #'equal))
          (check (position "native-check-arguments" *native-imports* :key #'first :test #'equal))
+         (ingress (position "native-ingress-arguments" *native-imports* :key #'first :test #'equal))
          (size (length ops)))
     (labels ((op (index code &optional value (valuep nil))
                (and (< index size) (= (native-op-code (aref ops index)) code)
@@ -3802,6 +3826,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           (cond
             ((op i #x20 1 t)
              (cond
+               ((and (zerop i) (op (1+ i) #x10 ingress t) (op (+ i 2) #x21 1 t))
+                (incf i 2))
                ((and (op (1+ i) #x41) (op (+ i 2) #x10 argument t)
                      (<= 0 (native-op-argument (aref ops (1+ i))))
                      (< (native-op-argument (aref ops (1+ i))) arity))
@@ -4381,10 +4407,11 @@ the named-entry format for hosts that translate individual Wasm workers."
              (symbol-function (compiler-primitive 10 1 "%PLAN-GENERIC-CALL"))))
          (*wasm-generic-calls* (make-hash-table :test 'eq))
          (*wasm-optimization-barriers* (hir-optimization-barriers unit))
+         (*wasm-result-callees* (hir-result-callees unit *wasm-optimization-barriers*))
          (*hir-inline-definitions* (make-hash-table :test 'equal))
          ;; These roots come directly from validated instruction operands.
          (type-analysis (multiple-value-list
-                         (infer-hir-types-checked unit (native-type-roots unit) t entries)))
+                         (infer-hir-types-checked unit (native-type-roots unit) t entries nil *wasm-result-callees*)))
          (*wasm-inferred-types* (first type-analysis))
          (*wasm-type-guards* (second type-analysis))
          (*wasm-debug* (some (lambda (function) (>= (hir-function-debug-level function) 2)) *native-functions*))
@@ -4394,9 +4421,8 @@ the named-entry format for hosts that translate individual Wasm workers."
          ;; workers. Its explicit closed-worker contract retains that lowering.
          (result-analysis (and *wasm-native-multiple-results* (not *wasm-closed-worker-functions*)
                                (not *compiler-bootstrapping*)
-                               (not *wasm-debug*) (multiple-value-list (hir-result-arities-checked unit))))
+                               (not *wasm-debug*) (multiple-value-list (hir-result-arities-checked unit *wasm-result-callees*))))
          (*wasm-result-arities* (first result-analysis))
-         (*wasm-result-callees* (second result-analysis))
          (*wasm-multiple-result-functions* (make-hash-table :test 'eq))
          (*wasm-boxed-result-workers* (make-hash-table :test 'eq))
          (*wasm-local-call-functions* nil)
@@ -4602,7 +4628,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    verify-hir-code-dominance hir-code-to-unit hir-code-to-unit-checked
                    hir-special-p hir-declarations hir-intersect-types hir-type-environment hir-bound-type-environment hir-declared-argument-types
                    native-optimization-level native-size-policy native-debug-level native-safety-level
-                   native-canonical-builtin-code native-builtin-code emit-native-object-types wasm-literal wasm-list
+                   native-canonical-builtin-code native-builtin-code emit-native-object-types wasm-literal wasm-list wasm-arguments
                    native-removable-p native-live-inputs native-direct-cells native-forward-blocks native-reachable-blocks native-loop-region-order native-loop-plan native-live-values native-local-layout native-single-calls native-full-groups native-proven-truth native-proof-reachable-blocks native-scalar-groups native-plan-branch-tests native-stable-predicate-p native-predicate-source native-predicate-key native-plan-cons-forwarding native-plan-predicate-reuse native-predicate-aliases native-block-targets native-single-return-target-p
                    native-argument-usage native-direct-workers native-direct-worker-body native-optimize-typed-body native-direct-wrapper native-boxed-result-worker native-direct-fallback native-direct-relocations
                    native-simple-callee-p native-local-call-functions emit-native-local-call
@@ -4618,7 +4644,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-capture hir-cell-for-binding
                    hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
                    hir-type-without-null hir-copy-source hir-type-truth-premise hir-type-branch-guards
-                   hir-inline-primitive hir-integer-identity hir-integer-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-result-callee hir-result-callees hir-result-arities-checked
+                   hir-inline-primitive hir-integer-identity hir-integer-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
                    hir-dispatch-candidate
                    hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells
                    hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-refresh-predecessors hir-proper-list-checks optimize-hir-checked optimize-hir
@@ -4629,7 +4655,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
                    hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir verify-hir-contents
                    native-inline-constants native-loop-literals native-loop-dominates-p native-hoist-source native-hoist-width native-hoist-type native-hoist-immediate-result-p native-plan-loop-hoists native-finalize-loop-hoists emit-native-invariant-value emit-native-hoisted-primitive native-plan-unboxed-arguments native-plan-unboxed-cell-values native-plan-unboxed-values native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-with-results emit-native-module-checked emit-native-module
-                   hir-body hir-close hir-local-macros-form hir-normalize-keywords hir-lambda
+                   hir-body hir-close hir-local-macros-form hir-lambda
                    hir-tagbody-form hir-setq-form hir-local-functions-form
                    hir-multiple-value-bind-form hir-block-form hir-simple-restart-form
                    hir-restart-signal-form hir-symbol-iterate-form hir-while-form

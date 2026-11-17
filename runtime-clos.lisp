@@ -31,6 +31,15 @@
                                                  %%class-subclass-p %%instance-type-p %%restore-saved-slots %%hir-function
                                                  %%hir-function-checked)))
 
+(setf *clos-primitives* (append *clos-primitives*
+  '(%make-argument-context %argument-context-p %context-argument %context-present %context-rest
+    %context-check-keys %context-keyword-present %context-keyword-argument
+    %context-invoke-method %context-invoke-without-next %call-next-packet %apply-effective)))
+(setf *clos-primitives* (append *clos-primitives*
+  '(miricl-runtime:packet-length miricl-runtime:packet-ref)))
+(setf *runtime-symbols* (append *runtime-symbols*
+  '(miricl-runtime:packet-length miricl-runtime:packet-ref)))
+
 (defparameter *native-clos-defaults*
   '((allocate-instance . %%standard-allocate-instance)
     (make-instance . %%standard-make-instance)
@@ -258,7 +267,7 @@
 
 (define-runtime-function $direct-function
     (($function :nullable-object) ($class :nullable-object) ($slot :nullable-object) ($mode i32)) (:object)
-  (wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 18)) :malformed-form)
+  (wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 19)) :malformed-form)
   (wat-fail-when #@(i32.ne (call $tag (local.get $function)) (i32.const 8)) :malformed-form)
   #@(if (i32.ge_u (local.get $mode) (i32.const 17))
     (then
@@ -281,6 +290,9 @@
   (:locals ($class :nullable-object) ($object :nullable-object) ($value :nullable-object) ($mode i32))
   #@(local.set $class (struct.get $direct-function $owner (local.get $function)))
   #@(local.set $mode (struct.get $direct-function $mode (local.get $function)))
+  #@(if (i32.eq (local.get $mode) (i32.const 19))
+    (then ,(wat-arity 1)
+      (return_call $effective-apply (local.get $function) (call $car (local.get $args)))))
   #@(if (i32.eq (local.get $mode) (i32.const 18))
     (then (return_call $apply (local.get $class) (local.get $args))))
   ;; The externally visible method-function protocol remains two arguments.

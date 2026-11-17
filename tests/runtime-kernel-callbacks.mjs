@@ -27,4 +27,4 @@ for (const fixture of JSON.parse(await fs.readFile(process.argv[2], 'utf8'))) {
     }
   }
 }
-console.log('Runtime kernel callbacks: copies, replacements, mixed helpers, recursive entry, checkpoints, transfers and recovery pass.');
+console.log('Runtime kernel callbacks: copies, same-callback joins, replacements, mixed helpers, recursive entry, checkpoints, transfers and recovery pass.');

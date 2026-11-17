@@ -135,6 +135,24 @@
           (declare (inline eql) (optimize (debug 0) (safety 0)))
           (values (funcall (if (eql object 23) callback replacement) 7 object extra))))
       '((0 1 23 41 23 :ordinary) (0 1 31 41 41 :ordinary)))
+    ;; The condition is unknown at emission. Both executable incoming
+    ;; primaries retain the saved callback, even with different value groups.
+    (fixture "same-callback-join"
+      '((defun callback-test-entry (callback selector object extra)
+          (declare (inline eql) (optimize (debug 0) (safety 0)))
+          (values (funcall (if (eql object 23) (values callback extra) (values callback))
+                           selector object extra))))
+      '((0 7 23 41 23 :direct) (0 7 31 43 31 :direct)
+        (0 -1 23 41 :transfer :direct) (0 7 23 41 23 :direct)))
+    (fixture "joined-helper"
+      '((defun callback-test-helper (callback selector object extra)
+          (declare (optimize (debug 0) (safety 0)))
+          (values (funcall callback selector object extra)))
+        (defun callback-test-entry (callback selector object extra)
+          (declare (inline eql) (optimize (debug 0) (safety 0)))
+          (values (callback-test-helper (if (eql object 23) callback (values callback extra))
+                                       selector object extra))))
+      '((0 7 23 41 23 :direct) (0 7 31 43 31 :direct)))
     (fixture "known-helper"
       '((defun callback-test-helper (callback selector object extra)
           (declare (optimize (debug 0) (safety 0)))

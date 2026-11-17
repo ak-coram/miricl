@@ -652,7 +652,15 @@
         (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'setf)))
           (call $cons (call $symbol (local.get $id)) (ref.null eq)))
         (call $canonical-builtin-function (local.get $id) (i32.const 1))))))
-    (local.set $id (i32.add (local.get $id) (i32.const 1))) (br $next))))
+    (local.set $id (i32.add (local.get $id) (i32.const 1))) (br $next)))
+  ;; Sealed packet kernels retain FUNCTION's lookup before the intrinsic call.
+  ;; Install the runtime symbol identities before any bootstrap kernel runs;
+  ;; the later CLOS private symbols have distinct identities and bindings.
+  (runtime-wat-forms
+    (loop for name in '(miricl-runtime:packet-length miricl-runtime:packet-ref)
+      collect `(drop (call $store-function (call $symbol (i32.const ,(runtime-symbol-id name)))
+        (call $node (i32.const 8) (i32.const ,(+ +clos-primitive-base+ (clos-primitive-op name)))
+          (ref.null eq) (ref.null eq) (ref.null eq)))))))
 
 (define-runtime-section symbol-functions-runtime-wat ()
   #@(global $native-function-flags (ref $digits)

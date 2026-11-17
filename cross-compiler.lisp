@@ -318,6 +318,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
          (uses (make-hash-table :test 'eq)) (calls (make-hash-table :test 'eq))
          (incoming (make-hash-table :test 'eq)) (reachable (make-hash-table :test 'eq))
          (unsafe (make-hash-table :test 'eq)) (edges (make-hash-table :test 'eq))
+         (flow (miricl-compiler::hir-primary-flow unit (miricl-compiler::hir-optimization-barriers unit)))
          (masks (make-hash-table :test 'eq)) (facts (make-hash-table :test 'eq))
          (entries (mapcar (lambda (item) (find (second item) (kernel-fixed-imports) :key #'fourth :test #'eq)) descriptor))
          (budget 32768) (all (1- (ash 1 (length entries)))))
@@ -338,7 +339,13 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                         (first (miricl-compiler::hir-instruction-attributes producer)))))
                (value-mask (value &optional (depth 0))
                  (spend)
-                 (when (or (> depth 64) (gethash value unsafe)) (return-from value-mask 0))
+                 (when (or (null value) (> depth 64) (gethash value unsafe)) (return-from value-mask 0))
+                 (let ((sources (gethash value flow)))
+                   (when sources
+                     (return-from value-mask
+                       (let ((mask all))
+                         (dolist (source sources mask)
+                           (setq mask (logand mask (value-mask source (1+ depth)))))))))
                  (let ((producer (miricl-compiler::hir-value-producer value)))
                    (if (not (miricl-compiler::%hir-instruction-p producer)) 0
                      (case (miricl-compiler::hir-instruction-opcode producer)
@@ -353,7 +360,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                                    (not (gethash (miricl-compiler::hir-instruction-output creation) unsafe)))
                               (value-mask (first (miricl-compiler::hir-instruction-inputs creation)) (1+ depth)) 0)))
                        (otherwise 0))))))
-        (unless (and (<= (length functions) 64) (member selected functions :test #'eq))
+        (unless (and flow (<= (length functions) 64) (member selected functions :test #'eq))
           (return-from proof nil))
         (dolist (function functions)
           (unless (and (null (miricl-compiler::hir-function-parent function))
@@ -402,8 +409,17 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                    (opcode (miricl-compiler::hir-instruction-opcode instruction))
                    (output (miricl-compiler::hir-instruction-output instruction))
                    (target (gethash instruction calls)))
-              (cond ((and (member opcode '(:copy :cell-new :cell-read)) (zerop index))
+              (cond ((and (member opcode '(:copy :primary :values :cell-new :cell-read)) (zerop index))
                      (push output (gethash value edges)))
+                    ((and (or (and (eq opcode :jump) (zerop index))
+                              (and (eq opcode :block-return) (= index 2)))
+                          (first (miricl-compiler::hir-instruction-attributes instruction)))
+                     ;; Forward the primary certificate and its unsafe-use
+                     ;; dependency together. A join with unknown/replacement
+                     ;; ingress is rejected by VALUE-MASK's intersection.
+                     (push (first (miricl-compiler::hir-block-parameters
+                                    (first (miricl-compiler::hir-instruction-attributes instruction))))
+                           (gethash value edges)))
                     ((and (eq opcode :call) (= index 1)))
                     ((and target (>= index 2))
                      (push (aref (gethash target arguments) (- index 2)) (gethash value edges)))
@@ -458,9 +474,26 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
 
 (defun kernel-emit-native-module (unit selected descriptor entries)
   (let* ((facts (and descriptor (kernel-fixed-callback-facts unit selected descriptor)))
-         (miricl-compiler::*wasm-fixed-call-emitter* (kernel-fixed-callback-emitter facts))
+         (callbacks (kernel-fixed-callback-emitter facts))
+         (miricl-compiler::*wasm-fixed-call-emitter*
+           (lambda (inputs)
+             (or (and callbacks (funcall callbacks inputs))
+                 (let* ((producer (miricl-compiler::hir-value-producer (second inputs)))
+                        (name (and (miricl-compiler::%hir-instruction-p producer)
+                                   (eq (miricl-compiler::hir-instruction-opcode producer) :function-reference)
+                                   (first (miricl-compiler::hir-instruction-attributes producer))))
+                        (entry (assoc name '((miricl-runtime:packet-length "native-packet-length" 1)
+                                             (miricl-runtime:packet-ref "native-packet-ref" 2)))))
+                   ;; These representation operations exist only in the
+                   ;; trusted host kernel linker; ordinary Lisp compilation
+                   ;; retains the normal function binding contracts.
+                   (when (and entry (= (length (cddr inputs)) (third entry)))
+                     (dolist (input (cddr inputs)) (miricl-compiler::wasm-get input))
+                     (miricl-compiler::wasm-call (second entry)) t)))))
          (miricl-compiler::*native-imports*
            (append miricl-compiler::*native-imports*
+             '(("native-packet-length" (:object) :object)
+               ("native-packet-ref" (:object :object) :object))
              (when facts
                (loop for (name arity) in (kernel-fixed-imports) collect
                  (list name (make-list arity :initial-element :object) :object))))))
@@ -545,7 +578,9 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                                (asdf:system-relative-pathname :miricl file)))
       (let ((*package* (find-package :miricl-runtime)) (*read-eval* nil))
         (loop for form = (read stream nil stream) until (eq form stream)
-              when (and (consp form) (eq (car form) 'defun)) collect form)))))
+              when (and (consp form) (eq (car form) 'defun)
+                        (not (member (second form) '(miricl-runtime:packet-length miricl-runtime:packet-ref))))
+                collect form)))))
 
 (defun kernel-export-index (bytes name)
   (let ((input (miricl-compiler::wasm-input bytes 8)))
@@ -656,7 +691,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
           (when (string= target "native-vector-set-inline") (setf vector-write t))
           (let ((arity (position target '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4") :test #'equal)))
             (when arity (setf call-slots (max call-slots (1+ arity)))))
-          (when (member target '("native-call" "native-character-code") :test #'equal)
+          (when (member target '("native-call" "native-primary-call" "native-character-code") :test #'equal)
             (setf call-slots (max call-slots 2)))
           (when (string= target "native-character-ref-inline") (setf call-slots (max call-slots 2)))
           (when (string= target "native-character-set-inline") (setf call-slots (max call-slots 3)))
@@ -676,7 +711,11 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
           (when (equal (cdr (assoc target miricl-compiler::*native-imports* :test #'equal))
                        '((:object :i64 :i64) :object))
             (setf integer-call t call-slots (max call-slots 1)))
-          (when (string= target "native-character-ref") (setf call-slots (max call-slots 3)))))
+          (when (string= target "native-character-ref") (setf call-slots (max call-slots 3)))
+          (when (member target '("native-arguments" "native-argument-set" "native-argument"
+                                "native-rest-argument" "native-check-arguments" "native-argument-present"
+                                "native-keyword-present" "native-keyword-argument" "native-check-keywords") :test #'equal)
+            (setf integer-call t call-slots (max call-slots 3)))))
       (setf vector-index (+ 5 (length locals)) vector-object (1+ vector-index) vector-value (+ 2 vector-index)
             call-base (+ vector-index (if vector-write 3 (if vector-read 1 0)))
             integer-left (+ call-base call-slots) integer-right (1+ integer-left)
@@ -773,8 +812,33 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                  ((string= target "native-call")
                   (format out "local.set ~D local.set ~D drop local.get ~D local.get ~D call $apply call $value-list call $clear-values~%"
                     (1+ call-base) call-base call-base (1+ call-base)))
+                 ((string= target "native-primary-call")
+                  (format out "local.set ~D local.set ~D drop local.get ~D local.get ~D call $native-primary-apply~%"
+                    (1+ call-base) call-base call-base (1+ call-base)))
                  ((string= target "native-primary") (write-line "call $car" out))
-                 ((string= target "native-argument") (write-line "call $int call $native-argument-cl" out))
+                 ((string= target "native-packet-length") (write-line "call $native-packet-length-cl" out))
+                 ((string= target "native-packet-ref") (write-line "call $native-packet-ref-cl" out))
+                 ((member target '("native-arguments" "native-argument-set" "native-argument"
+                                   "native-rest-argument" "native-check-arguments" "native-argument-present"
+                                   "native-keyword-present" "native-keyword-argument" "native-check-keywords") :test #'equal)
+                  ;; Keep private packets as raw references. Imports have mixed
+                  ;; boxed-reference and i32 operands; save each in a matching
+                  ;; local before converting only the reference transport.
+                  (let* ((signature (cdr (assoc target miricl-compiler::*native-imports* :test #'equal)))
+                         (object-slot call-base) (integer-slot integer-left)
+                         (slots (mapcar (lambda (type)
+                                          (if (eq type :object)
+                                              (prog1 (list type object-slot) (incf object-slot))
+                                              (prog1 (list type integer-slot) (incf integer-slot))))
+                                        (first signature))))
+                    (dolist (slot (reverse slots))
+                      (when (eq (first slot) :i32) (write-line "i64.extend_i32_s" out))
+                      (format out "local.set ~D~%" (second slot)))
+                    (dolist (slot slots)
+                      (format out "local.get ~D ~A~%" (second slot)
+                        (if (eq (first slot) :object) "extern.convert_any" "i32.wrap_i64")))
+                    (format out "call $~A~%" target)
+                    (when (second signature) (write-line "any.convert_extern ref.cast (ref null eq)" out))))
                  ((string= target "native-character-code-at64-inline")
                   (format out "local.set ~D local.set ~D~%local.get ~D extern.convert_any local.get ~D call $~A any.convert_extern ref.cast (ref null eq)~%"
                     integer-left call-base call-base integer-left target))

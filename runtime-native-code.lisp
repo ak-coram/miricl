@@ -263,12 +263,130 @@
       (then (return (array.new_fixed $objects 2 (local.get $a) (local.get $b)))))))
   #@(call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq))))
 
-(defun $native-packed-argument-cl ()
-  (runtime-function-definition '$native-packed-argument-cl
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-packed-argument-cl 'miricl-runtime:packed-argument-value))))
+;; Packet slots start with an inaccessible non-Lisp sentinel. The builder fills
+;; each slot once, but a foreign canonical GC array can still alias its storage.
+;; Public call ingress snapshots that storage before retaining or executing it.
+(define-runtime-function $native-checked-object (($value externref)) (:nullable-object)
+  (:locals ($object (ref null any)))
+  #@(local.set $object (any.convert_extern (local.get $value)))
+  (wat-fail-when #@(i32.eqz (ref.test (ref null eq) (local.get $object))) :malformed-form)
+  (wat-fail-when #@(i32.eqz (i32.or (ref.is_null (local.get $object))
+    (i32.or (ref.test (ref i31) (local.get $object))
+      (i32.or (ref.test (ref $obj) (local.get $object)) (ref.test (ref $objects) (local.get $object)))))) :malformed-form)
+  #@(ref.cast (ref null eq) (local.get $object)))
+
+(define-runtime-function $native-checked-value (($value externref)) (:nullable-object)
+  (:locals ($object :nullable-object))
+  #@(local.set $object (call $native-checked-object (local.get $value)))
+  (wat-fail-when #@(ref.test (ref $objects) (local.get $object)) :malformed-form)
+  #@(local.get $object))
+
+(define-runtime-function $native-arguments (($count i32)) (externref)
+  (:export-raw "native-arguments")
+  (wat-fail-when #@(i32.ge_u (local.get $count) (i32.const 65536)) :malformed-form)
+  #@(if (ref.is_null (global.get $native-argument-empty))
+    (then (global.set $native-argument-empty (array.new_default $objects (i32.const 0)))))
+  #@(extern.convert_any (array.new $objects (global.get $native-argument-empty) (local.get $count))))
+
+(define-runtime-function $native-argument-set
+    (($packet externref) ($index i32) ($element externref)) (externref)
+  (:export-raw "native-argument-set")
+  (:locals ($value (ref null any)) ($item (ref null any)) ($data (ref null $objects)))
+  #@(local.set $value (any.convert_extern (local.get $packet)))
+  #@(local.set $item (any.convert_extern (local.get $element)))
+  (wat-fail-when #@(i32.eqz (ref.test (ref $objects) (local.get $value))) :malformed-form)
+  #@(local.set $data (ref.cast (ref $objects) (local.get $value)))
+  (wat-fail-when #@(i32.ge_u (local.get $index) (array.len (local.get $data))) :malformed-form)
+  (wat-fail-when #@(i32.eqz (i32.or (ref.is_null (local.get $item))
+    (i32.or (ref.test (ref i31) (local.get $item)) (ref.test (ref $obj) (local.get $item))))) :malformed-form)
+  (wat-fail-when #@(i32.or (ref.is_null (global.get $native-argument-empty))
+    (i32.eqz (ref.eq (array.get $objects (local.get $data) (local.get $index))
+      (global.get $native-argument-empty)))) :malformed-form)
+  #@(array.set $objects (local.get $data) (local.get $index) (ref.cast (ref null eq) (local.get $item)))
+  #@(local.get $packet))
+
+(define-runtime-function $native-validate-packet (($args (ref $objects))) ()
+  (:locals ($index i32) ($item :nullable-object))
+  (wat-fail-when #@(i32.gt_u (array.len (local.get $args)) (i32.const 65536)) :malformed-form)
+  #@(block $done (loop $next
+    (br_if $done (i32.eq (local.get $index) (array.len (local.get $args))))
+    (local.set $item (array.get $objects (local.get $args) (local.get $index)))
+    ,(wat-fail-when #@(i32.eqz (i32.or (ref.is_null (local.get $item))
+      (i32.or (ref.test (ref i31) (local.get $item)) (ref.test (ref $obj) (local.get $item))))) :malformed-form)
+    (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $next))))
+
+(define-runtime-function $native-ingress-arguments (($args externref)) (externref)
+  (:export-raw "native-ingress-arguments")
+  (:locals ($value :nullable-object) ($source (ref null $objects))
+           ($packet (ref null $objects)) ($item :nullable-object) ($index i32) ($count i32))
+  #@(local.set $value (call $native-checked-object (local.get $args)))
+  #@(if (i32.eqz (ref.test (ref $objects) (local.get $value)))
+    (then (return (local.get $args))))
+  #@(local.set $source (ref.cast (ref $objects) (local.get $value)))
+  #@(local.set $count (array.len (local.get $source)))
+  ;; Generated method entries may include one extra hidden context operand.
+  ;; Keep the same bounded shape admission as private packet validation.
+  (wat-fail-when #@(i32.gt_u (local.get $count) (i32.const 65536)) :malformed-form)
+  #@(local.set $packet (array.new_default $objects (local.get $count)))
+  ;; No checkpoint, callback or user-visible object precedes completion. Copy
+  ;; slots only: referenced Lisp objects retain their ordinary shared identity.
+  #@(block $done (loop $copy
+    (br_if $done (i32.eq (local.get $index) (local.get $count)))
+    (local.set $item (array.get $objects (local.get $source) (local.get $index)))
+    ,(wat-fail-when #@(i32.eqz (i32.or (ref.is_null (local.get $item))
+      (i32.or (ref.test (ref i31) (local.get $item)) (ref.test (ref $obj) (local.get $item))))) :malformed-form)
+    (array.set $objects (local.get $packet) (local.get $index) (local.get $item))
+    (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy)))
+  #@(extern.convert_any (local.get $packet)))
 
 (define-runtime-function $native-packed-argument (($args (ref $objects)) ($index i32)) (:nullable-object)
-  #@(call $native-packed-argument-cl (call $vector-new (local.get $args)) (call $int (local.get $index))))
+  (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
+  #@(if (result (ref null eq)) (i32.lt_u (local.get $index) (array.len (local.get $args)))
+    (then (array.get $objects (local.get $args) (local.get $index))) (else (ref.null eq))))
+
+;; Representation copies allocate owned packets. No caller spine is modified.
+(define-runtime-function $native-prepend-argument (($head :nullable-object) ($args :nullable-object)) (:nullable-object)
+  (:locals ($source (ref null $objects)) ($data (ref null $objects)) ($index i32) ($count i32))
+  #@(local.set $source (ref.cast (ref $objects) (local.get $args)))
+  #@(local.set $count (array.len (local.get $source)))
+  (wat-fail-when #@(i32.ge_u (local.get $count) (i32.const 65536)) :malformed-form)
+  #@(local.set $data (array.new_default $objects (i32.add (local.get $count) (i32.const 1))))
+  #@(array.set $objects (local.get $data) (i32.const 0) (local.get $head))
+  #@(block $done (loop $copy
+    (br_if $done (i32.eq (local.get $index) (local.get $count)))
+    (array.set $objects (local.get $data) (i32.add (local.get $index) (i32.const 1))
+      (array.get $objects (local.get $source) (local.get $index)))
+    (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy)))
+  #@(local.get $data))
+
+(define-runtime-function $native-packet-tail (($args :nullable-object) ($start i32)) (:nullable-object)
+  (:locals ($source (ref null $objects)) ($data (ref null $objects)) ($index i32) ($count i32))
+  #@(if (i32.eqz (ref.test (ref $objects) (local.get $args)))
+    (then (call $native-check-private-spine (local.get $args)) (return (call $native-list-tail (local.get $args) (local.get $start)))))
+  #@(local.set $source (ref.cast (ref $objects) (local.get $args)))
+  #@(local.set $count (array.len (local.get $source)))
+  #@(if (i32.gt_u (local.get $start) (local.get $count)) (then (local.set $start (local.get $count))))
+  #@(local.set $count (i32.sub (local.get $count) (local.get $start)))
+  #@(local.set $data (array.new_default $objects (local.get $count)))
+  #@(block $done (loop $copy
+    (br_if $done (i32.eq (local.get $index) (local.get $count)))
+    (array.set $objects (local.get $data) (local.get $index)
+      (array.get $objects (local.get $source) (i32.add (local.get $start) (local.get $index))))
+    (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy)))
+  #@(local.get $data))
+
+;; Representation adapters used only by sealed portable CL packet kernels.
+(define-runtime-function $native-packet-length-cl (($args :nullable-object)) (:nullable-object)
+  #@(local.set $args (call $argument-context-arguments (local.get $args)))
+  #@(if (ref.test (ref $objects) (local.get $args))
+    (then (return (call $int (array.len (ref.cast (ref $objects) (local.get $args)))))))
+  #@(call $check-apply-list (local.get $args))
+  #@(call $list-length-native (local.get $args)))
+
+(define-runtime-function $native-packet-ref-cl (($args :nullable-object) ($index :nullable-object)) (:nullable-object)
+  #@(local.set $args (call $argument-context-arguments (local.get $args)))
+  #@(ref.cast (ref null eq) (any.convert_extern
+    (call $native-argument (extern.convert_any (local.get $args)) (call $sequence-index (local.get $index))))))
 
 (defun $native-list-tail-cl ()
   (runtime-function-definition '$native-list-tail-cl
@@ -278,18 +396,52 @@
   (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
   #@(call $native-list-tail-cl (local.get $value) (call $int (local.get $index))))
 
+(defun $native-private-spine-count-cl ()
+  (runtime-function-definition '$native-private-spine-count-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-private-spine-count-cl 'miricl-runtime:private-argument-spine-count))))
+
+(define-runtime-function $native-check-private-spine (($value :nullable-object)) ()
+  ;; %%APPLY also implements destructuring: unlike public APPLY, a private
+  ;; REST binder can return an atomic tail. Validate finiteness independently.
+  #@(drop (call $native-private-spine-count-cl (local.get $value) (ref.null eq))))
+
 (defun $native-rest-argument-cl ()
   (runtime-function-definition '$native-rest-argument-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$native-rest-argument-cl 'miricl-runtime:rest-argument-values))))
 
 (define-runtime-function $native-rest-argument (($args externref) ($index i32)) (externref)
   (:export-raw "native-rest-argument")
+  (:locals ($value :nullable-object) ($result :nullable-object) ($count i32) ($data (ref null $objects)))
+  (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
+  #@(local.set $value (call $native-checked-object (local.get $args)))
+  #@(if (ref.test (ref $objects) (local.get $value))
+    (then
+      (local.set $data (ref.cast (ref $objects) (local.get $value)))
+      (call $native-validate-packet (ref.as_non_null (local.get $data)))
+      (local.set $count (array.len (local.get $data)))
+      (block $done (loop $copy
+        (br_if $done (i32.le_u (local.get $count) (local.get $index)))
+        (local.set $count (i32.sub (local.get $count) (i32.const 1)))
+        (local.set $result (call $cons (array.get $objects (local.get $data) (local.get $count)) (local.get $result)))
+        (br $copy)))
+      (return (extern.convert_any (local.get $result)))))
+  #@(call $native-check-private-spine (local.get $value))
+  #@(extern.convert_any (call $native-rest-argument-cl (local.get $value) (call $int (local.get $index)))))
+
+(define-runtime-function $native-arguments-list (($args :nullable-object)) (:nullable-object)
+  #@(ref.cast (ref null eq) (any.convert_extern
+    (call $native-rest-argument (extern.convert_any (local.get $args)) (i32.const 0)))))
+
+(define-runtime-function $native-argument-present (($args externref) ($index i32)) (externref)
+  (:export-raw "native-argument-present")
   (:locals ($value :nullable-object))
   (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
-  #@(local.set $value ,(native-object '(local.get $args)))
+  #@(local.set $value (call $native-checked-object (local.get $args)))
   #@(if (ref.test (ref $objects) (local.get $value))
-    (then (local.set $value (call $vector-new (ref.cast (ref $objects) (local.get $value))))))
-  #@(extern.convert_any (call $native-rest-argument-cl (local.get $value) (call $int (local.get $index)))))
+    (then (return (extern.convert_any (call $bool
+      (i32.lt_u (local.get $index) (array.len (ref.cast (ref $objects) (local.get $value)))))))))
+  #@(call $native-check-private-spine (local.get $value))
+  #@(extern.convert_any (call $bool (i32.eqz (ref.is_null (call $native-list-tail (local.get $value) (local.get $index)))))))
 
 (defun $native-argument-cl ()
   (runtime-function-definition '$native-argument-cl
@@ -299,15 +451,18 @@
   (:export-raw "native-argument")
   (:locals ($value :nullable-object))
   (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
-  #@(local.set $value ,(native-object '(local.get $args)))
+  #@(local.set $value (call $native-checked-object (local.get $args)))
   #@(if (ref.test (ref $objects) (local.get $value))
     ;; Raw packets already expose their checked representation. Read them
     ;; without allocating a temporary Lisp vector or boxing the index.
     (then
       (if (i32.ge_u (local.get $index) (array.len (ref.cast (ref $objects) (local.get $value))))
         (then (return (ref.null extern))))
-      (return (extern.convert_any (array.get $objects
-        (ref.cast (ref $objects) (local.get $value)) (local.get $index))))))
+      (local.set $value (array.get $objects (ref.cast (ref $objects) (local.get $value)) (local.get $index)))
+      ,(wat-fail-when #@(i32.eqz (i32.or (ref.is_null (local.get $value))
+        (i32.or (ref.test (ref i31) (local.get $value)) (ref.test (ref $obj) (local.get $value))))) :malformed-form)
+      (return (extern.convert_any (local.get $value)))))
+  #@(call $native-check-private-spine (local.get $value))
   #@(extern.convert_any (call $native-argument-cl (local.get $value) (call $int (local.get $index)))))
 
 (defun $native-check-arguments-cl ()
@@ -316,22 +471,72 @@
 
 (define-runtime-function $native-check-arguments (($args externref) ($count i32) ($maximum i32)) ()
   (:export-raw "native-check-arguments")
-  (:locals ($value :nullable-object))
-  #@(local.set $value ,(native-object '(local.get $args)))
+  (:locals ($value (ref null any)) ($data (ref null $objects)) ($size i32))
+  #@(local.set $value (call $native-checked-object (local.get $args)))
+  (wat-fail-when #@(i32.or (i32.lt_s (local.get $count) (i32.const 0))
+    (i32.and (i32.ge_s (local.get $maximum) (i32.const 0))
+      (i32.lt_s (local.get $maximum) (local.get $count)))) :malformed-form)
   #@(if (ref.test (ref $objects) (local.get $value))
-    (then (local.set $value (call $vector-new (ref.cast (ref $objects) (local.get $value))))))
-  ;; Keep the runtime's precise checked arity condition and legacy message.
-  ;; The traversal and packet-size validation remain ordinary Common Lisp.
+    (then
+      (local.set $data (ref.cast (ref $objects) (local.get $value)))
+      (call $native-validate-packet (ref.as_non_null (local.get $data)))
+      (local.set $size (array.len (local.get $data)))
+      ,(wat-fail-when #@(i32.or (i32.lt_u (local.get $size) (local.get $count))
+        (i32.and (i32.ge_s (local.get $maximum) (i32.const 0))
+          (i32.gt_u (local.get $size) (local.get $maximum)))) :wrong-arity)
+      (return)))
+  (wat-fail-when #@(i32.eqz (ref.test (ref null eq) (local.get $value))) :malformed-form)
   (wat-fail-when #@(i32.eqz (call $native-check-arguments-cl
-    (local.get $value) (call $int (local.get $count)) (call $int (local.get $maximum)))) :wrong-arity))
+    (ref.cast (ref null eq) (local.get $value)) (call $int (local.get $count)) (call $int (local.get $maximum)))) :wrong-arity))
+
+(defun $native-keyword-find-cl ()
+  (runtime-function-definition '$native-keyword-find-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-keyword-find-cl 'miricl-runtime:packet-keyword-index))))
+(defun $native-check-keywords-cl ()
+  (runtime-function-definition '$native-check-keywords-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$native-check-keywords-cl 'miricl-runtime:check-packet-keywords))))
+
+(define-runtime-function $native-keyword-find (($args externref) ($start i32) ($key externref)) (:nullable-object)
+  (:locals ($value :nullable-object) ($name :nullable-object))
+  (wat-fail-when #@(i32.lt_s (local.get $start) (i32.const 0)) :malformed-form)
+  #@(local.set $value (call $native-checked-object (local.get $args)))
+  #@(local.set $name (call $native-checked-value (local.get $key)))
+  (wat-fail-when #@(i32.eqz (call $symbolp (local.get $name))) :malformed-form)
+  #@(call $native-keyword-find-cl (local.get $value) (call $int (local.get $start)) (local.get $name)))
+
+(define-runtime-function $native-keyword-present (($args externref) ($start i32) ($key externref)) (externref)
+  (:export-raw "native-keyword-present")
+  #@(extern.convert_any (call $bool (i32.eqz (ref.is_null
+    (call $native-keyword-find (local.get $args) (local.get $start) (local.get $key)))))))
+
+(define-runtime-function $native-keyword-argument (($args externref) ($start i32) ($key externref)) (externref)
+  (:export-raw "native-keyword-argument")
+  (:locals ($index :nullable-object))
+  #@(local.set $index (call $native-keyword-find (local.get $args) (local.get $start) (local.get $key)))
+  #@(if (result externref) (ref.is_null (local.get $index)) (then (ref.null extern))
+    (else (call $native-argument (local.get $args) (call $natural-count (local.get $index))))))
+
+(define-runtime-function $native-check-keywords (($args externref) ($start i32) ($keys externref) ($allow i32)) ()
+  (:export-raw "native-check-keywords")
+  (:locals ($names :nullable-object) ($name :nullable-object))
+  (wat-fail-when #@(i32.lt_s (local.get $start) (i32.const 0)) :malformed-form)
+  #@(call $check-apply-list (call $native-checked-value (local.get $keys)))
+  #@(local.set $names (call $native-checked-value (local.get $keys)))
+  #@(block $done (loop $keys
+    (br_if $done (ref.is_null (local.get $names)))
+    (local.set $name (call $car (local.get $names)))
+    ,(wat-fail-when #@(i32.eqz (call $symbolp (local.get $name))) :malformed-form)
+    (local.set $names (call $cdr (local.get $names))) (br $keys)))
+  #@(drop (call $native-check-keywords-cl (call $native-checked-object (local.get $args))
+    (call $int (local.get $start)) (call $native-checked-value (local.get $keys)) (call $bool (local.get $allow)))))
 
 (define-runtime-function $native-check-apply-arguments (($args externref) ($count i32)) ()
   (:export-raw "native-check-apply-arguments")
-  #@(drop (call $check-apply-arguments ,(native-object '(local.get $args)) (local.get $count))))
+  #@(drop (call $check-apply-arguments (call $native-checked-value (local.get $args)) (local.get $count))))
 
 (define-runtime-function $native-check-apply-list (($args externref)) ()
   (:export-raw "native-check-apply-list")
-  #@(call $check-apply-list ,(native-object '(local.get $args))))
+  #@(call $check-apply-list (call $native-checked-value (local.get $args))))
 
 (define-runtime-function $native-environment () (externref)
   (:export-raw "native-environment")
@@ -693,9 +898,19 @@
   (:export-raw "native-call")
   (:locals ($values :nullable-object))
   #@(local.set $values (call $value-list (call $apply
-    ,(native-object '(local.get $function)) ,(native-object '(local.get $args)))))
+    (call $native-checked-value (local.get $function))
+    ,(native-object '(call $native-ingress-arguments (local.get $args))))))
   #@(call $clear-values)
   #@(extern.convert_any (local.get $values)))
+
+(define-runtime-function $native-primary-call
+    (($environment externref) ($function externref) ($args externref)) (externref)
+  (:export-raw "native-primary-call")
+  ;; Keep ordinary application checks and frames, but discard secondary values
+  ;; without constructing a result list for a primary-only consumer.
+  #@(extern.convert_any (call $native-primary-apply
+    (call $native-checked-value (local.get $function))
+    ,(native-object '(call $native-ingress-arguments (local.get $args))))))
 
 (define-runtime-function $native-return (($values externref)) (externref)
   (:export-raw "native-return")
@@ -1398,7 +1613,8 @@
 
 (define-runtime-function $native-tail-call (($function externref) ($arguments externref)) (externref)
   (:export-raw "native-tail-call")
-  #@(return_call $native-tail-dispatch (local.get $function) (local.get $arguments) (i32.const 0)))
+  #@(return_call $native-tail-dispatch (local.get $function)
+    (call $native-ingress-arguments (local.get $arguments)) (i32.const 0)))
 
 ;; Allocate only for the ordinary adapter; never share a mutable argument spine.
 (define-runtime-function $native-tail-arguments
@@ -1450,8 +1666,8 @@
 
 (define-runtime-function $native-tail-dispatch (($function externref) ($arguments externref) ($ready i32)) (externref)
   (:locals ($name :nullable-object) ($args :nullable-object) ($id i32))
-  #@(local.set $name ,(native-object '(local.get $function)))
-  #@(local.set $args ,(native-object '(local.get $arguments)))
+  #@(local.set $name (call $native-checked-value (local.get $function)))
+  #@(local.set $args (call $native-checked-object (local.get $arguments)))
   ;; The fixed-operand entry already supplied its checkpoint. Adapter loops
   ;; still checkpoint before reading each subsequently selected mutable spine.
   #@(loop $dispatch
@@ -1462,12 +1678,13 @@
     ;; Inspect the actual function so global redefinitions still take effect.
     (local.set $id (call $native-builtin-id (local.get $name)))
     (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'funcall)))
-      (then (call $arity (local.get $args) (i32.const 1) (i32.const 2147483647))
-        (local.set $name (call $car (local.get $args)))
-        (local.set $args (call $cdr (local.get $args))) (br $dispatch)))
+      (then (call $native-check-arguments (extern.convert_any (local.get $args)) (i32.const 1) (i32.const -1))
+        (local.set $name (call $native-packet-ref-cl (local.get $args) (call $int (i32.const 0))))
+        (local.set $args (call $native-packet-tail (local.get $args) (i32.const 1))) (br $dispatch)))
     (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'apply)))
-      (then (local.set $name (call $car (local.get $args)))
-        (local.set $args (call $spread-arguments (local.get $args))) (br $dispatch)))
+      (then (call $native-check-arguments (extern.convert_any (local.get $args)) (i32.const 2) (i32.const -1))
+        (local.set $name (call $native-packet-ref-cl (local.get $args) (call $int (i32.const 0))))
+        (local.set $args (call $native-spread-arguments (local.get $args))) (br $dispatch)))
     ;; Preserve interactive debugger entry and frames for debug-enabled code.
     (if (i32.and (i32.eqz (global.get $debug-evaluating))
           (i32.and (ref.test (ref $native-function) (local.get $name))
@@ -1498,6 +1715,7 @@
   #@(local.set $args ,(native-object '(local.get $arguments)))
   #@(block $ordinary
     (br_if $ordinary (global.get $debug-evaluating))
+    (br_if $ordinary (ref.test (ref $objects) (local.get $args)))
     ;; Read the mutable spine only after the dispatcher's checkpoint.
     (local.set $scan (local.get $args))
     (block $arguments (loop $argument
@@ -1800,13 +2018,17 @@
 (define-runtime-function $native-generic-call
     (($plan externref) ($function externref) ($args externref) ($primary i32)) (externref)
   (:export-raw "native-generic-call")
-  (:locals ($effective :nullable-object) ($result :nullable-object))
+  (:locals ($effective :nullable-object) ($result :nullable-object) ($arguments :nullable-object))
+  ;; This older guarded-plan entry has a public list protocol. Adapt a foreign
+  ;; packet once, before its checkpoint or callback-capable guard evaluation.
+  #@(local.set $arguments (call $native-arguments-list
+    ,(native-object '(call $native-ingress-arguments (local.get $args)))))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(local.set $effective (call $generic-call-plan-function
-    ,(native-object '(local.get $plan)) ,(native-object '(local.get $function)) ,(native-object '(local.get $args))
+    ,(native-object '(local.get $plan)) ,(native-object '(local.get $function)) (local.get $arguments)
     (i32.shr_u (local.get $primary) (i32.const 1))))
   #@(if (ref.is_null (local.get $effective))
-    (then (local.set $result (call $apply ,(native-object '(local.get $function)) ,(native-object '(local.get $args)))))
+    (then (local.set $result (call $apply ,(native-object '(local.get $function)) (local.get $arguments))))
     (else
       ;; The guarded plan selects the entire effective method, preserving
       ;; method combination and next-method context. Its compiled unary
@@ -1819,9 +2041,9 @@
             (else (i32.const 0)))
         (then (local.set $result (call $native-direct-apply
           (ref.cast (ref $native-function) (local.get $effective))
-          ,(native-object '(local.get $args)) (ref.null eq) (ref.null eq) (ref.null eq))))
+          (local.get $arguments) (ref.null eq) (ref.null eq) (ref.null eq))))
         (else (local.set $result (call $apply (local.get $effective)
-          (call $cons ,(native-object '(local.get $args)) (ref.null eq))))))))
+          (call $cons (local.get $arguments) (ref.null eq))))))))
   #@(if (i32.eqz (i32.and (local.get $primary) (i32.const 1)))
     (then (local.set $result (call $value-list (local.get $result)))))
   #@(call $clear-values)
@@ -2199,13 +2421,18 @@
   ($native-install) ($native-function) ($native-function-with-code) ($native-close-with-arity) ($native-close) ($native-close-fixed) ($native-close-cached) ($native-close-static) ($native-with-arity) ($native-code-size) ($native-capture) ($native-code-storage) ($native-code-entry) ($native-code-bytes) ($native-literal)
   ($native-debug-wrap) ($native-debug-attach) ($native-debug-close) ($native-debug-info)
   ($native-attach-direct) ($native-attach-direct-root) ($native-set-argument-usage) ($native-attach-direct-usage) ($native-direct-apply) ($native-shared-entry)
-  ($native-two-arguments) ($native-packed-argument-cl) ($native-packed-argument) ($native-list-tail-cl) ($native-list-tail) ($native-argument-cl) ($native-argument) ($native-rest-argument-cl) ($native-rest-argument) ($native-check-arguments-cl) ($native-check-arguments) ($native-check-apply-arguments) ($native-check-apply-list) ($native-environment)
+  #@(global $native-argument-empty (mut (ref null eq)) (ref.null eq))
+  ($native-checked-object) ($native-checked-value) ($native-arguments) ($native-argument-set) ($native-validate-packet) ($native-ingress-arguments) ($native-prepend-argument) ($native-packet-tail)
+  ($native-packet-length-cl) ($native-packet-ref-cl) ($native-arguments-list)
+  ($native-argument-present) ($native-keyword-find-cl) ($native-check-keywords-cl)
+  ($native-keyword-find) ($native-keyword-present) ($native-keyword-argument) ($native-check-keywords)
+  ($native-two-arguments) ($native-packed-argument) ($native-list-tail-cl) ($native-list-tail) ($native-private-spine-count-cl) ($native-check-private-spine) ($native-argument-cl) ($native-argument) ($native-rest-argument-cl) ($native-rest-argument) ($native-check-arguments-cl) ($native-check-arguments) ($native-check-apply-arguments) ($native-check-apply-list) ($native-environment)
   ($native-restore-environment) ($native-bind)
   ($native-block-enter) ($native-block-environment) ($native-block-return) ($native-block-match) ($native-block-values)
   ($native-control) ($native-restart-signal) ($native-throw)
   ($native-global-read) ($native-global-write) ($native-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
   ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-read) ($native-cell-write)
-  ($native-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
+  ($native-call) ($native-primary-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1)
   ($native-int64) ($native-unbox-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)
   ($native-logand-int64) ($native-logior-int64) ($native-logxor-int64) ($native-ash-int64)

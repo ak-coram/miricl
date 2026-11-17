@@ -368,6 +368,12 @@ Thin checked adapters preserve public arity behavior. Multi-entry modules can
 share the public adapter, and verified argument-use masks avoid unnecessary
 extraction. The physical worker convention is not a general wide-argument ABI.
 
+General calls with a primary-only or discarded result use the checked
+=native-primary-call= adapter. It retains ordinary application and clears
+secondary values after success, without constructing a result list. Unknown
+return cardinality does not prevent this consumer-based lowering. Complete
+value-group consumers retain =native-call= and its full result representation.
+
 Known closed calls can use direct workers when their argument and result
 contracts agree. A bounded DEBUG 0 effect analysis permits frame omission only
 for eligible bodies without dynamic cleanup or tail-frame replacement. Unknown

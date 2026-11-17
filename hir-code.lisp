@@ -27,7 +27,9 @@
     (:call-primary 2 2 0 t) (:call-primary 3 3 0 t)
     (:call-primary 4 4 0 t) (:call-primary 5 5 0 t)
     (:call-primary 6 6 0 t) (:copy 1 1 0 t) (:debug-step 0 0 1 nil) (:debug-resume 0 0 1 nil)
-    (:call 2 nil 0 t nil :speed) (:call-primary 2 nil 0 t nil :speed)) 'simple-vector))
+    (:call 2 nil 0 t nil :speed) (:call-primary 2 nil 0 t nil :speed)
+    (:argument-present 0 0 1 t) (:keyword-present 0 0 2 t)
+    (:keyword-argument 0 0 2 t) (:check-keywords 0 0 2 nil)) 'simple-vector))
 
 (defun hir-code-error (object reason)
   (error 'hir-code-input-error :datum object :reason reason))
@@ -215,9 +217,31 @@
       (unless (consp parameters) (hir-code-error parameters "dotted parameter metadata"))
       (when (gethash parameters seen) (hir-code-error parameters "circular parameter metadata"))
       (setf (gethash parameters seen) t)
-      (unless (symbolp (car parameters)) (hir-code-error (car parameters) "expected a parameter name"))
-      (push (pop parameters) result))
+      (let ((parameter (pop parameters)))
+        (cond ((symbolp parameter) (push parameter result))
+              ((and (consp parameter) (null (cdr parameter))
+                    (consp (first parameter)) (symbolp (first (first parameter)))
+                    (consp (cdr (first parameter))) (symbolp (second (first parameter)))
+                    (null (cddr (first parameter))))
+               (push (list (list (first (first parameter)) (second (first parameter)))) result))
+              (t (hir-code-error parameter "expected a parameter name or explicit keyword parameter")))))
     (nreverse result)))
+
+(defun copy-hir-keyword-check (descriptor)
+  ;; This literal is executable metadata, unlike ordinary quoted literals.
+  ;; Validate its entire spine before retaining a private copy.
+  (declare (optimize (safety 3)))
+  (unless (and (consp descriptor) (consp (cdr descriptor)) (null (cddr descriptor))
+               (member (second descriptor) '(nil t)))
+    (hir-code-error descriptor "invalid keyword check descriptor"))
+  (let ((seen (make-hash-table :test 'eq)) (keys (first descriptor)) (copy nil))
+    (loop while keys do
+      (unless (consp keys) (hir-code-error keys "dotted allowed keyword list"))
+      (when (gethash keys seen) (hir-code-error keys "circular allowed keyword list"))
+      (setf (gethash keys seen) t)
+      (unless (symbolp (car keys)) (hir-code-error (car keys) "expected keyword name symbol"))
+      (push (pop keys) copy))
+    (list (nreverse copy) (second descriptor))))
 
 (define-condition hir-code-input-error (program-error)
   ((datum :initarg :datum :reader hir-code-error-datum)
@@ -322,6 +346,12 @@
                         (:block-return (when (plusp a) (bounded (1- a) (length blocks) "block out of range")))
                         (:check-arguments
                          (unless (or (zerop b) (> b a)) (hir-code-error a "invalid argument limits")))
+                        ((:keyword-present :keyword-argument)
+                         (bounded b (length literals) "keyword literal out of range")
+                         (unless (symbolp (svref literals b)) (hir-code-error b "expected keyword name symbol")))
+                        (:check-keywords
+                         (bounded b (length literals) "keyword descriptor out of range")
+                         (setf (svref literals b) (copy-hir-keyword-check (svref literals b))))
                         (:control-call
                          (unless (and (<= 0 a 7)
                                       (case a
@@ -383,13 +413,25 @@
 (defun copy-hir-code (payload)
   ;; Export a fresh wire representation, never the VM's executable containers.
   (declare (optimize (safety 3)))
-  (vector (copy-seq (svref payload 0))
+  (let ((literals (copy-seq (svref payload 0))))
+    ;; Executable keyword metadata must not become mutable through an exported
+    ;; recipe. Ordinary literal objects retain their normal identity/sharing.
+    (loop for function across (svref payload 1) do
+      (let ((scratch (make-array (+ 6 (svref function 7)) :initial-element 0)))
+        (loop for block across (svref function 5) do
+          (let ((code (svref block 2)) (pc 0))
+            (loop while (< pc (length code)) do
+              (setq pc (read-hir-code-instruction code pc scratch))
+              (when (eq (first (svref *hir-code-operations* (svref scratch 0))) :check-keywords)
+                (setf (svref literals (svref scratch 5))
+                  (copy-hir-keyword-check (svref literals (svref scratch 5))))))))))
+  (vector literals
     (map 'vector (lambda (function)
       (vector (svref function 0) (svref function 1) (svref function 2) (svref function 3)
         (svref function 4)
         (pack-hir-blocks (svref function 5))
         (copy-hir-debug-info (svref function 6) (svref function 1) (svref function 4))
-        (copy-seq (svref function 9)) (copy-list (svref function 10)) (svref function 12))) (svref payload 1))))
+        (copy-seq (svref function 9)) (copy-hir-parameters (svref function 10)) (svref function 12))) (svref payload 1)))))
 
 (defun disassemble-hir-code (payload &optional (index 0))
   "Print executable HIR without requiring the compiler or retained source."
@@ -442,6 +484,10 @@
                   ((:global-read :global-write :dynamic-bind)
                    (format t "~A ~S~{ ~A~}" (string-downcase (symbol-name operation)) (literal a)
                      (mapcar #'register inputs)))
+                  ((:keyword-present :keyword-argument)
+                   (format t "~A from ~D key ~S" (string-downcase (symbol-name operation)) a (literal b)))
+                  (:check-keywords
+                   (format t "check-keywords from ~D ~S" a (literal b)))
                   (:closure (format t "closure F~D~{ ~A~}" a (mapcar #'register inputs)))
                   (:capture (format t "capture ~D~@[ [~S]~]" a
                     (and (< (* a 2) (length captures)) (svref captures (* a 2)))))

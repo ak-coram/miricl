@@ -61,28 +61,22 @@
   "STATE is #(generic arguments class-a class-b class-c class-d mode).
 Consume the cache key in reverse argument order, retaining EQL object identity."
   (declare (type function metadata) (optimize (safety 0) (debug 0))
-           (inline car cdr eq eql svref + - logand ash))
+           (inline car cdr eq eql svref + - < logand ash))
   (funcall metadata 7 state nil)
   (funcall metadata 0 key nil)
   (let ((mode (svref (the simple-vector state) 6))
         (arguments (svref (the simple-vector state) 1))
-        (position 0) (index 0) (scan nil) (object nil) (profile nil))
+        (position 0) (index 0) (object nil) (profile nil))
     (declare (type (integer 0 8191) mode) (type (integer 0 3) position index))
-    (funcall metadata 0 arguments nil)
+    (packet-length arguments)
     (values
      (block match
        (if (eql (logand mode 7) 0) (return-from match (eq key nil)))
        (setq position (- (logand mode 7) 1))
        (tagbody next
           (if (eql (logand mode (ash 16 position)) 0) (go next-position))
-          (setq scan arguments index position)
-        argument
-          (if (eql index 0) (go argument-found))
-          (setq scan (cdr scan) index (- index 1)) (go argument)
-        argument-found
-          ;; A malformed short argument list supplies no matching cache proof.
-          (if scan nil (return-from match nil))
-          (setq object (car scan))
+          (if (< position (packet-length arguments)) nil (return-from match nil))
+          (setq object (packet-ref arguments position))
           (if (eql (logand mode (ash 256 position)) 0) (go class))
           (setq profile (funcall metadata 2 (svref (the simple-vector state) 0) nil))
           (funcall metadata 0 profile nil)

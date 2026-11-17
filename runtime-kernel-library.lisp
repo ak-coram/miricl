@@ -17,7 +17,7 @@
            #:integer-gcd #:integer-lcm-list #:integer-square-root #:integer-bit-present-p #:integer-all-ones-p #:integer-power-of-two-p #:deposit-integer-field #:text-equal-p #:text-fold-equal-p #:text-designator #:ascii-white-p #:ascii-upper-code #:ascii-digit-value #:integer-power #:calendar-part-value #:calendar-days-before-year #:calendar-days-before-month
            #:if-expression #:expand-values-form #:expand-logical-form #:expand-conditional-form #:expand-selection-form #:function-block-forms #:split-function-documentation #:condition-operator-name-p
            #:allocate-like-vector #:reverse-vector-value #:fill-array-values #:slice-simple-vector #:vector-elements-equalp #:fill-sequence-values #:copy-sequence-values #:copy-subsequence-values #:concatenate-sequence-values #:character-bag-member-p #:trim-text-value #:generated-symbol-text #:copy-symbol-value #:format-index-value #:format-parameter-value #:format-comparison-value #:format-escape-value-p #:format-minimum-column #:flatten-value-groups #:standard-syntax-code
-           #:checked-integer-value #:checked-float-value #:checked-readtable-value #:checked-hash-table-value #:checked-random-state-value #:checked-stream-value #:checked-character-value #:checked-bit-value #:checked-fill-pointer-value #:checked-bit-array-value #:calendar-zone-value #:packed-argument-value #:argument-value #:rest-argument-values #:check-private-arguments #:path-component-value-p #:path-directory-end-value #:path-name-end-value #:path-prefix-value-p #:hash-key-value-p #:loop-word-value-p #:spread-call-arguments #:integer-interval-bound-value
+           #:checked-integer-value #:checked-float-value #:checked-readtable-value #:checked-hash-table-value #:checked-random-state-value #:checked-stream-value #:checked-character-value #:checked-bit-value #:checked-fill-pointer-value #:checked-bit-array-value #:calendar-zone-value #:argument-value #:rest-argument-values #:check-private-arguments #:path-component-value-p #:path-directory-end-value #:path-name-end-value #:path-prefix-value-p #:hash-key-value-p #:loop-word-value-p #:spread-call-arguments #:integer-interval-bound-value
            #:proper-list-count #:check-arity-count #:check-zero-arity #:check-one-arity #:check-two-arity #:check-three-arity #:sequence-index-value #:native-list-tail-value #:arrays-same-shape-p #:array-contents-count #:array-subscript-value #:complex-component-type #:cons-type-components #:printer-limit-value #:pretty-tab-distance #:compiled-byte-header-p #:text-position-column #:read-ordering-buffer #:merge-ordering-buffers #:loop-syntax-equal-p #:copy-loop-syntax #:tree-value-equal-p #:path-directory-value-p #:format-small-integer))
 (in-package #:miricl-runtime)
 
@@ -218,7 +218,7 @@ result in bit 4. Bounds and callable definitions are validated before entry."
   (declare (optimize (safety 0) (debug 0))
            (inline checked-path-car checked-path-cdr eq length 1+ < >))
   (values (block done
-    (let ((minimum 0) (maximum 0) (optional nil) (unbounded nil) (count (length arguments)))
+    (let ((minimum 0) (maximum 0) (optional nil) (unbounded nil) (count (packet-length arguments)))
       (declare (type (integer 0 #x7fffffff) minimum maximum count))
       (tagbody next
         (if parameters nil (go check))
@@ -1539,10 +1539,48 @@ uses this worker for physical storage beyond a vector's fill pointer."
             (let ((seconds (* zone 3600))) (if (integerp seconds) (return-from done seconds))))))
     (error 'type-error :datum zone :expected-type (list 'rational -24 24)))))
 
-(defun packed-argument-value (arguments index)
-  (declare (type simple-vector arguments) (type (signed-byte 32) index)
-           (optimize (safety 0) (debug 0)) (inline length < >= svref))
-  (values (if (< index 0) nil (if (>= index (length arguments)) nil (svref arguments index)))))
+(export '(packet-length packet-ref packet-keyword-index check-packet-keywords))
+;; The cross compiler maps these two private substrate operations directly to
+;; raw-array reads. Their host definitions retain ordinary CL vector/list use.
+(defun packet-length (packet)
+  (if (simple-vector-p packet) (length packet) (proper-list-count packet)))
+(defun packet-ref (packet index)
+  (if (simple-vector-p packet) (svref packet index) (nth index packet)))
+(defun packet-keyword-index (packet start key)
+  "Return the value's index for the first complete matching pair, or NIL."
+  (declare (type (integer 0 #x7fffffff) start) (optimize (safety 0) (debug 0))
+           (inline < + eq))
+  (values (let ((count (packet-length packet)) (index start))
+    (declare (type (integer 0 #x7fffffff) count index))
+    (block found
+      (tagbody next
+        ;; Leave odd-tail/name errors to the final check, after defaults.
+        (if (< (+ index 1) count) nil (return-from found nil))
+        (if (eq (packet-ref packet index) key) (return-from found (+ index 1)))
+        (setq index (the (integer 0 #x7fffffff) (+ index 2))) (go next))))))
+(defun check-packet-keywords (packet start allowed allow)
+  (declare (type (integer 0 #x7fffffff) start) (optimize (safety 0) (debug 0))
+           (inline < + eq symbolp checked-path-car checked-path-cdr))
+  (values (let ((count (packet-length packet)) (index start) (seen nil) (unknown nil))
+    (declare (type (integer 0 #x7fffffff) count index))
+    (tagbody next
+      (if (< index count) nil (go done))
+      (if (< (+ index 1) count) nil (error 'program-error))
+      (let ((key (packet-ref packet index)))
+        (if (symbolp key) nil (error 'program-error))
+        (if (eq key :allow-other-keys)
+            (if seen nil (progn (setq seen t) (if allow nil (setq allow (packet-ref packet (+ index 1))))))
+            (if allow nil
+                (let ((names allowed))
+                  (tagbody search
+                    (if names nil (progn (setq unknown t) (go found)))
+                    (if (eq key (checked-path-car names)) (go found))
+                    (setq names (checked-path-cdr names)) (go search)
+                   found)))))
+      (setq index (the (integer 0 #x7fffffff) (+ index 2))) (go next)
+     done
+      (if allow nil (if unknown (error 'program-error)))) nil)))
+
 (defun argument-value (arguments index)
   (declare (type (integer 0 #x7fffffff) index) (optimize (safety 0) (debug 0))
            (inline simple-vector-p length >= svref nthcdr-bounded checked-path-car))
@@ -1567,26 +1605,37 @@ uses this worker for physical storage beyond a vector's fill pointer."
   (values (if (private-arguments-valid-p arguments minimum maximum) nil
               (error 'program-error))))
 
-(export '(private-arguments-valid-p))
-(defun private-arguments-valid-p (arguments minimum maximum)
-  "Validate the existing private packet convention without choosing a reporter.
-The native boundary translates a false result into its checked arity condition."
-  (declare (type (signed-byte 32) minimum maximum) (optimize (safety 0) (debug 0))
-           (inline simple-vector-p length < > = 1+ consp cdr))
+(export '(private-arguments-valid-p private-argument-spine-count))
+(defun private-argument-spine-count (arguments proper)
+  "Count a finite private argument spine; retain its arbitrary REST tail.
+When PROPER is true, return NIL for a non-NIL terminal atom. Cycles always
+signal a condition before a private binder can traverse unchecked input."
+  (declare (optimize (safety 0) (debug 0)) (inline consp cdr eq 1+ list))
   (values (block done
-    (if (< minimum 0) (return-from done nil))
-    (if (if (< maximum 0) (simple-vector-p arguments) t)
-        (let ((size (length arguments)))
-          (if (< size minimum) (return-from done nil))
-          (if (< maximum 0) nil (if (> size maximum) (return-from done nil)))
-          (return-from done t)))
-    (let ((index 0) (scan arguments))
-      (declare (type (integer 0 #x7fffffff) index))
+    (let ((fast arguments) (slow arguments) (count 0))
+      (declare (type (integer 0 #x3fffffffffffffff) count))
       (tagbody next
-        (if (= index minimum) (return-from done t))
-        (if (consp scan) nil (return-from done nil))
-        (setq scan (cdr (the cons scan)) index (the (integer 0 #x7fffffff) (1+ index)))
+        (if (consp fast) nil (return-from done (if (if proper fast nil) nil count)))
+        (setq fast (cdr (the cons fast))
+              count (the (integer 0 #x3fffffffffffffff) (1+ count)))
+        (if (consp fast) nil (return-from done (if (if proper fast nil) nil count)))
+        (setq fast (cdr (the cons fast))
+              slow (cdr (the cons slow))
+              count (the (integer 0 #x3fffffffffffffff) (1+ count)))
+        (if (eq fast slow)
+            (error 'type-error :datum arguments :expected-type (list 'satisfies 'list-length)))
         (go next))))))
+
+(defun private-arguments-valid-p (arguments minimum maximum)
+  (declare (type (signed-byte 32) minimum maximum) (optimize (safety 0) (debug 0))
+           (inline < > simple-vector-p length))
+  (values (if (< minimum 0) nil
+    (if (if (< maximum 0) nil (< maximum minimum)) nil
+      ;; An unbounded private binder implements destructuring REST, whose tail
+      ;; can be an atom. A bounded binder must consume a proper argument list.
+      (let ((size (if (simple-vector-p arguments) (length arguments)
+                      (private-argument-spine-count arguments (not (< maximum 0))))))
+        (if size (if (< size minimum) nil (if (< maximum 0) t (not (> size maximum)))) nil))))))
 
 (defun path-component-value-p (text pattern bounds)
   (declare (type string text pattern) (type cons bounds) (optimize (safety 0) (debug 0))

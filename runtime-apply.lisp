@@ -11,6 +11,10 @@
            ($thrown i32) ($direct-arity i32) ($direct-usage i32)
            ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object)
            ($result :nullable-object))
+  ;; Internal APPLY owns raw slot storage. Exported native/JS call adapters
+  ;; snapshot foreign raw arrays before arriving here or reaching a checkpoint.
+  #@(if (ref.test (ref $objects) (local.get $args))
+    (then (call $native-validate-packet (ref.cast (ref $objects) (local.get $args)))))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   ;; Reuse a bounded ring, restoring overwritten entries on return as well as
   ;; nonlocal exits. No frame objects or argument lists are allocated here.
@@ -69,6 +73,35 @@
   (runtime-function-definition '$spread-arguments
     (wat-fragment (miricl-cross:runtime-kernel-wat '$spread-arguments 'miricl-runtime:spread-call-arguments))))
 
+;; Physical APPLY adaptation copies a validated public final spine into owned
+;; storage. Its prefix may already be raw; no temporary Lisp wrapper is used.
+(define-runtime-function $native-spread-arguments (($args :nullable-object)) (:nullable-object)
+  (:locals ($data (ref null $objects)) ($source (ref null $objects))
+           ($tail :nullable-object) ($count i32) ($prefix i32) ($index i32) ($total i32))
+  #@(if (i32.eqz (ref.test (ref $objects) (local.get $args)))
+    (then (return (call $spread-arguments (local.get $args)))))
+  #@(local.set $source (ref.cast (ref $objects) (local.get $args)))
+  #@(call $native-validate-packet (ref.as_non_null (local.get $source)))
+  #@(local.set $count (array.len (local.get $source)))
+  (wat-fail-when #@(i32.lt_u (local.get $count) (i32.const 2)) :wrong-arity)
+  #@(local.set $prefix (i32.sub (local.get $count) (i32.const 2)))
+  #@(local.set $tail (array.get $objects (local.get $source) (i32.sub (local.get $count) (i32.const 1))))
+  #@(call $check-apply-list (local.get $tail))
+  #@(local.set $total (i32.add (local.get $prefix) (call $natural-count (call $list-length-native (local.get $tail)))))
+  (wat-fail-when #@(i32.ge_u (local.get $total) (i32.const 65536)) :malformed-form)
+  #@(local.set $data (array.new_default $objects (local.get $total)))
+  #@(block $prefix-done (loop $copy-prefix
+    (br_if $prefix-done (i32.eq (local.get $index) (local.get $prefix)))
+    (array.set $objects (local.get $data) (local.get $index)
+      (array.get $objects (local.get $source) (i32.add (local.get $index) (i32.const 1))))
+    (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy-prefix)))
+  #@(block $done (loop $copy-tail
+    (br_if $done (i32.eq (local.get $index) (local.get $total)))
+    (array.set $objects (local.get $data) (local.get $index) (call $car (local.get $tail)))
+    (local.set $tail (call $cdr (local.get $tail)))
+    (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy-tail)))
+  #@(local.get $data))
+
 (define-runtime-function $apply-spread (($args :nullable-object)) (:nullable-object)
   (:locals ($spread :nullable-object))
   #@(local.set $spread (call $spread-arguments (local.get $args)))
@@ -123,6 +156,21 @@
         (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $name)))))))))
   ;; The resolved function has one immutable dispatch code.
   #@(local.set $code (struct.get $obj $n (ref.cast (ref $obj) (local.get $name))))
+  #@(if (i32.eq (local.get $code) (i32.const 2147483645))
+    (then (return_call $generic-apply (local.get $name) (local.get $args))))
+  #@(if (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id 'funcall))))
+    (then
+      (call $native-check-arguments (extern.convert_any (local.get $args)) (i32.const 1) (i32.const -1))
+      (return_call $apply (call $native-packet-ref-cl (local.get $args) (call $int (i32.const 0)))
+        (call $native-packet-tail (local.get $args) (i32.const 1)))))
+  #@(if (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id 'apply))))
+    (then
+      (call $native-check-arguments (extern.convert_any (local.get $args)) (i32.const 2) (i32.const -1))
+      (return_call $apply (call $native-packet-ref-cl (local.get $args) (call $int (i32.const 0)))
+        (call $native-spread-arguments (local.get $args)))))
+  ;; Source/HIR/builtin/public-MOP protocols genuinely consume Lisp lists.
+  #@(if (ref.test (ref $objects) (local.get $args))
+    (then (local.set $args (call $native-arguments-list (local.get $args)))))
   #@(if (i32.eq (local.get $code) (i32.const 2147483641))
     (then (return_call $hir-apply (local.get $name) (local.get $args))))
   #@(if (i32.eq (local.get $code) (i32.const 2147483642))
@@ -417,5 +465,5 @@
 (define-runtime-section apply-runtime-wat ()
   ($apply0)
   (if *source-bootstrap-p* ($apply-source) "")
-  ($spread-arguments) ($apply-spread)
+  ($spread-arguments) ($native-spread-arguments) ($apply-spread)
   ($apply1))

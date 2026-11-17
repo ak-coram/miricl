@@ -46,6 +46,110 @@
     (return (call $car (local.get $cell))))
   #@(call $car (call $property-cell (struct.get $obj $b (local.get $info)) (local.get $key))))
 
+;; Opaque activation objects keep owned packets out of ordinary Lisp argument-
+;; list variables. Raw storage here is private: public native call ingress
+;; already copied foreign arrays before any callback/checkpoint. A structural
+;; array type or completed builder alone is never evidence of ownership.
+;; The public list view is made only on request; method hops retain the packet.
+(define-runtime-function $argument-context (($args :nullable-object)) (:nullable-object)
+  (:locals ($packet (ref null $objects)) ($scan :nullable-object) ($count i32) ($index i32))
+  #@(if (ref.test (ref $method-context) (local.get $args)) (then (return (local.get $args))))
+  #@(if (ref.test (ref $objects) (local.get $args))
+    (then (local.set $packet (ref.cast (ref $objects) (local.get $args)))
+      (call $native-validate-packet (ref.as_non_null (local.get $packet))))
+    (else
+      (call $check-apply-list (local.get $args))
+      (local.set $count (call $natural-count (call $list-length-native (local.get $args))))
+      ,(wat-fail-when #@(i32.ge_u (local.get $count) (i32.const 65536)) :malformed-form)
+      (local.set $packet (array.new_default $objects (local.get $count)))
+      (local.set $scan (local.get $args))
+      (block $done (loop $copy
+        (br_if $done (i32.eq (local.get $index) (local.get $count)))
+        (array.set $objects (local.get $packet) (local.get $index) (call $car (local.get $scan)))
+        (local.set $scan (call $cdr (local.get $scan)))
+        (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy)))))
+  #@(struct.new $method-context (call $allocate-object-tag (i32.const 53)) (i32.const 0)
+    (f64.const 0) (ref.null $digits) (ref.null eq) (ref.null eq) (ref.null eq)
+    (local.get $packet) (ref.null eq)))
+
+(define-runtime-function $argument-context-p (($context :nullable-object)) (:nullable-object)
+  #@(call $bool (ref.test (ref $method-context) (local.get $context))))
+
+(define-runtime-function $argument-context-arguments (($context :nullable-object)) (:nullable-object)
+  #@(if (result (ref null eq)) (ref.test (ref $method-context) (local.get $context))
+    (then (struct.get $method-context $args (ref.cast (ref $method-context) (local.get $context))))
+    (else (local.get $context))))
+
+(define-runtime-function $context-argument (($context :nullable-object) ($index :nullable-object)) (:nullable-object)
+  #@(call $native-packet-ref-cl (call $argument-context-arguments (local.get $context)) (local.get $index)))
+(define-runtime-function $context-present (($context :nullable-object) ($index :nullable-object)) (:nullable-object)
+  #@(ref.cast (ref null eq) (any.convert_extern (call $native-argument-present
+    (extern.convert_any (call $argument-context-arguments (local.get $context))) (call $sequence-index (local.get $index))))))
+(define-runtime-function $context-rest (($context :nullable-object) ($index :nullable-object)) (:nullable-object)
+  #@(ref.cast (ref null eq) (any.convert_extern (call $native-rest-argument
+    (extern.convert_any (call $argument-context-arguments (local.get $context))) (call $sequence-index (local.get $index))))))
+(define-runtime-function $context-check-keywords
+    (($context :nullable-object) ($start :nullable-object) ($keys :nullable-object) ($allow i32)) (:nullable-object)
+  #@(call $native-check-keywords (extern.convert_any (call $argument-context-arguments (local.get $context)))
+    (call $sequence-index (local.get $start)) (extern.convert_any (local.get $keys)) (local.get $allow))
+  #@(ref.null eq))
+(define-runtime-function $context-keyword-present
+    (($context :nullable-object) ($start :nullable-object) ($key :nullable-object)) (:nullable-object)
+  #@(ref.cast (ref null eq) (any.convert_extern (call $native-keyword-present
+    (extern.convert_any (call $argument-context-arguments (local.get $context)))
+    (call $sequence-index (local.get $start)) (extern.convert_any (local.get $key))))))
+(define-runtime-function $context-keyword-argument
+    (($context :nullable-object) ($start :nullable-object) ($key :nullable-object)) (:nullable-object)
+  #@(ref.cast (ref null eq) (any.convert_extern (call $native-keyword-argument
+    (extern.convert_any (call $argument-context-arguments (local.get $context)))
+    (call $sequence-index (local.get $start)) (extern.convert_any (local.get $key))))))
+
+(define-runtime-function $effective-apply (($function :nullable-object) ($args :nullable-object)) (:nullable-object)
+  (:locals ($mode i32) ($plan :nullable-object) ($context :nullable-object))
+  #@(if (ref.test (ref $direct-function) (local.get $function))
+    (then
+      (local.set $mode (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $function))))
+      (if (i32.eq (local.get $mode) (i32.const 19))
+        (then
+          (local.set $context (call $argument-context (local.get $args)))
+          (return_call $apply
+            (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $function)))
+            (array.new_fixed $objects 1 (local.get $context)))))
+      (if (i32.eq (local.get $mode) (i32.const 8))
+        (then (return_call $invoke-method
+          (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $function)))
+          (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $function)))
+          (ref.null eq) (call $argument-context-arguments (local.get $args)) (ref.null eq) (i32.const 0))))
+      (if (i32.eq (local.get $mode) (i32.const 9))
+        (then
+          (local.set $plan (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $function))))
+          (return_call $invoke-method
+            (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $function)))
+            (call $car (local.get $plan)) (call $car (call $cdr (local.get $plan)))
+            (call $argument-context-arguments (local.get $args))
+            (call $car (call $cdr (call $cdr (local.get $plan)))) (i32.const 0))))))
+  ;; A custom/public effective function retains its unary list protocol.
+  #@(return_call $apply (local.get $function) (call $cons
+    (call $native-arguments-list (call $argument-context-arguments (local.get $args))) (ref.null eq))))
+
+(define-runtime-function $context-invoke-method
+    (($gf :nullable-object) ($method :nullable-object) ($rest :nullable-object)
+     ($context :nullable-object) ($continuation :nullable-object) ($forbidden i32)) (:nullable-object)
+  #@(return_call $invoke-method (local.get $gf) (local.get $method) (local.get $rest)
+    (call $argument-context-arguments (local.get $context)) (local.get $continuation) (local.get $forbidden)))
+
+(define-runtime-function $call-next-packet (($context :nullable-object) ($replacement :nullable-object)) (:nullable-object)
+  (:locals ($packed (ref null $method-context)) ($next :nullable-object))
+  (wat-fail-when #@(i32.eqz (ref.test (ref $method-context) (local.get $context))) :control-error)
+  #@(local.set $packed (ref.cast (ref $method-context) (local.get $context)))
+  (wat-fail-when #@(struct.get $obj $n (local.get $packed)) :control-error)
+  #@(local.set $next (struct.get $method-context $next (local.get $packed)))
+  ;; Changed applicability and NO-NEXT-METHOD are live public MOP boundaries.
+  #@(if (i32.or (i32.eqz (ref.is_null (local.get $replacement))) (ref.is_null (local.get $next)))
+    (then (return_call $apply ,(clos-library-reference '%call-next-list)
+      (array.new_fixed $objects 2 (local.get $context) (local.get $replacement)))))
+  #@(return_call $apply (local.get $next) (array.new_fixed $objects 1 (local.get $context))))
+
 ;; The next-method context has lexical extent through the method's closures.
 ;; Pack the private context into one object while retaining the same dynamic
 ;; binding and lexical lifetime as the former five/six-element list.
@@ -53,6 +157,8 @@
     (($gf :nullable-object) ($method :nullable-object) ($rest :nullable-object)
      ($args :nullable-object) ($continuation :nullable-object) ($forbidden i32)) (:nullable-object)
   (:locals ($saved :nullable-object) ($context :nullable-object) ($result :nullable-object) ($function :nullable-object) ($thrown i32))
+  #@(if (i32.eqz (ref.test (ref $objects) (local.get $args)))
+    (then (local.set $args (call $argument-context-arguments (call $argument-context (local.get $args))))))
   #@(local.set $context (struct.new $method-context
     (call $allocate-object-tag (i32.const 53)) (local.get $forbidden) (f64.const 0) (ref.null $digits)
     (local.get $gf) (local.get $method) (local.get $rest) (local.get $args) (local.get $continuation)))
@@ -65,7 +171,7 @@
         (ref.cast (ref $direct-function) (local.get $function))) (i32.const 18))
       (then (return_call $apply
         (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $function)))
-        (call $cons (local.get $context) (local.get $args)))))))
+        (call $native-prepend-argument (local.get $context) (local.get $args)))))))
   #@(local.set $saved (global.get $dynamic-variables))
   #@(global.set $dynamic-variables (call $bind (local.get $saved)
     ,(clos-library-reference '%next-context) (local.get $context)))
@@ -86,7 +192,7 @@
             (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $function)))
             (local.get $args))))
           (else (local.set $result (call $apply (local.get $function)
-            (call $native-two-arguments (local.get $function) (local.get $args) (local.get $rest))))))
+            (call $native-two-arguments (local.get $function) (call $native-arguments-list (local.get $args)) (local.get $rest))))))
         (br $returned)))
     (local.set $thrown (i32.const 1)))
   #@(global.set $dynamic-variables (local.get $saved))
@@ -104,7 +210,7 @@
       (if (i32.eqz (local.get $n)) (then (return (struct.get $obj $a (ref.cast (ref $obj) (local.get $context))))))
       (if (i32.eq (local.get $n) (i32.const 1)) (then (return (struct.get $obj $b (ref.cast (ref $obj) (local.get $context))))))
       (if (i32.eq (local.get $n) (i32.const 2)) (then (return (struct.get $obj $c (ref.cast (ref $obj) (local.get $context))))))
-      (if (i32.eq (local.get $n) (i32.const 3)) (then (return (struct.get $method-context $args (local.get $packed)))))
+      (if (i32.eq (local.get $n) (i32.const 3)) (then (return (call $native-arguments-list (struct.get $method-context $args (local.get $packed))))))
       (if (i32.eq (local.get $n) (i32.const 4)) (then (return (struct.get $method-context $next (local.get $packed)))))
       (if (i32.eq (local.get $n) (i32.const 5))
         (then (return (if (result (ref null eq)) (call $value-n (local.get $context))
@@ -317,7 +423,7 @@
   #@(local.set $saved-count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (local.set $result (call $generic-key-match-cl (local.get $key)
-    (call $vector-new (array.new_fixed $objects 7 (local.get $gf) (local.get $a)
+    (call $vector-new (array.new_fixed $objects 7 (local.get $gf) (call $argument-context (local.get $a))
       (local.get $ca) (local.get $cb) (local.get $cc) (local.get $cd) (call $int (local.get $mode))))
     (call $generic-dispatch-metadata-function)))
     (global.set $extra-values (local.get $saved))
@@ -694,11 +800,12 @@
            ($metadata :nullable-object) ($recent (ref null $objects)) ($row (ref null $objects))
            ($selected :nullable-object) ($epoch :nullable-object) ($slot-token :nullable-object)
            ($scan :nullable-object) ($a :nullable-object) ($b :nullable-object) ($c :nullable-object)
-           ($result :nullable-object) ($count i32) ($hit i32))
+           ($result :nullable-object) ($count i32) ($hit i32) ($activation :nullable-object))
   ;; This ingress owns an argument spine rather than fixed operand values.
   ;; Poll before reading it, then recognize only a complete bounded proper
   ;; list. Long, dotted and cyclic inputs retain ordinary checked dispatch.
   #@(block $ordinary
+    (br_if $ordinary (ref.test (ref $objects) (local.get $args)))
     (if (global.get $thread-active) (then (call $thread-checkpoint)))
     (local.set $scan (local.get $args))
     (block $arguments (loop $argument
@@ -718,6 +825,8 @@
     ;; Preserve the committed method's complete value group, including zero
     ;; values. Scalar metadata/slot plans clear their own transient values.
     (if (local.get $hit) (then (return (local.get $result)))))
+  #@(local.set $activation (call $argument-context (local.get $args)))
+  #@(local.set $args (call $argument-context-arguments (local.get $activation)))
   #@(local.set $function (call $generic-property (local.get $gf) ,(clos-library-reference :discriminating-function)))
   ;; Bootstrap generics use NIL for the same default dispatcher. Custom
   ;; discriminators and trace wrappers retain their own call path.
@@ -786,15 +895,15 @@
                 (if (i32.eqz (local.get $computed))
                   (then
                     (if (i32.and (local.get $mode) (i32.const 16))
-                      (then (local.set $ca (call $dispatch-class (call $car (local.get $args))))))
+                      (then (local.set $ca (call $dispatch-class (call $native-packet-ref-cl (local.get $args) (call $int (i32.const 0)))))))
                     (if (i32.and (local.get $mode) (i32.const 32))
-                      (then (local.set $cb (call $dispatch-class (call $car (call $cdr (local.get $args)))))))
+                      (then (local.set $cb (call $dispatch-class (call $native-packet-ref-cl (local.get $args) (call $int (i32.const 1)))))))
                     (if (i32.and (local.get $mode) (i32.const 64))
-                      (then (local.set $cc (call $dispatch-class (call $car (call $cdr (call $cdr (local.get $args))))))))
+                      (then (local.set $cc (call $dispatch-class (call $native-packet-ref-cl (local.get $args) (call $int (i32.const 2)))))))
                     (if (i32.and (local.get $mode) (i32.const 128))
-                      (then (local.set $cd (call $dispatch-class (call $car (call $cdr (call $cdr (call $cdr (local.get $args)))))))))
+                      (then (local.set $cd (call $dispatch-class (call $native-packet-ref-cl (local.get $args) (call $int (i32.const 3)))))))
                     (local.set $computed (i32.const 1))))
-                (if (call $generic-key-match (local.get $key) (local.get $gf) (local.get $args)
+                (if (call $generic-key-match (local.get $key) (local.get $gf) (local.get $activation)
                       (local.get $ca) (local.get $cb) (local.get $cc) (local.get $cd) (local.get $mode))
                   (then
                     ;; Lazy condition-class creation can reenter Lisp. Never
@@ -802,7 +911,7 @@
                     (br_if $miss (i32.eqz (call $eql (local.get $version)
                       (call $symbol-value ,(clos-library-reference '%dispatch-version)))))
                     (drop (call $check-generic-arity
-                      (call $generic-property (local.get $gf) ,(clos-library-reference :lambda-list)) (local.get $args)))
+                      (call $generic-property (local.get $gf) ,(clos-library-reference :lambda-list)) (local.get $activation)))
                     (if (i32.eqz (ref.is_null (local.get $recent)))
                       (then
                         (if (i32.ge_u (local.get $phase) (i32.const 2))
@@ -812,16 +921,16 @@
                             (array.set $objects (local.get $recent) (i32.const ,(1+ *generic-recent-index*))
                               (array.get $objects (local.get $recent) (i32.const ,*generic-recent-index*)))
                             (array.set $objects (local.get $recent) (i32.const ,*generic-recent-index*) (local.get $row))))))
-                    (return (call $apply (local.get $selected)
-                      (call $cons (local.get $args) (ref.null eq))))))))
+                    (return (call $effective-apply (local.get $selected) (local.get $activation)))))))
             (if (i32.lt_u (local.get $phase) (i32.const 2))
               (then (local.set $phase (i32.add (local.get $phase) (i32.const 1))))
               (else (local.set $cache (call $cdr (local.get $cache)))))
             (br $next)))))
       (return (call $apply ,(clos-library-reference '%invoke-effective)
-        (call $cons (local.get $gf) (call $cons (local.get $args) (ref.null eq)))))))
+        (array.new_fixed $objects 3 (local.get $gf)
+          (call $native-arguments-list (local.get $args)) (local.get $activation))))))
   #@(call $apply ,(clos-library-reference '%dispatch-generic)
-    (call $cons (local.get $gf) (call $cons (local.get $args) (ref.null eq)))))
+    (call $cons (local.get $gf) (call $cons (call $native-arguments-list (local.get $args)) (ref.null eq)))))
 
 (define-runtime-function $standard-property-generic-p
     (($function :nullable-object) ($method :nullable-object)) (i32)
@@ -1039,6 +1148,10 @@
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
     (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
     (field $args (ref null eq)) (field $next (ref null eq)))))
+  ($argument-context) ($argument-context-p) ($argument-context-arguments)
+  ($context-argument) ($context-present) ($context-rest) ($context-check-keywords)
+  ($context-keyword-present) ($context-keyword-argument) ($effective-apply)
+  ($context-invoke-method) ($call-next-packet)
   ($dispatch-eql-key) ($generic-discriminator) ($generic-property) ($invoke-method) ($method-context-element) ($dispatch-class-known) ($dispatch-class) ($generic-key-match) ($generic-fixed-arity-p) ($generic-recent-call) ($generic-recent-plan-ready) ($generic-recent-context) ($generic-recent-scalar-call) ($generic-recent-call-ready) ($generic-cache-permitted-p) ($generic-cache-row) ($generic-apply)
   ($make-generic-call-plan) ($generic-call-plan-function)
   ($standard-property-generic-p) ($find-instance-slot) ($instance-slot-operation-general) ($restore-saved-slots) ($property-effective) ($ensure-instance-layout))

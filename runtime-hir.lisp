@@ -408,11 +408,24 @@
              (i32.sub (local.get $a) (i32.const 1)))) (else (ref.null eq)))
          (local.get $registers) (local.get $captures) (i32.const ,(if (eq opcode :debug-step) 1 0))) effects))
       (:constant (setf result (hir-literal)))
-      ((:argument :rest-argument)
-       (setf result (native-object `(call ,(if (eq opcode :argument) '$native-argument '$native-rest-argument)
+      ((:argument :argument-present :rest-argument)
+       (setf result (native-object `(call ,(case opcode
+                                           (:argument '$native-argument)
+                                           (:argument-present '$native-argument-present)
+                                           (otherwise '$native-rest-argument))
          (extern.convert_any (local.get $args)) (local.get $a)))))
       (:check-arguments (push #@(call $native-check-arguments (extern.convert_any (local.get $args))
         (local.get $a) (i32.sub (local.get $b) (i32.const 1))) effects))
+      ((:keyword-present :keyword-argument)
+       (setf result (native-object `(call ,(if (eq opcode :keyword-present)
+                                             '$native-keyword-present '$native-keyword-argument)
+         (extern.convert_any (local.get $args)) (local.get $a)
+         (extern.convert_any (array.get $objects (local.get $literals) (local.get $b)))))))
+      (:check-keywords
+       (let ((descriptor '(array.get $objects (local.get $literals) (local.get $b))))
+         (push `(call $native-check-keywords (extern.convert_any (local.get $args)) (local.get $a)
+           (extern.convert_any (call $car ,descriptor))
+           (i32.eqz (ref.is_null (call $car (call $cdr ,descriptor))))) effects)))
       (:truth (setf result `(call $bool (i32.eqz (ref.is_null ,(hir-input 0))))))
       (:copy (setf result (hir-input 0)))
       ((:function-reference :function-reference-inline :function-reference-notinline)
@@ -484,7 +497,8 @@
       ;; The dispatcher and nonlocal landing path establish one value. These
       ;; operations only manipulate explicit registers and cannot change the
       ;; ambient value packet. Calls still capture their results and clear it.
-      (unless (member opcode '(:constant :argument :rest-argument :check-arguments :truth
+      (unless (member opcode '(:constant :argument :argument-present :rest-argument :check-arguments
+                               :keyword-present :keyword-argument :check-keywords :truth
                                :values :values-list :list :value-ref :checked-argument
                                :cell-new :cell-read :cell-write :primary :copy :capture :closure
                                :check-apply-list :check-apply-arguments :branch :jump :checked-jump))

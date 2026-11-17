@@ -24,8 +24,12 @@ export function nativeModuleToWat(bytes, moduleIndex, declarations, entries, cal
     return value.toString();
   };
   const name = () => {const size = unsigned(); const value = new TextDecoder().decode(bytes.subarray(position, position + size)); position += size; return value;};
-  const imports = [], bodies = [], types = [], functionTypes = [];
+  const imports = [], tags = [], bodies = [], types = [], functionTypes = [];
   const functionName = index => index < imports.length ? `$${imports[index]}` : `$${prefix}-${moduleIndex}-${index - imports.length}`;
+  const tagName = index => {
+    assert.ok(index < tags.length, 'Unsupported native exception tag index');
+    return tags[index];
+  };
   const valueType = () => {
     const type = byte();
     if (type === 0x7f) return 'i32';
@@ -84,8 +88,20 @@ export function nativeModuleToWat(bytes, moduleIndex, declarations, entries, cal
       for (let i = 0; i < count; i++) {
         const entry = {module: name(), name: name()};
         assert.ok(isRuntimeImport(entry), 'Unsupported native runtime namespace');
-        const field = runtimeImportName(entry); assert.match(field, /^native-[a-z0-9-]+$/);
-        assert.equal(byte(), 0); unsigned(); imports.push(field);
+        const importKind = byte();
+        if (importKind === 0) {
+          const field = runtimeImportName(entry); assert.match(field, /^native-[a-z0-9-]+$/);
+          unsigned(); imports.push(field);
+        } else {
+          assert.equal(importKind, 4, 'Unsupported native import kind');
+          assert.equal(entry.name, 'transfer', 'Unsupported native exception tag');
+          assert.equal(byte(), 0, 'Unsupported native exception tag attribute');
+          assert.deepEqual(types[unsigned()], {parameters: [], results: []},
+            'Native transfer tag must have no payload');
+          // Tags have their own index space and share the runtime transfer tag.
+          // They must never shift function imports or linked entry indices.
+          tags.push('$transfer');
+        }
       }
     } else if (kind === 3) {
       for (let count = unsigned(); count > 0; count--) functionTypes.push(unsigned());
@@ -110,6 +126,7 @@ export function nativeModuleToWat(bytes, moduleIndex, declarations, entries, cal
             case 0x03: instructions.push(`loop${blockType()}`); break;
             case 0x04: instructions.push(`if${blockType()}`); break;
             case 0x05: instructions.push('else'); break;
+            case 0x08: instructions.push(`throw ${tagName(unsigned())}`); break;
             case 0x0b: if (position < bodyEnd) instructions.push('end'); break;
             case 0x0c: instructions.push(`br ${unsigned()}`); break;
             case 0x0d: instructions.push(`br_if ${unsigned()}`); break;
@@ -126,6 +143,14 @@ export function nativeModuleToWat(bytes, moduleIndex, declarations, entries, cal
             }
             case 0x12: instructions.push(`return_call ${functionName(unsigned())}`); break;
             case 0x1a: instructions.push('drop'); break;
+            case 0x1f: {
+              const type = blockType(), catches = [];
+              for (let count = unsigned(); count > 0; count--) {
+                assert.equal(byte(), 0, 'Unsupported native exception catch kind');
+                catches.push(`(catch ${tagName(unsigned())} ${unsigned()})`);
+              }
+              instructions.push(`try_table${type} ${catches.join(' ')}`); break;
+            }
             case 0xd3: instructions.push('ref.eq'); break;
             case 0x20: instructions.push(`local.get ${unsigned()}`); break;
             case 0x21: instructions.push(`local.set ${unsigned()}`); break;

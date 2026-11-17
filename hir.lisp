@@ -1513,42 +1513,6 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
          (return-from (hir-return-from-form form variables functions targets))
          (otherwise (hir-application-form form variables functions targets)))))))
 
-(defun hir-normalize-keywords (params body)
-  (declare (type list params body))
-  ;; The source boundary validated this lambda list. Keep required bindings
-  ;; in the native entry and lower only its remaining keyword machinery.
-  (let ((prefix nil) (remaining params)
-        (normalizer #'miricl::%normalize-lambda))
-    (loop while (and remaining (not (member (car remaining) lambda-list-keywords)))
-          do (push (pop remaining) prefix))
-    (setq prefix (nreverse prefix))
-    ;; AUX may shadow an earlier parameter. Keep the original normalization
-    ;; unless the declaration's binding identity is unambiguous.
-    (when (or (null prefix)
-              (some (lambda (spec) (member (if (consp spec) (car spec) spec) prefix))
-                    (cdr (member '&aux params))))
-      (return-from hir-normalize-keywords (funcall normalizer params body)))
-    (multiple-value-bind (forms specials types policy) (hir-declarations body t)
-      (declare (ignore forms policy))
-      (let ((outer nil) (normalized (funcall normalizer remaining body)))
-        (let ((names (intersection prefix specials)))
-          (when names (push (cons 'special names) outer)))
-        (dolist (entry types)
-          (when (member (car entry) prefix)
-            (push (list 'type (cdr entry) (car entry)) outer)))
-        ;; Without optional arguments, no parser operation advances the rest
-        ;; spine. Its private mutable box is redundant: bind rest/key views
-        ;; directly to the native rest parameter.
-        (unless (member '&optional remaining)
-          (let* ((args (second (first normalized))) (form (first (second normalized)))
-                 (bindings (second form)) (box (caar bindings)))
-            (dolist (binding (cdr bindings))
-              (when (equal (second binding) (list 'car box))
-                (setf (second binding) args)))
-            (setf (second form) (cdr bindings))))
-        (list (append prefix (first normalized))
-              (append (when outer (list (cons 'declare (nreverse outer)))) (second normalized)))))))
-
 (defun hir-lambda (form parent variables functions targets name &optional implicit-block)
   (declare (type (or null simple-vector) parent)
            (type list variables functions targets implicit-block))
@@ -1556,23 +1520,6 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   (setq name (hir-code-name name))
   (unless (and (consp form) (eq (first form) 'lambda))
     (compiler-input-fail "lambda expression" form "expected (LAMBDA lambda-list body...)"))
-  (when (member '&key (second form))
-    ;; Share the target's existing lambda-list semantics during bootstrap.
-    ;; Its normalized required/rest bindings and keyword checks still compile
-    ;; through HIR; application bodies do not fall back to interpretation.
-    (unless (fboundp 'miricl::%normalize-lambda)
-      (error "Keyword normalization requires the host's lambda-list adapter."))
-    (when implicit-block
-      ;; The local function's named block covers its body, not keyword
-      ;; initializers. Insert it before normalization moves those into LET*.
-      (let ((body (cddr form)) (prefix nil))
-        (when (and (stringp (car body)) (cdr body)) (push (pop body) prefix))
-        (loop while (and (consp (car body)) (eq (caar body) 'declare)) do (push (pop body) prefix))
-        (setq form (list* 'lambda (second form)
-                     (append (nreverse prefix) (list (list* 'block (first implicit-block) body))))
-              implicit-block nil)))
-    (let ((normalized (hir-normalize-keywords (second form) (cddr form))))
-      (setq form (list* 'lambda (first normalized) (second normalized)))))
   (let* ((*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*))
          (*hir-safety-level* (native-safety-level (cddr form) *hir-safety-level*))
          (*hir-types* *hir-types*)
@@ -1589,8 +1536,9 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
       (let* ((local variables) (index 0) (parameters (second form)) (mode :required)
              (required (or (position-if (lambda (p) (member p lambda-list-keywords)) parameters) (length parameters)))
              (end (or (position-if (lambda (p) (member p '(&rest &key &aux))) parameters) (length parameters)))
-             (maximum (if (member '&rest parameters) -1 (- end (if (member '&optional parameters) 1 0))))
-             (names nil))
+             (maximum (if (or (member '&rest parameters) (member '&key parameters))
+                          -1 (- end (if (member '&optional parameters) 1 0))))
+             (names nil) (key-start nil) (keys nil) (allow nil))
         (catch 'hir-path-ended
         (hir-emit :check-arguments nil nil (list required maximum) :check)
         (loop while parameters do
@@ -1608,28 +1556,47 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                (when types (setq *hir-types* (hir-bound-type-environment parameter local types))))
               ((eq parameter '&aux)
                (when (eq mode :aux) (error "Duplicate &AUX.")) (setq mode :aux))
+              ((eq parameter '&key)
+               (unless (member mode '(:required :optional :after-rest)) (error "Misplaced &KEY."))
+               (setq mode :key key-start index))
+              ((eq parameter '&allow-other-keys)
+               (unless (eq mode :key) (error "Misplaced &ALLOW-OTHER-KEYS."))
+               (setq allow t))
               ((member parameter lambda-list-keywords)
                (error "HIR parameter lowering is not implemented for ~S." parameter))
               (t
                (when (eq mode :after-rest) (error "Unexpected parameter after &REST."))
                (let* ((spec (if (consp parameter) parameter (list parameter)))
-                      (variable (first spec)) (supplied (and (eq mode :optional) (third spec)))
-                      (present nil) (value nil))
-                 (unless (and (<= 1 (length spec) (case mode (:required 1) (:optional 3) (otherwise 2)))
+                      (variable (first spec)) (supplied (and (member mode '(:optional :key)) (third spec)))
+                      (present nil) (value nil) (key nil))
+                 (unless (and (<= 1 (length spec) (case mode (:required 1) ((:optional :key) 3) (otherwise 2)))
                               (or (not (eq mode :required)) (symbolp parameter)))
                    (error "Malformed parameter ~S." parameter))
+                 (when (eq mode :key)
+                   (if (consp variable)
+                       (setq key (first variable) variable (second variable))
+                       (setq key (intern (symbol-name variable) "KEYWORD")))
+                   (push key keys))
                  (when (and (not (eq mode :aux))
                             (or (member variable names) (and supplied (or (eq variable supplied) (member supplied names)))))
                    (error "Duplicate parameter ~S." parameter))
                  (case mode
                    (:required (setq value (hir-emit :argument nil :single (list index))))
                    (:aux (setq value (hir-single (hir-form (second spec) local functions targets))))
-                   (:optional
-                    (setq present (hir-emit :rest-argument nil :single (list index)))
+                   ((:optional :key)
+                    ;; Keep the packet private to this activation. Presence
+                    ;; is independent of the supplied argument's truth value.
+                    (setq present (if (eq mode :key)
+                                      (hir-emit :keyword-present nil :single (list key-start key) :read)
+                                      (hir-emit :argument-present nil :single (list index) :read)))
                     (let ((yes (hir-new-block)) (no (hir-new-block)) (join (hir-new-block :multiple)))
                       (hir-terminate :branch (list present) (list yes no))
                       (setq *hir-block* yes)
-                      (hir-terminate :jump (list (hir-multiple (hir-emit :argument nil :single (list index)))) (list join))
+                      (hir-terminate :jump
+                        (list (hir-multiple
+                          (if (eq mode :key)
+                              (hir-emit :keyword-argument nil :single (list key-start key) :read)
+                              (hir-emit :argument nil :single (list index))))) (list join))
                       (setq *hir-block* no)
                       (let ((default (catch 'hir-path-ended (hir-single (hir-form (second spec) local functions targets)))))
                         (unless (hir-block-terminator *hir-block*)
@@ -1641,7 +1608,10 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                    (setq local (hir-bind-value supplied (hir-emit :truth (list present) :single) local specials))
                    (when types (setq *hir-types* (hir-bound-type-environment supplied local types)))
                    (push supplied names))
-                 (unless (eq mode :aux) (incf index)))))))
+                 (when (member mode '(:required :optional)) (incf index)))))))
+        ;; Match the existing source binder's detection point: initializers,
+        ;; including AUX forms, precede keyword validation and the body.
+        (when key-start (hir-emit :check-keywords nil nil (list key-start (nreverse keys) allow) :check))
         (when implicit-block (setq body (list (list* 'block (first implicit-block) body))))
         (setq local (hir-shadow-specials local specials))
         (let* ((*hir-types* (hir-type-environment local types))
@@ -1663,7 +1633,10 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   ;; would keep another executable AST alive behind that code.
   (dolist (function (hir-unit-functions unit))
     (setf (hir-function-parameters function)
-      (mapcar (lambda (parameter) (if (consp parameter) (first parameter) parameter))
+      (mapcar (lambda (parameter)
+                (if (consp parameter)
+                    (if (consp (first parameter)) (list (first parameter)) (first parameter))
+                    parameter))
         (hir-function-parameters function)))
     (dolist (binding (hir-function-bindings function))
       (let ((local (hir-binding-local binding)))
@@ -1758,6 +1731,8 @@ global definitions. Internal calls refer to this group's lexical definitions."
   ;; Build its index once; graph-dependent validation tables remain fresh.
   (let ((table (make-hash-table :test 'eq)))
     (dolist (shape '((:constant 0 0 1 1) (:argument 0 0 1 1) (:rest-argument 0 0 1 1)
+                      (:argument-present 0 0 1 1) (:keyword-present 0 0 2 2)
+                      (:keyword-argument 0 0 2 2) (:check-keywords 0 0 3 3)
                       (:check-arguments 0 0 2 2) (:check-apply-arguments 1 1 1 1)
                       (:check-apply-list 1 1 0 0) (:checked-argument 1 1 1 1)
                       (:truth 1 1 0 0) (:function-reference 0 0 1 2)
@@ -1915,9 +1890,20 @@ global definitions. Internal calls refer to this group's lexical definitions."
                (:call
                 (unless (or (null attributes) (equal attributes '(:speed)))
                   (compiler-input-fail "HIR call policy" attributes "expected NIL or (:SPEED)")))
-               ((:argument :rest-argument :check-apply-arguments :checked-argument :value-ref :capture)
+               ((:argument :rest-argument :argument-present :check-apply-arguments :checked-argument :value-ref :capture)
                 (unless (typep (first attributes) '(unsigned-byte 32))
                   (compiler-input-fail "HIR index" attributes "expected a nonnegative 32-bit index")))
+               ((:keyword-present :keyword-argument :check-keywords)
+                (unless (typep (first attributes) '(unsigned-byte 32))
+                  (compiler-input-fail "HIR keyword start" attributes "expected a nonnegative 32-bit index"))
+                (if (eq opcode :check-keywords)
+                    (progn
+                      (compiler-list-length (second attributes) "HIR allowed keywords")
+                      (unless (and (every #'symbolp (second attributes))
+                                   (member (third attributes) '(nil t)))
+                        (compiler-input-fail "HIR keyword check" attributes "expected symbol keys and a boolean allowance")))
+                    (unless (symbolp (second attributes))
+                      (compiler-input-fail "HIR keyword name" attributes "expected a symbol"))))
                (:check-arguments
                 (unless (and (typep (first attributes) '(unsigned-byte 32))
                              (integerp (second attributes))
@@ -1939,6 +1925,14 @@ global definitions. Internal calls refer to this group's lexical definitions."
                ((:control-call :restart-signal)
                 (unless (typep (first attributes) '(unsigned-byte 32))
                   (compiler-input-fail "HIR control operation" attributes "expected a nonnegative operation code"))))
+             (when (member opcode '(:argument-present :keyword-present :keyword-argument :check-keywords))
+               (unless (if (eq opcode :check-keywords)
+                           (and (null (hir-instruction-output object))
+                                (eq (hir-instruction-effect object) :check))
+                           (and (hir-instruction-output object)
+                                (eq (hir-value-kind (hir-instruction-output object)) :single)
+                                (eq (hir-instruction-effect object) :read)))
+                 (compiler-input-fail "HIR argument operation" object "invalid output kind or effect")))
              (when (eq opcode :capture)
                (capture-identity (second attributes))
                (unless (and (hir-instruction-output object)

@@ -2,56 +2,233 @@
 (in-package :miricl-compiler)
 
 (defun hir-result-callee (value &optional callees)
-  "A function identity established by executable closure data, not local metadata."
+  "Executable code provenance, without asserting closure object identity."
   (or (and callees (gethash value callees))
    (loop repeat 32 do
     (let ((origin (hir-value-producer value)))
       (unless (%hir-instruction-p origin) (return nil))
       (case (hir-instruction-opcode origin)
-        (:copy (setq value (first (hir-instruction-inputs origin))))
+        ((:copy :primary :values) (setq value (first (hir-instruction-inputs origin)))
+         (unless value (return nil)))
         (:closure (return (first (hir-instruction-attributes origin))))
         ;; A cell's LOCAL record is descriptive, not a proof that no write,
         ;; alias or capture has changed its current function identity.
         (otherwise (return nil)))))))
 
-(defun hir-result-callees (unit barriers)
-  "Prove read-only lexical function cells from their actual initialization."
-  (let ((callees (make-hash-table :test 'eq)) (fuel 65536))
+(defun hir-primary-flow (unit barriers)
+  "Primary forwarding edges in current validated HIR, or NIL on exhaustion.
+Charge graph containers, values, captures, parameters and every operand, including
+edges unrelated to primary forwarding. Captured landing parameters have unknown
+ingress; empty VALUES has no function primary. This is not an escape certificate."
+  (let ((sources (make-hash-table :test 'eq)) (fuel 65536))
     (dolist (function (hir-unit-functions unit))
+      ;; Validation establishes the value/block counts. Charge values without
+      ;; traversing them here; callee resolution visits that list independently.
+      (when (minusp (decf fuel (+ 1 (hir-function-value-count function) (hir-function-block-count function))))
+        (return-from hir-primary-flow nil))
+      (dolist (identity (hir-function-captures function))
+        (declare (ignore identity))
+        (when (minusp (decf fuel)) (return-from hir-primary-flow nil)))
+      (dolist (block (hir-function-blocks function))
+        (dolist (parameter (hir-block-parameters block))
+          (when (minusp (decf fuel)) (return-from hir-primary-flow nil))
+          (when (gethash function barriers)
+            (push nil (gethash parameter sources))))
+        (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+          (when (minusp (decf fuel)) (return-from hir-primary-flow nil))
+          (let ((inputs (hir-instruction-inputs instruction)))
+            (dolist (input inputs)
+              (declare (ignore input))
+              (when (minusp (decf fuel)) (return-from hir-primary-flow nil)))
+            (case (hir-instruction-opcode instruction)
+              ((:copy :primary :values)
+               (when inputs (setf (gethash (hir-instruction-output instruction) sources) (list (first inputs)))))
+              ((:jump :block-return)
+               (let* ((target (first (hir-instruction-attributes instruction)))
+                      (parameter (and target (first (hir-block-parameters target)))))
+                 (when parameter
+                   (push (if (eq (hir-instruction-opcode instruction) :jump) (first inputs) (third inputs))
+                         (gethash parameter sources))))))))))
+    sources))
+
+(defun hir-local-callee-flow (unit barriers sources)
+  "Certify captured lexical function cells from executable initialization.
+LOCAL metadata only selects candidates. Audit every alias, write and closure
+capture; assigned initialization must precede calls/exposure in the owner's entry.
+Debugger-visible, escaping or mutated cells retain ordinary lookup."
+  (let ((cells (make-hash-table :test 'eq)) (aliases (make-hash-table :test 'eq))
+        (writes (make-hash-table :test 'eq)) (bad (make-hash-table :test 'eq))
+        (initialized (make-hash-table :test 'eq)) (reads (make-hash-table :test 'eq))
+        (fuel 65536))
+    (dolist (function (hir-unit-functions unit))
+      (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+      (unless (or (gethash function barriers) (>= (hir-function-debug-level function) 2))
+        (dolist (block (hir-function-blocks function))
+          (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+          (dolist (instruction (hir-block-instructions block))
+            (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+            (when (eq (hir-instruction-opcode instruction) :cell-new)
+              (let ((binding (first (hir-instruction-attributes instruction)))
+                    (cell (hir-instruction-output instruction)))
+                (when (and (%hir-binding-p binding) (hir-binding-local binding)
+                           (eq cell (hir-binding-cell binding)))
+                  (setf (gethash cell cells) binding (gethash cell aliases) cell))))))))
+    (when (zerop (hash-table-count cells)) (return-from hir-local-callee-flow nil))
+    (dolist (function (hir-unit-functions unit))
+      (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+      ;; A frame can expose a binding without an ordinary executable load.
+      (when (>= (hir-function-debug-level function) 2)
+        (dolist (identity (hir-function-captures function))
+          (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+          (when (%hir-binding-p identity) (setf (gethash (hir-binding-cell identity) bad) t))))
+      (dolist (block (hir-function-blocks function))
+        (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+        (dolist (instruction (hir-block-instructions block))
+          (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+          (when (eq (hir-instruction-opcode instruction) :capture)
+            (let* ((binding (second (hir-instruction-attributes instruction)))
+                   (cell (and (%hir-binding-p binding) (hir-binding-cell binding))))
+              (when (gethash cell cells)
+                (setf (gethash (hir-instruction-output instruction) aliases) cell)
+                (when (>= (hir-function-debug-level function) 2) (setf (gethash cell bad) t))))))))
+    (dolist (function (hir-unit-functions unit))
+      (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+      (dolist (block (hir-function-blocks function))
+        (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+        (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+          (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+          (let* ((opcode (hir-instruction-opcode instruction)) (inputs (hir-instruction-inputs instruction))
+                 (captures (and (eq opcode :closure)
+                                (hir-function-captures (first (hir-instruction-attributes instruction))))))
+            ;; Capture records do not certify that a client supplied the right
+            ;; context operand at every creation of that function's closure.
+            (loop for identity in captures for input in inputs do
+              (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+              (let ((cell (and (%hir-binding-p identity) (hir-binding-cell identity))))
+                (when (and (gethash cell cells) (not (eq cell (gethash input aliases))))
+                  (setf (gethash cell bad) t))))
+            (loop for input in inputs for index from 0 for identities = captures then (cdr identities)
+                  for cell = (gethash input aliases) do
+              (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+              (when cell
+                (cond ((and (zerop index) (eq opcode :cell-read))
+                       (push instruction (gethash cell reads)))
+                      ((and (zerop index) (eq opcode :cell-write))
+                       (push instruction (gethash cell writes)))
+                      ((and (eq opcode :closure) (eq (car identities) (gethash cell cells))))
+                      (t (setf (gethash cell bad) t)))))))))
+    ;; A write-free allocation initializes the cell itself. Valid SSA use
+    ;; dominance also covers cells allocated inside conditional/local scopes.
+    (maphash (lambda (cell binding)
+      (declare (ignore binding))
+      (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+      (unless (gethash cell writes)
+        (setf (gethash cell initialized) (first (hir-instruction-inputs (hir-value-producer cell)))))) cells)
+    (dolist (function (hir-unit-functions unit))
+      (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+      (let ((prefix t) (ready (make-hash-table :test 'eq)))
+        (dolist (instruction (hir-block-instructions (hir-function-entry function)))
+          (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+          (let* ((opcode (hir-instruction-opcode instruction)) (inputs (hir-instruction-inputs instruction))
+                 (cell (if (eq opcode :cell-new) (hir-instruction-output instruction) (gethash (first inputs) aliases))))
+            (unless (or (member opcode '(:constant :argument :capture :closure :cell-new :cell-read :copy :primary :values :check-arguments))
+                        (and (eq opcode :cell-write) (gethash cell cells)))
+              (setq prefix nil))
+            (when (and prefix (gethash cell cells) (eq (hir-value-owner cell) function))
+              (let ((source (case opcode
+                              (:cell-new (unless (gethash cell writes) (first inputs)))
+                              (:cell-write (when (null (cdr (gethash cell writes))) (second inputs))))))
+                (when source
+                  (setf (gethash cell initialized) source (gethash cell ready) t))))
+            ;; An early load snapshots the pre-initialization value; it must
+            ;; not inherit a later write's target even though the cell is local.
+            (when (and cell (gethash cell writes) (eq (hir-value-owner cell) function)
+                       (eq opcode :cell-read) (not (gethash cell ready)))
+              (setf (gethash instruction bad) t))))))
+    ;; No partial certificates survive an incomplete alias/use audit.
+    (maphash (lambda (cell source)
+      (unless (gethash cell bad)
+        (dolist (instruction (gethash cell reads))
+          (when (minusp (decf fuel)) (return-from hir-local-callee-flow nil))
+          (unless (gethash instruction bad)
+            (setf (gethash (hir-instruction-output instruction) sources) (list source)))))) initialized)))
+
+(defun hir-result-callees (unit barriers)
+  "Bounded executable code facts for this HIR invocation only.
+Same-target acyclic forwarding preserves the selected SSA closure as context.
+Unknown inputs, cycles and exhausted work provide no certificate."
+  (let ((callees (make-hash-table :test 'eq)) (fuel 65536)
+        (sources (hir-primary-flow unit barriers)) (active (make-hash-table :test 'eq)))
+    (unless sources (return-from hir-result-callees callees))
+    (hir-local-callee-flow unit barriers sources)
+    (dolist (function (hir-unit-functions unit))
+      (when (minusp (decf fuel)) (return-from hir-result-callees callees))
       (unless (gethash function barriers)
+        ;; Successful primary preflight bounds all instructions and operands
+        ;; scanned by this shared helper, called once per function. Keep that
+        ;; prerequisite rather than duplicating its private-cell use rules.
         (let ((cells (hir-private-cells function barriers))
               (writes (make-hash-table :test 'eq)) (targets (make-hash-table :test 'eq)))
           (dolist (block (hir-function-blocks function))
+            (when (minusp (decf fuel)) (return-from hir-result-callees callees))
             (dolist (instruction (hir-block-instructions block))
               (when (minusp (decf fuel)) (return-from hir-result-callees callees))
               (when (eq (hir-instruction-opcode instruction) :cell-write)
                 (push instruction (gethash (first (hir-instruction-inputs instruction)) writes)))))
-          ;; Restrict certificates to initializations executed in the entry
-          ;; block, before its successor edges. A single assignment to a
-          ;; nonescaping cell then dominates all later reachable blocks.
+          ;; Write-free allocations initialize the cell before every valid
+          ;; SSA use, including allocations in nested conditional scopes.
+          (maphash (lambda (cell private)
+            (declare (ignore private))
+            (when (minusp (decf fuel)) (return-from hir-result-callees callees))
+            (unless (gethash cell writes)
+              (setf (gethash cell targets) (first (hir-instruction-inputs (hir-value-producer cell)))))) cells)
+          ;; Assigned cells need initialization in the entry block, before
+          ;; successor edges. A single write then dominates later blocks.
           (dolist (instruction (hir-block-instructions (hir-function-entry function)))
+            (when (minusp (decf fuel)) (return-from hir-result-callees callees))
             (let* ((inputs (hir-instruction-inputs instruction))
                    (cell (if (eq (hir-instruction-opcode instruction) :cell-new)
                              (hir-instruction-output instruction) (first inputs))))
               (case (hir-instruction-opcode instruction)
                 (:cell-new
                  (when (and (gethash cell cells) (null (gethash cell writes)))
-                   (setf (gethash cell targets) (hir-result-callee (first inputs)))))
+                   (setf (gethash cell targets) (first inputs))))
                 (:cell-write
                  (when (and (gethash cell cells) (null (cdr (gethash cell writes))))
-                   (setf (gethash cell targets) (hir-result-callee (second inputs)))))
+                   (setf (gethash cell targets) (second inputs))))
                 (:cell-read
                  (when (gethash cell targets)
-                   (setf (gethash (hir-instruction-output instruction) callees) (gethash cell targets)))))))
+                   (setf (gethash (hir-instruction-output instruction) sources) (list (gethash cell targets))))))))
           (dolist (block (hir-function-blocks function))
+            (when (minusp (decf fuel)) (return-from hir-result-callees callees))
             (unless (eq block (hir-function-entry function))
               (dolist (instruction (hir-block-instructions block))
+                (when (minusp (decf fuel)) (return-from hir-result-callees callees))
                 (when (eq (hir-instruction-opcode instruction) :cell-read)
                   (let ((target (gethash (first (hir-instruction-inputs instruction)) targets)))
-                    (when target (setf (gethash (hir-instruction-output instruction) callees) target))))))))))
+                    (when target (setf (gethash (hir-instruction-output instruction) sources) (list target)))))))))))
+    ;; Memoization bounds shared DAG traversal;
+    ;; an active dependency (including a loop parameter) remains unknown.
+    (labels ((target (value depth)
+               (when (or (null value) (> depth 64) (gethash value active)) (return-from target nil))
+               (when (minusp (decf fuel)) (return-from target nil))
+               (multiple-value-bind (known found) (gethash value callees)
+                 (when found (return-from target known)))
+               (setf (gethash value active) t)
+               (let* ((inputs (gethash value sources))
+                      (code (if inputs
+                                (let ((first (target (first inputs) (1+ depth))))
+                                  (and first (every (lambda (input) (eq first (target input (1+ depth)))) (rest inputs)) first))
+                                (hir-result-callee value))))
+                 (remhash value active)
+                 (setf (gethash value callees) code))))
+      (dolist (function (hir-unit-functions unit))
+        (dolist (value (hir-function-values function))
+          (when (minusp fuel) (return-from hir-result-callees callees))
+          (target value 0))))
     callees))
 
-(defun hir-result-arities-checked (unit)
+(defun hir-result-arities-checked (unit &optional callee-facts)
   "Prove exact value counts from validated, current HIR, independently of types.
 NIL means unknown; integer zero is a proof of no values. Cycles and exhausted
 work retain unknown facts. No declarations or replaceable global names certify
@@ -59,7 +236,7 @@ an arity. Recompute after any HIR mutation."
   (let ((facts (make-hash-table :test 'eq))
         (incoming (make-hash-table :test 'eq))
         (barriers (hir-optimization-barriers unit)) (fuel 65536))
-   (let ((callees (hir-result-callees unit barriers)))
+   (let ((callees (or callee-facts (hir-result-callees unit barriers))))
     (labels ((join (sources)
                (when sources
                  (let ((count (gethash (first sources) facts)))
@@ -919,7 +1096,7 @@ Captured cells and debug-enabled functions keep conservative inferred types."
   (let ((*hir-inline-definitions* nil))
     (values (infer-hir-types-checked unit roots rootsp entries))))
 
-(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only)
+(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts)
   "Internal inference kernel; UNIT and ROOTS have passed the public boundary.
 Return primary type facts and executable branch premises as separate values."
   (declare (type hir-unit unit) (type list roots entries))
@@ -935,7 +1112,8 @@ Return primary type facts and executable branch premises as separate values."
         (opaque (make-hash-table :test 'eq)) (queued (make-hash-table :test 'eq))
         (required (make-hash-table :test 'eq)) (growth (make-hash-table :test 'eq)) (work nil)
         (primitives *hir-inline-definitions*) (intrinsics (make-hash-table :test 'eq))
-        (guards (hir-type-branch-guards unit)))
+        (guards (hir-type-branch-guards unit))
+        (callees (or callee-facts (hir-result-callees unit (hir-optimization-barriers unit)))))
     (declare (type hash-table facts sources users calls references candidates escaped
                    sites opaque queued required growth guards)
              (type list work))
@@ -951,11 +1129,13 @@ Return primary type facts and executable branch premises as separate values."
                  (dolist (input (gethash value sources) type)
                    (setq type (hir-type-join type (gethash input facts)))))))
       ;; Parameter facts require a closed set of callers. A function passed as
-      ;; a value to application code, returned, or stored outside its private
-      ;; function cell must keep its ordinary unrestricted entry parameters.
+      ;; a value to application code, returned, or stored in a cell must keep
+      ;; its ordinary unrestricted entry parameters.
+      ;; Code provenance alone is not a closed-use certificate: storing a
+      ;; closure in a cell remains conservative even with LOCAL metadata.
       (dolist (function (hir-unit-functions unit))
         (dolist (value (hir-function-values function))
-          (let ((target (native-known-callee value)))
+          (let ((target (hir-result-callee value callees)))
             (when target (setf (gethash value references) target (gethash target candidates) t)))))
       (dolist (function (hir-unit-functions unit))
         (dolist (block (hir-function-blocks function))
@@ -968,14 +1148,7 @@ Return primary type facts and executable branch premises as separate values."
                 (let ((target (gethash input references)))
                   (when (and target
                          (not (and (eq opcode :call) (= index 1)))
-                         (not (eq opcode :copy))
-                         (not (and (eq opcode :cell-write) (= index 1)
-                           (let* ((cell (hir-type-cell (first inputs)))
-                                  (producer (and cell (hir-value-producer cell)))
-                                  (binding (and (%hir-instruction-p producer)
-                                             (first (hir-instruction-attributes producer)))))
-                             (and (%hir-binding-p binding) (hir-binding-local binding)
-                                  (eq target (hir-local-function (hir-binding-local binding))))))))
+                         (not (eq opcode :copy)))
                     (setf (gethash target escaped) t))))))))
       ;; Explicit Wasm exports admit callers outside this unit, even when a
       ;; function's only HIR references appear to be private direct calls.
@@ -1016,7 +1189,7 @@ Return primary type facts and executable branch premises as separate values."
                    (edge (second inputs) value)
                    (edge (second inputs) (hir-type-cell (first inputs))))
                   (:call
-                   (let ((target (native-known-callee (second inputs))))
+                   (let ((target (hir-result-callee (second inputs) callees)))
                      (if target (progn (setf (gethash value calls) target) (edge target value))
                          (let ((primitive (hir-inline-primitive producer primitives)))
                            (when primitive

@@ -62,7 +62,11 @@
                        (a (when (plusp (fourth spec)) (svref scratch 4)))
                        (b (when (> (fourth spec) 1) (svref scratch 5)))
                        (output (when (plusp out) (svref vs (1- out))))
-                       (instruction (make-hir-instruction-record opcode inputs output nil nil :control (svref scratch 1))))
+                       (instruction (make-hir-instruction-record opcode inputs output nil nil
+                                      (case opcode
+                                        ((:argument-present :keyword-present :keyword-argument) :read)
+                                        (:check-keywords :check) (otherwise :control))
+                                      (svref scratch 1))))
                   (when (eq opcode :call-primary)
                     ;; Reconstruct ordinary semantic HIR. The shared native
                     ;; liveness pass can scalarize this pair again; consumers
@@ -92,9 +96,13 @@
                       (:function-reference
                        (case number (35 (list (svref literals a) 'inline))
                          (36 (list (svref literals a) 'notinline)) (otherwise (list (svref literals a)))))
-                      ((:argument :rest-argument :value-ref :control-call :restart-signal
+                      ((:argument :argument-present :rest-argument :value-ref :control-call :restart-signal
                         :check-apply-arguments :checked-argument) (list a))
                       (:check-arguments (list a (1- b)))
+                      ((:keyword-present :keyword-argument) (list a (svref literals b)))
+                      (:check-keywords
+                       (let ((descriptor (copy-hir-keyword-check (svref literals b))))
+                         (list a (first descriptor) (second descriptor))))
                       (:capture (list a nil))
                       (:closure
                        (let ((child (svref functions a)))

@@ -3,7 +3,11 @@
 
 (defun hir-code-parameters (parameters)
   ;; Defaults and AUX initializers are already code, not executable metadata.
-  (mapcar (lambda (parameter) (if (consp parameter) (first parameter) parameter)) parameters))
+  (copy-hir-parameters
+    (mapcar (lambda (parameter)
+              (if (consp parameter)
+                  (if (consp (first parameter)) (list (first parameter)) (first parameter))
+                  parameter)) parameters)))
 
 (defun hir-code-debug-sites (function register)
   (let ((sites nil) (indices (make-hash-table :test 'eq)) (count 0))
@@ -255,10 +259,15 @@
                        (case opcode
                          ((:constant :function-reference :global-read :global-write :dynamic-bind)
                           (word (literal (first attributes))))
-                         ((:argument :rest-argument :value-ref :capture :control-call :restart-signal
+                         ((:argument :argument-present :rest-argument :value-ref :capture :control-call :restart-signal
                            :check-apply-arguments :checked-argument)
                           (word (first attributes)))
                          (:check-arguments (word (first attributes)) (word (1+ (second attributes))))
+                         ((:keyword-present :keyword-argument)
+                          (word (first attributes)) (word (literal (second attributes))))
+                         (:check-keywords
+                          (word (first attributes))
+                          (word (literal (copy-hir-keyword-check (rest attributes)))))
                          (:closure (word (gethash (first attributes) indices)))
                          (:block-enter (word (hir-block-id (hir-target-block (first attributes)))))
                          ((:branch :jump :checked-jump) (dolist (target attributes) (word (hir-block-id target))))
