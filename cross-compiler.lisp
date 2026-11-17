@@ -761,6 +761,12 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
             ((= code #x0f)
              (when (and (eq result :truth) (not raw-truth)) (write-line "ref.is_null i32.eqz" out))
              (write-line "return" out) (setq raw-truth nil))
+            ((and (member code '(#x02 #x03 #x04)) (= argument #x6f)
+                  (= (- (miricl-compiler::native-op-end op) (miricl-compiler::native-op-start op)) 2))
+             ;; Values carried by control edges use the same raw reference
+             ;; ABI as parameters and locals after kernel adaptation.
+             (format out "~A (result (ref null eq))~%"
+               (case code (#x02 "block") (#x03 "loop") (#x04 "if"))))
             ((member code '(#x20 #x21 #x22))
              (format out "~A ~D~%" (case code (#x20 "local.get") (#x21 "local.set") (#x22 "local.tee"))
                (cond (*kernel-worker-preserve-abi* argument)

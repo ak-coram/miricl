@@ -104,8 +104,15 @@
           (indexed (format nil "~A ~D" indexed argument))
           ((member code '(#x02 #x03 #x04))
            (format nil "~A~A" (cdr (assoc code '((2 . "block") (3 . "loop") (4 . "if"))))
-             (case argument (#x40 "") (#x6f " (result externref)") (#x7f " (result i32)")
-               (otherwise (format nil " (type ~D)" argument)))))
+             (if (and (= argument #x40) (= (- (native-op-end op) (native-op-start op)) 2)) ""
+                 (let ((type (and (= (- (native-op-end op) (native-op-start op)) 2)
+                              (cdr (assoc argument
+                                '((#x7f . "i32") (#x7e . "i64") (#x7d . "f32")
+                                  (#x7c . "f64") (#x7b . "v128") (#x70 . "funcref")
+                                  (#x6f . "externref") (#x6e . "anyref") (#x6d . "eqref")
+                                  (#x6c . "i31ref") (#x6b . "structref") (#x6a . "arrayref")))))))
+                   (if type (format nil " (result ~A)" type)
+                       (format nil " (type ~D)" argument))))))
           ((= code #x0e) (format nil "br_table~{ ~D~}" argument))
           ((= code #x10) (format nil "call ~A" (native-disassembly-target argument imports)))
           ((= code #x12) (format nil "return_call ~A" (native-disassembly-target argument imports)))

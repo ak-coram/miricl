@@ -476,6 +476,140 @@
     (values (- next offset) (when types (subseq color-types 0 next))
             mapping)))
 
+(defun native-forward-locals (ops total offset types)
+  (declare (type simple-vector ops) (type (unsigned-byte 32) total offset)
+           (type (or null simple-vector) types))
+  ;; Copies retain their stores until ordinary exception-aware liveness runs.
+  ;; Only adjacent active GET/TEE and SET/TEE establish equal local values;
+  ;; a source generation invalidates the equality when that local is written.
+  ;; Control boundaries discard all equalities, including exceptional/control
+  ;; branches normalized by the module adapter. Calls cannot mutate Wasm locals.
+  ;; Exact defaultable types preserve reference validation and initialization.
+  ;; Without explicit types, only the native ABI's object locals are known;
+  ;; the scalar prefix can contain distinct numeric representations.
+  ;; Dense tables and epochs bound this pass to O(instructions + locals) work.
+  (let ((sources (make-array total :initial-element nil))
+        (versions (make-array total :initial-element 0))
+        (stamps (make-array total :initial-element 0))
+        (epochs (make-array total :initial-element 0))
+        (epoch 1) (previous nil) (forwarded 0))
+    (declare (type simple-vector sources versions stamps epochs)
+             (type (unsigned-byte 33) epoch)
+             (type (or null (unsigned-byte 32)) previous)
+             (type (unsigned-byte 32) forwarded))
+    (loop for op across ops for code = (native-op-code op)
+          for local = (native-op-argument op) do
+      (cond
+        ((null code))
+        ((= code #x20)
+         (let ((source (aref sources local)))
+           (when (and source (= (aref epochs local) epoch)
+                      (= (aref stamps local) (aref versions source)))
+             (setf (native-op-argument op) source)
+             (setq local source) (incf forwarded)))
+         (setq previous local))
+        ((member code '(#x21 #x22))
+         (incf (aref versions local))
+         (setf (aref epochs local) 0)
+         (when (and previous (/= previous local)
+                    (if types
+                        (and (not (eql (car (aref types local)) #x64))
+                             (equal (aref types local) (aref types previous)))
+                        (and (not (and (<= 2 local) (< local offset)))
+                             (not (and (<= 2 previous) (< previous offset))))))
+           (setf (aref sources local) previous
+                 (aref stamps local) (aref versions previous)
+                 (aref epochs local) epoch))
+         (setq previous (and (= code #x22) local)))
+        (t
+         (setq previous nil)
+         (when (member code '(#x00 #x02 #x03 #x04 #x05 #x08 #x0b #x0c #x0d #x0e #x0f #x12 #x1f))
+           (incf epoch)))))
+    (when (plusp forwarded)
+      (compiler-statistic :optimization/local-forward nil forwarded)))
+  ops)
+
+(defun native-result-blocks (ops bytes offset types)
+  (declare (type simple-vector ops) (type vector bytes)
+           (type (unsigned-byte 32) offset) (type (or null simple-vector) types))
+  ;; NATIVE-SIMPLIFY-OPS compacts active records; forwarding changes only
+  ;; operands. Original index adjacency therefore describes active neighbors.
+  ;; Resolve scopes and incoming branches before mutating any records.
+  ;; Each branch belongs to one scope, bounding all scans to O(instructions).
+  (when (loop for op across ops thereis
+          (or (member (native-op-code op) '(#x1f #x0e))
+              (and (eql (native-op-code op) #x0d)
+                   (/= (aref bytes (native-op-start op)) #x0d))))
+    (return-from native-result-blocks ops))
+  (let* ((size (length ops)) (scopes (make-array size)) (top 0)
+         (ends (make-array size :initial-element nil))
+         (stores (make-array size :initial-element nil))
+         (bad (make-array size :initial-element nil)))
+    (declare (type (unsigned-byte 32) size top)
+             (type simple-vector scopes ends stores bad))
+    (dotimes (i size)
+      (declare (type (unsigned-byte 32) i))
+      (let* ((op (aref ops i)) (code (native-op-code op))
+             (prior (and (plusp i) (1- i))))
+        (declare (type simple-vector op) (type (unsigned-byte 8) code)
+                 (type (or null (unsigned-byte 32)) prior))
+        (case code
+          ((#x02 #x03 #x04) (setf (aref scopes top) i) (incf top))
+          (#x0b (when (plusp top)
+                  (decf top) (setf (aref ends (aref scopes top)) i)))
+          ((#x0c #x0d)
+           (let ((depth (native-op-argument op)))
+             (when (< depth top)
+               (let ((scope (aref scopes (- top depth 1))))
+                 (if (and (= code #x0c)
+                          (= (aref bytes (native-op-start op)) #x0c)
+                          prior (eql (native-op-code (aref ops prior)) #x21))
+                     (push prior (aref stores scope))
+                     (setf (aref bad scope) t)))))))))
+    (dotimes (i size)
+      (declare (type (unsigned-byte 32) i))
+      (let* ((op (aref ops i)) (end (aref ends i))
+             (load-index (and end (< (1+ end) size) (1+ end)))
+             (load (and load-index (aref ops load-index)))
+             (local (and load (eql (native-op-code load) #x20)
+                         (native-op-argument load)))
+             (type (and local
+                        (if types
+                            (let ((type (aref types local)))
+                              (and (null (cdr type)) (car type)))
+                            ;; The native ABI's first two parameters and
+                            ;; untyped local suffix contain externrefs.
+                            (and (or (< local 2) (>= local offset)) #x6f)))))
+        (when (and (eql (native-op-code op) #x02)
+                   (eql (native-op-argument op) #x40)
+                   (= (- (native-op-end op) (native-op-start op)) 2)
+                   (= (aref bytes (1+ (native-op-start op))) #x40)
+                   (aref stores i) (not (aref bad i))
+                   load (eql (native-op-code load) #x20)
+                   (member type '(#x7f #x7e #x7d #x7c #x7b #x70 #x6f #x6e #x6d #x6c #x6b #x6a)))
+          (let* ((tail (aref ops (1- end)))
+                 (fallthrough (and (eql (native-op-code tail) #x21)
+                                   (eql (native-op-argument tail) local)))
+                 (terminal (and
+                             (member (native-op-code tail) '(#x00 #x08 #x0c #x0f #x12))
+                             (member (aref bytes (native-op-start tail))
+                                     '(#x00 #x08 #x0a #x0c #x0f #x12 #x13 #x15)))))
+            ;; Every reaching exit sets this exact defaultable local immediately
+            ;; before transfer. Carry that value instead, then TEE at the join
+            ;; so later reads still observe the assignment. Exiting branches
+            ;; and traps execute neither the join nor any moved assignment.
+            (when (and (or fallthrough terminal)
+                       (every (lambda (index)
+                                (let ((store (aref ops index)))
+                                  (and (eql (native-op-code store) #x21)
+                                       (eql (native-op-argument store) local))))
+                              (aref stores i)))
+              (dolist (index (aref stores i))
+                (setf (native-op-code (aref ops index)) nil))
+              (when fallthrough (setf (native-op-code tail) nil))
+              (setf (native-op-argument op) type (native-op-code load) #x22))))))
+    ops))
+
 (defun native-fold-locals (ops)
   (declare (type simple-vector ops))
   (let ((previous nil) (prior nil))
@@ -690,6 +824,8 @@
       (if decoded-ops (values decoded-ops parameter-count local-count) (native-read-ops bytes))
     (declare (type simple-vector ops) (type (unsigned-byte 32) offset count))
     (setq ops (native-simplify-ops ops bytes))
+    (native-forward-locals ops (+ offset count) offset local-types)
+    (native-result-blocks ops bytes offset local-types)
     (let ((exceptions (native-op-flow ops))
           (relocations (and *wasm-function-relocations*
                            (gethash *wasm-current-function* *wasm-function-relocations*)))
@@ -728,6 +864,10 @@
                           (cond
                             ((member code '(#x20 #x21 #x22))
                              (wasm-byte code) (wasm-u32 (native-op-argument op)))
+                            ((and (= code #x02)
+                                  (= (- (native-op-end op) (native-op-start op)) 2)
+                                  (member (native-op-argument op) '(#x7f #x7e #x7d #x7c #x7b #x70 #x6f #x6e #x6d #x6c #x6b #x6a)))
+                             (wasm-byte code) (wasm-byte (native-op-argument op)))
                             ((= code #x1a) (wasm-byte code))
                             ((= code #x41) (wasm-byte code) (wasm-s32 (native-op-argument op)))
                             ((and (= code #x44) (integerp (native-op-argument op)))
@@ -838,7 +978,8 @@ RECORDS contain bytes, decoded operations, local types and exact stack effects.
 SIGNATURES contain raw parameter/result types in final function-index order.
 ELIGIBLE contains each body's packed SPACE/SPEED/COMPILATION-SPEED policy.
 Return replacement bodies and (body parameters results) helper records."
-  (let ((groups (make-hash-table :test 'equal)) (group-count 0) (occurrences 0)
+  (let ((groups (make-hash-table :test 'equal)) (group-count 0)
+        (fingerprints (make-hash-table :test 'eql)) (occurrences 0)
         (candidates nil) (selected nil) (helpers nil) (work budget))
     (dotimes (function (length records))
       (let ((record (aref records function)))
@@ -860,7 +1001,8 @@ Return replacement bodies and (body parameters results) helper records."
                     do (setf (aref last-uses (native-op-argument op)) i))
               (dotimes (start (length ops))
                 (when (and (plusp work) (plusp function-work) (member (native-op-code (aref ops start)) '(#x20 #x41 #x42 #xd0)))
-                  (let ((stack nil) (depth 0))
+                  (let ((stack nil) (depth 0) (fingerprint 0) (core-fingerprint 0))
+                    (declare (type (unsigned-byte 24) fingerprint core-fingerprint))
                     (loop for end from start below (min (length ops) (+ start 128))
                           for op = (aref ops end) for code = (native-op-code op) do
                       (decf work) (decf function-work)
@@ -879,16 +1021,26 @@ Return replacement bodies and (body parameters results) helper records."
                         (dotimes (i pops) (pop stack)) (decf depth pops)
                         (when (plusp pushes)
                           (push (native-outline-result op body types signatures) stack) (incf depth)))
-                      (when (and (member (- end start) '(15 23 31 39 47 63 79 95 127)) (<= depth 1)
+                      (setq fingerprint (logand #xffffff (+ (* fingerprint 33) code)))
+                      (unless (= code #x20) (setq core-fingerprint fingerprint))
+                      ;; Equal helpers have equal opcode sequences after removing
+                      ;; trailing GETs, including those appended for outputs. Once
+                      ;; groups fill, a missing fingerprint rules out a match;
+                      ;; collisions still require the complete normalized key.
+                      ;; Check every endpoint from 16 operations within the
+                      ;; bounded window; local simplification changes lengths.
+                      (when (and (>= (- end start) 15) (<= depth 1)
                                  (every #'identity stack)
-                                 (>= (- (native-op-end op) (native-op-start (aref ops start))) minimum))
+                                 (>= (- (native-op-end op) (native-op-start (aref ops start))) minimum)
+                                 (or (< group-count 4096) (gethash core-fingerprint fingerprints)))
                         (let ((region (native-outline-region body ops types start (1+ end) last-uses stack)))
                           (when region
                             (let* ((key (first region)) (group (gethash key groups)))
-                              (when (and (null group) (< group-count 2048))
+                              (when (and (null group) (< group-count 4096))
                                 ;; Group: representative region and occurrences.
                                 (setq group (list region nil)) (setf (gethash key groups) group)
-                                (incf group-count) (push group candidates))
+                                (incf group-count) (push group candidates)
+                                (setf (gethash core-fingerprint fingerprints) t))
                               (when (and group (< occurrences 8192))
                                 ;; A site owns its local numbering, even when
                                 ;; all normalized bytes match another function.

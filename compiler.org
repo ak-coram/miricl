@@ -183,6 +183,52 @@ literals, merges equal bodies, removes unreachable code/imports and relocates al
 Helper fusion and factory/table selection price encoded section costs. Runtime imports use
 namespace =m= and omit the =native-= field prefix.
 
+=native-forward-locals= forwards copies within straight-line instruction regions before
+building flow and liveness facts. Adjacent local reads or tees followed by stores establish
+equal values only for identical defaultable Wasm types. Per-local generations invalidate
+copies when their source changes; control boundaries discard the region's facts. Calls
+preserve activation-local equality. Stores remain for exception-aware liveness and
+stackification to remove when safe, preserving landing-pad observations and initialization.
+The native ABI supplies object-local types when explicit types are absent; unknown scalar
+types decline forwarding. Dense tables and region epochs bound work to instructions plus
+locals. The shared body entry applies the pass to guest emission, typed direct workers and
+decoded whole-image bodies. Existing writers encode changed local indices and relocate call
+offsets; whole-image optimization retains a body only when its final encoding shrinks.
+
+=native-result-blocks= replaces eligible local-based joins with single-result Wasm blocks.
+The void block's next instruction must read one known, single-byte defaultable local type.
+Every branch targeting the block must be unconditional and immediately follow a store to
+that local. Normal fallthrough must end in the same store or a direct terminating transfer.
+The pass removes those stores, assigns the block its exact result type and changes the join
+read to a tee, preserving later local observations. Other exits retain their effects and
+order. Exception-bearing bodies, branch tables, typed conditional branches and unsupported
+types decline this transformation. Original scope targets are resolved before edits, with
+linear work and storage; no cached flow facts precede the rewrite. Subsequent passes treat
+scope boundaries as stack barriers, and result blocks retain their signatures during scope
+cleanup and final encoding.
+Runtime worker adaptation maps object-valued control signatures to the same GC reference
+ABI as its locals and parameters. Instruction extents distinguish single-byte result types
+from signed-LEB type indices in encoding and disassembly.
+
+=native-outline-code= shares repeated straight-line regions using exact normalized bytes
+and Wasm types. Local renaming preserves aliases; reads before the first write become
+inputs, and written locals used later become outputs. Regions neither consume inherited
+stack operands nor cross control transfers. Unknown result types and bodies with exception
+handlers decline outlining. Each site supplies its own local mapping, and selected sites
+must not overlap. Encoded call, argument/result traffic, helper and section costs determine
+whether sharing saves space under the function's policy.
+
+Discovery checks every endpoint from 16 through 128 instructions, subject to minimum byte
+size and stack shape. Local simplification can change region lengths, so endpoint selection
+does not depend on a sparse length schedule. Per-function and global scan budgets, bounded
+region length, and caps on groups, occurrences and helpers limit work and storage. Exhausted
+budgets retain ordinary code; discovery order can limit the repetitions found.
+After group admission fills, a rolling opcode fingerprint rejects candidates that cannot
+match an admitted group before constructing their normalized helpers. It omits terminal
+local reads, including reads appended for returned locals. Equal helpers share this
+fingerprint; collisions still require the complete normalized key. Bounded integer
+arithmetic and an integer-keyed table keep this rejection step within the existing scan.
+
 ** Whole-program artifacts and runtime
 
 COMPILE-FILE records =:miricl-ir= definitions, references, effects and reflection barriers.

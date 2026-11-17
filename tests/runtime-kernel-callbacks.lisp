@@ -144,6 +144,71 @@
                            selector object extra))))
       '((0 7 23 41 23 :direct) (0 7 31 43 31 :direct)
         (0 -1 23 41 :transfer :direct) (0 7 23 41 23 :direct)))
+    ;; Object-valued joins cross the native worker's external-reference ABI
+    ;; into the runtime's GC reference ABI. Validate and execute the adapted
+    ;; WAT on both incoming paths, including transfer and later recovery.
+    (let ((definitions
+            '((defun callback-test-entry (callback selector object extra)
+                (declare (inline eql) (optimize (debug 0) (safety 0)))
+                (let ((answer (if (eql object 23)
+                                  (funcall callback selector object extra)
+                                  (funcall callback selector extra object))))
+                  (values (funcall callback selector answer extra)))))))
+      (fixture "callback-result-join" definitions
+        '((0 7 23 41 23 :direct) (0 7 31 43 43 :direct)
+          (0 -1 23 41 :transfer :direct) (0 -1 31 43 :transfer :direct)
+          (0 7 23 41 23 :direct) (0 7 31 43 43 :direct)))
+      ;; The fixed descriptor promises the saved primitive's identity.
+      ;; Ordinary callbacks use a separately compiled worker without it.
+      (fixture "ordinary-result-join" definitions
+        '((1 7 23 41 41 :ordinary) (1 7 31 43 43 :ordinary)) nil))
+    ;; Scalar joins retain their Wasm result type while the surrounding worker
+    ;; changes reference ABI. Round-trip actual optimized bytes through the
+    ;; listing used by the adapter, then execute both numeric incoming values.
+    (let* ((bytes (miricl-compiler::optimize-wasm-module
+                   (wasmtime:wat-to-wasm
+"(module
+ (import \"m\" \"call3\" (func $callback (param externref externref externref externref) (result externref)))
+ (import \"m\" \"int64\" (func $integer (param i64) (result externref)))
+ (func (export \"entry\") (param externref externref externref externref externref) (result externref)
+   (local i64)
+   local.get 1 local.get 2
+   block $done
+     local.get 3 any.convert_extern ref.cast (ref i31) i31.get_s i32.const 23 i32.eq
+     if i64.const 17 local.set 5 br $done end
+     i64.const 29 local.set 5
+   end
+   local.get 5 call $integer
+   local.get 4 call $callback))")))
+           (worker (miricl-cross::kernel-worker-wat bytes
+                     (miricl-cross::kernel-export-index bytes "entry") "$entry" 4 :object nil)))
+      (fixture "integer-result-join" nil
+        '((0 7 23 41 17 :ordinary) (0 7 31 43 29 :ordinary)
+          (0 -1 23 41 :transfer :ordinary) (0 7 31 43 29 :ordinary)) nil worker))
+    ;; A positive type index can have the same decoded integer as an abstract
+    ;; reference type byte. Its longer signed-LEB encoding still selects the
+    ;; function type, whose scalar result must survive listing and adaptation.
+    (let* ((types (with-output-to-string (out)
+                    (dotimes (i #x6f) (write-line "(type (func))" out))
+                    (write-line "(type $typed-join (func (result i64)))" out)))
+           (bytes (miricl-compiler::optimize-wasm-module
+                   (wasmtime:wat-to-wasm
+                    (concatenate 'string "(module " types
+"(import \"m\" \"call3\" (func $callback (param externref externref externref externref) (result externref)))
+ (import \"m\" \"int64\" (func $integer (param i64) (result externref)))
+ (func (export \"entry\") (param externref externref externref externref externref) (result externref)
+   local.get 1 local.get 2
+   block (type $typed-join)
+     local.get 3 any.convert_extern ref.cast (ref i31) i31.get_s i32.const 23 i32.eq
+     if i64.const 17 br 1 end
+     i64.const 29
+   end
+   call $integer local.get 4 call $callback))"))))
+           (worker (concatenate 'string types
+                     (miricl-cross::kernel-worker-wat bytes
+                       (miricl-cross::kernel-export-index bytes "entry") "$entry" 4 :object nil))))
+      (fixture "indexed-result-join" nil
+        '((0 7 23 41 17 :ordinary) (0 7 31 43 29 :ordinary)) nil worker))
     (fixture "joined-helper"
       '((defun callback-test-helper (callback selector object extra)
           (declare (optimize (debug 0) (safety 0)))

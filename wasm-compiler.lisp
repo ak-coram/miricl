@@ -5019,7 +5019,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-restart-signal-form hir-symbol-iterate-form hir-while-form
                    hir-multiple-value-call-form hir-return-from-form
                    hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-to-hir compile-module-to-hir compile-native-module
-                   make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-fold-locals native-optimize-body
+                   make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-forward-locals native-result-blocks native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
                    native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module native-outline-result native-outline-region native-outline-site native-outline-code native-outline-bodies
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
