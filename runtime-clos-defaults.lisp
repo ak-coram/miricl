@@ -381,7 +381,7 @@
   (wat-symbol-case #@(local.get $id)
     ((class-slots class-finalized-p slot-definition-name slot-definition-allocation
       slot-definition-type slot-value-using-class compute-applicable-methods
-      compute-effective-method compute-discriminating-function)
+      compute-effective-method compute-discriminating-function method-lambda-list)
       #@(global.set $slot-access-token (call $cons (ref.null eq) (ref.null eq)))))
   #@(nop))
 
@@ -801,11 +801,138 @@
       (local.set $scan (call $cdr (local.get $scan))) (br $next)))
   #@(ref.null eq) #@(i32.const 0))
 
+;; Owned definition-time keyword identities live with the method and therefore
+;; survive image save/restore. Ordinary MOP lambda lists remain unchanged.
+;; Return a fresh reverse-order key spine. Stored profiles use declaration
+;; order, while the shared normalization service returns reverse order.
+(define-runtime-function $clos-initarg-copy-profile (($profile :nullable-object)) (:nullable-object)
+  (:locals ($scan :nullable-object) ($head :nullable-object) ($key :nullable-object))
+  #@(local.set $scan (call $car (local.get $profile)))
+  ;; Private descriptors also arrive through untrusted core images. Reject
+  ;; malformed or cyclic profiles before the no-poll copy loop.
+  #@(drop (call $length (local.get $scan)))
+  (wat-list-loop ($scan)
+    #@(local.set $key (call $car (local.get $scan)))
+    #@(if (i32.eqz (call $symbolp (local.get $key)))
+      (then (call $type-fail (local.get $key) (call $symbol (i32.const ,(runtime-symbol-id 'symbol)))
+        (i32.const ,(runtime-error-code :expected-designator)))))
+    #@(local.set $head (call $cons (local.get $key) (local.get $head))))
+  #@(call $cons (local.get $head) (call $cdr (local.get $profile))))
+
+(define-runtime-function $clos-initialize-method-profile
+    (($method :nullable-object) ($canonical :nullable-object)) (:nullable-object)
+  (:locals ($ll :nullable-object) ($profile :nullable-object) ($ownership :nullable-object)
+           ($source :nullable-object) ($proof :nullable-object))
+  #@(call $check-type (local.get $method) ,(clos-library-reference 'method))
+  ;; Custom method classes retain their ordinary metadata protocol. Descriptor
+  ;; installation never accepts a caller-provided normalized profile.
+  #@(if (i32.eqz (ref.eq (call $dispatch-class (local.get $method))
+        (call $named-class ,(clos-library-reference 'standard-method)))) (then (return (local.get $method))))
+  #@(if (ref.test (ref $method-initarg-profile) (struct.get $obj $c (ref.cast (ref $obj) (local.get $method))))
+    (then (return (local.get $method))))
+  #@(local.set $ownership (struct.get $obj $c (ref.cast (ref $obj) (local.get $method))))
+  #@(local.set $ll ,(clos-default-get #@(local.get $method) :lambda-list))
+  #@(if (ref.is_null (local.get $canonical)) (then (local.set $canonical (local.get $ll)))
+    (else
+      (if (ref.is_null (call $clos-canonical-method-p-cl (local.get $ll) (local.get $canonical)
+            (call $clos-initarg-metadata-function)))
+        (then (drop (call $clos-method-metadata-value (call $int (i32.const 12)) (local.get $canonical) (ref.null eq)))))))
+  #@(local.set $profile (call $clos-initarg-copy-profile
+    (call $clos-initarg-profile-cl (local.get $canonical) (call $clos-initarg-metadata-function))))
+  #@(local.set $source (call $clos-initarg-source-cl (local.get $ll) (call $clos-initarg-metadata-function)))
+  ;; Semantic key identities survive raw borrowing. Only an unchanged owned
+  ;; storage proof permits the cheap path; a borrower receives checked reuse.
+  #@(if (ref.is_null (global.get $method-profile-proof))
+    (then (global.set $method-profile-proof (call $cons (ref.null eq) (ref.null eq)))))
+  #@(if (i32.and (i32.eqz (ref.is_null (local.get $ownership)))
+        (ref.eq (local.get $ownership) (struct.get $obj $c (ref.cast (ref $obj) (local.get $method)))))
+    (then (local.set $proof (global.get $method-profile-proof))))
+  #@(if (i32.and (ref.eq (local.get $ll) ,(clos-default-get #@(local.get $method) :lambda-list))
+        (ref.eq (struct.get $obj $a (ref.cast (ref $obj) (local.get $method)))
+          (call $named-class ,(clos-library-reference 'standard-method))))
+    (then
+      (if (i32.eqz (ref.test (ref $method-initarg-profile)
+            (struct.get $obj $c (ref.cast (ref $obj) (local.get $method)))))
+        (then (struct.set $obj $c (ref.cast (ref $obj) (local.get $method))
+          (struct.new $method-initarg-profile (local.get $ll) (local.get $profile) (local.get $source) (local.get $proof)))))))
+  #@(local.get $method))
+
+(define-runtime-function $clos-allocate-method
+    (($class :nullable-object) ($properties :nullable-object) ($canonical :nullable-object)) (:nullable-object)
+  (:locals ($method :nullable-object) ($count i32))
+  #@(call $check-type (local.get $class) ,(clos-library-reference 'class))
+  #@(local.set $count (call $length (local.get $properties)))
+  (wat-fail-when #@(i32.and (local.get $count) (i32.const 1)) :wrong-arity)
+  ;; Own the property spine before attaching a private descriptor. No caller
+  ;; can retain its cells through the allocation input.
+  #@(local.set $properties (call $copy-spine (local.get $properties) (i32.const 0)))
+  #@(local.set $method (call $node (i32.const 23) (i32.const 0)
+    (local.get $class) (local.get $properties) (call $symbol (i32.const 1))))
+  #@(if (ref.is_null (local.get $canonical)) (then (return (local.get $method))))
+  #@(call $clos-initialize-method-profile (local.get $method) (local.get $canonical)))
+
+(define-runtime-function $clos-initarg-profile
+    (($method :nullable-object) ($ll :nullable-object)) (:nullable-object)
+  (:locals ($protocol :nullable-object) ($function :nullable-object) ($token :nullable-object)
+           ($owned :nullable-object) ($proof :nullable-object))
+  #@(if (i32.ne (call $tag (local.get $method)) (i32.const 23)) (then (return (ref.null eq))))
+  #@(if (i32.eqz (call $boundp ,(clos-library-reference '%standard-initarg-protocol)))
+    (then (return (ref.null eq))))
+  #@(local.set $protocol (call $symbol-value ,(clos-library-reference '%standard-initarg-protocol)))
+  #@(local.set $token (global.get $slot-access-token))
+  #@(local.set $function (call $fdefinition ,(clos-library-reference 'method-lambda-list)))
+  #@(if (i32.eqz (ref.eq (local.get $function) (call $car (local.get $protocol))))
+    (then (return (ref.null eq))))
+  #@(if (i32.eqz (call $standard-property-generic-p (local.get $function) (call $car (call $cdr (local.get $protocol)))))
+    (then (return (ref.null eq))))
+  ;; The owned fast-hit checks and returned copy do not poll. Borrowed and
+  ;; restored metadata instead use checked live matching below, which may poll.
+  ;; The live reader already ran before this query.
+  #@(if (i32.eqz (ref.eq (local.get $token) (global.get $slot-access-token))) (then (return (ref.null eq))))
+  #@(if (i32.eqz (ref.eq ,(clos-default-get #@(call $car (call $cdr (local.get $protocol))) :function)
+        (call $car (call $cdr (call $cdr (local.get $protocol)))))) (then (return (ref.null eq))))
+  #@(local.set $owned (struct.get $obj $c (ref.cast (ref $obj) (local.get $method))))
+  #@(if (i32.eqz (ref.test (ref $method-initarg-profile) (local.get $owned))) (then (return (ref.null eq))))
+  #@(if (i32.eqz (ref.eq (local.get $ll) ,(clos-default-get #@(local.get $method) :lambda-list)))
+    (then (return (ref.null eq))))
+  #@(if (ref.is_null (global.get $method-profile-proof))
+    (then (global.set $method-profile-proof (call $cons (ref.null eq) (ref.null eq)))))
+  #@(local.set $proof (struct.get $method-initarg-profile $proof (ref.cast (ref $method-initarg-profile) (local.get $owned))))
+  #@(if (i32.and (ref.eq (local.get $proof) (global.get $method-profile-proof))
+        (ref.eq (local.get $ll) (struct.get $method-initarg-profile $lambda-list
+          (ref.cast (ref $method-initarg-profile) (local.get $owned)))))
+    (then (return (call $clos-initarg-copy-profile
+      (struct.get $method-initarg-profile $profile (ref.cast (ref $method-initarg-profile) (local.get $owned)))))))
+  ;; Borrowed metadata is checked on every request. A restored non-null proof
+  ;; is from a different process: validate its source mapping before reusing it.
+  #@(if (ref.is_null (call $clos-initarg-profile-matches-cl (local.get $ll)
+        (struct.get $method-initarg-profile $source (ref.cast (ref $method-initarg-profile) (local.get $owned)))
+        (struct.get $method-initarg-profile $profile (ref.cast (ref $method-initarg-profile) (local.get $owned)))
+        (call $clos-initarg-metadata-function))) (then (return (ref.null eq))))
+  ;; The matcher may call checked workers. Never reinstate a proof revoked by
+  ;; a borrower, setter, reader change, or class/storage change during it.
+  #@(if (i32.and (i32.eqz (ref.is_null (local.get $proof)))
+        (i32.and (ref.eq (local.get $token) (global.get $slot-access-token))
+          (i32.and (ref.eq (local.get $owned) (struct.get $obj $c (ref.cast (ref $obj) (local.get $method))))
+            (i32.and (ref.eq (local.get $ll) ,(clos-default-get #@(local.get $method) :lambda-list))
+              (ref.eq (local.get $proof) (struct.get $method-initarg-profile $proof
+                (ref.cast (ref $method-initarg-profile) (local.get $owned))))))))
+    (then (struct.set $method-initarg-profile $proof (ref.cast (ref $method-initarg-profile) (local.get $owned))
+      (global.get $method-profile-proof))))
+  #@(call $clos-initarg-copy-profile
+    (struct.get $method-initarg-profile $profile (ref.cast (ref $method-initarg-profile) (local.get $owned)))))
+
 (define-runtime-function $clos-initarg-metadata-value
     (($selector-value :nullable-object) ($object :nullable-object) ($extra :nullable-object)) (:nullable-object)
   (:locals ($selector i32) ($class :nullable-object) ($metaclass :nullable-object) ($data (ref $objects))
            ($methods :nullable-object) ($hit i32))
   #@(local.set $selector (call $natural-count (local.get $selector-value)))
+  #@(if (i32.eq (local.get $selector) (i32.const 30))
+    (then (return_call $clos-initarg-profile-cl (local.get $object) (call $clos-initarg-metadata-function))))
+  #@(if (i32.eq (local.get $selector) (i32.const 29))
+    (then (return_call $clos-initialize-method-profile (local.get $object) (ref.null eq))))
+  #@(if (i32.eq (local.get $selector) (i32.const 28))
+    (then (return_call $clos-initarg-profile (local.get $object) (local.get $extra))))
   #@(if (i32.le_u (local.get $selector) (i32.const 14))
     (then (return_call $clos-method-metadata-value (local.get $selector-value) (local.get $object) (local.get $extra))))
   #@(if (i32.eq (local.get $selector) (i32.const 15))
@@ -884,6 +1011,25 @@
   (wat-fail :malformed-form)
   #@(unreachable))
 
+(defun $clos-initarg-source-cl ()
+  (runtime-function-definition '$clos-initarg-source-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-initarg-source-cl 'miricl-runtime:clos-initarg-source-value
+      :fixed-callbacks '((1 %%clos-initarg-metadata))))))
+(defun $clos-initarg-profile-matches-cl ()
+  (runtime-function-definition '$clos-initarg-profile-matches-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-initarg-profile-matches-cl 'miricl-runtime:clos-initarg-profile-matches-value
+      :fixed-callbacks '((3 %%clos-initarg-metadata))))))
+
+(defun $clos-canonical-method-p-cl ()
+  (runtime-function-definition '$clos-canonical-method-p-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-canonical-method-p-cl 'miricl-runtime:clos-canonical-method-metadata-p
+      :fixed-callbacks '((2 %%clos-initarg-metadata))))))
+
+(defun $clos-initarg-profile-cl ()
+  (runtime-function-definition '$clos-initarg-profile-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-initarg-profile-cl 'miricl-runtime:clos-initarg-profile-value
+      :fixed-callbacks '((1 %%clos-initarg-metadata))))))
+
 (defun $clos-check-initargs-cl ()
   (runtime-function-definition '$clos-check-initargs-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$clos-check-initargs-cl 'miricl-runtime:clos-check-initargs-value
@@ -901,6 +1047,14 @@
   ($clos-default-initargs-cl) ($clos-shared-initialize-cl) ($clos-find-slot-cl)
   #@(global $clos-initarg-metadata-function (mut (ref null eq)) (ref.null eq))
   ($clos-initarg-metadata-function) ($clos-initarg-metadata-call) ($clos-initarg-metadata-value)
+  #@(type $method-initarg-profile (struct (field $lambda-list (ref null eq)) (field $profile (ref null eq))
+    (field $source (ref null eq)) (field $proof (mut (ref null eq)))))
+  ;; Process-only capability: deserialized profiles must validate their compact
+  ;; source mapping before acquiring this process's fast-path proof.
+  #@(global $method-profile-proof (mut (ref null eq)) (ref.null eq))
+  ($clos-initarg-copy-profile) ($clos-initialize-method-profile) ($clos-allocate-method)
+  ($clos-initarg-profile) ($clos-initarg-profile-cl) ($clos-canonical-method-p-cl)
+  ($clos-initarg-source-cl) ($clos-initarg-profile-matches-cl)
   ($clos-check-initargs-cl) ($clos-allocate-instance-cl) ($standard-allocate-storage)
   ($clos-applicable-class-key-p) ($clos-applicable-cache-hit)
   #@(global $slot-access-token (mut (ref null eq)) (ref.null eq))

@@ -312,6 +312,207 @@ try {
         (reject) (= *soundness-initarg-cache-calls* 2)
         (typep (make-instance 'soundness-initarg-cache) 'soundness-initarg-cache))))`);
   console.log('Soundness: warmed initarg checks observe method keyword changes and invoke hooks once.');
+  evaluate(`(defclass soundness-initarg-owned-union () ())
+    (defmethod initialize-instance :after ((object soundness-initarg-owned-union) &key one two)
+      (declare (ignore object one two))) (values)`);
+  check(`(let* ((object (make-instance 'soundness-initarg-owned-union))
+      (checker (symbol-function (compiler-primitive 10 1 "%%STANDARD-CHECK-INITARGS")))
+      (name (compiler-primitive 10 1 "%CHECK-KEYS"))
+      (original (symbol-function name)) (retained nil))
+    (unwind-protect
+        (progn
+          (setf (symbol-function name)
+            (lambda (arguments allowed allow)
+              (funcall original arguments allowed allow)
+              (push allowed retained)))
+          (funcall checker object '(:one 1 :two 2) '(initialize-instance) t nil)
+          ;; The ordinary final checker may retain its argument. Mutating it
+          ;; after return must not alter method metadata or the next union.
+          (when (car retained) (rplaca (car retained) :changed) (rplacd (car retained) nil))
+          (funcall checker object '(:one 3 :two 4) '(initialize-instance) t nil)
+          (let ((union (car retained))
+                (keys (function-keywords (find-method #'initialize-instance '(:after)
+                        (list (find-class 'soundness-initarg-owned-union))))))
+            (and (member :one keys) (member :two keys)
+              (member :one union) (member :two union) t)))
+      (setf (symbol-function name) original)))`);
+  // Custom MOP readers own these lists. Their mutable results are untrusted
+  // boundary data, distinct from the standard readers' immutable metadata.
+  evaluate(`(defclass soundness-initarg-reader () ())
+    (defmethod initialize-instance :after ((object soundness-initarg-reader) &key original)
+      (declare (ignore object original)))
+    (defparameter *soundness-initarg-reader-target*
+      (find-method #'initialize-instance '(:after) (list (find-class 'soundness-initarg-reader))))
+    (defvar *soundness-initarg-reader-list* nil)
+    (defvar *soundness-initarg-reader-calls* 0) (values)`);
+  check(`(let* ((object (make-instance 'soundness-initarg-reader))
+      (checker (symbol-function (compiler-primitive 10 1 "%%STANDARD-CHECK-INITARGS")))
+      (pair (list :original 'value))
+      (*soundness-initarg-reader-list* (list 'object '&key (list pair nil)))
+      (*soundness-initarg-reader-calls* 0)
+      (reader nil))
+    (labels ((accept (arguments)
+               (funcall checker object arguments '(initialize-instance) t nil) t)
+             (reject (arguments)
+               (handler-case (progn (accept arguments) nil)
+                 (error (condition) (plusp (length (princ-to-string condition)))))))
+      ;; Warm the standard metadata path before changing its reader protocol.
+      (dotimes (i 8) (accept '(:original 1)))
+      (unwind-protect
+        (progn
+          (setq reader (eval '(defmethod miricl-mop:method-lambda-list :around
+              ((method (eql *soundness-initarg-reader-target*)))
+            (incf *soundness-initarg-reader-calls*) *soundness-initarg-reader-list*)))
+          (dotimes (i 8) (accept '(:original 1)))
+          (and
+            (let ((before *soundness-initarg-reader-calls*))
+              (and (accept '(:original 2)) (> *soundness-initarg-reader-calls* before)))
+            ;; Rename inside the same outer spine and nested key pair.
+            (progn (setf (car pair) :renamed)
+              (and (accept '(:renamed 3)) (reject '(:original 4))))
+            (progn (setf (cdr (last *soundness-initarg-reader-list*))
+                         (list '&allow-other-keys))
+              (accept '(:unlisted 5)))
+            (progn (setf (cdddr *soundness-initarg-reader-list*) nil)
+              (reject '(:unlisted 5)))
+            (every (lambda (bad)
+              (let ((*soundness-initarg-reader-list* bad))
+                (and (reject nil)
+                  (let ((*soundness-initarg-reader-list* (list 'object '&key (list pair nil))))
+                    (accept '(:renamed 6))))))
+              (list #() "object"
+                (cons 'object :tail)
+                (let ((cycle (list 'object))) (setf (cdr cycle) cycle) cycle)
+                (list 'object '&key (list (list :bad 'value 'extra) nil))
+                (list 'object '&key (list (cons :bad :tail) nil))))))
+        (when reader (remove-method #'miricl-mop:method-lambda-list reader)))
+      (and (accept '(:original 7)) (reject '(:renamed 8))
+        (let ((original (fdefinition 'miricl-mop:method-lambda-list)))
+          (unwind-protect
+            (progn
+              (setf (fdefinition 'miricl-mop:method-lambda-list)
+                (lambda (method)
+                  (if (eq method *soundness-initarg-reader-target*)
+                    *soundness-initarg-reader-list* (funcall original method))))
+              (and (accept '(:renamed 9)) (reject '(:original 10))))
+            (setf (fdefinition 'miricl-mop:method-lambda-list) original)))
+        (accept '(:original 11)))))`);
+  console.log('Soundness: warmed initarg checks observe mutable custom method metadata and recover after rejection.');
+  evaluate(`(defclass soundness-initarg-slot-reader ()
+      ((first :initarg :first) (second :initarg :second)))
+    (defvar *soundness-initarg-slot-class* nil)
+    (defvar *soundness-initarg-slot-target* nil)
+    (defvar *soundness-initarg-slot-list* nil)
+    (defvar *soundness-initarg-slot-keys* nil) (values)`);
+  check(`(let* ((object (make-instance 'soundness-initarg-slot-reader))
+      (checker (symbol-function (compiler-primitive 10 1 "%%STANDARD-CHECK-INITARGS")))
+      (*soundness-initarg-slot-class* (class-of object))
+      (slots (miricl-mop:class-slots *soundness-initarg-slot-class*))
+      (*soundness-initarg-slot-target* (find 'first slots :key #'miricl-mop:slot-definition-name))
+      (second (find 'second slots :key #'miricl-mop:slot-definition-name))
+      (*soundness-initarg-slot-list* (list *soundness-initarg-slot-target*))
+      (*soundness-initarg-slot-keys* (list :borrowed))
+      (slot-reader nil) (key-reader nil))
+    (labels ((accept (arguments) (funcall checker object arguments nil t nil) t)
+             (reject (arguments)
+               (handler-case (progn (accept arguments) nil)
+                 (error (condition) (plusp (length (princ-to-string condition)))))))
+      (dotimes (i 8) (accept '(:first 1)))
+      (unwind-protect
+        (progn
+          (setq slot-reader (eval '(defmethod miricl-mop:class-slots :around
+              ((class (eql *soundness-initarg-slot-class*))) *soundness-initarg-slot-list*)))
+          (setq key-reader (eval '(defmethod miricl-mop:slot-definition-initargs :around
+              ((slot (eql *soundness-initarg-slot-target*))) *soundness-initarg-slot-keys*)))
+          (dotimes (i 8) (accept '(:borrowed 1)))
+          (and (reject '(:first 1))
+            (progn (setf (car *soundness-initarg-slot-keys*) :changed)
+              (and (accept '(:changed 2)) (reject '(:borrowed 2))))
+            (every (lambda (bad)
+              (let ((*soundness-initarg-slot-keys* bad))
+                (and (reject nil)
+                  (let ((*soundness-initarg-slot-keys* (list :changed)))
+                    (accept '(:changed 3))))))
+              (list #() "keys" (list 17) (cons :bad :tail)
+                (let ((cycle (list :bad))) (setf (cdr cycle) cycle) cycle)))
+            (progn (setf (car *soundness-initarg-slot-list*) second)
+              (and (accept '(:second 4)) (reject '(:changed 4))))))
+        (when key-reader (remove-method #'miricl-mop:slot-definition-initargs key-reader))
+        (when slot-reader (remove-method #'miricl-mop:class-slots slot-reader)))
+      (and (accept '(:first 5 :second 6)) (reject '(:borrowed 7)))))`);
+  console.log('Soundness: warmed initarg checks observe custom slot metadata changes and recover after rejection.');
+  check(`(progn
+    (defclass soundness-initarg-redefined () ((value :initarg :old)))
+    (let ((driver (compile-native '(lambda (key value)
+        (slot-value (make-instance 'soundness-initarg-redefined key value) 'value)))))
+      (dotimes (i 8) (funcall driver :old i))
+      (defclass soundness-initarg-redefined () ((value :initarg :new)))
+      (and (= (funcall driver :new 42) 42)
+        (handler-case (progn (funcall driver :old 43) nil)
+          (error (condition) (plusp (length (princ-to-string condition)))))
+        (= (funcall driver :new 44) 44))))`);
+  console.log('Soundness: warmed constructors observe redefined class initargs and recover after rejection.');
+  // An implicit method keyword has the same identity as its explicit form.
+  // Its EQL specializer runs after file preparation has lowered the body.
+  evaluate(`(defclass soundness-keyword-timing () ())
+    (defparameter *soundness-keyword-timing-object* (make-instance 'soundness-keyword-timing))
+    (defparameter *soundness-keyword-timing-old* (intern "SOUNDNESS-DEFINITION-KEY" "KEYWORD"))
+    (defparameter *soundness-keyword-timing-new* nil)
+    (defparameter *soundness-keyword-timing-events* nil) (values)`);
+  vm.mountFile('/soundness-keyword-timing.lisp', `(in-package :miricl-compiler)
+    (defmethod initialize-instance :after
+        ((object (eql (progn
+           (push :specializer *soundness-keyword-timing-events*)
+           (unintern *soundness-keyword-timing-old* "KEYWORD")
+           (setq *soundness-keyword-timing-new* (intern "SOUNDNESS-DEFINITION-KEY" "KEYWORD"))
+           *soundness-keyword-timing-object*)))
+         &key soundness-definition-key)
+      (declare (ignore object))
+      (push soundness-definition-key *soundness-keyword-timing-events*)
+      soundness-definition-key)`);
+  evaluate(`(compile-file "/soundness-keyword-timing.lisp" :verbose nil :block-compile nil)
+    (compile-native-bundle "/soundness-keyword-timing.wasm" "/soundness-keyword-timing-native.wasm")
+    (load "/soundness-keyword-timing-native.wasm") (values)`);
+  check(`(let* ((object *soundness-keyword-timing-object*)
+      (old *soundness-keyword-timing-old*) (new *soundness-keyword-timing-new*)
+      (checker (symbol-function (compiler-primitive 10 1 "%%STANDARD-CHECK-INITARGS")))
+      (method (find-method #'initialize-instance '(:after)
+                (list (miricl-mop:intern-eql-specializer object)))))
+    (labels ((accept () (funcall checker object (list old 42) '(initialize-instance) t nil) t)
+             (reject ()
+               (handler-case
+                   (progn (funcall checker object (list new 43) '(initialize-instance) t nil) nil)
+                 (error (condition) (plusp (length (princ-to-string condition)))))))
+      (unwind-protect
+        (and (not (eq old new))
+          (equal *soundness-keyword-timing-events* '(:specializer))
+          (progn (dotimes (i 8) (accept)) t) (reject) (accept)
+          (equal *soundness-keyword-timing-events* '(:specializer))
+          (= (funcall (miricl-mop:method-function method) (list object old 42) nil) 42)
+          (equal *soundness-keyword-timing-events* '(42 :specializer)))
+        (remove-method #'initialize-instance method)
+        (unintern new "KEYWORD"))))`);
+  console.log('Soundness: file/native method metadata retains the body keyword identity across specializer effects.');
+  check(`(let* ((allocate (symbol-function (compiler-primitive 10 1 "%%ALLOCATE-METHOD")))
+      (class (find-class 'standard-method))
+      (original '(object &key safe))
+      (canonical '(object &key ((:safe safe)))))
+    (labels ((create (source target)
+               (funcall allocate class (list :lambda-list source) target)))
+      (and
+        (every (lambda (bad)
+          (handler-case (progn (create bad canonical) nil)
+            (error (condition) (plusp (length (princ-to-string condition))))))
+          (list (cons 'object :tail)
+            (let ((cycle (list 'object))) (setf (cdr cycle) cycle) cycle)
+            '(object &key ((:other different)))))
+        (let* ((method (create original canonical))
+               (keys (function-keywords method)))
+          (setf (car keys) :borrowed)
+          (and (equal (function-keywords method) '(:safe))
+            (not (nth-value 1 (function-keywords method)))))
+        (equal (function-keywords (create original canonical)) '(:safe)))))`);
+  console.log('Soundness: owned method profiles reject malformed construction, recover and return independent keyword lists.');
   // A fixed standard name still runs permitted methods. Compile the caller
   // before installing and replacing a hook, and discard the constructor result.
   check(`(progn
@@ -370,6 +571,48 @@ try {
               (setf (getf slots :discriminating-function) old))
             (= (funcall driver 32) 32))))))`);
   console.log('Soundness: warmed generic dispatch observes applicability hooks and borrowed canonical metadata.');
+  // Reusing a checked owned spine must not bless borrowed or replaced metadata.
+  evaluate(`(defgeneric soundness-metadata-shape (x))
+    (defmethod soundness-metadata-shape ((x t)) x) (values)`);
+  check(`(let* ((generic #'soundness-metadata-shape)
+      (metadata (symbol-function (compiler-primitive 10 1 "%%GENERIC-DISPATCH-METADATA")))
+      (put (symbol-function (compiler-primitive 10 1 "%%PUT")))
+      (raw (symbol-function (compiler-primitive 10 1 "%%RAW-SLOTS")))
+      (replace (symbol-function (compiler-primitive 10 1 "%%SET-RAW-SLOTS")))
+      (info (funcall (symbol-function (compiler-primitive 10 1 "%%GENERIC-INFO")) generic))
+      (profile (list nil)))
+    (labels ((query () (funcall metadata 2 generic nil))
+             (reject ()
+               (handler-case (progn (query) nil)
+                 (error (condition) (plusp (length (princ-to-string condition)))))))
+      (funcall put generic :eql-dispatch-profile profile)
+      (dotimes (i 8) (query))
+      (and (eq (query) profile)
+        (progn (funcall put generic :soundness-extra-property :extra)
+          (funcall put generic :eql-dispatch-profile (setq profile (list :updated)))
+          (eq (query) profile))
+        (let* ((slots (funcall raw info)) (tail (last slots)))
+          (and
+            (unwind-protect
+                (progn (rplacd tail :dotted) (reject))
+              (rplacd tail nil))
+            (eq (query) profile)
+            (unwind-protect
+                (progn (rplacd tail slots) (reject))
+              (rplacd tail nil))
+            (eq (query) profile)
+            (unwind-protect
+                (progn (rplacd tail (list :unpaired)) (reject))
+              (rplacd tail nil))
+            (eq (query) profile)
+            (progn (setf (getf slots :eql-dispatch-profile) (setq profile (list :borrowed)))
+              (eq (query) profile))
+            (unwind-protect
+                (progn (funcall replace info '(:unpaired)) (reject))
+              (funcall replace info slots))
+            (eq (query) profile))))))`);
+  recover();
+  console.log('Soundness: owned metadata validation observes value updates, borrowing, malformed spines and replacement recovery.');
   // The private native ABI accepts raw mutable eqref arrays. These standalone
   // stable WasmGC types canonicalize to that packet type across modules; the
   // fixture constructs and mutates packets without runtime layout indices.

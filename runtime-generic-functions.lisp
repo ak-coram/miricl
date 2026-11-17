@@ -14,8 +14,9 @@
 ;; The owned metadata vector also holds two recent flattened dispatch rows
 ;; and the call-history identity under which they were populated. Borrowing
 ;; RAW-SLOTS relinquishes ownership and disables these derived caches too.
-(defparameter *generic-property-cache-size* (+ 4 (length *generic-property-cache-keys*)))
+(defparameter *generic-property-cache-size* (+ 5 (length *generic-property-cache-keys*)))
 (defparameter *generic-recent-index* (1+ (length *generic-property-cache-keys*)))
+(defparameter *generic-validation-index* (+ 3 *generic-recent-index*))
 
 (define-runtime-function $generic-property (($gf :nullable-object) ($key :nullable-object)) (:nullable-object)
   (:locals ($info (ref $obj)) ($owned :nullable-object) ($cache (ref null $objects))
@@ -299,6 +300,54 @@
           (clos-library-reference :format-control) #@(local.get $reason)
           (clos-library-reference :format-arguments) #@(ref.null eq)))))
 
+;; Cache only the finite, even spine proof, never the values or MOP results.
+;; Owned metadata starts empty and %%PUT preserves complete pairs. Borrowing,
+;; replacing storage or changing its class revokes C in the raw operation.
+;; The process-private stamp is absent from saved roots: restored cache arrays
+;; must pass the ordinary checked walk before receiving this process's stamp.
+(define-runtime-function $generic-metadata-properties
+    (($gf :nullable-object) ($info :nullable-object)) (:nullable-object)
+  (:locals ($properties :nullable-object) ($owned :nullable-object)
+           ($cache (ref null $objects)) ($length :nullable-object))
+  #@(local.set $properties (struct.get $obj $b (ref.cast (ref $obj) (local.get $info))))
+  #@(local.set $owned (struct.get $obj $c (ref.cast (ref $obj) (local.get $info))))
+  #@(block $unchecked
+    (br_if $unchecked (i32.eqz (ref.test (ref $objects) (local.get $owned))))
+    (local.set $cache (ref.cast (ref $objects) (local.get $owned)))
+    (br_if $unchecked (i32.ne (array.len (local.get $cache)) (i32.const ,*generic-property-cache-size*)))
+    (br_if $unchecked (i32.eqz (ref.eq (array.get $objects (local.get $cache) (i32.const 0)) (call $symbol (i32.const 1)))))
+    (br_if $unchecked (ref.is_null (global.get $generic-metadata-proof)))
+    (if (ref.eq (array.get $objects (local.get $cache) (i32.const ,*generic-validation-index*))
+          (global.get $generic-metadata-proof))
+      (then (return (local.get $properties)))))
+  #@(local.set $length (call $list-length-native (local.get $properties)))
+  #@(if (ref.is_null (local.get $length))
+    (then (call $type-fail (local.get $properties)
+      (call $symbol-value ,(clos-library-reference '%proper-list-type))
+      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(if (i32.and (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $length)))) (i32.const 1))
+    (then (call $generic-dispatch-invalid (local.get $gf)
+      ,(wat-text-literal "Generic metadata property list must contain key/value pairs."))))
+  ;; Checked workers may yield. Do not promote detached or borrowed storage.
+  #@(if (i32.and (ref.eq (struct.get $obj $a (ref.cast (ref $obj) (local.get $gf))) (local.get $info))
+        (i32.and (ref.eq (struct.get $obj $b (ref.cast (ref $obj) (local.get $info))) (local.get $properties))
+          (ref.eq (struct.get $obj $c (ref.cast (ref $obj) (local.get $info))) (local.get $owned))))
+    (then
+      (if (ref.eq (local.get $owned) (call $symbol (i32.const 1)))
+        (then
+          (local.set $cache (array.new_default $objects (i32.const ,*generic-property-cache-size*)))
+          (array.set $objects (local.get $cache) (i32.const 0) (local.get $owned))
+          (struct.set $obj $c (ref.cast (ref $obj) (local.get $info)) (local.get $cache))))
+      (if (ref.is_null (local.get $cache)) (then (return (local.get $properties))))
+      (if (i32.ne (array.len (local.get $cache)) (i32.const ,*generic-property-cache-size*))
+        (then (return (local.get $properties))))
+      (if (i32.eqz (ref.eq (array.get $objects (local.get $cache) (i32.const 0)) (call $symbol (i32.const 1))))
+        (then (return (local.get $properties))))
+      (if (ref.is_null (global.get $generic-metadata-proof))
+        (then (global.set $generic-metadata-proof (call $cons (ref.null eq) (ref.null eq)))))
+      (array.set $objects (local.get $cache) (i32.const ,*generic-validation-index*) (global.get $generic-metadata-proof))))
+  #@(local.get $properties))
+
 (define-runtime-function $generic-dispatch-metadata-value
     (($selector-value :nullable-object) ($object :nullable-object) ($extra :nullable-object)) (:nullable-object)
   (:locals ($selector i32) ($mode i32) ($data (ref $objects)) ($info :nullable-object)
@@ -361,6 +410,9 @@
           (local.set $info (struct.get $obj $a (ref.cast (ref $obj) (local.get $object))))))
       (if (i32.ne (call $tag (local.get $info)) (i32.const 23))
         (then (call $generic-dispatch-invalid (local.get $object) ,(wat-text-literal "Generic metadata requires instance storage."))))
+      (if (i32.ne (local.get $selector) (i32.const 1))
+        (then (local.set $properties (call $generic-metadata-properties (local.get $object) (local.get $info))))
+        (else
       (local.set $properties (struct.get $obj $b (ref.cast (ref $obj) (local.get $info))))
       ;; Retain the checked count instead of traversing the same spine again
       ;; for parity. LIST-LENGTH-NATIVE rejects dotted spines and returns NIL
@@ -371,7 +423,7 @@
           (call $symbol-value ,(clos-library-reference '%proper-list-type))
           (i32.const ,(runtime-error-code :expected-designator)))))
       (if (i32.and (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $length)))) (i32.const 1))
-        (then (call $generic-dispatch-invalid (local.get $object) ,(wat-text-literal "Generic metadata property list must contain key/value pairs."))))
+        (then (call $generic-dispatch-invalid (local.get $object) ,(wat-text-literal "Generic metadata property list must contain key/value pairs."))))))
       (if (i32.eq (local.get $selector) (i32.const 1))
         (then (return (call $car (call $property-cell (local.get $properties) ,(clos-library-reference :object))))))
       (if (i32.eq (local.get $selector) (i32.const 2))
@@ -1136,6 +1188,8 @@
 
 (define-runtime-section generic-functions-runtime-wat ()
   #@(global $generic-dispatch-metadata-function (mut (ref null eq)) (ref.null eq))
+  #@(global $generic-metadata-proof (mut (ref null eq)) (ref.null eq))
+  ($generic-metadata-properties)
   ($generic-dispatch-metadata-function) ($generic-dispatch-metadata-call) ($generic-dispatch-metadata-value) ($generic-dispatch-invalid)
   ($dispatch-eql-key-cl) ($generic-fixed-arity-cl) ($generic-cache-permitted-cl) ($generic-key-match-cl)
   #@(type $generic-call-plan (sub final $obj (struct

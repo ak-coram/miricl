@@ -229,7 +229,7 @@ context. HIR debugging shares visible cells with closures, checks declared write
 ordinary nonlocal cleanup. Frame metadata is copied/validated; executable arrays are not
 exposed. Native Wasm does not yet provide equivalent stepping instrumentation.
 
-** Source map and validation workflow
+** Source map and debugging interfaces
 
 - =compiler-input.lisp=, =hir.lisp=: validation, frontend, declarations and HIR.
 - =standard-contracts.lisp=: target ANSI operation identities, signatures and semantic facts.
@@ -243,21 +243,10 @@ exposed. Native Wasm does not yet provide equivalent stepping instrumentation.
 - =runtime-hir.lisp=, =runtime-native-code.lisp=, =runtime-values.lisp=,
   =scripts/miricl.mjs=: runtime execution, installation and image boundaries.
 
-Iterate in persistent source-compiler Wasm and host cross-compiler REPLs, then confirm with
-matching precompiled images and application checks. Sealed native callers may retain old
-definitions after global redefinition. Runtime/import changes require matching images; host
-reloads must refresh packed source catalogues as well as image caches. Layout/registration
-changes require a fresh image check. DISASSEMBLE handles retained HIR; =disassemble-native=
-accepts emitted bytes and actual function index without changing policy.
-
-ANSI covers language behavior in interpreter/compiler modes. Focused soundness, optimization
-and implementation suites cover rejection/recovery, proofs, redefinition, values/effects, tail
-calls, codecs and platform boundaries. WASI runtime tests stay separate from dynamic-code
-optimization requirements. Gate analysis on eligible consumers, count its own shipped cost,
-and avoid broad frameworks without representative measured return. Compare a fixed original
-source corpus without installing successive compiler generations; keep experiment
-drivers/results temporary and report bootstrap, native throughput, application behavior and
-raw/compressed sizes separately.
+DISASSEMBLE handles retained HIR; =disassemble-native= accepts emitted bytes and the actual
+function index without changing optimization policy. Sealed native callers retain their
+internal bindings independently of later global redefinition. Runtime imports, packed source
+catalogues, layouts and registration tables belong to matching compiler/runtime artifacts.
 
 ** ANSI standard-function contracts
 
@@ -343,19 +332,16 @@ retains arbitrary-precision and contagion behavior. Runtime sequence classificat
 character initialization and rational-interval arithmetic no longer carry captured standard
 functions solely to guard forbidden CL redefinition.
 
-*** Validation and remaining limits
+*** Representation and remaining limits
 
-Focused matching source-runtime checks cover checked calls/accessors, NOTINLINE, dotted tails,
-ordinary user redefinition, live generic methods, RATIONALIZE, MAKE-SEQUENCE and malformed
-import rejection/recovery. Host source, contract, planner and proof checks also pass. Full
-matching precompiled bootstrap, ANSI/application confirmation and final native throughput and
-raw/compressed image measurements remain pending; focused checks do not establish them.
+Startup packing requires a checked decoding pass and temporary byte storage. Further
+compression of =bootstrap-public-symbol-bytes= and =bootstrap-private-symbol-bytes= needs a
+checked bridge for their immutable byte-array readers. Retained output-literal compression
+would also affect =$emit-literal=, =$ascii-text-literal=, caches and snapshots. These candidates
+must account for loader cost and compressed downloads as well as raw image storage;
+initialization encoding does not change authoritative contract facts or query representations.
 
-The fixed original compiler-source corpus is the throughput reference: compiled output is
-validated and instantiated without installing another compiler generation. Measure complete
-modules and shipped contract/helper costs under the default SPACE 3/SPEED 1 policy. Record
-native throughput separately from interpreted bootstrap and retain the 1 MiB raw default-image
-budget. Inventory/signature coverage does not imply complete result/effect facts, specialized
+Inventory/signature coverage does not imply complete result/effect facts, specialized
 lowering for every operation, or complete symbolic type reasoning.
 
 Normative references: [[https://www.lispworks.com/documentation/HyperSpec/Body/11_abab.htm][CLHS 11.1.2.1.2]],
@@ -367,3 +353,86 @@ Normative references: [[https://www.lispworks.com/documentation/HyperSpec/Body/1
 [[https://www.lispworks.com/documentation/HyperSpec/Body/f_mem_m.htm][MEMBER]],
 [[https://www.lispworks.com/documentation/HyperSpec/Body/f_assocc.htm][ASSOC]],
 [[https://www.lispworks.com/documentation/HyperSpec/Body/f_typep.htm][TYPEP]].
+
+** File compilation and owned CLOS metadata
+
+*** File/native multiple-value integration
+
+File preparation and lexical canonicalization retain resolved standard MULTIPLE-VALUE-BIND
+syntax. The producer uses the outer environment; the body preserves lexical/special bindings,
+declarations and captures. Prepared VALUES/APPLY and eligible small literal MEMBER calls use
+semantic HIR lowering without consulting later macro definitions. Whole-program scanning
+recognizes retained MVB bindings and masks outer function-value facts within their scope.
+Boundary validation checks proper, legal, unique binding variables and valid bodies.
+
+Immediate component consumers of proven exact local tuples of two through eight values use
+component locals under a bounded planning budget. Captured/unknown joins, differing counts
+and ordinary call producers retain the general path. Full-value boundaries reconstruct the
+ordinary representation; public calling conventions and general call-result lists remain.
+File/native lowering preserves zero/missing/extra values, operand effects, lexical macro and
+symbol-macro scope, normalized defaults, mutable captures, special restoration and cleanup,
+with or without block compilation. General optional/keyword argument cursors remain.
+
+*** Owned method keyword profiles
+
+Method preparation captures implicit keyword symbols alongside the executable lambda list
+while preserving the original METHOD-LAMBDA-LIST. The required canonical sixth
+=%ENSURE-METHOD= argument supplies explicit executable keyword pairs to the checked private
+allocator. Matching compiler/runtime artifacts use this format. Keyword identities survive
+specializer evaluation that uninterns and reinterns an implicit keyword name.
+
+Each owned standard method has a private WasmGC descriptor containing normalized keyword
+identities and compact declaration shape, without initform graphs. Its lifetime follows the
+method and it survives image save/restore. FUNCTION-KEYWORDS and initialization checking share
+checked normalization. Returned keyword spines are fresh; FUNCTION-KEYWORDS preserves
+declaration order and reports only explicit &ALLOW-OTHER-KEYS.
+
+Every query invokes live METHOD-LAMBDA-LIST. Exact standard-reader, method/function/protocol,
+storage, lambda-list and live token checks guard descriptor reuse. The final owned hit and
+copy do not yield or call Lisp; borrowed matching may poll. No lock spans arbitrary Lisp
+callbacks. Invalidating raw operations revoke proof directly. An epoch alone cannot justify
+reuse across multi-step MOP/class/method mutation. Custom readers retain checked parsing that
+observes same-spine and nested mutation. Borrowing preserves semantic identities while
+revoking fast proof; borrowed NIL ownership is never promoted. A process-private unsaved token
+requires restored descriptors to validate shape and symbol keys, with final live rereads,
+before acquiring proof.
+
+The initialization checker consumes its already-fresh method-key spine when building the
+validity union. Both descriptor and fallback paths allocate this spine; descriptor cells and
+custom-reader source cells never become union storage. Key order and identities are preserved.
+The final key checker can retain or mutate the union without changing subsequent checks,
+method metadata or independent FUNCTION-KEYWORDS results.
+
+*** Owned generic metadata shape
+
+A private generic metadata cache retains a checked finite/even property-spine fact. A
+process-private unsaved token permits reuse only after validation and final rereads of metadata
+identity, storage spine and ownership. Raw borrowing, storage replacement and class changes
+revoke ownership directly. Value-cell updates and insertion of complete fresh pairs preserve
+the shape fact. Restored cache arrays require validation before receiving the current token;
+borrowed/NIL ownership is never promoted.
+
+This fact caches no semantic property value, applicable-method set, custom MOP result or
+permission-protocol outcome. Live calls and redefinition guards remain; specializer metadata
+retains ordinary validation. On the valid owned path, guarded shape reuse and property-cell
+traversal do not yield or call Lisp. Borrowed fallback remains checked live observation and
+does not promise a snapshot of arbitrary concurrent user mutation.
+
+*** Remaining compiler limits
+
+Initialization still computes applicable-method unions, slot validity and requirements on
+each request. Guarded whole initialization plans and reusable unions remain candidates;
+mutable custom MOP readers preclude identity-only caching. Retained descriptors contribute
+both code and data to shipped artifacts.
+
+Argument/method-context transport, repeated keyword scans, interpreter callbacks and
+continuation capture remain candidates. Hidden method context leaves three user arguments in
+the fixed worker ABI. Wider transport needs immutable owned backing or a private
+packet entry; a structural WasmGC type, completed foreign builder or trusted-call flag does
+not establish ownership. Public ingress remains checked.
+
+DYNAMIC-EXTENT declarations do not yet enable continuation scalarization.
+Inlining or scalarizing calls/captures requires nonescape/use proofs preserving identity,
+mutation, next-method state, scheduling, dynamic state, locks and cleanup. Target-semantic
+float flow and compact literal FORMAT plans remain lowering opportunities; broad REAL
+declarations do not justify forced float representations.

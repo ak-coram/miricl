@@ -115,7 +115,8 @@
     (list* . list*)))
 ;; Keep new private IDs after every existing primitive interval.
 (setf *clos-primitives* (append *clos-primitives* '(%%copy-list %%slot-value %%nth)))
-(defparameter *native-clos-symbols* '(:initarg-profile))
+(defparameter *native-clos-symbols* nil)
+(setf *clos-primitives* (append *clos-primitives* '(%%allocate-method)))
 
 (assert (<= (length *clos-primitives*) (- 2147483640 +clos-primitive-base+)))
 
@@ -658,6 +659,10 @@ Generate only source forms here; the compiler-free guest needs no contract table
     (then (return_call $generic-dispatch-metadata-call (local.get $args))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%complex-type-metadata)))
     (then (return_call $complex-type-metadata-primitive (local.get $op) (local.get $args))))
+  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%allocate-method)))
+    (then ,(wat-arity 3)
+      (return_call $clos-allocate-method (call $car (local.get $args))
+        (call $car (call $cdr (local.get $args))) (call $car (call $cdr (call $cdr (local.get $args)))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%clos-initarg-metadata)))
     (then (return_call $clos-initarg-metadata-call (local.get $args))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%array-upgrade-metadata)))
@@ -806,6 +811,12 @@ Generate only source forms here; the compiler-free guest needs no contract table
         (then ,(wat-arity 2) (return (call $car (local.get $cell)))))
       ,(wat-arity 3)
       (local.set $value (call $car (call $cdr (call $cdr (local.get $args)))))
+      (if (ref.eq (local.get $b) ,(clos-library-reference :lambda-list))
+        (then
+          (if (ref.test (ref $method-initarg-profile) (struct.get $obj $c (ref.cast (ref $obj) (local.get $a))))
+            (then (struct.set $method-initarg-profile $proof
+              (ref.cast (ref $method-initarg-profile) (struct.get $obj $c (ref.cast (ref $obj) (local.get $a))))
+              (ref.null eq))))))
       (if (ref.is_null (local.get $cell))
         (then
           (struct.set $obj $b (ref.cast (ref $obj) (local.get $a))
@@ -851,11 +862,20 @@ Generate only source forms here; the compiler-free guest needs no contract table
       ;; Borrowed storage can subsequently be modified through ordinary cons
       ;; operations. Only exclusively owned storage admits fixed slot offsets.
       (if (i32.eq (call $tag (local.get $a)) (i32.const 23))
-        (then (struct.set $obj $c (ref.cast (ref $obj) (local.get $a)) (ref.null eq))))
+        (then
+          (if (ref.test (ref $method-initarg-profile) (struct.get $obj $c (ref.cast (ref $obj) (local.get $a))))
+            (then (struct.set $method-initarg-profile $proof
+              (ref.cast (ref $method-initarg-profile) (struct.get $obj $c (ref.cast (ref $obj) (local.get $a)))) (ref.null eq)))
+            (else (struct.set $obj $c (ref.cast (ref $obj) (local.get $a)) (ref.null eq))))))
       (return (struct.get $obj $b (ref.cast (ref $obj) (local.get $a))))))
   (wat-arity 2)
   #@(if (i32.eq (call $tag (local.get $a)) (i32.const 23))
-    (then (struct.set $obj $c (ref.cast (ref $obj) (local.get $a)) (ref.null eq))))
+    (then
+      (if (i32.and (ref.test (ref $method-initarg-profile) (struct.get $obj $c (ref.cast (ref $obj) (local.get $a))))
+            (i32.ne (local.get $op) (i32.const ,(clos-primitive-op '%%set-raw-class))))
+        (then (struct.set $method-initarg-profile $proof
+          (ref.cast (ref $method-initarg-profile) (struct.get $obj $c (ref.cast (ref $obj) (local.get $a)))) (ref.null eq)))
+        (else (struct.set $obj $c (ref.cast (ref $obj) (local.get $a)) (ref.null eq))))))
   #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%set-raw-class)))
     (then (struct.set $obj $a (ref.cast (ref $obj) (local.get $a)) (local.get $b)))
     (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $a)) (local.get $b))))

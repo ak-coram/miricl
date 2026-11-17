@@ -139,9 +139,10 @@ do not yet implement these controls.
 
 During the runtime migration, prioritize completing ports. Compare generated
 code and performance with equivalent SBCL code; optimize further during a port
-only when generated code is substantially slower. Record other speed and size
-candidates in compiler.org with affected functions, evidence and tradeoffs, so
-later work can prioritize mechanisms benefiting many functions.
+only when generated code is substantially slower. Describe remaining speed and
+size mechanisms in compiler.org with affected functions and design tradeoffs, so
+later work can prioritize mechanisms benefiting many functions. Keep measured
+evidence in temporary experiment records and report results to the user.
 
 The long-term runtime direction is ordinary Common Lisp cross-compiled on the
 bootstrap host by MIRICL, above a small native substrate for representation and platform
@@ -268,6 +269,17 @@ applications and their existing benchmarks are sufficient for now. Keep
 one-off measurement scripts and results in temporary directories; continue
 reporting runtime/application performance and raw/compressed image sizes
 without restoring the removed compiler/interpreter microbenchmark suite.
+
+# Documentation
+
+Keep compiler.org focused on how the current compiler works: architecture,
+interfaces, representations, algorithms, semantic contracts and implementation
+limits. Consolidate related mechanisms and write in the present tense.
+Do not add development chronology, batch records, benchmark results, size or memory
+measurements, test pass/fail or coverage reports, application validation status,
+or per-run artifact/session handoffs. Report validation and measurements to the
+user and keep one-off evidence in temporary directories. Document input-validation
+mechanisms and compiler contracts as part of the architecture.
 
 # Style
 

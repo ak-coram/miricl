@@ -617,14 +617,11 @@
                        (t (cons object args))))))
           (%%while methods
             (let* ((method (pop methods)) (ll (method-lambda-list method))
-                   (info (%get method :initarg-profile)))
-              ;; Method lambda lists are immutable metadata. Still invoke the
-              ;; MOP reader each time; a changed reader result gets a new plan.
-              (unless (and info (eq (car info) ll))
-                (setq info (list ll (%member '&allow-other-keys ll) (%nth 4 (%lambda-profile ll))))
-                (setf (%get method :initarg-profile) info))
-              (when (cadr info) (setq allow t))
-              (setq allowed (append (caddr info) allowed))))))
+                   (info (or (%%clos-initarg-metadata 28 method ll)
+                             (%%clos-initarg-metadata 30 ll nil))))
+              ;; Custom reader results are validated and normalized afresh.
+              (when (cdr info) (setq allow t))
+              (setq allowed (append (car info) allowed))))))
     (%check-keys args allowed allow)))
 (defun make-instance (class &rest initargs)
   (when (symbolp class) (setq class (find-class class)))
@@ -805,8 +802,10 @@
 (defun method-lambda-list (method) (%get method :lambda-list))
 (defun method-qualifiers (method) (%get method :qualifiers))
 (defun function-keywords (method)
-  (let* ((ll (method-lambda-list method)) (profile (%lambda-profile ll)))
-    (values (nreverse (%nth 4 profile)) (not (null (%member '&allow-other-keys ll))))))
+  (let* ((ll (method-lambda-list method))
+         (info (or (%%clos-initarg-metadata 28 method ll)
+                   (%%clos-initarg-metadata 30 ll nil))))
+    (values (nreverse (car info)) (not (null (cdr info))))))
 (defun eql-specializer-object (specializer) (%get specializer :object))
 (defun intern-eql-specializer (object)
   (let ((scan %eql-specializers) (found nil))
@@ -918,13 +917,14 @@
   (setf (%get method :generic-function) gf (%get gf :methods) (cons method (%get gf :methods)))
   (let ((scan (%get method :specializers))) (%%while scan (funcall %raw-add-direct-method (pop scan) method)))
   (unless %booting (%set-generic-discriminator gf (compute-discriminating-function gf))) gf)
-(defun %ensure-method (name qualifiers ll specializers function)
+(defun %ensure-method (name qualifiers ll specializers function canonical-ll)
   ;; Adding a method must not reinitialize an existing generic function.
   (let ((gf (if (fboundp name) (fdefinition name)
                 (ensure-generic-function name :lambda-list ll))))
     (when (eq gf (%%generic-info gf)) (error 'program-error))
-    (let ((method (%%allocate (generic-function-method-class gf)
-            (list :qualifiers qualifiers :lambda-list ll :specializers specializers :function function))))
+    (let ((method (%%allocate-method (generic-function-method-class gf)
+            (list :qualifiers qualifiers :lambda-list ll :specializers specializers :function function)
+            canonical-ll)))
       (shared-initialize method t)
       (add-method gf method) method)))
 (defun %specializer-matches (specializer arg)
@@ -1435,10 +1435,25 @@
 (defun extract-specializer-names (specialized-lambda-list)
   (nth-value 1 (%method-lambda-parts specialized-lambda-list)))
 
+(defun %canonical-method-lambda-list (ll)
+  ;; Capture implicit keyword identities once, before evaluating specializers.
+  ;; The executable lambda and its owned profile consume these exact symbols.
+  (let ((scan ll) (keyp nil) (result nil))
+    (%%while scan
+      (let ((param (pop scan)))
+        (cond ((eq param '&key) (setq keyp t))
+              ((eq param '&aux) (setq keyp nil))
+              ((and keyp (not (eq param '&allow-other-keys)))
+               (cond ((symbolp param) (setq param (list (list (%keyword param) param))))
+                     ((symbolp (car param))
+                      (setq param (cons (list (%keyword (car param)) (car param)) (cdr param)))))))
+        (push param result)))
+    (reverse result)))
+
 (defun %expand-method (args)
   (let ((name (pop args)) (qualifiers nil) (params nil) (ll nil) (specializers nil) (body nil)
         (context (gensym)) (declarations nil) (doc nil) (scanning t) (expansion nil) (call-ll nil)
-        (plain-body nil))
+        (plain-body nil) (canonical-ll nil))
     (%%while (and args (car args) (atom (car args))) (push (pop args) qualifiers))
     (unless args (error 'program-error))
     (setq params (pop args) body args)
@@ -1448,11 +1463,11 @@
         (push (if (and (consp specializer) (eq (car specializer) 'eql))
                   (list 'intern-eql-specializer (cadr specializer))
                   (list 'find-class (%quote specializer))) specializers)))
-    (setq call-ll ll)
+    (setq canonical-ll (%canonical-method-lambda-list ll) call-ll canonical-ll)
     ;; The generic validates the union of applicable keyword names. Relax the
     ;; executable lambda without changing method metadata or actual arguments.
     (when (and (%member '&key ll) (not (%member '&allow-other-keys ll)))
-      (let ((scan ll) (prefix nil))
+      (let ((scan call-ll) (prefix nil))
         (%%while (and scan (not (eq (car scan) '&aux))) (push (pop scan) prefix))
         (setq call-ll (append (reverse prefix) (cons '&allow-other-keys scan)))))
     (%%while (and scanning body)
@@ -1480,7 +1495,7 @@
                 (list 'lambda '(%method-arguments %next-methods)
                   (list 'declare (list 'ignore '%next-methods))
                   (list 'apply function '%next-context '%method-arguments))
-                nil function 18)))))
+                nil function 18) (%quote canonical-ll)))))
     (if doc
         (let ((method (gensym)))
           (list 'let (list (list method expansion))
@@ -1528,7 +1543,7 @@
     (unless (%get class :condition)
       (setq function (%%structure-function function class slot (if writer 12 11))))
     (let ((method (%ensure-method name nil (if writer '(new-value object) '(object))
-                    (if writer (list (find-class t) class) (list class)) function)))
+                    (if writer (list (find-class t) class) (list class)) function nil)))
       (setf (%get method :accessor-slot) slot)
       method)))
 (defun %install-accessors (class)
@@ -1548,7 +1563,7 @@
             (when *print-readably* (error 'print-not-readable :object object))
             (if *print-escape* (call-next-method)
                 (if (stringp report) (write-string report stream) (funcall report object stream)))
-            object))))) name)
+            object)) nil))) name)
 
 (defun %lambda-names (params)
   (if params
@@ -1770,7 +1785,7 @@
                         (funcall printer object stream %structure-print-depth)
                         (funcall printer object stream)))
                   (%%print-structure object stream))
-              object))))
+              object)) nil))
       name)))
 (defun %expand-struct-spec (spec)
   (if (symbolp spec) (%quote spec)
@@ -2076,7 +2091,8 @@
 (defun %initialize-method-meta (object &rest args)
   (let ((keys '(:qualifiers :lambda-list :specializers :function)))
     (%%while keys
-      (let ((key (pop keys))) (when (%cell args key) (setf (%get object key) (car (%cell args key))))))) object)
+      (let ((key (pop keys))) (when (%cell args key) (setf (%get object key) (car (%cell args key)))))))
+  (%%clos-initarg-metadata 29 object nil) object)
 (defun %initialize-slot-meta (object &rest args)
   (let ((keys '(:name :allocation :initargs :initform :initfunction :type :readers :writers)))
     (%%while keys
@@ -2104,7 +2120,7 @@
   (%%while definitions
     (let* ((entry (pop definitions)) (function (cadr entry)))
       (%ensure-method 'initialize-instance '(:after) (caddr entry) (list (find-class (car entry)))
-        (lambda (args next) (apply function args))))))
+        (lambda (args next) (apply function args)) (%canonical-method-lambda-list (caddr entry))))))
 (defun %standard-slot-protocol-for-args-p (entry class object slot)
   (let* ((name (car entry)) (gf (cadr entry)) (standard (caddr entry))
          (reader (eq name 'slot-value-using-class))
@@ -2131,4 +2147,9 @@
           (let ((gf (fdefinition name))) (list name gf (car (%get gf :methods)))))
     '(class-slots class-finalized-p slot-definition-name slot-definition-allocation
       slot-definition-type slot-value-using-class (setf slot-value-using-class))))
+;; Native normalization owns its definition-time derived profiles. The
+;; reader still runs on every request; this records only the standard path.
+(defparameter %standard-initarg-protocol
+  (let* ((gf #'method-lambda-list) (method (car (%get gf :methods))))
+    (list gf method (%get method :function))))
 (setq %booting nil)

@@ -73,9 +73,51 @@ try {
           (transport-saved-next 1 nil 3 4 5 :marker nil)))))
         (funcall driver) (funcall driver) (funcall driver)))
     (values)`, {eof: true});
+  other.evaluate(`(defparameter *transport-method-key* (intern "TRANSPORT-SAVED-KEY" "KEYWORD"))
+    (defgeneric transport-saved-keyword (object &key transport-saved-key))
+    (defmethod transport-saved-keyword ((object t) &key transport-saved-key)
+      (declare (ignore object)) transport-saved-key)
+    (defparameter *transport-method*
+      (find-method #'transport-saved-keyword nil (list (find-class 't))))
+    (function-keywords *transport-method*)
+    (defgeneric transport-saved-metadata (object))
+    (defmethod transport-saved-metadata ((object t)) object)
+    (dotimes (i 8)
+      (funcall (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%GENERIC-DISPATCH-METADATA"))
+        4 #'transport-saved-metadata nil))
+    (unintern *transport-method-key* "KEYWORD")
+    (defparameter *transport-new-method-key* (intern "TRANSPORT-SAVED-KEY" "KEYWORD"))
+    (values)`, {eof: true});
   const saved = other.saveImage();
   const restored = await Miricl.instantiate(saved);
   try {
+    assert.equal(restored.evaluate(`(let* ((generic #'transport-saved-metadata)
+        (metadata (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%GENERIC-DISPATCH-METADATA")))
+        (info (funcall (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%GENERIC-INFO")) generic)))
+      (dotimes (i 8) (funcall metadata 4 generic nil))
+      (let* ((slots (funcall (symbol-function
+            (miricl-compiler::compiler-primitive 10 1 "%%RAW-SLOTS")) info))
+          (tail (last slots)))
+        (and
+          (unwind-protect
+              (progn (rplacd tail slots)
+                (handler-case (progn (funcall metadata 4 generic nil) nil)
+                  (error (condition) (plusp (length (princ-to-string condition))))))
+            (rplacd tail nil))
+          (progn (funcall metadata 4 generic nil)
+            (eq (transport-saved-metadata :recovered) :recovered)))))`, {eof: true}).output,
+      'T\n', 'Restored generic metadata validates borrowing and recovers after a cyclic spine.');
+    assert.equal(restored.evaluate(`(let ((keys (function-keywords *transport-method*)))
+      (and (equal keys (list *transport-method-key*))
+        (not (eq *transport-method-key* *transport-new-method-key*))
+        (progn
+          (funcall (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%RAW-SLOTS"))
+            *transport-method*)
+          (equal (function-keywords *transport-method*) (list *transport-method-key*)))
+        (equal (multiple-value-list
+          (funcall (miricl-mop:method-function *transport-method*)
+            (list nil *transport-method-key* 42) nil)) '(42))))`, {eof: true}).output, 'T\n',
+      'Saved and borrowed method metadata retains the keyword identity captured by its executable body.');
     assert.equal(restored.evaluate(`(let ((graph *transport-saved-graph*))
       (and (eq (svref graph 0) (svref graph 1))
         (eq (svref graph 0) (cdr (svref graph 0)))
