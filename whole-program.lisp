@@ -143,6 +143,11 @@
              (loop for pairs on (cdr value) by #'cddr do
                (setf (gethash (car pairs) written) t)
                (push (second pairs) work)))
+            (multiple-value-bind
+             ;; Preparation retains this standard binding syntax for HIR.
+             ;; Its variable list is syntax; the value form and body execute.
+             (compiler-source-form value)
+             (dolist (child (cddr value)) (push child work)))
             (otherwise
              (cond
                ((or (member (car value) '(macrolet symbol-macrolet))
@@ -281,6 +286,15 @@
                                              (not (compiler-primitive 18 name))
                                              (consp lambda) (eq (car lambda) 'lambda))) inner)))
                             (setq functions inner) (body (cdr args)) (setq functions outer)))
+                         (multiple-value-bind
+                          (compiler-source-form value)
+                          (queue (second args) :code)
+                          (let ((outer functions))
+                            ;; Body bindings hide enclosing function-value facts,
+                            ;; while the value form still sees the outer scope.
+                            (dolist (name (car args))
+                              (push (list (list :value name) nil) functions))
+                            (body (cddr args)) (setq functions outer)))
                          ((flet labels)
                           ;; Closure construction does not execute its body.
                           ;; Visit local definitions only when called or taken

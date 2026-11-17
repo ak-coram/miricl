@@ -1461,6 +1461,48 @@ exhausted work budgets keep every incoming value group."
 (defun emit-native-results (value count)
   (dotimes (index count) (emit-native-result value index)))
 
+(defun native-local-result-groups (function blocks)
+  ;; An immediate component consumer also benefits from tuple storage when
+  ;; there is no private multiple-result worker. Follow its local joins back
+  ;; to VALUES, keeping unknown calls and captured landing pads on the ordinary
+  ;; packet path. Exact counts come from the shared, validated HIR analysis.
+  (declare (type simple-vector function) (type list blocks))
+  (unless *wasm-result-arities* (return-from native-local-result-groups nil))
+  (let ((work nil) (fuel 4096))
+    (declare (type list work) (type (integer -1 4096) fuel))
+    (dolist (block blocks)
+      (dolist (instruction (hir-block-instructions block))
+        (when (minusp (decf fuel)) (return-from native-local-result-groups nil))
+        (when (and (member (hir-instruction-opcode instruction) '(:primary :value-ref))
+                   (native-value-slot *wasm-live-values* (hir-instruction-output instruction)))
+          (let* ((value (first (hir-instruction-inputs instruction)))
+                 (arity (gethash value *wasm-result-arities*)))
+            (when (and arity (<= 2 arity 8) (%hir-block-p (hir-value-producer value))
+                       (not (native-value-slot *wasm-scalar-groups* value)))
+              (push value work))))))
+    (unless work (return-from native-local-result-groups nil))
+    (let ((sources (native-value-table function)) (groups (native-value-table function)))
+      (declare (type simple-vector sources groups))
+      (dolist (block blocks)
+        (when (minusp (decf fuel)) (return-from native-local-result-groups nil))
+        (let* ((end (hir-block-terminator block)) (opcode (hir-instruction-opcode end))
+               (target (and (member opcode '(:jump :block-return)) (first (hir-instruction-attributes end))))
+               (parameter (and target (first (hir-block-parameters target)))))
+          (when parameter
+            (push (if (eq opcode :jump) (first (hir-instruction-inputs end))
+                      (third (hir-instruction-inputs end))) (native-value-slot sources parameter)))))
+      (loop while work do
+        (when (minusp (decf fuel)) (return-from native-local-result-groups nil))
+        (let* ((value (pop work)) (arity (gethash value *wasm-result-arities*))
+               (origin (hir-value-producer value)))
+          (when (and arity (<= 2 arity 8) (not (native-value-slot groups value))
+                     (not (native-value-slot *wasm-scalar-groups* value))
+                     (or (%hir-block-p origin)
+                         (and (%hir-instruction-p origin) (eq (hir-instruction-opcode origin) :values))))
+            (setf (native-value-slot groups value) t)
+            (dolist (source (native-value-slot sources value)) (push source work)))))
+      groups)))
+
 (defun emit-native-multiple-call (inputs output)
   (let* ((target (and *wasm-local-call-functions* (hir-result-callee (second inputs) *wasm-result-callees*)))
          (count (and target (gethash target *wasm-multiple-result-functions*)))
@@ -3785,19 +3827,23 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
     ;; never an allocated Lisp packet. Dead component stores disappear during
     ;; the existing liveness/stack pass. Primary-only demand keeps its scalar
     ;; representation and does not allocate these locals at all.
-    (when (or *wasm-multiple-result-count*
+    (let ((local-groups (native-local-result-groups function blocks))
+          (worker-groups (or *wasm-multiple-result-count*
               (some (lambda (block)
                       (some (lambda (instruction)
                               (and (eq (hir-instruction-opcode instruction) :call)
                                    (gethash (hir-result-callee (second (hir-instruction-inputs instruction)) *wasm-result-callees*)
                                             *wasm-multiple-result-functions*)))
-                            (hir-block-instructions block))) blocks))
+                            (hir-block-instructions block))) blocks))))
+     (when (or local-groups worker-groups)
       (dolist (value (hir-function-values function))
         (let* ((arity (gethash value *wasm-result-arities*))
                (origin (hir-value-producer value)))
           (when (and (eq (hir-value-kind value) :multiple)
                      (not (native-value-slot *wasm-scalar-groups* value))
-                     arity (<= 2 arity 4)
+                     arity
+                     (or (and local-groups (native-value-slot local-groups value))
+                         (and worker-groups (<= 2 arity 4)))
                      (or (not (%hir-instruction-p origin))
                          (member (hir-instruction-opcode origin) '(:values :copy))
                          (and (eq (hir-instruction-opcode origin) :call)
@@ -3806,7 +3852,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
             (let ((locals nil))
               (dotimes (i arity)
                 (push (+ (if direct 2 3) raw-count wide-count count) locals) (incf count))
-              (setf (native-value-slot *wasm-multiple-result-locals* value) (nreverse locals)))))))
+              (setf (native-value-slot *wasm-multiple-result-locals* value) (nreverse locals))))))))
    (when *wasm-function-relocations*
      (setf (gethash function *wasm-function-relocations*) nil))
    (compiler-statistic :lowering/function-control
@@ -4944,7 +4990,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-removable-p native-live-inputs native-direct-cells native-forward-blocks native-reachable-blocks native-loop-region-order native-loop-plan native-live-values native-local-layout native-single-calls native-full-groups native-proven-truth native-proof-reachable-blocks native-scalar-groups native-plan-branch-tests native-stable-predicate-p native-predicate-source native-predicate-key native-plan-cons-forwarding native-plan-predicate-reuse native-predicate-aliases native-block-targets native-single-return-target-p
                    native-argument-usage native-primary-functions native-plan-argument-usages native-call-usage emit-native-call-operands native-direct-workers native-direct-worker-body native-optimize-typed-body native-direct-wrapper native-boxed-result-worker native-direct-fallback native-direct-relocations
                    native-simple-callee-p native-local-call-functions emit-native-local-call
-                   native-result-signature emit-native-result emit-native-results emit-native-multiple-call
+                   native-result-signature emit-native-result emit-native-results native-local-result-groups emit-native-multiple-call
                    emit-native-fixed-call native-type-integer-width native-compute-integer-width native-integer-width emit-native-integer-box
                    native-generic-candidate native-proven-generic-mask native-plan-generic-calls emit-native-generic-call
                    emit-native-unboxed-integer native-integer-result-fits-p native-inline-shift-opcode native-inline-nonnegative-division-opcode native-inline-integer-opcode emit-native-integer-chain emit-native-inline-integer emit-native-integer-call

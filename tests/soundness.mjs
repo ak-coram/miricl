@@ -753,6 +753,12 @@ try {
     ["(compile-native '(lambda (x x) x))", /duplicate parameter/],
     ["(compile-native '(lambda (&rest &key) nil))", /lambda-list keyword/],
     ["(compile-native '(lambda (&optional (x nil &rest)) x))", /lambda-list keyword/],
+    ["(compile-native '(lambda () (multiple-value-bind (x))))", /value form/],
+    ["(compile-native '(lambda () (multiple-value-bind (x x) (values 1 2) x)))", /duplicate variable/],
+    ["(compile-native '(lambda () (multiple-value-bind (x . y) (values 1 2) x)))", /dotted tail/],
+    ["(compile-native '(lambda () (multiple-value-bind (:constant) 1 nil)))", /nonconstant variable/],
+    [`(let ((variables (list 'x))) (setf (cdr variables) variables)
+       (compile-native (list 'lambda nil (list 'multiple-value-bind variables nil nil))))`, /circular list/],
     ["(compile-native '(lambda () (declare (optimize (safety 4))) nil))", /level from 0 through 3/],
     ["(compile-native '(lambda (x) (declare (type (array t (-1)) x)) x))", /array dimension/],
     ["(compile-native '(lambda (x) (declare ((12) x)) x))", /symbol naming the compound type/],
@@ -787,6 +793,18 @@ try {
       '(lambda (node) (loop :for (a . b) :in node :collect a))))
     (nth-value 1 (form-references
       '(macrolet ((pattern ((a . b)) (list 'quote a))) (pattern (1 . 2))))) t)`);
+  // Retained standard MVB syntax is executable binding structure. Its body
+  // must mask outer function-value facts before reachability removes roots.
+  check(`(let* ((plain '(let ((fn (lambda (x) x)))
+                         (multiple-value-bind (x) (values 42) (funcall fn x))))
+      (plain-barriers (nth-value 1 (form-references plain)))
+      (shadowed-barriers (nth-value 1 (form-references
+        '(let ((fn (lambda (x) x)))
+           (multiple-value-bind (fn) (soundness-scanner-producer) (funcall fn 42)))))))
+    (and (not (nth-value 1 (form-written-variables plain)))
+      (not (member "UNEXPANDED-MACRO" plain-barriers :test #'equal))
+      (not (member (list :indirect-call (symbol-name 'funcall)) plain-barriers :test #'equal))
+      (member (list :indirect-call (symbol-name 'funcall)) shadowed-barriers :test #'equal) t))`);
   for (const source of [
     "(form-references '(progn (+ 1 . 2)))",
     `(form-references '(flet ((soundness-scanner-syntax (x) x))
@@ -796,6 +814,20 @@ try {
   evaluate("(fmakunbound 'soundness-scanner-syntax) (values)");
   evaluate("(defmacro soundness-bad-expansion () '(let ((x 1 2)) x)) (values)");
   reject("(compile-native '(lambda () (soundness-bad-expansion)))", /binding/);
+  // Preserving MVB bypasses its ordinary macro expansion, so both native and
+  // file preparation must still validate a macro-produced binding structure.
+  evaluate(`(defmacro soundness-bad-mvb ()
+    '(multiple-value-bind (x x) (values 1 2) x)) (values)`);
+  reject("(compile-native '(lambda () (soundness-bad-mvb)))", /duplicate variable/);
+  vm.mountFile('/soundness-mvb.lisp', `(in-package :miricl-compiler)
+    (defun soundness-file-mvb () (soundness-bad-mvb))`);
+  reject('(compile-file "/soundness-mvb.lisp" :verbose nil)', /duplicate variable/);
+  vm.mountFile('/soundness-mvb.lisp', `(in-package :miricl-compiler)
+    (defun soundness-file-mvb ()
+      (multiple-value-bind (x y) (values 42) (values x y)))`);
+  check(`(and (pathnamep (compile-file "/soundness-mvb.lisp" :verbose nil))
+    (load "/soundness-mvb.wasm")
+    (equal (multiple-value-list (soundness-file-mvb)) '(42 nil)))`);
   for (const [mutation, reason] of [
     ['(setf (hir-function-parent function) function)', /parent chain/],
     ['(setf (hir-block-id block) -1)', /block record or ID/],

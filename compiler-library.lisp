@@ -90,6 +90,18 @@
              (dolist (name (%file-lexical-specials forms)) (push (cons name name) environment))
              (rplaca destination (%file-code-cons source 'locally slots))
              (loop for form in forms for slot on slots do (push (list form slot environment) work))))
+          ((eq (car source) 'multiple-value-bind)
+           (let* ((outer environment) (specials (%file-lexical-specials (cdddr source)))
+                  (names nil) (forms (cdddr source)) (slots (make-list (length forms))))
+             (dolist (name (second source))
+               (setq environment (%file-lexical-bind name environment specials))
+               (push (cdar environment) names))
+             (dolist (name specials) (push (cons name name) environment))
+             (rplaca destination
+               (%file-code-cons source 'multiple-value-bind (list* (nreverse names) nil slots)))
+             ;; The value form is outside both the bindings and declarations.
+             (loop for form in forms for slot on slots do (push (list form slot environment) work))
+             (push (list (third source) (cddr (car destination)) outer) work)))
           ((member (car source)
              '(quote lambda let let* flet labels locally function block return-from tagbody go the
                defvar defparameter defconstant declare %%case-form %%list-test %%list-accumulate
@@ -122,7 +134,7 @@
     (case operator
       (quote form)
       (lambda (%file-lexical-function form operator variables functions blocks tags))
-      ((let let*) (%file-lexical-call form variables functions blocks tags))
+      ((let let* multiple-value-bind) (%file-lexical-call form variables functions blocks tags))
       ((flet labels)
        (let ((outer functions) (definitions nil))
          (dolist (definition (car args))
@@ -505,6 +517,20 @@
        (return-from %compile-condition (%compile-form (cons operator args) environment)))
       (otherwise (setq %compilation-complete nil compiled args)))
     (list* '%%condition-form operator compiled)))
+(defun %compile-macroexpand (form environment)
+  (declare (type list environment))
+  ;; Retain the standard binding structure for HIR instead of expanding it
+  ;; into an optional/rest closure. Still expand lexical macros, and macros
+  ;; whose expansions introduce MULTIPLE-VALUE-BIND, in their original scope.
+  (let ((expanded nil))
+    (loop
+      (when (and (consp form) (eq (car form) 'multiple-value-bind)
+                 (eq (macro-function 'multiple-value-bind environment)
+                     (macro-function 'multiple-value-bind)))
+        (return (values form expanded)))
+      (multiple-value-bind (expansion expanded-p) (macroexpand-1 form environment)
+        (unless expanded-p (return (values form expanded)))
+        (setq form expansion expanded t)))))
 (defun %compile-form (form environment)
   (declare (type list environment))
   ;; Macro expansions routinely contain much deeper trees than their source.
@@ -549,7 +575,7 @@
          (walk (form environment destination)
            (when (fboundp 'miricl-compiler::compiler-source-form)
              (miricl-compiler::compiler-source-form form))
-           (setq form (macroexpand form environment))
+           (setq form (%compile-macroexpand form environment))
            (when (fboundp 'miricl-compiler::compiler-source-form)
              (miricl-compiler::compiler-source-form form)
              (when (and (consp form) (member form %compiler-source-path :test #'eq))
@@ -560,6 +586,17 @@
              ((member (car form) '(quote go declare)) (rplaca destination form))
              ((member (car form) '(let let*))
               (bindings (second form) (car form) environment environment nil nil (cddr form) destination))
+             ((eq (car form) 'multiple-value-bind)
+              (let ((local environment) (specials nil))
+                (dolist (name (second form))
+                  (when (%%compile 18 name) (push name specials))
+                  (setq local (%%compile 3 local name)))
+                (let ((items (cdddr form)))
+                  (when specials (push (list 'declare (cons 'special (nreverse specials))) items))
+                  (rplaca destination
+                    (list* 'multiple-value-bind (second form) nil (body items local))))
+                (let ((source (third form)) (slot (cddr (car destination))))
+                  (defer (lambda () (walk source environment slot))))))
              ((member (car form) '(block return-from the))
               (rplaca destination (list* (car form) (second form) (forms (cddr form) environment))))
              ((eq (car form) 'locally)
@@ -579,7 +616,7 @@
 
 (defun %compile-recursive-form (form environment)
   (declare (type list environment))
-  (multiple-value-bind (expansion expanded) (macroexpand form environment)
+  (multiple-value-bind (expansion expanded) (%compile-macroexpand form environment)
     (when expanded (return-from %compile-recursive-form (%compile-form expansion environment))))
   (unless (consp form) (return-from %compile-recursive-form form))
   (let ((operator (car form)) (args (cdr form)))
@@ -597,6 +634,7 @@
                 (setf (gethash marker %file-load-values) (list (%compile-form (car args) nil))) marker)
               (eval (car args)))))
       ((let let*) (%compile-bindings operator (car args) (cdr args) environment))
+      (multiple-value-bind (%compile-form form environment))
       (progv
        (list* operator (%compile-form (car args) environment) (%compile-form (cadr args) environment)
          (%compile-body (cddr args) environment)))

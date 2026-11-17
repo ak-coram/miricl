@@ -1249,7 +1249,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   (declare (type list functions))
   (when (and (consp form) (eq (car form) 'member) (< *hir-debug-level* 2)
              (not (eq (cdr (assoc 'member *hir-inline-policy* :test #'equal)) 'notinline))
-             (not (hir-lexical-function-entry 'member functions)) (not (macro-function 'member)))
+             (not (hir-lexical-function-entry 'member functions))
+             (or (eql (compiler-primitive 8 form) 1) (not (macro-function 'member))))
     ;; IF may recognize this call before its normal lowering task. Validate
     ;; syntax before inspecting it; quoted data can still be dotted or cyclic.
     (compiler-source-form form)
@@ -1323,6 +1324,14 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                  (defer (lambda ()
                           (arguments (cddr form) nil (hir-single result) variables functions targets)))
                  (lower (second form) variables functions targets))))
+         (values-call (form variables functions targets)
+           (arguments (cdr form) nil
+             (and (hir-lexical-function-entry 'values functions) (hir-function-reference 'values functions))
+             variables functions targets (not (hir-lexical-function-entry 'values functions))))
+         (apply-call (form variables functions targets)
+           (let ((expanded (hir-literal-apply-form form functions)))
+             (if expanded (lower expanded variables functions targets)
+                 (arguments (cdr form) nil (hir-function-reference 'apply functions) variables functions targets))))
          (bindings (remaining local pending sequential specials types policy forms entry functions targets debug-level safety-level size-policy)
            (if remaining
                (let* ((binding (car remaining))
@@ -1381,13 +1390,24 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                    ;; The file frontend marks resolved calls so subsequent
                    ;; macro definitions cannot re-expand already prepared code.
                    ((and (consp form) (eql (compiler-primitive 8 form) 1))
-                    ;; FUNCALL still denotes an indirect call after preparation.
-                    ;; Keep its designator before its arguments without routing
-                    ;; through the ordinary variadic FUNCALL entry on every call.
-                    (if (eq (car form) 'funcall)
-                        (function-call form variables functions targets)
-                        (arguments (cdr form) nil (hir-function-reference (car form) functions)
-                          variables functions targets)))
+                    ;; Resolution freezes macro expansion, not the operation's
+                    ;; semantics. Retain the same intrinsic lowering as source
+                    ;; calls, without consulting a later macro definition.
+                    (cond
+                      ((eq (car form) 'funcall)
+                       (function-call form variables functions targets))
+                      ((eq (car form) 'values)
+                       (values-call form variables functions targets))
+                      ((eq (car form) 'apply)
+                       (apply-call form variables functions targets))
+                      (t
+                       (let ((membership (hir-literal-membership form functions)))
+                         (if membership
+                             (progn
+                               (defer (lambda () (setq result (hir-small-membership (hir-single result) (cdr membership)))))
+                               (lower (car membership) variables functions targets))
+                             (arguments (cdr form) nil (hir-function-reference (car form) functions)
+                               variables functions targets))))))
                    ((and *hir-macro-context* (consp form) (symbolp (car form))
                          (macro-function (car form) (hir-macro-environment variables functions)))
                     (lower (macroexpand-1 form (hir-macro-environment variables functions)) variables functions targets))
@@ -1448,15 +1468,11 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                                          (hir-intersect-types (hir-value-type result) type)))))
                     (lower (third form) variables functions targets))
                    ((eq (car form) 'values)
-                    (arguments (cdr form) nil
-                      (and (hir-lexical-function-entry 'values functions) (hir-function-reference 'values functions))
-                      variables functions targets (not (hir-lexical-function-entry 'values functions))))
+                    (values-call form variables functions targets))
                    ((eq (car form) 'funcall)
                     (function-call form variables functions targets))
                    ((eq (car form) 'apply)
-                    (let ((expanded (hir-literal-apply-form form functions)))
-                      (if expanded (lower expanded variables functions targets)
-                          (arguments (cdr form) nil (hir-function-reference 'apply functions) variables functions targets))))
+                    (apply-call form variables functions targets))
                    ;; Keep the specialized special-operator and MEMBER lowering.
                    ;; Their expression children re-enter this worklist frontend.
                    ((or (and (symbolp (car form)) (special-operator-p (car form)))

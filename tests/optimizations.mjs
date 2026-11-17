@@ -80,6 +80,103 @@ try {
     (let ((bits (make-array 1 :element-type 'bit :initial-element 0)))
       (and (equal (multiple-value-list (optimization-prepared-store bits)) '(1 (:array :index :value)))
            (= (sbit bits 0) 1))))`);
+  // ANSI covers the individual binding/value rules. Exercise their composition
+  // through file preparation, canonicalization and native bundle conversion.
+  evaluate(`(shadow '(values multiple-value-bind) :optimization-shadow)
+    (defvar *optimization-prepared-binding* :outside) (values)`);
+  vm.mountFile('/optimization-prepared-values.lisp', `
+    (in-package :cl-user)
+    (defmacro optimization-prepared-expand (form) form)
+    (defun optimization-prepared-components (flag effect) ${policy}
+      (optimization-prepared-expand
+        (multiple-value-bind (a b c d e f)
+            (block parts
+              (if flag (values (funcall effect :first) nil 3 4 5 6)
+                (return-from parts (values (funcall effect :second) nil 30 40 50 60))))
+          (values f e d c b a))))
+    (defun optimization-prepared-receive (producer cleanup) ${policy}
+      (multiple-value-bind (a b c d e f)
+          (unwind-protect (funcall producer) (funcall cleanup))
+        (values a b c d e f)))
+    (defun optimization-prepared-mixed (mode) ${policy}
+      (multiple-value-bind (a b c d e f)
+          (if mode (if (eq mode :few) (values nil 2) (values 1 nil 3 4 5 6 7))
+            (values))
+        (if (eq mode :empty) (values) (values a b c d e f))))
+    (defun optimization-prepared-scope () ${policy}
+      (symbol-macrolet ((a :outer))
+        (multiple-value-bind (a b) (values :bound a)
+          (flet ((defaults (&optional (x a xp) &key (y b yp))
+                   (values x xp y yp)))
+            (values (multiple-value-list (defaults))
+              (lambda () (values a b)) (setq a :changed))))))
+    (defun optimization-prepared-special (callback) ${policy}
+      (multiple-value-bind (*optimization-prepared-binding* ignored)
+          (values :inside 10)
+        (declare (ignore ignored))
+        (funcall callback)))
+    (defun optimization-prepared-value-shadow () ${policy}
+      (flet ((optimization-shadow::values (x) (values x :local)))
+        (macrolet ((optimization-shadow::multiple-value-bind (x)
+                     (list 'optimization-shadow::values x)))
+          (optimization-shadow::multiple-value-bind 42))))`);
+  for (const blockCompile of ['nil', 't']) {
+    evaluate(`(compile-file "/optimization-prepared-values.lisp" :verbose nil
+        :block-compile ${blockCompile})
+      (defmacro optimization-prepared-expand (form)
+        (declare (ignore form)) (error "Prepared code must retain its expansion."))
+      (miricl-compiler:compile-native-bundle "/optimization-prepared-values.wasm"
+        "/optimization-prepared-values-native.wasm")
+      (load "/optimization-prepared-values-native.wasm") (values)`);
+    check('prepared branch values retain components and operand effects', `(every
+      (lambda (flag)
+        (let ((effects nil))
+          (and (equal (multiple-value-list
+                  (optimization-prepared-components flag
+                    (lambda (event) (push event effects) (values event :discarded))))
+                (if flag '(6 5 4 3 nil :first) '(60 50 40 30 nil :second)))
+            (equal effects (if flag '(:first) '(:second)))))) '(nil t))`);
+    check('prepared binding survives cleanup with zero, few and overflow values', `(every
+      (lambda (returned)
+        (let ((effects nil))
+          (and (equal (multiple-value-list
+                  (optimization-prepared-receive
+                    (lambda () (push :producer effects) (values-list returned))
+                    (lambda () (push :cleanup effects) (values :discarded :extra))))
+                (subseq (append returned (make-list 6)) 0 6))
+            (equal (reverse effects) '(:producer :cleanup)))))
+      '(nil (nil) (1 nil 3 4 5 6 7)))`);
+    check('prepared branches retain differing counts and zero-value results', `(every
+      (lambda (case)
+        (equal (multiple-value-list (optimization-prepared-mixed (car case))) (cdr case)))
+      '((nil nil nil nil nil nil nil) (:few nil 2 nil nil nil nil)
+        (:many 1 nil 3 4 5 6) (:empty)))`);
+    check('prepared cleanup retains nonlocal values and recovers after errors', `(let ((effects nil))
+      (and (equal (multiple-value-list
+              (catch 'optimization-prepared-exit
+                (optimization-prepared-receive
+                  (lambda () (throw 'optimization-prepared-exit (values nil :escaped 3 4 5 6)))
+                  (lambda () (push :throw-cleanup effects))))) '(nil :escaped 3 4 5 6))
+        (handler-case
+            (progn (optimization-prepared-receive (lambda () (error "Expected failure"))
+                     (lambda () (push :error-cleanup effects))) nil)
+          (error () t))
+        (equal effects '(:error-cleanup :throw-cleanup))
+        (equal (multiple-value-list
+                (optimization-prepared-receive (lambda () (values 42)) (lambda () (values))))
+          '(42 nil nil nil nil nil))))`);
+    check('prepared binding scopes retain defaults, captures and special restoration', `(and
+      (multiple-value-bind (defaults closure changed) (optimization-prepared-scope)
+        (and (equal defaults '(:bound nil :outer nil)) (eq changed :changed)
+          (equal (multiple-value-list (funcall closure)) '(:changed :outer))))
+      (let ((*optimization-prepared-binding* :outside))
+        (and (equal (multiple-value-list
+                (optimization-prepared-special
+                  (lambda () (values *optimization-prepared-binding* nil :seen))))
+              '(:inside nil :seen))
+          (eq *optimization-prepared-binding* :outside)))
+      (equal (multiple-value-list (optimization-prepared-value-shadow)) '(42 :local)))`);
+  }
   define('optimization-tail-factory', `(lambda (offset) ${policy}
     (labels ((walk (n acc) (if (zerop n) (+ offset acc) (walk (1- n) (1+ acc))))) #'walk))`);
   check('tail-recursive escaped closure',
