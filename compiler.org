@@ -112,7 +112,11 @@ Dominated truth tests and canonical predicates narrow values only across paths t
 the premise. Aliases, writes, captured landings and unresolved entries prevent unsupported
 propagation. Executed truth facts are available at every SAFETY level; unchecked declarations
 retain their own restrictions. Arithmetic uses target intervals, contagion and bignum
-promotion. Fresh CONS field observations and proper-list facts are temporary and invalidated
+promotion. Exact binary ordered comparisons against literal integers refine independently
+known integer ranges on both arms, including reversed operands and bignum thresholds. These
+facts retain the comparison and its operand effects; they do not establish integer membership,
+an integer object representation or a scalar storage contract. Fresh CONS field observations
+and proper-list facts are temporary and invalidated
 by mutation or unknown effects; LIST alone never proves a proper spine.
 
 Semantic simplification forwards unaliased private cells, propagates constants and executable
@@ -168,11 +172,14 @@ values, dynamic cleanup and scheduler polls remain. Unsupported calls use ordina
 application. Immutable captures can be direct; mutable captures share cells. Distinct function
 objects and required capture identities survive body sharing and closure caching.
 
-Integers are canonical i31 immediates, boxed signed-i64 values or larger sign/magnitude
+Integers use i31 immediates, boxed signed-i64 values or larger sign/magnitude
 integers; target FIXNUM spans signed i64. Proven scalar work can stay raw and share canonical
 boxing. Overflow, large shifts, division traps and infinite two's-complement semantics retain
 checks or general helpers. Private numeric cells require proofs for every write and no
-capture/escape; reads keep SSA snapshots. Predicates can feed branches directly; bounded reuse
+capture/escape; reads keep SSA snapshots. Object extraction uses direct i31 casts only with
+canonical producer provenance and an i31 range; other proven scalar integers use an extractor
+accepting both immediate and boxed storage, including restored boxed small integers.
+Predicates can feed branches directly; bounded reuse
 and loop motion require stable operands and nontrapping canonical operations. Typed
 list/vector operations retain safety, definition and boundary contracts; LIST/LIST* preserve
 fresh spines and operand order. APPLY/MVC binding rewrites check proper lists and arity before
@@ -180,12 +187,38 @@ unchecked reads.
 
 At SAFETY 1, binary ordered comparisons can use signed-i64 instructions when fresh,
 declaration-independent inference proves both operand ranges fit signed i64. A separate,
-bounded representation check follows only copies and primary extraction to integer literals
-or retained checked binary LOGAND calls. LOGAND validates its operands and canonicalizes
+bounded representation check follows copies and primary extraction to integer literals,
+retained checked binary LOGAND calls or the proved arithmetic plans below. LOGAND validates its operands and canonicalizes
 successful signed-i64 results. Extraction accepts both i31 and boxed i64 even for narrow
 ranges; a range alone does not prove an i31 representation. Unknown facts or origins retain
 the checked comparison helper. This comparison plan preserves producer evaluation and checks,
 returns one ordinary Lisp value, and does not enable raw cells, branch fusion or loop motion.
+
+At SAFETY 1 and DEBUG below 2, binary addition/subtraction and unary 1+/1- can use
+i32 arithmetic when fresh, declaration-independent inference bounds both operands and the
+computed result within signed i32. The result proof comes from operand facts rather than
+an asserted output type. Existing mixed inference first filters out operands or results
+whose ranges cannot support this plan; only the fresh declaration-independent query grants
+the proof. Arithmetic candidates are collected during ordinary primitive planning.
+Arithmetic and ordered comparison candidates share one declaration-independent demand
+query over their operand roots, treating every function as externally callable.
+The query reuses the emission's structural callee, standard-operation and branch-premise
+maps; it does not reuse declared type facts. Comparison admission may inspect prospective
+arithmetic producers, but extraction requires those producers' accepted plans after the
+query. All maps and facts belong to the unchanged validated HIR during this emission
+and must be discarded after mutation. The bounded arithmetic planner omits selection at maximum COMPILATION-SPEED;
+unknown or exhausted selection retains the checked call. Operand producers stay in order,
+and each selected operation retains its scheduling poll at the original call site, including
+unused results. These plans do not participate in loop motion. Canonical producers with
+proved i31 ranges use i31 extraction; other objects use the scalar extractor before wrapping.
+Intermediate SSA results share the existing raw i64 locals after signed extension, allowing
+arithmetic chains to avoid intermediate boxes. Reference consumers box using the proved
+result width and canonical integer conversion, including results outside the i31 range.
+Private cell storage and loop induction require their separate existing proofs.
+Opt-in =WITH-COMPILATION-STATISTICS= records accepted plans as
+=:proof/integer-arithmetic-i32= and emitted lowerings as
+=:optimization/integer-arithmetic-i32=, with the arithmetic operator as detail.
+These count compilation events rather than unique sites or runtime executions.
 
 Acyclic regions use forward structure; proved reducible natural loops use Wasm loops.
 Irreducible, captured or exhausted cases retain dense dispatch. Transfers preserve block

@@ -959,6 +959,46 @@ try {
     recover();
   }
 
+  // Current-format numeric restoration can supply a boxed i64 whose value
+  // fits i31. Executed range facts must not turn its extraction into a cast.
+  const integerSampleValue = 1n << 40n;
+  const integerSample = vm.vm['native-int64'](integerSampleValue);
+  const integerType = vm.vm['core-object-type'](integerSample);
+  const integerReader = Object.keys(vm.vm).find(name => name.startsWith(`core-read:${integerType}:`));
+  const integerSignature = integerReader.split(':')[2];
+  const integerFields = vm.vm[integerReader](integerSample);
+  const immutableIntegerFields = Array.from(integerSignature, (kind, index) => index)
+    .filter(index => integerSignature[index] === integerSignature[index].toLowerCase());
+  const mutableIntegerFields = Array.from(integerSignature, (kind, index) => index)
+    .filter(index => integerSignature[index] !== integerSignature[index].toLowerCase());
+  const integerPayloadArgument = immutableIntegerFields.findIndex(index =>
+    integerSignature[index] === 'l' && integerFields[index] === integerSampleValue);
+  const integerSignArgument = mutableIntegerFields.findIndex(index =>
+    integerSignature[index] === 'I' && integerFields[index] === 1);
+  assert.ok(integerPayloadArgument >= 0 && integerSignArgument >= 0);
+  const boxedInteger = number => {
+    const arguments_ = immutableIntegerFields.map(index => integerFields[index]);
+    const mutable = mutableIntegerFields.map(index => integerFields[index]);
+    arguments_[integerPayloadArgument] = number;
+    mutable[integerSignArgument] = number < 0n ? -1 : number > 0n ? 1 : 0;
+    const value = vm.vm[`core-new:${integerType}`](...arguments_);
+    vm.vm[`core-set:${integerType}`](value, ...mutable);
+    assert.equal(typeof value, 'object', 'Exercise actual boxed storage.');
+    assert.equal(vm.javascript.integer(value), number);
+    return value;
+  };
+  const narrowedInteger = packetFunction(`(compile-native '(lambda (x)
+    (declare (optimize (safety 0) (debug 0)))
+    (if (integerp x)
+        (if (>= x 0) (if (< x 10) (+ x 1) x) x)
+        0)))`);
+  for (const number of [-1073741825n, -1n, 0n, 5n, 9n, 10n, 1073741823n, 1073741824n]) {
+    const expected = number >= 0n && number < 10n ? number + 1n : number;
+    for (const value of [vm.vm['native-int64'](number), boxedInteger(number)])
+      assert.equal(vm.javascript.integer(vm.vm['native-call1'](narrowedInteger, value)), expected);
+  }
+  recover();
+
   const reject = (source, reason, conditionType = 'compiler-input-error') => {
     const output = evaluate(`(handler-case (progn ${source} :unexpected-acceptance)
       (${conditionType} (condition) (princ-to-string condition)))`);
@@ -2028,6 +2068,174 @@ try {
         (hir-type-proves-p (gethash (first (hir-unit-functions unit)) facts t) '${expected}))`);
     }
   }
+  // Executed integer predicates, rather than declarations, justify rounding
+  // ordered bounds. Both arms and operand orientations include bignum limits.
+  check(`(and
+    (loop for (left right expected) in
+        '(((integer * 9) integer (integer * 9))
+          ((integer 4 *) integer (integer 4 *))
+          ((integer * 9) (integer 4 *) (integer 4 9))) always
+      (and (hir-type-proves-p (hir-type-restrict left right) expected)
+           (hir-type-proves-p (hir-type-restrict right left) expected)))
+    (null (hir-type-restrict '(integer 10 *) '(integer * 9)))
+    (null (hir-type-restrict '(integer * 9) '(integer 10 *))))`);
+  for (const threshold of [
+    10n, -1073741825n, -1073741824n, 1073741823n, 1073741824n,
+    9223372036854775807n, -9223372036854775808n,
+  ]) {
+    for (const [operator, upper, inclusive] of [
+      ['<', true, false], ['<=', true, true],
+      ['>', false, false], ['>=', false, true],
+    ]) {
+      for (const positive of [true, false]) {
+        const bound = positive
+          ? threshold + (inclusive ? 0n : upper ? -1n : 1n)
+          : threshold + (inclusive ? upper ? 1n : -1n : 0n);
+        const expected = (positive ? upper : !upper)
+          ? `(integer * ${bound})` : `(integer ${bound} *)`;
+        const reversed = { '<': '>', '<=': '>=', '>': '<', '>=': '<=' }[operator];
+        for (const test of [`(${operator} x ${threshold})`, `(${reversed} ${threshold} x)`]) {
+          check(`(hir-type-proves-p
+            (soundness-proven-result
+              '(lambda (x)
+                 (declare (notinline ${operator} ${reversed})
+                          (optimize (safety 1) (debug 0)))
+                 (if (integerp x)
+                     (if ${test} ${positive ? 'x' : bound} ${positive ? bound : 'x'})
+                     ${bound}))) '${expected})`);
+        }
+      }
+    }
+  }
+  // A declaration cannot supply executable integer membership to a proof.
+  check(`(not (hir-type-proves-p
+    (soundness-proven-result
+      '(lambda (x)
+         (declare (type integer x) (optimize (safety 1) (debug 0)))
+         (if (< x 10) x 9))) '(integer * 9)))`);
+  // Observed comparisons cannot transfer a range to a later cell value.
+  // Keep threshold effects, primary extraction and saved predicate identity.
+  for (const body of [
+    '(if (< x (progn (setq x 20) (values 10 :extra))) (< x 10) t)',
+    '(let ((test (< x 10))) (setq x 20) (if test (< x 10) t))',
+    '(if (not (>= x 10)) (progn (setq x 20) (< x 10)) t)',
+    '(if (< x 10) (progn (funcall (lambda () (setq x 20))) (< x 10)) t)',
+    '(if (< x 10) (progn (if flag (setq x 20) (setq x 30)) (< x 10)) t)',
+  ]) {
+    check(`(let ((function (compile-native
+        '(lambda (flag)
+           (declare (optimize (safety 0) (debug 0)))
+           (let ((x 1)) ${body})))))
+      (and (null (funcall function nil)) (null (funcall function t))))`);
+  }
+  // Comparisons against integers do not establish integer membership for
+  // rational/float inputs, and must retain operand effects and checked errors.
+  for (const safety of [0, 1, 3]) {
+    check(`(let ((function (compile-native
+        '(lambda (x effect)
+           (declare (optimize (safety ${safety}) (debug 0)))
+           (if (< x (progn (funcall effect) (values 10 :extra)))
+               (values (<= x 9) x) (values nil x))))) (effects 0))
+      (and (equal (multiple-value-list
+          (funcall function 19/2 (lambda () (incf effects)))) '(nil 19/2))
+        (equal (multiple-value-list
+          (funcall function 9.5d0 (lambda () (incf effects)))) '(nil 9.5d0))
+        (handler-case
+          (progn (funcall function :invalid (lambda () (incf effects))) nil)
+          (type-error () t))
+        (equal (multiple-value-list
+          (funcall function 7 (lambda () (incf effects)))) '(t 7))
+        (= effects 4)))`);
+  }
+  // Executed bounds can narrow arithmetic while retaining checked entry facts.
+  check(`(let ((function (compile-native
+      '(lambda (x)
+         (declare (optimize (safety 0) (debug 0)))
+         (if (integerp x)
+             (if (>= x 0)
+                 (if (< x 10) (values (+ x 1) :small) (values x :large))
+                 (values x :negative))
+             (values x :other))))))
+    (and (equal (multiple-value-list (funcall function 7)) '(8 :small))
+         (equal (multiple-value-list (funcall function 1073741824)) '(1073741824 :large))
+         (equal (multiple-value-list (funcall function -1)) '(-1 :negative))
+         (equal (multiple-value-list (funcall function 7.5d0)) '(7.5d0 :other))))`);
+  // Default-safety scalar chains retain snapshots, multiple values and
+  // canonical promotion when an intermediate leaves the immediate range.
+  for (const declaration of ['', '(notinline + - 1+ 1-)']) {
+    check(`(let ((function (compile-native
+        '(lambda (x)
+           (declare ${declaration} (optimize (safety 1) (debug 0)))
+           (let* ((a (logand x 1023))
+                  (b (+ a 1073741823))
+                  (c (- b 1073741824)))
+             (values b (1+ (1- c)) a))))))
+      (and (loop for x in '(0 1 1023 -1 1267650600228229401496703205375) always
+          (let ((a (logand x 1023)))
+            (equal (multiple-value-list (funcall function x))
+              (list (+ a 1073741823) (- a 1) a))))
+        (handler-case (progn (funcall function :invalid) nil) (type-error () t))
+        (equal (multiple-value-list (funcall function 7)) '(1073741830 6 7))))`);
+  }
+  // Statistics distinguish accepted plans from emitted arithmetic. Checked
+  // fixed calls remain available under NOTINLINE; expansion honors its veto.
+  check(`(with-compilation-statistics (statistics)
+    (let ((function (compile-native
+        '(lambda (x)
+           (declare (optimize (safety 1) (debug 0)))
+           (1+ (logand x 1023))))))
+      (and (= (funcall function 7) 8)
+        (let ((rows (compilation-statistics-report statistics)))
+          (and (assoc :proof/integer-arithmetic-i32 rows)
+               (not (null (assoc :optimization/integer-arithmetic-i32 rows))))))))`);
+  check(`(with-compilation-statistics (statistics)
+    (let ((function (compile-native
+        '(lambda (x)
+           (declare (notinline + - 1+ 1-) (optimize (safety 1) (debug 0)))
+           (let ((a (logand x 1023))) (1+ (- (+ a 17) 3)))))))
+      (and (= (funcall function 7) 22)
+        (not (assoc :proof/integer-arithmetic-i32
+               (compilation-statistics-report statistics))))))`);
+  // A proved integer range is independent of storage representation. Outside
+  // the range, ordinary arithmetic preserves floating point and large values.
+  check(`(let ((function (compile-native
+      '(lambda (x)
+         (declare (optimize (safety 1) (debug 0)))
+         (if (and (integerp x) (>= x -2147483647) (<= x 2147483646))
+             (values (+ x 1) :bounded) (values (+ x 1) :general))))))
+    (and (loop for x in '(-2147483647 -1073741824 0 1073741823 2147483646) always
+        (equal (multiple-value-list (funcall function x)) (list (+ x 1) :bounded)))
+      (loop for x in '(-2147483648 2147483647 9223372036854775807 1/2 0.5d0) always
+        (equal (multiple-value-list (funcall function x)) (list (+ x 1) :general)))
+      (handler-case (progn (funcall function :invalid) nil) (type-error () t))
+      (equal (multiple-value-list (funcall function 4)) '(5 :bounded))))`);
+  // A bounded operand does not prove a bounded arithmetic result. The last
+  // increment can leave signed i32 and must retain the ordinary exact path.
+  check(`(let ((function (compile-native
+      '(lambda (x)
+         (declare (optimize (safety 1) (debug 0)))
+         (+ (logand x 2147483647) 1)))))
+    (and (= (funcall function 2147483647) 2147483648)
+         (= (funcall function 0) 1)))`);
+  // Later writes cannot change raw SSA observations or inherit old facts.
+  check(`(let ((function (compile-native
+      '(lambda (value effect)
+         (declare (optimize (safety 1) (debug 0)))
+         (let* ((x (logand value 15)) (saved (+ x 1)))
+           (setq x (funcall effect))
+           (values saved (+ x 1)))))) (effects 0))
+    (and (equal (multiple-value-list
+        (funcall function 7 (lambda () (incf effects) 0.5d0))) '(8 1.5d0))
+      (= effects 1)))`);
+  // The final update may leave i64 even when the executed loop guard fits.
+  check(`(let ((function (compile-native
+      '(lambda (x)
+         (declare (type integer x) (inline + <=)
+                  (optimize (safety 0) (debug 0)))
+         (loop while (<= x 9223372036854775807) do (setq x (+ x 1)))
+         (values x :done)))))
+    (equal (multiple-value-list (funcall function 9223372036854775806))
+      '(9223372036854775808 :done)))`);
   for (const source of [
     '(lambda (x) (declare (type (eql 7) x)) x)',
     '(lambda (x) (the (eql 7) x))',

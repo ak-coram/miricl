@@ -130,7 +130,7 @@
                         (otherwise (error "Unexpected native GC instruction ~D." argument))))
              (multiple-value-bind (ignored next) (native-read-uleb bytes position)
                (declare (ignore ignored)) (setq position next))))
-          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd1 #xd3)))
+          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd1 #xd3)))
            (error "Unexpected native instruction ~D." code)))
         (when (or (not references-only) (member code '(#x10 #x12 #xd2)))
           (push (make-native-op code argument start position) ops))))
@@ -301,7 +301,7 @@
       ((#x21 #x1a) (values 1 0))
       ((#x22 #x45 #x50 #xa7 #xac #xd1) (values 1 1))
       (#xfb (if (= (native-op-argument op) 5) (values 2 0) (values 1 1)))
-      ((#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3) (values 2 1))
+      ((#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3) (values 2 1))
       ((#x10 #x12)
        (when (and *native-call-stack-effects* (< (native-op-argument op) (length *native-call-stack-effects*)))
          (let ((effect (svref *native-call-stack-effects* (native-op-argument op))))
@@ -910,7 +910,7 @@
     (case code
       ((#x20 #x22) (aref types argument))
       (#x10 (first (second (aref signatures argument))))
-      ((#x41 #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #xa7 #xd1 #xd3) '(#x7f))
+      ((#x41 #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #xa7 #xd1 #xd3) '(#x7f))
       ((#x42 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xac) '(#x7e))
       (#xd0 (let ((start (1+ (native-op-start op))))
               (if (and (= (native-op-end op) (1+ start))
@@ -1073,7 +1073,7 @@ Return replacement bodies and (body parameters results) helper records."
                       ;; barriers. Regions neither consume an outside operand
                       ;; nor introduce a new branch or retained recursive frame.
                       (unless (and (plusp work) (plusp function-work) (or (/= code #x10) (= (aref body (native-op-start op)) #x10))
-                                   (member code '(#x10 #x1a #x20 #x21 #x22 #x41 #x42 #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd0 #xd1 #xd3 #xfb)))
+                                   (member code '(#x10 #x1a #x20 #x21 #x22 #x41 #x42 #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd0 #xd1 #xd3 #xfb)))
                         (return))
                       (multiple-value-bind (pops pushes)
                           (if (= code #x10)

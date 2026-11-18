@@ -74,6 +74,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-type-guards* nil)
 (defvar *wasm-inline-vector-calls* nil)
 (defvar *wasm-inline-simple-calls* nil)
+(defvar *wasm-proven-integer-arithmetic* nil)
 (defvar *wasm-inline-references* nil)
 (defvar *wasm-branch-tests* nil)
 (defvar *wasm-reused-values* nil)
@@ -612,6 +613,11 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 
 (defun native-removable-p (instruction)
   (declare (type simple-vector instruction))
+  ;; These arithmetic plans retain their original cooperative checkpoint,
+  ;; even when no consumer observes the arithmetic result.
+  (when (and *wasm-proven-integer-arithmetic*
+             (gethash instruction *wasm-proven-integer-arithmetic*))
+    (return-from native-removable-p nil))
   ;; These operations cannot signal or change observable state in valid HIR.
   ;; Global lookups and calls stay live even when their result is discarded.
   (or (and *wasm-proper-list-checks* (gethash instruction *wasm-proper-list-checks*))
@@ -1693,7 +1699,9 @@ exhausted work budgets keep every incoming value group."
            (wasm-byte #x42) (wasm-s32 literal))
           (t
            (wasm-get operand)
-           (if (<= width 31)
+           ;; A narrow mathematical range does not establish ref.i31. Only
+           ;; a canonical checked producer licenses that representation cast.
+           (if (and (<= width 31) (native-checked-integer-origin-p operand))
                (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
                (wasm-call "native-unbox-int64"))
            (when cached
@@ -1796,7 +1804,7 @@ exhausted work budgets keep every incoming value group."
                    (if (integerp literal)
                        (progn (wasm-byte #x42) (wasm-s64 literal))
                        (progn (wasm-get value)
-                         (if (<= width 31)
+                         (if (and (<= width 31) (native-checked-integer-origin-p value))
                              (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
                              (wasm-call "native-unbox-int64")))))
                  (emit-native-unboxed-integer value width))))
@@ -1900,9 +1908,10 @@ exhausted work budgets keep every incoming value group."
     (unless (and width (<= width (if (zerop safety) 64 31))) (return-from emit-native-vector-call nil))
     (wasm-get (third inputs))
     (wasm-get (fourth inputs))
-    (if (<= width 31)
+    (if (and (<= width 31) (native-checked-integer-origin-p (fourth inputs)))
         (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d))
-        (wasm-call "native-unbox-int64"))
+        (progn (wasm-call "native-unbox-int64")
+          (when (<= width 31) (wasm-byte #xa7))))
     (wasm-call (cond ((not (zerop safety)) "native-vector-ref")
                      ((<= width 31) "native-vector-ref-trusted")
                      (t "native-vector-ref-trusted64")))
@@ -1951,13 +1960,25 @@ exhausted work budgets keep every incoming value group."
   ;; Each CASE arm names an exact standard CL operation. These bounded plans
   ;; reuse compact checked helpers or replace the ordinary argument packet;
   ;; NOTINLINE still vetoes expansion. Never classify a private builtin by ID.
+  (let ((arithmetic nil) (fuel 4096))
+    (declare (type (integer -1 4096) fuel))
     (dolist (function (hir-unit-functions unit))
       ;; Only inline TRUNCATE needs full multiple-value demand here. Compute
       ;; it on first use, then share the table within this function's plan.
-      (let ((full nil))
+      (let ((full nil)
+            (arithmeticp (and *wasm-proven-integer-arithmetic*
+                              (< (hir-function-debug-level function) 2)
+                              (< (ash (hir-function-optimization-policy function) -4) 3)
+                              (not (and *wasm-optimization-barriers*
+                                        (gethash function *wasm-optimization-barriers*))))))
       (dolist (block (hir-function-blocks function))
         (let ((allocated nil))
         (dolist (instruction (hir-block-instructions block))
+          ;; Share the ordinary traversal, including the old selection budget
+          ;; for instructions in eligible functions. Exhaustion discards only
+          ;; arithmetic candidates; ordinary and comparison planning continue.
+          (when (and arithmeticp (not (minusp fuel)) (minusp (decf fuel)))
+            (setq arithmetic nil))
           (when (eq (hir-instruction-opcode instruction) :call)
             (let* ((inputs (hir-instruction-inputs instruction)) (reference (second inputs))
                    (producer (hir-value-producer reference))
@@ -2131,6 +2152,15 @@ exhausted work budgets keep every incoming value group."
                   (cond ((equal type '(eql t)) (setq kind :true))
                         ((eq type 'null) (setq kind :false)))))
               (when kind
+                    (when (and arithmeticp (not (minusp fuel))
+                               (= (hir-instruction-safety-level instruction) 1)
+                               (eq kind :standard-call)
+                               name
+                               (or (and (= (length inputs) 4) (member name '(+ -)))
+                                   (and (= (length inputs) 3) (member name '(1+ 1-)))))
+                      ;; NAME already requires a direct canonical reference
+                      ;; with expansion permission, including NOTINLINE.
+                      (push (cons instruction name) arithmetic))
                     (when (member kind '(:cons :list :list-star)) (setq allocated t))
                     (when (and allocated *wasm-cons-forward-blocks*
                                (member kind '(:car :cdr :car-cons :cdr-cons :checked-car :checked-cdr)))
@@ -2141,15 +2171,18 @@ exhausted work budgets keep every incoming value group."
                     ;; Computed designators retain their evaluation and identity.
                     (when attributes
                       (setf (gethash reference *wasm-inline-references*) t))))))))))
-  (native-plan-proven-integer-comparisons unit)
+  (native-plan-proven-integers unit arithmetic)
   (native-plan-character-code-fusion unit)
-  *wasm-inline-simple-calls*)
+  *wasm-inline-simple-calls*))
 
-(defun native-checked-integer-origin-p (value)
+(defun native-checked-integer-origin-p (value &optional prospective-arithmetic)
   ;; A mathematical range does not prove the runtime representation. Retained
   ;; checked LOGAND canonicalizes successful signed-i64 results through INT64
-  ;; or INTEGER. Copies and primary extraction preserve that representation;
+  ;; or INTEGER. Proven arithmetic uses the same canonical boxing contract.
+  ;; Copies and primary extraction preserve that representation;
   ;; cells, joins and external returns need a separate representation proof.
+  ;; PROSPECTIVE-ARITHMETIC is private candidate admission only. Callers that
+  ;; justify extraction must omit it and inspect accepted plans instead.
   (loop repeat 32 do
     (let ((producer (hir-value-producer value)))
       (unless (%hir-instruction-p producer) (return nil))
@@ -2161,44 +2194,111 @@ exhausted work budgets keep every incoming value group."
                               (<= -9223372036854775808 literal 9223372036854775807))
                      (values t literal)))))
         (:call
-         (return (and (= (length (hir-instruction-inputs producer)) 4)
+         (return (or (and prospective-arithmetic (gethash producer prospective-arithmetic))
+                     (and *wasm-proven-integer-arithmetic*
+                          (gethash producer *wasm-proven-integer-arithmetic*) t)
+                     (and (= (length (hir-instruction-inputs producer)) 4)
                       (eq (hir-inline-primitive producer) 'logand)
-                      (eq (gethash producer *wasm-inline-simple-calls*) :logand-general))))
+                      (eq (gethash producer *wasm-inline-simple-calls*) :logand-general)))))
         (otherwise (return nil))))))
 
-(defun native-plan-proven-integer-comparisons (unit)
-  ;; Run after ordinary plans so each accepted producer still has its checked
-  ;; implementation. Only exact binary ordered comparisons at SAFETY 1 enter
-  ;; this path; the ordinary planner already honored NOTINLINE. Declarations
-  ;; alone cannot justify either operand's extraction.
-  (let ((pending nil) (roots nil))
+(defun native-plan-proven-integers (unit candidates)
+  "Share one executable-fact query between arithmetic and comparison plans."
+  (let ((arithmetic nil) (comparisons nil) (roots nil)
+        (prospective (make-hash-table :test 'eq)))
+    (dolist (entry (nreverse candidates))
+      (let* ((instruction (car entry)) (name (cdr entry))
+             (operands (cddr (hir-instruction-inputs instruction)))
+             (types (and *wasm-inferred-types*
+                         (mapcar (lambda (operand) (gethash operand *wasm-inferred-types* t)) operands))))
+        ;; Mixed facts only reject candidates. Reject unknown operand widths
+        ;; before deriving a result, so untyped calls need no interval work.
+        (when (and types
+                   (every (lambda (type)
+                            (let ((width (native-type-integer-width type)))
+                              (and width (<= width 32)))) types)
+                   (let ((width (native-type-integer-width (hir-inline-result-type name types))))
+                     (and width (<= width 32))))
+          (push entry arithmetic)
+          (setf (gethash instruction prospective) t)
+          (dolist (operand operands) (push operand roots)))))
     (dolist (function (hir-unit-functions unit))
       (dolist (block (hir-function-blocks function))
         (dolist (instruction (hir-block-instructions block))
           (when (and (= (hir-instruction-safety-level instruction) 1)
                      (member (gethash instruction *wasm-inline-simple-calls*)
                        '(:less-real :greater-real :not-greater-real :not-less-real))
-                     (every #'native-checked-integer-origin-p
+                     (every (lambda (operand) (native-checked-integer-origin-p operand prospective))
                        (cddr (hir-instruction-inputs instruction))))
-            (push instruction pending)
-            (dolist (operand (cddr (hir-instruction-inputs instruction)))
-              (push operand roots))))))
+            (push instruction comparisons)
+            (dolist (operand (cddr (hir-instruction-inputs instruction))) (push operand roots))))))
     (when roots
-      ;; Treat every function as an entry, retaining unknown external inputs.
-      ;; Recompute from validated current HIR; exhausted inference is unknown.
-      (let ((proven (infer-hir-types-checked unit roots t (hir-unit-functions unit) t)))
-        (dolist (instruction pending)
-          (when (every (lambda (operand)
+      ;; These maps describe the current owned HIR, independently of inferred
+      ;; types and declarations. All functions remain externally callable for
+      ;; this proof. No metadata or facts survive this emission.
+      (let ((proven (infer-hir-types-checked unit roots t (hir-unit-functions unit) t
+                       *wasm-result-callees* *hir-standard-operations* *wasm-type-guards*)))
+        (native-plan-proven-integer-arithmetic arithmetic proven)
+        (native-plan-proven-integer-comparisons comparisons proven)))))
+
+(defun native-plan-proven-integer-arithmetic (pending proven)
+  "Choose exact i32 arithmetic from executable operand facts at SAFETY 1."
+  (dolist (entry pending)
+    (let* ((instruction (car entry)) (name (cdr entry))
+           (types (mapcar (lambda (operand) (gethash operand proven t))
+                          (cddr (hir-instruction-inputs instruction))))
+           (widths (mapcar #'native-type-integer-width types))
+           ;; A result assertion is never evidence of nonoverflow.
+           (width (native-type-integer-width (hir-inline-result-type name types))))
+      (when (and width (<= width 32)
+                 (every (lambda (size) (and size (<= size 32))) widths))
+        (compiler-statistic :proof/integer-arithmetic-i32 name)
+        (setf (gethash instruction *wasm-proven-integer-arithmetic*) (vector widths width name)
+              (gethash instruction *wasm-inline-simple-calls*)
+              (if (member name '(+ 1+)) #x7c #x7d))))))
+
+(defun emit-native-proven-integer-arithmetic (inputs opcode proof &optional raw)
+  (compiler-statistic :optimization/integer-arithmetic-i32 (svref proof 2))
+  ;; Retain the call's scheduling point after all operand producers. Raw SSA
+  ;; snapshots remain i64 so the existing storage/alias ABI stays unchanged.
+  (wasm-call "native-poll")
+  (loop for operand in (cddr inputs) for width in (svref proof 0) do
+    (let* ((cached (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* operand)))
+           (producer (hir-value-producer operand))
+           (literal (and (%hir-instruction-p producer)
+                         (eq (hir-instruction-opcode producer) :constant)
+                         (first (hir-instruction-attributes producer)))))
+      (cond ((integerp literal) (wasm-integer literal))
+            ((and (<= width 31) (native-checked-integer-origin-p operand)
+                  (not (and cached (or (eq (svref cached 4) :result) (svref cached 3)))))
+             (wasm-get operand) (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d))
+            (t (emit-native-unboxed-integer operand width) (wasm-byte #xa7)))))
+  (when (= (length inputs) 3) (wasm-integer 1))
+  (wasm-byte (if (= opcode #x7c) #x6a #x6b))
+  (wasm-byte #xac)
+  (unless raw (wasm-call "native-int64")))
+
+(defun native-plan-proven-integer-comparisons (pending proven)
+  ;; Run after ordinary plans so each accepted producer still has its checked
+  ;; implementation. Only exact binary ordered comparisons at SAFETY 1 enter
+  ;; this path; the ordinary planner already honored NOTINLINE. Declarations
+  ;; alone cannot justify either operand's extraction.
+  (dolist (instruction pending)
+    ;; Prospective arithmetic admitted only query roots. A rejected arithmetic
+    ;; candidate cannot license extraction, even if its value has a range.
+    (when (and (every #'native-checked-integer-origin-p
+                  (cddr (hir-instruction-inputs instruction)))
+               (every (lambda (operand)
                          (multiple-value-bind (low high bounded)
                              (hir-integer-bounds (gethash operand proven t))
                            (and bounded (<= -9223372036854775808 low high 9223372036854775807))))
-                  (cddr (hir-instruction-inputs instruction)))
-            (let ((kind (case (gethash instruction *wasm-inline-simple-calls*)
-                          (:less-real :proven-less-int64) (:greater-real :proven-greater-int64)
-                          (:not-greater-real :proven-not-greater-int64)
-                          (:not-less-real :proven-not-less-int64))))
-              (compiler-statistic :proof/integer-comparison-checked-origin kind)
-              (setf (gethash instruction *wasm-inline-simple-calls*) kind))))))))
+                  (cddr (hir-instruction-inputs instruction))))
+      (let ((kind (case (gethash instruction *wasm-inline-simple-calls*)
+                    (:less-real :proven-less-int64) (:greater-real :proven-greater-int64)
+                    (:not-greater-real :proven-not-greater-int64)
+                    (:not-less-real :proven-not-less-int64))))
+        (compiler-statistic :proof/integer-comparison-checked-origin kind)
+        (setf (gethash instruction *wasm-inline-simple-calls*) kind)))))
 
 (defun emit-native-proven-integer-comparison (inputs kind)
   ;; Use the full scalar extractor even for narrow mathematical ranges: an
@@ -2476,7 +2576,11 @@ exhausted work budgets keep every incoming value group."
   ;; its HIR type cannot describe the lowered integer. Keep the ordinary box
   ;; helper's fixed-arity ABI and policy for all existing callers.
   (declare (type simple-vector raw))
-  (let ((width (or (native-integer-width (svref raw 1)) (svref raw 2))))
+  (let* ((producer (hir-value-producer (svref raw 1)))
+         (proof (and *wasm-proven-integer-arithmetic*
+                     (gethash producer *wasm-proven-integer-arithmetic*)))
+         (width (if proof (svref proof 1)
+                    (or (native-integer-width (svref raw 1)) (svref raw 2)))))
     (if (and width (<= width 31) *wasm-import-counts*
              (not (gethash "native-int64" *wasm-import-counts*)))
         (progn (compiler-statistic :optimization/immediate-integer-box)
@@ -2636,11 +2740,18 @@ exhausted work budgets keep every incoming value group."
                (if (eq kind :character-code-at)
                    (progn (wasm-get (third inputs))
                           (emit-native-character-code-at inputs t))
-                   (emit-native-inline-integer inputs kind t))
+                   (let ((proof (and *wasm-proven-integer-arithmetic*
+                                     (gethash instruction *wasm-proven-integer-arithmetic*))))
+                     (if proof (emit-native-proven-integer-arithmetic inputs kind proof t)
+                         (emit-native-inline-integer inputs kind t))))
                (emit-native-raw-result-store raw output)
                (return-from emit-native-instruction nil)))
            (cond
-             ((integerp kind) (emit-native-inline-integer inputs kind))
+             ((integerp kind)
+              (let ((proof (and *wasm-proven-integer-arithmetic*
+                                (gethash instruction *wasm-proven-integer-arithmetic*))))
+                (if proof (emit-native-proven-integer-arithmetic inputs kind proof)
+                    (emit-native-inline-integer inputs kind))))
              ((member kind '(:proven-less-int64 :proven-greater-int64
                              :proven-not-greater-int64 :proven-not-less-int64))
               (emit-native-proven-integer-comparison inputs kind))
@@ -3420,7 +3531,10 @@ exhausted work budgets keep every incoming value group."
                    (kind (if capture :capture
                              (and (eq (hir-instruction-opcode instruction) :call)
                                   (gethash instruction *wasm-inline-simple-calls*)))))
-              (when (and kind (or (and (integerp kind) (or (<= #x50 kind #x59) (member kind '(#x7c #x7d #x7e #x83 #x84 #x85))))
+              (when (and kind
+                         (not (and *wasm-proven-integer-arithmetic*
+                                   (gethash instruction *wasm-proven-integer-arithmetic*)))
+                         (or (and (integerp kind) (or (<= #x50 kind #x59) (member kind '(#x7c #x7d #x7e #x83 #x84 #x85))))
                                   (member kind '(:eq :null :consp :simple-vector-p :vectorp :stringp :symbolp :integerp :characterp :evenp :oddp :capture)))
                          (or capture (native-value-slot *wasm-scalar-groups* output))
                          (or (native-value-slot *wasm-live-values* output) (gethash instruction fused))
@@ -3512,7 +3626,7 @@ exhausted work budgets keep every incoming value group."
            (if (integerp literal)
                (progn (wasm-byte #x42) (wasm-s64 literal))
                (progn (wasm-get input)
-                 (if (<= width 31)
+                 (if (and (<= width 31) (native-checked-integer-origin-p input))
                      (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
                      (wasm-call "native-unbox-int64"))))))
        (cond ((member kind '(:evenp :oddp))
@@ -3714,9 +3828,12 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           (let* ((output (hir-instruction-output instruction))
                  (kind (and (eq (hir-instruction-opcode instruction) :call)
                             (gethash instruction *wasm-inline-simple-calls*)))
-                 (width (if (eq kind :character-code-at)
-                            (native-type-integer-width (hir-inline-result-type 'char-code '(character)))
-                            64)))
+                 (proof (and *wasm-proven-integer-arithmetic*
+                             (gethash instruction *wasm-proven-integer-arithmetic*)))
+                 (width (cond (proof (svref proof 1))
+                              ((eq kind :character-code-at)
+                               (native-type-integer-width (hir-inline-result-type 'char-code '(character))))
+                              (t 64))))
             (when (and (or (and (integerp kind) (>= kind #x60)) (eq kind :character-code-at))
                        width (<= width 64)
                        (native-value-slot *wasm-live-values* output)
@@ -4851,6 +4968,7 @@ the named-entry format for hosts that translate individual Wasm workers."
          (*wasm-object-types* nil) (*wasm-exceptions* nil))
     (let ((*wasm-inline-vector-calls* (make-hash-table :test 'eq))
           (*wasm-inline-simple-calls* (make-hash-table :test 'eq))
+          (*wasm-proven-integer-arithmetic* (make-hash-table :test 'eq))
           (*wasm-cons-forward-blocks* (make-hash-table :test 'eq))
           (*wasm-proper-list-checks* nil)
           (*wasm-inline-references* (make-hash-table :test 'eq)))
@@ -5070,7 +5188,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-generic-candidate native-proven-generic-mask native-plan-generic-calls emit-native-generic-call
                    emit-native-unboxed-integer native-integer-result-fits-p native-inline-shift-opcode native-inline-nonnegative-division-opcode native-inline-integer-opcode emit-native-integer-chain emit-native-inline-integer emit-native-integer-call
                    native-simple-vector-value-p native-list-value-p emit-native-vector-call emit-native-list-call emit-native-character-call
-                   native-plan-inline-simple native-checked-integer-origin-p native-plan-proven-integer-comparisons emit-native-proven-integer-comparison
+                   native-plan-inline-simple native-checked-integer-origin-p native-plan-proven-integers native-plan-proven-integer-arithmetic emit-native-proven-integer-arithmetic native-plan-proven-integer-comparisons emit-native-proven-integer-comparison
                    native-plan-character-code-fusion native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-builtin emit-native-tail-call
                    native-fixed-arity emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-restore emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward

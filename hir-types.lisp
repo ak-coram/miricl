@@ -579,17 +579,19 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
   (cond ((null derived) nil) ((eq asserted t) derived) ((eq derived t) asserted)
         ((hir-type-equal-p derived asserted) asserted)
         (t
-         (multiple-value-bind (low-a high-a integer-a) (hir-integer-bounds derived)
-           (multiple-value-bind (low-b high-b integer-b) (hir-integer-bounds asserted)
+         (multiple-value-bind (low-a high-a integer-a) (hir-integer-interval derived)
+           (multiple-value-bind (low-b high-b integer-b) (hir-integer-interval asserted)
              (if (and integer-a integer-b)
-                 (let ((low (max low-a low-b)) (high (min high-a high-b)))
+                 (let ((low (if (and low-a low-b) (max low-a low-b) (or low-a low-b)))
+                       (high (if (and high-a high-b) (min high-a high-b) (or high-a high-b))))
                    ;; Either operand contains the intersection. Retaining
                    ;; one whose bounds already match avoids fresh conses,
                    ;; and can retain useful MEMBER/EQL restrictions too.
-                   (cond ((> low high) nil)
-                         ((and (= low low-a) (= high high-a)) derived)
-                         ((and (= low low-b) (= high high-b)) asserted)
-                         (t (list 'integer low high))))
+                   ;; NIL endpoints denote infinity, not an unknown type.
+                   (cond ((and low high (> low high)) nil)
+                         ((and (eql low low-a) (eql high high-a)) derived)
+                         ((and (eql low low-b) (eql high high-b)) asserted)
+                         (t (list 'integer (or low '*) (or high '*)))))
                  ;; Retaining just the assertion is a sound upper bound of
                  ;; the intersection, and avoids growing recursive AND trees.
                  asserted))))))
@@ -758,8 +760,8 @@ environment. SUBTYPEP's false and unknown answers are deliberately not inferred.
 (defun hir-type-truth-premise (test &optional cells)
   "Recover a truth or canonical type predicate through immutable temporaries.
 The third value is a type established by a positive predicate, an integer
-predicate name, or NIL for ordinary truth. CELLS records actual private uses,
-not client binding flags."
+predicate name, a tagged integer comparison, or NIL for ordinary truth.
+CELLS records actual private uses, not client binding flags."
   (declare (type simple-vector test))
   (let ((current test) (inverse nil) (predicate nil))
     (dotimes (depth 32)
@@ -780,6 +782,21 @@ not client binding flags."
                                 (multiple-value-bind (environment known) (hir-primary-constant (fifth inputs))
                                   (and known (null environment)))))
                    (return-from hir-type-truth-premise (values (third inputs) inverse type)))))
+             (when (and (member name '(< <= > >=)) (= (length inputs) 4))
+               ;; Only binary comparisons have complementary ordered arms.
+               ;; Keep the call and its operand effects; later inference must
+               ;; independently establish integer membership before rounding
+               ;; a strict threshold to the next integer.
+               (multiple-value-bind (bound known) (hir-primary-constant (fourth inputs))
+                 (when (and known (integerp bound))
+                   (return-from hir-type-truth-premise
+                     (values (third inputs) inverse (list :integer-comparison name bound)))))
+               (multiple-value-bind (bound known) (hir-primary-constant (third inputs))
+                 (when (and known (integerp bound))
+                   (return-from hir-type-truth-premise
+                     (values (fourth inputs) inverse
+                       (list :integer-comparison
+                         (case name (< '>) (<= '>=) (> '<) (>= '<=)) bound))))))
              (unless (= (length inputs) 3) (return))
              (let ((type (and name (standard-function-predicate-type name))))
              (cond
@@ -916,11 +933,16 @@ A budget limits cost; stopping early only loses optimization opportunities."
                                                (or source observed))))
                               (compiler-statistic :proof/branch-premise
                                 (if (consp restriction) (car restriction) (or restriction positive)))
-                              (push (cons observed (if (member restriction '(zerop minusp plusp))
-                                                      (cons restriction positive)
-                                                      (if restriction
-                                                          (if positive restriction (list 'not restriction))
-                                                          positive)))
+                              (push (cons observed
+                                     (cond ((member restriction '(zerop minusp plusp))
+                                            (cons restriction positive))
+                                           ((and (consp restriction)
+                                                 (eq (car restriction) :integer-comparison))
+                                            (list :integer-comparison (second restriction)
+                                              (third restriction) positive))
+                                           (restriction
+                                            (if positive restriction (list 'not restriction)))
+                                           (t positive)))
                                     (gethash (hir-instruction-output instruction) guards))))
                           (let ((terminator (hir-block-terminator current)) (previous nil))
                             (when (and (not killed) (member (hir-instruction-opcode terminator) '(:jump :branch)))
@@ -989,12 +1011,12 @@ name proves semantics, never identity of its runtime function object."
             (compiler-statistic (if result :proof/integer-identity-known :proof/integer-identity-unknown) name)
             result))))))
 
-(defun hir-integer-branch-type (type name positive)
+(defun hir-integer-branch-type (type name positive &optional (threshold 0))
   "An upper bound of integer TYPE's members satisfying this predicate arm.
 Numeric predicates alone cannot establish INTEGER: floats and other numeric
 types retain their existing type. Removing an interior zero would leave a
 hole, so keep the original interval in that case."
-  (declare (type symbol name))
+  (declare (type symbol name) (type integer threshold))
   (multiple-value-bind (low high integer) (hir-integer-interval type)
     (unless integer (return-from hir-integer-branch-type type))
     (let ((a low) (b high))
@@ -1006,7 +1028,18 @@ hole, so keep the original interval in that case."
         (minusp (if positive (setq b (if high (min high -1) -1))
                             (setq a (if low (max low 0) 0))))
         (plusp (if positive (setq a (if low (max low 1) 1))
-                           (setq b (if high (min high 0) 0)))))
+                           (setq b (if high (min high 0) 0))))
+        ((< <= > >=)
+         (let* ((upper (member name '(< <=)))
+                (inclusive (member name '(<= >=)))
+                (bound (if positive
+                           (if inclusive threshold
+                               (if upper (1- threshold) (1+ threshold)))
+                           (if inclusive
+                               (if upper (1+ threshold) (1- threshold)) threshold))))
+           (if (if positive upper (not upper))
+               (setq b (if high (min high bound) bound))
+               (setq a (if low (max low bound) bound))))))
       (cond ((and a b (> a b)) nil)
             ((and (eql a low) (eql b high)) type)
             (t (compiler-statistic :proof/integer-branch-refinement name)
@@ -1207,9 +1240,11 @@ Captured cells and debug-enabled functions keep conservative inferred types."
       (compiler-input-fail "type-inference root" root "value does not belong to this HIR unit")))
   (values (infer-hir-types-checked unit roots rootsp entries)))
 
-(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts operation-facts)
+(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts operation-facts guard-facts)
   "Internal inference kernel; UNIT and ROOTS have passed the public boundary.
-Return primary type facts and executable branch premises as separate values."
+Return primary type facts and executable branch premises as separate values.
+Optional metadata is internal: it must describe this same owned UNIT and must
+be discarded after mutation. The public inference boundary accepts no maps."
   (declare (type hir-unit unit) (type list roots entries))
   ;; Explicitly requesting no facts needs no dependency or escape graph.
   ;; Many initialization units contain no operations using inferred types.
@@ -1223,7 +1258,10 @@ Return primary type facts and executable branch premises as separate values."
         (required (make-hash-table :test 'eq)) (growth (make-hash-table :test 'eq)) (work nil)
         (intrinsics (make-hash-table :test 'eq))
         (*hir-standard-operations* (or operation-facts (hir-standard-operations unit)))
-        (guards (hir-type-branch-guards unit))
+        ;; Internal callers may reuse structural premises while retaining
+        ;; ownership of this unchanged, validated HIR. These are not inferred
+        ;; types and do not carry declarations into a PROVEN-ONLY query.
+        (guards (or guard-facts (hir-type-branch-guards unit)))
         (callees (or callee-facts (hir-result-callees unit (hir-optimization-barriers unit)))))
     (declare (type hash-table facts sources users calls references candidates escaped
                    sites opaque queued required growth guards)
@@ -1376,14 +1414,22 @@ Return primary type facts and executable branch premises as separate values."
                          ((t) (hir-type-without-null (gethash (car premise) facts)))
                          ((nil) 'null)
                          (otherwise
-                          (if (and (consp (cdr premise))
-                                   (member (cadr premise) '(zerop minusp plusp)))
+                          (cond
+                            ((and (consp (cdr premise))
+                                  (eq (cadr premise) :integer-comparison))
+                             ;; An unvisited dependency is bottom, not an
+                             ;; unknown settled type. Premature T would lose
+                             ;; later bounds in this monotone fixed point.
+                             (hir-integer-branch-type (gethash (car premise) facts)
+                               (third premise) (fifth premise) (fourth premise)))
+                            ((and (consp (cdr premise))
+                                  (member (cadr premise) '(zerop minusp plusp)))
                               ;; Standard numeric predicates retain their ANSI
                               ;; meaning at arbitrary integer width. This
                               ;; premise grants no unchecked lowering contract.
                               (hir-integer-branch-type (gethash (car premise) facts t)
-                                (cadr premise) (cddr premise))
-                              (cdr premise)))))))
+                                (cadr premise) (cddr premise)))
+                            (t (cdr premise))))))))
                    (hir-type-join previous refined))))
           (remhash value queued)
           (unless (hir-type-equal-p previous next)
