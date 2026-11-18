@@ -236,11 +236,16 @@ size and stack shape. Local simplification can change region lengths, so endpoin
 does not depend on a sparse length schedule. Per-function and global scan budgets, bounded
 region length, and caps on groups, occurrences and helpers limit work and storage. Exhausted
 budgets retain ordinary code; discovery order can limit the repetitions found.
-After group admission fills, a rolling opcode fingerprint rejects candidates that cannot
-match an admitted group before constructing their normalized helpers. It omits terminal
-local reads, including reads appended for returned locals. Equal helpers share this
-fingerprint; collisions still require the complete normalized key. Bounded integer
-arithmetic and an integer-keyed table keep this rejection step within the existing scan.
+Discovery extends local, input and write sets as each endpoint advances. Retained sites
+own copies of their local mappings. A rolling fingerprint includes opcodes and nonlocal
+immediate bytes, omitting original local indices and terminal local reads, including reads
+appended for returned locals. Equal helpers share this fingerprint. Each fingerprint
+caches a bounded set of representative groups: a streaming comparison checks complete
+normalized helper bytes and parameter/result types before reusing their owned helper.
+A miss constructs the ordinary normalized helper and uses the complete exact key, so
+collisions or a full representative cache cannot hide matching groups. After group
+admission fills, an absent fingerprint rejects a candidate before normalization. Bounded
+integer arithmetic and an integer-keyed table keep the filter within the existing scan.
 
 ** Whole-program artifacts and runtime
 

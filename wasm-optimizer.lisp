@@ -924,18 +924,62 @@
                (cons (if (= (or argument (aref bytes (1+ (native-op-start op)))) #x16) #x64 #x63)
                  (coerce (subseq bytes (+ 2 (native-op-start op)) (native-op-end op)) 'list))))))))
 
-(defun native-outline-region (body ops types start end last-uses stack)
+(defun native-outline-match-region (body ops start end order output local-types parameters results region)
+  ;; A bounded fingerprint bucket only chooses which owned helper to try.
+  ;; Compare its complete normalized encoding and signature without allocating
+  ;; another helper or string key. A collision supplies no equality evidence.
+  (unless (and (equal parameters (third region)) (equal results (fourth region)))
+    (return-from native-outline-match-region nil))
+  (let* ((helper (second region)) (size (length helper)) (cursor 0))
+    (unless (and (< cursor size) (= (aref helper cursor) (length local-types)))
+      (return-from native-outline-match-region nil))
+    (incf cursor)
+    (dolist (type local-types)
+      (unless (and (< (+ cursor (length type)) size) (= (aref helper cursor) 1))
+        (return-from native-outline-match-region nil))
+      (incf cursor)
+      (dolist (byte type)
+        (unless (= byte (aref helper cursor)) (return-from native-outline-match-region nil))
+        (incf cursor)))
+    (loop for i from start below end for op = (aref ops i) for code = (native-op-code op) do
+      (if (member code '(#x20 #x21 #x22))
+          (progn
+            (unless (and (< (1+ cursor) size) (= (aref helper cursor) code)
+                         (= (aref helper (1+ cursor)) (position (native-op-argument op) order)))
+              (return-from native-outline-match-region nil))
+            (incf cursor 2))
+          (let ((first (native-op-start op)) (last (native-op-end op)))
+            (unless (<= (+ cursor (- last first)) size)
+              (return-from native-outline-match-region nil))
+            (loop for offset from first below last do
+              (unless (= (aref body offset) (aref helper cursor))
+                (return-from native-outline-match-region nil))
+              (incf cursor)))))
+    (dolist (index output)
+      (unless (and (< (1+ cursor) size) (= (aref helper cursor) #x20)
+                   (= (aref helper (1+ cursor)) (position index order)))
+        (return-from native-outline-match-region nil))
+      (incf cursor 2))
+    (and (= (1+ cursor) size) (= (aref helper cursor) #x0b))))
+
+(defun native-outline-region (body ops types start end last-uses stack &optional discovery bucket)
   ;; Alpha-renaming respects aliases. A local read before its first write is
   ;; an input; other locals begin with a dominating write inside the helper.
   (let ((locals nil) (inputs nil) (written nil) (output nil))
-    (loop for i from start below end for op = (aref ops i)
-          for code = (native-op-code op) for index = (native-op-argument op)
-          when (member code '(#x20 #x21 #x22)) do
-            (pushnew index locals)
-            (if (= code #x20)
-                (unless (member index written) (pushnew index inputs))
-                (pushnew index written)))
-    (setq locals (nreverse locals) inputs (nreverse inputs))
+    (if discovery
+        ;; Discovery extends these sets as END advances. Copy the lists into
+        ;; encounter order; retained sites must not share its evolving state.
+        (setq locals (reverse (first discovery)) inputs (reverse (second discovery))
+              written (third discovery))
+        (progn
+          (loop for i from start below end for op = (aref ops i)
+                for code = (native-op-code op) for index = (native-op-argument op)
+                when (member code '(#x20 #x21 #x22)) do
+                  (pushnew index locals)
+                  (if (= code #x20)
+                      (unless (member index written) (pushnew index inputs))
+                      (pushnew index written)))
+          (setq locals (nreverse locals) inputs (nreverse inputs))))
     (dolist (index locals)
       (when (and (member index written) (>= (aref last-uses index) end)) (push index output)))
     (setq output (nreverse output))
@@ -945,16 +989,30 @@
            (order (append inputs temporaries))
            (parameters (mapcar (lambda (index) (aref types index)) inputs))
            (results (append (reverse stack) (mapcar (lambda (index) (aref types index)) output)))
-           (local-types (mapcar (lambda (index) (aref types index)) temporaries))
-           (helper (with-wasm-bytes
-                     (wasm-u32 (length temporaries))
-                     (dolist (type local-types) (wasm-u32 1) (dolist (byte type) (wasm-byte byte)))
+           (local-types (mapcar (lambda (index) (aref types index)) temporaries)))
+      (unless (or *native-module-stack-effects*
+                  (every (lambda (type) (and (= (length type) 1)
+                                             (member (first type) '(#x6f #x7f #x7e #x70))))
+                         (append parameters results local-types)))
+        (return-from native-outline-region nil))
+      (dolist (group bucket)
+        (let ((representative (first group)))
+          (when (native-outline-match-region body ops start end order output local-types parameters results representative)
+            (return-from native-outline-region
+              (values (list (first representative) (second representative)
+                            (third representative) (fourth representative) inputs output)
+                      group)))))
+      (let ((helper (with-wasm-bytes
+                     ;; The local cap proves these counts and renamed indices
+                     ;; have single-byte unsigned LEB128 encodings.
+                     (wasm-byte (length temporaries))
+                     (dolist (type local-types) (wasm-byte 1) (dolist (byte type) (wasm-byte byte)))
                      ;; Normalize directly into the owned helper buffer; an
                      ;; intermediate instruction vector would only be copied.
                      (loop for i from start below end for op = (aref ops i) do
                        (if (member (native-op-code op) '(#x20 #x21 #x22))
                            (progn (wasm-byte (native-op-code op))
-                             (wasm-u32 (position (native-op-argument op) order)))
+                             (wasm-byte (position (native-op-argument op) order)))
                            (let ((first (native-op-start op)) (last (native-op-end op)))
                              ;; Copy adjacent unchanged instructions together;
                              ;; local operands still require alpha-renaming.
@@ -965,15 +1023,10 @@
                                    (return))
                                  (incf i) (setq last (native-op-end next))))
                              (wasm-append body first last))))
-                     (dolist (index output) (wasm-byte #x20) (wasm-u32 (position index order))) (wasm-byte #x0b))))
-      (unless (or *native-module-stack-effects*
-                  (every (lambda (type) (and (= (length type) 1)
-                                             (member (first type) '(#x6f #x7f #x7e #x70))))
-                         (append parameters results local-types)))
-        (return-from native-outline-region nil))
+                     (dolist (index output) (wasm-byte #x20) (wasm-byte (position index order))) (wasm-byte #x0b))))
       ;; Key owns the complete normalized bytes and types, not a lossy hash.
       (list (list (map 'string #'code-char helper) parameters results)
-            helper parameters results inputs output))))
+            helper parameters results inputs output)))))
 
 (defun native-outline-site (region index)
   (with-wasm-bytes
@@ -1010,7 +1063,8 @@ Return replacement bodies and (body parameters results) helper records."
                     do (setf (aref last-uses (native-op-argument op)) i))
               (dotimes (start (length ops))
                 (when (and (plusp work) (plusp function-work) (member (native-op-code (aref ops start)) '(#x20 #x41 #x42 #xd0)))
-                  (let ((stack nil) (depth 0) (fingerprint 0) (core-fingerprint 0))
+                  (let ((stack nil) (depth 0) (fingerprint 0) (core-fingerprint 0)
+                        (discovery (list nil nil nil)))
                     (declare (type (unsigned-byte 24) fingerprint core-fingerprint))
                     (loop for end from start below (min (length ops) (+ start 128))
                           for op = (aref ops end) for code = (native-op-code op) do
@@ -1030,26 +1084,42 @@ Return replacement bodies and (body parameters results) helper records."
                         (dotimes (i pops) (pop stack)) (decf depth pops)
                         (when (plusp pushes)
                           (push (native-outline-result op body types signatures) stack) (incf depth)))
+                      (when (member code '(#x20 #x21 #x22))
+                        (let ((index (native-op-argument op)))
+                          (pushnew index (first discovery))
+                          (if (= code #x20)
+                              (unless (member index (third discovery)) (pushnew index (second discovery)))
+                              (pushnew index (third discovery)))))
                       (setq fingerprint (logand #xffffff (+ (* fingerprint 33) code)))
+                      (unless (member code '(#x20 #x21 #x22))
+                        (loop for offset from (1+ (native-op-start op)) below (native-op-end op) do
+                          (setq fingerprint (logand #xffffff (+ (* fingerprint 33) (aref body offset))))))
                       (unless (= code #x20) (setq core-fingerprint fingerprint))
                       ;; Equal helpers have equal opcode sequences after removing
                       ;; trailing GETs, including those appended for outputs. Once
                       ;; groups fill, a missing fingerprint rules out a match;
                       ;; collisions still require the complete normalized key.
+                      ;; Nonlocal immediates strengthen this filter; normalized
+                      ;; locals contribute their opcode, never their old index.
                       ;; Check every endpoint from 16 operations within the
                       ;; bounded window; local simplification changes lengths.
                       (when (and (>= (- end start) 15) (<= depth 1)
                                  (every #'identity stack)
                                  (>= (- (native-op-end op) (native-op-start (aref ops start))) minimum)
                                  (or (< group-count 4096) (gethash core-fingerprint fingerprints)))
-                        (let ((region (native-outline-region body ops types start (1+ end) last-uses stack)))
+                        (multiple-value-bind (region matched)
+                            (native-outline-region body ops types start (1+ end) last-uses stack
+                                                   discovery (gethash core-fingerprint fingerprints))
                           (when region
-                            (let* ((key (first region)) (group (gethash key groups)))
+                            (let* ((key (first region)) (group (or matched (gethash key groups))))
                               (when (and (null group) (< group-count 4096))
                                 ;; Group: representative region and occurrences.
                                 (setq group (list region nil)) (setf (gethash key groups) group)
                                 (incf group-count) (push group candidates)
-                                (setf (gethash core-fingerprint fingerprints) t))
+                                ;; Bound collision comparisons. Further exact
+                                ;; groups retain the ordinary full-key lookup.
+                                (when (< (length (gethash core-fingerprint fingerprints)) 8)
+                                  (push group (gethash core-fingerprint fingerprints))))
                               (when (and group (< occurrences 8192))
                                 ;; A site owns its local numbering, even when
                                 ;; all normalized bytes match another function.

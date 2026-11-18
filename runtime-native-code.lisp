@@ -1843,18 +1843,21 @@
   #@(return_call $native-set-argument-usage
     (call $native-attach-direct (local.get $function) (local.get $entry)) (local.get $usage)))
 
-(defun native-direct-call-wat (arity &optional checked)
+(defun native-direct-call-wat (arity &optional checked function arguments typed-function)
   ;; Reuse the caller's native-function and fixed-arity checks when present.
+  ;; Callers may also reuse object conversions and a proven native-function cast.
   (let* ((names (case arity (0 nil) (1 '($value)) (2 '($left $right))
                         (3 '($a $b $c)) (4 '($a $b $c $d))))
-         (fn (native-object '(local.get $function)))
+         (fn (or function (native-object '(local.get $function))))
+         (native-fn (or typed-function `(ref.cast (ref $native-function) ,fn)))
          (direct (wat-fragment #@(if (i32.eqz (ref.is_null
-                       (struct.get $native-function $direct (ref.cast (ref $native-function) ,fn))))
+                       (struct.get $native-function $direct ,native-fn)))
                      (then
                        (local.set $direct-result
-                         (call $native-direct-apply (ref.cast (ref $native-function) ,fn)
+                         (call $native-direct-apply ,native-fn
                            ,@(loop for index below 4 collect (if (< index arity)
-                             (native-object (list 'local.get (nth index names))) '(ref.null eq)))))
+                             (if arguments (nth index arguments)
+                               (native-object (list 'local.get (nth index names)))) '(ref.null eq)))))
                        (call $clear-values)
                        (return (extern.convert_any (local.get $direct-result))))))))
     (if checked direct
@@ -1997,16 +2000,19 @@
 
 (define-runtime-function $native-call1 (($function externref) ($value externref)) (externref)
   (:export-raw "native-call1")
-  (:locals ($direct-result :nullable-object) ($hit i32) ($id i32) ($tag i32) ($accessor i32) ($a :nullable-object))
+  (:locals ($direct-result :nullable-object) ($hit i32) ($id i32) ($tag i32) ($accessor i32)
+           ($a :nullable-object) ($function-object :nullable-object) ($native-function (ref $native-function)))
   #@(local.set $a ,(native-object '(local.get $value)))
-  #@(local.set $id (call $native-builtin-id ,(native-object '(local.get $function))))
+  #@(local.set $function-object ,(native-object '(local.get $function)))
+  #@(local.set $id (call $native-builtin-id (local.get $function-object)))
   #@(local.set $tag (call $tag (local.get $a)))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
-  #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
-    (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 3))
-      (then ,(native-direct-call-wat 1 t)
+  #@(if (ref.test (ref $native-function) (local.get $function-object))
+    (then (if (f64.eq (struct.get $obj $f
+        (local.tee $native-function (ref.cast (ref $native-function) (local.get $function-object)))) (f64.const 3))
+      (then ,(native-direct-call-wat 1 t '(local.get $function-object) '((local.get $a)) '(local.get $native-function))
         (return (extern.convert_any (call $native-primary-apply
-        ,(native-object '(local.get $function)) (array.new_fixed $objects 1 (local.get $a)))))))))
+        (local.get $function-object) (array.new_fixed $objects 1 (local.get $a)))))))))
   (native-fixed-vector-call-wat 1)
   (wat-symbol-case #@(local.get $id)
     ((not null) #@(return (extern.convert_any (call $bool (ref.is_null (local.get $a))))))
