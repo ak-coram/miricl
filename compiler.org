@@ -178,6 +178,15 @@ list/vector operations retain safety, definition and boundary contracts; LIST/LI
 fresh spines and operand order. APPLY/MVC binding rewrites check proper lists and arity before
 unchecked reads.
 
+At SAFETY 1, binary ordered comparisons can use signed-i64 instructions when fresh,
+declaration-independent inference proves both operand ranges fit signed i64. A separate,
+bounded representation check follows only copies and primary extraction to integer literals
+or retained checked binary LOGAND calls. LOGAND validates its operands and canonicalizes
+successful signed-i64 results. Extraction accepts both i31 and boxed i64 even for narrow
+ranges; a range alone does not prove an i31 representation. Unknown facts or origins retain
+the checked comparison helper. This comparison plan preserves producer evaluation and checks,
+returns one ordinary Lisp value, and does not enable raw cells, branch fusion or loop motion.
+
 Acyclic regions use forward structure; proved reducible natural loops use Wasm loops.
 Irreducible, captured or exhausted cases retain dense dispatch. Transfers preserve block
 arguments/environments and backedge scheduling. Native body passes perform liveness, local

@@ -943,19 +943,19 @@
       (return-from native-outline-region nil))
     (let* ((temporaries (remove-if (lambda (index) (member index inputs)) locals))
            (order (append inputs temporaries))
-           (code (with-wasm-bytes
-                   (loop for i from start below end for op = (aref ops i) do
-                     (if (member (native-op-code op) '(#x20 #x21 #x22))
-                         (progn (wasm-byte (native-op-code op))
-                           (wasm-u32 (position (native-op-argument op) order)))
-                         (wasm-append body (native-op-start op) (native-op-end op))))))
            (parameters (mapcar (lambda (index) (aref types index)) inputs))
            (results (append (reverse stack) (mapcar (lambda (index) (aref types index)) output)))
            (local-types (mapcar (lambda (index) (aref types index)) temporaries))
            (helper (with-wasm-bytes
                      (wasm-u32 (length temporaries))
                      (dolist (type local-types) (wasm-u32 1) (dolist (byte type) (wasm-byte byte)))
-                     (wasm-append code)
+                     ;; Normalize directly into the owned helper buffer; an
+                     ;; intermediate instruction vector would only be copied.
+                     (loop for i from start below end for op = (aref ops i) do
+                       (if (member (native-op-code op) '(#x20 #x21 #x22))
+                           (progn (wasm-byte (native-op-code op))
+                             (wasm-u32 (position (native-op-argument op) order)))
+                           (wasm-append body (native-op-start op) (native-op-end op))))
                      (dolist (index output) (wasm-byte #x20) (wasm-u32 (position index order))) (wasm-byte #x0b))))
       (unless (or *native-module-stack-effects*
                   (every (lambda (type) (and (= (length type) 1)

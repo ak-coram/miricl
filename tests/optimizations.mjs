@@ -372,6 +372,73 @@ try {
           (eq *optimization-branch-scope* :outside)))))`);
   console.log('Optimizations: common branch tails preserve effects, value groups, errors and dynamic cleanup.');
 
+  // ANSI covers comparisons and LOGAND separately. Exercise executable range
+  // proofs with retained checked producers, effectful operands and full values.
+  const checkedComparisonPolicy = '(declare (optimize (space 3) (speed 1) (safety 1) (debug 1)))';
+  for (const [operator, suffix] of [['<', 'less'], ['>', 'greater'], ['<=', 'le'], ['>=', 'ge']]) {
+    for (const mask of ['1073741823', '9223372036854775807']) {
+      const name = `optimization-checked-${suffix}-${mask}`;
+      define(name, `(lambda (left right callback) ${checkedComparisonPolicy}
+        (values (multiple-value-list (${operator}
+          (logand (funcall callback :left left) ${mask})
+          (logand (funcall callback :right right) ${mask}))) :comparison))`);
+      check('checked scalar comparison preserves values, effects and integer boundaries', `(loop
+        for pair in '((0 0) (0 1) (1 0) (-1 0)
+          (1073741823 1073741824) (1073741824 1073741823)
+          (-1073741825 -1073741824)
+          (-9223372036854775808 9223372036854775807)
+          (9223372036854775807 -9223372036854775808)
+          (18446744073709551617 18446744073709551618)) always
+        (let ((events nil) (left (first pair)) (right (second pair)))
+          (and (equal (multiple-value-list
+                  (${name} left right (lambda (event value)
+                    (push event events) (values value :discarded :extra))))
+                (list (list (${operator} (logand left ${mask}) (logand right ${mask}))) :comparison))
+            (equal (reverse events) '(:left :right)))))`);
+      check('checked scalar producers retain errors, evaluation order and recovery', `(loop
+        for pair in '((:bad 5) (5 :bad) (1.5 5) (5 #c(1 2))) always
+        (let ((events nil))
+          (and (handler-case
+              (progn (${name} (first pair) (second pair) (lambda (event value)
+                (push event events) (values value :discarded))) nil)
+              (type-error (condition)
+                (and (eql (type-error-datum condition)
+                       (if (integerp (first pair)) (second pair) (first pair)))
+                  (equal (reverse events)
+                    (if (integerp (first pair)) '(:left :right) '(:left))))))
+            (equal (multiple-value-list
+                (${name} 2 3 (lambda (event value) (declare (ignore event)) (values value :extra))))
+              (list (list (${operator} 2 3)) :comparison)))))`);
+    }
+    const declared = `optimization-declared-${suffix}`;
+    define(declared, `(lambda (left right) ${checkedComparisonPolicy}
+      (declare (type (signed-byte 64) left right)) (${operator} left right))`);
+    check('declaration-only comparison retains target signed64 boundary semantics', `(loop
+      for left in '(-9223372036854775808 -1073741825 0 1073741824 9223372036854775807)
+      always (loop for right in '(-9223372036854775808 -1073741825 0 1073741824 9223372036854775807)
+        always (eql (${declared} left right) (${operator} left right))))`);
+    const general = `optimization-general-${suffix}`;
+    define(general, `(lambda (left right) ${checkedComparisonPolicy} (${operator} left right))`);
+    check('unproved comparisons retain real-number semantics and checked errors', `(and
+      (eql (${general} 1/2 0.75) (${operator} 1/2 0.75))
+      (eql (${general} 18446744073709551616 18446744073709551617)
+        (${operator} 18446744073709551616 18446744073709551617))
+      (handler-case (progn (${general} :bad 1) nil) (type-error () t))
+      (eql (${general} 2 3) (${operator} 2 3)))`);
+    const guarded = `optimization-guarded-${suffix}`;
+    define(guarded, `(lambda (left right) ${checkedComparisonPolicy}
+      (if (and (typep left '(signed-byte 64)) (typep right '(signed-byte 64)))
+        (${operator} (logand left -1) (logand right -1)) :outside))`);
+    check('executably guarded comparisons preserve signed64 limits and outside inputs', `(and
+      (loop for left in '(-9223372036854775808 -1073741825 -1073741824 0 1073741823 1073741824 9223372036854775807)
+        always (loop for right in '(-9223372036854775808 -1073741825 -1073741824 0 1073741823 1073741824 9223372036854775807)
+          always (eql (${guarded} left right) (${operator} left right))))
+      (eq (${guarded} 9223372036854775808 0) :outside)
+      (eq (${guarded} 0 -9223372036854775809) :outside)
+      (eq (${guarded} :bad 0) :outside))`);
+  }
+  console.log('Optimizations: executable scalar comparison proofs retain checked producers, operand effects and multiple values.');
+
   // Declared hot paths deliberately exercise inlining and scalar lowering.
   // The assertions concern legal input, effects and values, not a prescribed
   // lowering strategy or the optimizer's private representation.

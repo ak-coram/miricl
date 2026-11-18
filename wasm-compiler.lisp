@@ -1364,7 +1364,9 @@ exhausted work budgets keep every incoming value group."
                                                 :evenp :oddp :puthash :character-ref :character-set :simple-character-set :code-character :make-character-vector :make-string :make-simple-vector :character-code :character-code-at
                                                 :integer-length :ash-general :logand-general :mod-general :truncate-primary
                                                 :sbit-ref :row-major-ref :row-major-set
-                                                :less-real :greater-real :not-greater-real :not-less-real :zero-number)))))))
+                                                :less-real :greater-real :not-greater-real :not-less-real :zero-number
+                                                :proven-less-int64 :proven-greater-int64
+                                                :proven-not-greater-int64 :proven-not-less-int64)))))))
           (setf (native-value-slot scalar (hir-instruction-output instruction)) t)))
       (let* ((terminator (hir-block-terminator block)) (opcode (hir-instruction-opcode terminator))
              (target (first (hir-instruction-attributes terminator))))
@@ -2139,8 +2141,78 @@ exhausted work budgets keep every incoming value group."
                     ;; Computed designators retain their evaluation and identity.
                     (when attributes
                       (setf (gethash reference *wasm-inline-references*) t))))))))))
+  (native-plan-proven-integer-comparisons unit)
   (native-plan-character-code-fusion unit)
   *wasm-inline-simple-calls*)
+
+(defun native-checked-integer-origin-p (value)
+  ;; A mathematical range does not prove the runtime representation. Retained
+  ;; checked LOGAND canonicalizes successful signed-i64 results through INT64
+  ;; or INTEGER. Copies and primary extraction preserve that representation;
+  ;; cells, joins and external returns need a separate representation proof.
+  (loop repeat 32 do
+    (let ((producer (hir-value-producer value)))
+      (unless (%hir-instruction-p producer) (return nil))
+      (case (hir-instruction-opcode producer)
+        ((:primary :copy) (setq value (first (hir-instruction-inputs producer))))
+        (:constant
+         (let ((literal (first (hir-instruction-attributes producer))))
+           (return (when (and (integerp literal)
+                              (<= -9223372036854775808 literal 9223372036854775807))
+                     (values t literal)))))
+        (:call
+         (return (and (= (length (hir-instruction-inputs producer)) 4)
+                      (eq (hir-inline-primitive producer) 'logand)
+                      (eq (gethash producer *wasm-inline-simple-calls*) :logand-general))))
+        (otherwise (return nil))))))
+
+(defun native-plan-proven-integer-comparisons (unit)
+  ;; Run after ordinary plans so each accepted producer still has its checked
+  ;; implementation. Only exact binary ordered comparisons at SAFETY 1 enter
+  ;; this path; the ordinary planner already honored NOTINLINE. Declarations
+  ;; alone cannot justify either operand's extraction.
+  (let ((pending nil) (roots nil))
+    (dolist (function (hir-unit-functions unit))
+      (dolist (block (hir-function-blocks function))
+        (dolist (instruction (hir-block-instructions block))
+          (when (and (= (hir-instruction-safety-level instruction) 1)
+                     (member (gethash instruction *wasm-inline-simple-calls*)
+                       '(:less-real :greater-real :not-greater-real :not-less-real))
+                     (every #'native-checked-integer-origin-p
+                       (cddr (hir-instruction-inputs instruction))))
+            (push instruction pending)
+            (dolist (operand (cddr (hir-instruction-inputs instruction)))
+              (push operand roots))))))
+    (when roots
+      ;; Treat every function as an entry, retaining unknown external inputs.
+      ;; Recompute from validated current HIR; exhausted inference is unknown.
+      (let ((proven (infer-hir-types-checked unit roots t (hir-unit-functions unit) t)))
+        (dolist (instruction pending)
+          (when (every (lambda (operand)
+                         (multiple-value-bind (low high bounded)
+                             (hir-integer-bounds (gethash operand proven t))
+                           (and bounded (<= -9223372036854775808 low high 9223372036854775807))))
+                  (cddr (hir-instruction-inputs instruction)))
+            (let ((kind (case (gethash instruction *wasm-inline-simple-calls*)
+                          (:less-real :proven-less-int64) (:greater-real :proven-greater-int64)
+                          (:not-greater-real :proven-not-greater-int64)
+                          (:not-less-real :proven-not-less-int64))))
+              (compiler-statistic :proof/integer-comparison-checked-origin kind)
+              (setf (gethash instruction *wasm-inline-simple-calls*) kind))))))))
+
+(defun emit-native-proven-integer-comparison (inputs kind)
+  ;; Use the full scalar extractor even for narrow mathematical ranges: an
+  ;; integer range alone never licenses an i31 representation cast. Operand
+  ;; producers have already run in source order, including all their checks.
+  (dolist (operand (cddr inputs))
+    (multiple-value-bind (known literal) (native-checked-integer-origin-p operand)
+      (declare (ignore known))
+      (if (integerp literal)
+          (progn (wasm-byte #x42) (wasm-s64 literal))
+          (progn (wasm-get operand) (wasm-call "native-unbox-int64")))))
+  (wasm-byte (case kind (:proven-less-int64 #x53) (:proven-greater-int64 #x55)
+                       (:proven-not-greater-int64 #x57) (:proven-not-less-int64 #x59)))
+  (wasm-call "native-boolean"))
 
 (defun native-plan-character-code-fusion (unit)
   "Eliminate an unobserved canonical CHAR object without moving its checked read."
@@ -2569,6 +2641,9 @@ exhausted work budgets keep every incoming value group."
                (return-from emit-native-instruction nil)))
            (cond
              ((integerp kind) (emit-native-inline-integer inputs kind))
+             ((member kind '(:proven-less-int64 :proven-greater-int64
+                             :proven-not-greater-int64 :proven-not-less-int64))
+              (emit-native-proven-integer-comparison inputs kind))
              ((eq kind :true) (wasm-literal t))
              ((eq kind :false) (wasm-null))
              ((eq kind :left) (wasm-get (third inputs)))
@@ -4995,7 +5070,8 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-generic-candidate native-proven-generic-mask native-plan-generic-calls emit-native-generic-call
                    emit-native-unboxed-integer native-integer-result-fits-p native-inline-shift-opcode native-inline-nonnegative-division-opcode native-inline-integer-opcode emit-native-integer-chain emit-native-inline-integer emit-native-integer-call
                    native-simple-vector-value-p native-list-value-p emit-native-vector-call emit-native-list-call emit-native-character-call
-                   native-plan-inline-simple native-plan-character-code-fusion native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
+                   native-plan-inline-simple native-checked-integer-origin-p native-plan-proven-integer-comparisons emit-native-proven-integer-comparison
+                   native-plan-character-code-fusion native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-builtin emit-native-tail-call
                    native-fixed-arity emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-restore emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    emit-native-structured-target emit-native-structured-jump emit-native-structured-region
