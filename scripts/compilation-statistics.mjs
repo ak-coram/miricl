@@ -19,7 +19,7 @@ export async function readCompilationStatistics(vm) {
   try {
   // Encode labels as code points: this keeps JSON escaping independent of
   // Lisp printer settings and works for arbitrary symbol names/Unicode.
-  vm.evaluate(`(with-open-file (out "/__compiler-statistics.json" :direction :output :if-exists :supersede)
+  await vm.evaluateAsync(`(with-open-file (out "/__compiler-statistics.json" :direction :output :if-exists :supersede)
     (write-char #\\[ out)
     (let ((first t))
       (dolist (row (miricl-compiler:compilation-statistics-report miricl-compiler::*statistics-report-snapshot*))

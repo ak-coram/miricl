@@ -1,8 +1,13 @@
 // Host file I/O uses ordinary Lisp APIs and the existing green-thread driver.
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {Miricl} from '../../scripts/miricl.mjs';
 import {DevFilesystem} from '../../scripts/dev-filesystem.mjs';
+import {HostFilesystem} from '../../scripts/host-filesystem.mjs';
+import {enableCompilationStatistics, disableCompilationStatistics, readCompilationStatistics,
+  collectCompilationStatistics} from '../../scripts/compilation-statistics.mjs';
 
 const vm = await Miricl.instantiate(fs.readFileSync(process.argv[2] ?? 'miricl.wasm'), {
   imports: {filesystemTest: {advanceDate() { unixTime++; }}},
@@ -125,6 +130,55 @@ try {
   assert.equal(provider.requests.size, 0);
   assert.equal(vm.vm['filesystem-services'].get(0), null);
   await check('(null (probe-file "host/main.lisp"))');
+  const directory = fs.mkdtempSync(join(tmpdir(), 'miricl-compiler-statistics-'));
+  const previousDirectory = process.env.MIRICL_COMPILER_STATISTICS_DIRECTORY;
+  const readFile = vm.readFile;
+  const initialCount = 3, increment = 2;
+  const counter = rows => rows.find(row => row.rule === 'collector-test' && row.detail === 'operation');
+  try {
+    provider = new HostFilesystem(vm, directory);
+    enableCompilationStatistics(vm);
+    vm.evaluate(`(defparameter *host-statistics-table* miricl-compiler::*compilation-statistics*)
+      (miricl-compiler::record-compilation-statistic :collector-test :operation ${initialCount}) (values)`);
+    assert.equal(counter(await readCompilationStatistics(vm))?.count, initialCount);
+    await check(`(and (eq *host-statistics-table* miricl-compiler::*compilation-statistics*)
+      (null miricl-compiler::*statistics-report-snapshot*))`);
+    vm.evaluate(`(miricl-compiler::record-compilation-statistic :collector-test :operation ${increment}) (values)`);
+    const readbackError = new Error('Injected statistics readback failure');
+    vm.readFile = async () => {vm.readFile = readFile; throw readbackError;};
+    await assert.rejects(readCompilationStatistics(vm), error => error === readbackError);
+    await check(`(and (eq *host-statistics-table* miricl-compiler::*compilation-statistics*)
+      (null miricl-compiler::*statistics-report-snapshot*))`);
+    assert.equal(counter(await readCompilationStatistics(vm))?.count, initialCount + increment);
+    disableCompilationStatistics(vm);
+
+    process.env.MIRICL_COMPILER_STATISTICS_DIRECTORY = directory;
+    let operations = 0;
+    const operationResult = {collected: true};
+    assert.equal(await collectCompilationStatistics(vm,
+      {workload: 'host-filesystem-test', phase: 'collector'}, async () => {
+        operations++;
+        await vm.evaluateAsync(`(miricl-compiler::record-compilation-statistic
+          :collector-test :operation ${initialCount}) (values)`);
+        return operationResult;
+      }), operationResult);
+    assert.equal(operations, 1);
+    const reports = fs.readdirSync(directory).filter(name => name.endsWith('.json'))
+      .map(name => JSON.parse(fs.readFileSync(join(directory, name), 'utf8')));
+    const report = reports.find(record => record.workload === 'host-filesystem-test' && record.phase === 'collector');
+    assert.equal(report?.status, 'complete');
+    assert.equal(counter(report.counters)?.count, initialCount);
+    await check(`(and (null miricl-compiler::*compilation-statistics*)
+      (null miricl-compiler::*statistics-report-snapshot*) (= (+ 20 22) 42))`);
+  } finally {
+    vm.readFile = readFile;
+    if (previousDirectory === undefined) delete process.env.MIRICL_COMPILER_STATISTICS_DIRECTORY;
+    else process.env.MIRICL_COMPILER_STATISTICS_DIRECTORY = previousDirectory;
+    disableCompilationStatistics(vm);
+    provider.close();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+  console.log('Compiler statistics: async host files, preserved counters, failed-read recovery, and collection lifecycle pass.');
   console.log('Development files: normal file APIs, Unicode/binary data, nested LOAD, directories, overlay writes, async waits, and cancellation pass.');
 } finally {
   provider?.close(); vm.close(); globalThis.fetch = fetch;
