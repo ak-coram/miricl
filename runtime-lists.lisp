@@ -32,23 +32,24 @@
 ;; Checked proper-list count for internal argument spines. Keep the original
 ;; raw ABI while rejecting dotted and cyclic input before unchecked callers.
 (define-runtime-function $length (($list :nullable-object)) (i32)
-  (:locals ($fast :nullable-object) ($slow :nullable-object) ($count i64))
+  (:locals ($fast :nullable-object) ($slow :nullable-object) ($count i32))
   #@(local.set $fast (local.get $list)) #@(local.set $slow (local.get $list))
   #@(block $done (loop $next
     (br_if $done (ref.is_null (local.get $fast)))
     (local.set $fast (call $cdr (local.get $fast)))
-    (local.set $count (i64.add (local.get $count) (i64.const 1)))
+    (local.set $count (i32.add (local.get $count) (i32.const 1)))
     (br_if $done (ref.is_null (local.get $fast)))
     (local.set $fast (call $cdr (local.get $fast)))
-    (local.set $slow (call $cdr (local.get $slow)))
-    (local.set $count (i64.add (local.get $count) (i64.const 1)))
+    ;; FAST has already checked every cell traversed by SLOW.
+    (local.set $slow (struct.get $obj $b (ref.cast (ref $obj) (local.get $slow))))
+    (local.set $count (i32.add (local.get $count) (i32.const 1)))
     (if (ref.eq (local.get $fast) (local.get $slow))
       (then (call $type-fail (local.get $list)
         (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'satisfies)))
           (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'list-length))) (ref.null eq)))
         (i32.const ,(runtime-error-code :expected-designator)))))
     (br $next)))
-  #@(i32.wrap_i64 (local.get $count)))
+  #@(local.get $count))
 
 (define-runtime-function $arity
     (($args :nullable-object) ($min i32) ($max i32))
@@ -64,6 +65,16 @@
 (define-runtime-function $arity1 (($args :nullable-object)) ()
   (wat-fail-when #@(i32.ne (call $length (local.get $args)) (i32.const 1)) :wrong-arity))
 (define-runtime-function $arity2 (($args :nullable-object)) ()
+  (:locals ($tail :nullable-object))
+  ;; Ending at NIL after two checked cons cells proves the common successful
+  ;; shape without a count or cycle cursor. On every miss, LENGTH still sees
+  ;; the original input, preserving dotted/cyclic errors before arity errors.
+  #@(block $slow
+    (br_if $slow (i32.ne (call $tag (local.get $args)) (i32.const 7)))
+    (local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $args))))
+    (br_if $slow (i32.ne (call $tag (local.get $tail)) (i32.const 7)))
+    (if (ref.is_null (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
+      (then (return))))
   (wat-fail-when #@(i32.ne (call $length (local.get $args)) (i32.const 2)) :wrong-arity))
 (define-runtime-function $arity3 (($args :nullable-object)) ()
   (wat-fail-when #@(i32.ne (call $length (local.get $args)) (i32.const 3)) :wrong-arity))

@@ -122,47 +122,69 @@
   #@(local.get $a) #@(local.get $b) #@(local.get $tail) #@(local.get $count))
 
 (define-runtime-function $eval-apply-fixed
-    (($name :nullable-object) ($a :nullable-object) ($b :nullable-object) ($arity i32))
+    (($name :nullable-object) ($a :nullable-object) ($b :nullable-object)
+     ($tail :nullable-object) ($arity i32))
     (:nullable-object i32)
-  (:locals ($function :nullable-object) ($binding :nullable-object) ($id i32)
+  (:locals ($function :nullable-object) ($id i32)
            ($result :nullable-object) ($thrown i32)
            ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object))
   #@(block $fast
     (block $ordinary
+      ;; The checked fixed ABI accepts at most four evaluated operands.
+      ;; Reject other arities before classifying the function.
+      (br_if $ordinary (i32.gt_u (local.get $arity) (i32.const 4)))
       (br_if $ordinary (global.get $debug-evaluating))
-      (local.set $function (local.get $name))
-      (if (call $symbolp (local.get $name))
+      ;; The fixed whitelist below contains only standard CL functions.
+      ;; Their symbol calls may rely on the ANSI definitions; actual function
+      ;; objects still carry their own identity and implementation.
+      (if (i32.lt_s (local.tee $id (call $id (local.get $name))) (i32.const 0))
         (then
-          (local.set $id (call $id (local.get $name)))
-          (br_if $ordinary (i32.ge_u (local.get $id) (i32.const ,(length *runtime-symbols*))))
-          (local.set $binding (call $symbol-index-get (global.get $function-bindings) (local.get $id)))
-          (br_if $ordinary (ref.is_null (local.get $binding)))
-          (local.set $function (call $binding-value (local.get $binding)))))
-      (local.set $id (call $native-builtin-id (local.get $function)))
-      (br_if $ordinary (i32.lt_s (local.get $id) (i32.const 0)))
-      (if (i32.eq (local.get $arity) (i32.const 1))
-        (then
-          ,(wat-symbol-case #@(local.get $id)
-            ((car cdr first rest not null identity consp atom symbolp listp stringp integerp
-              numberp rationalp realp complexp floatp 1+ 1- length)
-              #@(br $fast)))
-          (br $ordinary)))
-      (br_if $ordinary (i32.ne (local.get $arity) (i32.const 2)))
-      ,(wat-symbol-case #@(local.get $id)
-        ((eq eql cons + - * / = /= < > <= >=) #@(br $fast))))
+          (local.set $function (local.get $name))
+          (local.set $id (call $native-builtin-id (local.get $function)))))
+      ;; Every supported fixed ID is inside the bootstrap symbol table.
+      (br_if $ordinary (i32.ge_u (local.get $id) (i32.const ,(length *runtime-symbols*))))
+      ,(native-standard-fixed-dispatch-wat #@(local.get $id)
+        #@(local.get $arity) #@(br $fast) #@(br $ordinary)))
     (return (ref.null eq) (i32.const 0)))
+  ;; A function-object hit is non-NIL; the default NIL local marks a symbol.
+  ;; Whitelist membership proves the canonical factory's bounded builtin ID.
+  #@(if (ref.is_null (local.get $function))
+    (then (local.set $function (call $canonical-builtin-function (local.get $id) (i32.const 0)))))
   #@(local.set $backtrace-depth (global.get $backtrace-depth))
   #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
   #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
   #@(array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $name))
   #@(global.set $backtrace-depth (i32.add (local.get $backtrace-depth) (i32.const 1)))
   #@(call $clear-values)
+  ;; TAIL is the collector's checked, owned overflow spine. Read its values
+  ;; without changing it so a miss retains the ordinary argument packet.
+  ;; The contract selector proves one result even in a full values context.
   (debug-protected-call
     #@(ref.cast (ref null eq) (any.convert_extern
-      (if (result externref) (i32.eq (local.get $arity) (i32.const 1))
-        (then (call $native-call1 (extern.convert_any (local.get $function)) (extern.convert_any (local.get $a))))
-        (else (call $native-call2 (extern.convert_any (local.get $function))
-          (extern.convert_any (local.get $a)) (extern.convert_any (local.get $b)))))))
+      (block $fixed-call (result externref)
+        ;; LIST can own this unescaped collector spine. Reusing its overflow
+        ;; cells preserves freshness without allocating them again in CALL3/4.
+        ;; Shared contracts already proved a supported LIST arity (one to four).
+        (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'list)))
+          (then
+            (if (global.get $thread-active) (then (call $thread-checkpoint)))
+            (br $fixed-call (extern.convert_any
+              (call $cons (local.get $a)
+                (if (result (ref null eq)) (i32.gt_u (local.get $arity) (i32.const 1))
+                  (then (call $cons (local.get $b) (local.get $tail)))
+                  (else (ref.null eq))))))))
+        ,@(loop for arity in '(1 2 0 3) collect
+            `(if (i32.eq (local.get $arity) (i32.const ,arity))
+               (then (br $fixed-call
+                 (call ,(nth arity '($native-call0 $native-call1 $native-call2 $native-call3))
+                   (extern.convert_any (local.get $function))
+                   ,@(loop for argument in '((local.get $a) (local.get $b)
+                                             (call $car (local.get $tail)))
+                           repeat arity collect `(extern.convert_any ,argument)))))))
+        (call $native-call4 (extern.convert_any (local.get $function))
+          (extern.convert_any (local.get $a)) (extern.convert_any (local.get $b))
+          (extern.convert_any (call $car (local.get $tail)))
+          (extern.convert_any (call $car (call $cdr (local.get $tail))))))))
     #@(block
       (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
       (global.set $backtrace-depth (local.get $backtrace-depth))))
@@ -183,7 +205,7 @@
         (br_if $ordinary (i32.eqz (ref.is_null (call $cdr (local.get $rest)))))
         (local.set $b (call $car (local.get $rest)))
         (local.set $arity (i32.const 2))))
-    (call $eval-apply-fixed (local.get $name) (local.get $a) (local.get $b) (local.get $arity))
+    (call $eval-apply-fixed (local.get $name) (local.get $a) (local.get $b) (ref.null eq) (local.get $arity))
     (local.set $hit) (local.set $result)
     (if (local.get $hit) (then (return (local.get $result)))))
   #@(return_call $apply (local.get $name) (local.get $args)))
@@ -347,18 +369,17 @@
               (i32.eq (local.get $kind) (i32.const ,(runtime-symbol-id 'progn))))
       (i32.or (i32.eq (local.get $kind) (i32.const ,(runtime-symbol-id 'quote)))
               (i32.eq (local.get $kind) (i32.const ,(runtime-symbol-id 'function)))))
-    (then (return_call $eval1 (local.get $form) (local.get $env))))
+    (then (return_call $eval1 (local.get $form) (local.get $env) (local.get $kind))))
   #@(if (if (result i32) (i32.eq (call $tag (local.get $operator)) (i32.const 6))
           (then (f64.eq (struct.get $obj $f (ref.cast (ref $obj) (local.get $operator))) (f64.const 0)))
           (else (i32.const 1)))
-    (then (return_call $eval1 (local.get $form) (local.get $env))))
-  (wat-dynamic-call #@(call $eval1 (local.get $form) (local.get $env))))
+    (then (return_call $eval1 (local.get $form) (local.get $env) (local.get $kind))))
+  (wat-dynamic-call #@(call $eval1 (local.get $form) (local.get $env) (local.get $kind))))
 
 (define-runtime-function $eval1
-    (($form :nullable-object) ($env :nullable-object))
+    (($form :nullable-object) ($env :nullable-object) ($id i32))
     (:nullable-object)
-  (:locals ($id i32)
-           ($values-count i32)
+  (:locals ($values-count i32)
            ($secondary :nullable-object) ($tertiary :nullable-object)
            ($index i32)
            ($args :nullable-object)
@@ -368,21 +389,61 @@
            ($binding :nullable-object)
            ($new-env :nullable-object)
            ($params :nullable-object))
+  ;; EVAL0 supplies the operator ID after its checkpoint; no callback or
+  ;; checkpoint occurs between that query and this entry.
   #@(local.set $name (struct.get $obj $a (ref.cast (ref $obj) (local.get $form))))
-  #@(local.set $id (call $id (local.get $name)))
   #@(local.set $args (struct.get $obj $b (ref.cast (ref $obj) (local.get $form))))
   #@(if (f64.ne (struct.get $obj $f (ref.cast (ref $obj) (local.get $form))) (f64.const 0))
     (then (return_call $eval-compiled (local.get $form) (local.get $env))))
+  ;; Standard special operators cannot be rebound as functions or macros.
+  ;; Dispatch common forms before unrelated lexical/macro lookup; each keeps
+  ;; its checked arity, operand order, checkpoints and final-value tail call.
+  (wat-symbol-case #@(local.get $id)
+    (quote
+      (wat-arity 1)
+      #@(return (call $car (local.get $args))))
+    (if
+      (wat-arity 2 3)
+      #@(local.set $value (call $eval (call $car (local.get $args)) (local.get $env)))
+      #@(local.set $args (call $cdr (local.get $args)))
+      #@(if (ref.is_null (local.get $value)) (then (local.set $args (call $cdr (local.get $args)))))
+      #@(return_call $eval (call $car (local.get $args)) (local.get $env)))
+    (function
+      (wat-arity 1)
+      #@(local.set $name (call $car (local.get $args)))
+      #@(if (call $symbolp (local.get $name))
+        (then (local.set $value (call $lexical-function (local.get $name) (local.get $env)))
+          (if (i32.eq (call $tag (local.get $value)) (i32.const 30))
+            (then (return (struct.get $obj $a (ref.cast (ref $obj) (local.get $value))))))
+          (return (call $fdefinition (local.get $name)))))
+      #@(if (i32.eq (call $operator (local.get $name)) (i32.const ,(runtime-symbol-id 'setf)))
+          (then (local.set $value (call $lexical-function (local.get $name) (local.get $env)))
+            (if (i32.eq (call $tag (local.get $value)) (i32.const 32))
+              (then (return (struct.get $obj $a (ref.cast (ref $obj) (local.get $value))))))
+            (return (call $fdefinition (local.get $name)))))
+      (wat-fail-when #@(i32.ne (call $id (call $car (local.get $name))) (i32.const ,(runtime-symbol-id 'lambda))) :malformed-form)
+      #@(local.set $args (call $cdr (local.get $name)))
+      #@(return (call $closure (call $car (local.get $args))
+                          (call $cdr (local.get $args)) (local.get $env)))))
+  #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'progn)))
+      (then
+        (block $done (loop $next (br_if $done (ref.is_null (local.get $args)))
+          (if (ref.is_null (call $cdr (local.get $args)))
+            (then (return_call $eval (call $car (local.get $args)) (local.get $env))))
+          (local.set $value (call $eval (call $car (local.get $args)) (local.get $env)))
+          (local.set $args (call $cdr (local.get $args))) (br $next))) (return (local.get $value))))
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'quasiquote)))
     (then ,(wat-arity 1)
       (return (call $eval-backquote (call $car (local.get $args)) (local.get $env) (i32.const 1)))))
   (wat-symbol-branch '(local.get $id) *development-operators*
     (wat-fragment #@(return (call $development-eval (local.get $id) (local.get $args) (local.get $env)))))
-  #@(if (call $symbolp (local.get $name))
+  #@(if (i32.ne (local.get $id) (i32.const -1))
     (then
       ;; Resolve the lexical function namespace once for both macro expansion
       ;; and application. The same binding must shadow a global macro in both.
-      (local.set $binding (call $lexical-function (local.get $name) (local.get $env)))
+      ;; The supplied ID already proves a symbol (including NIL), so reuse it
+      ;; instead of classifying the operator and querying its ID again.
+      (local.set $binding (call $lexical-function-id (local.get $id) (local.get $env) (i32.const 0)))
       (local.set $value (if (result (ref null eq)) (ref.is_null (local.get $binding))
         (then (call $symbol-index-get (global.get $macro-bindings) (local.get $id)))
         (else (if (result (ref null eq)) (i32.eq (call $tag (local.get $binding)) (i32.const 31))
@@ -547,23 +608,6 @@
                 (local.set $value (call $car (local.get $params)))))))))))
       #@(call $clear-values)
       #@(return (local.get $value))))
-  (wat-symbol-case #@(local.get $id)
-    (quote
-      (wat-arity 1)
-      #@(return (call $car (local.get $args))))
-    (if
-      (wat-arity 2 3)
-      #@(local.set $value (call $eval (call $car (local.get $args)) (local.get $env)))
-      #@(local.set $args (call $cdr (local.get $args)))
-      #@(if (ref.is_null (local.get $value)) (then (local.set $args (call $cdr (local.get $args)))))
-      #@(return_call $eval (call $car (local.get $args)) (local.get $env))))
-  #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'progn)))
-      (then
-        (block $done (loop $next (br_if $done (ref.is_null (local.get $args)))
-          (if (ref.is_null (call $cdr (local.get $args)))
-            (then (return_call $eval (call $car (local.get $args)) (local.get $env))))
-          (local.set $value (call $eval (call $car (local.get $args)) (local.get $env)))
-          (local.set $args (call $cdr (local.get $args))) (br $next))) (return (local.get $value))))
   #@(if (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'let)))
               (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'let*))))
       (then
@@ -651,23 +695,6 @@
         (then (drop (call $function-documentation (local.get $value) (local.get $binding) (i32.const 1)))))
       #@(drop (call $set-fdefinition (local.get $name) (local.get $value)))
       #@(return (local.get $name)))
-    (function
-      (wat-arity 1)
-      #@(local.set $name (call $car (local.get $args)))
-      #@(if (call $symbolp (local.get $name))
-        (then (local.set $value (call $lexical-function (local.get $name) (local.get $env)))
-          (if (i32.eq (call $tag (local.get $value)) (i32.const 30))
-            (then (return (struct.get $obj $a (ref.cast (ref $obj) (local.get $value))))))
-          (return (call $fdefinition (local.get $name)))))
-      #@(if (i32.eq (call $operator (local.get $name)) (i32.const ,(runtime-symbol-id 'setf)))
-          (then (local.set $value (call $lexical-function (local.get $name) (local.get $env)))
-            (if (i32.eq (call $tag (local.get $value)) (i32.const 32))
-              (then (return (struct.get $obj $a (ref.cast (ref $obj) (local.get $value))))))
-            (return (call $fdefinition (local.get $name)))))
-      (wat-fail-when #@(i32.ne (call $id (call $car (local.get $name))) (i32.const ,(runtime-symbol-id 'lambda))) :malformed-form)
-      #@(local.set $args (call $cdr (local.get $name)))
-      #@(return (call $closure (call $car (local.get $args))
-                          (call $cdr (local.get $args)) (local.get $env))))
     (the
       (wat-arity 2)
       #@(local.set $value (call $eval (call $car (call $cdr (local.get $args))) (local.get $env)))
@@ -719,7 +746,8 @@
     (else
       (call $eval-call-arguments (local.get $args) (local.get $env))
       (local.set $values-count) (local.set $args) (local.set $secondary) (local.set $value)
-      (call $eval-apply-fixed (local.get $name) (local.get $value) (local.get $secondary) (local.get $values-count))
+      (call $eval-apply-fixed (local.get $name) (local.get $value) (local.get $secondary)
+        (local.get $args) (local.get $values-count))
       (local.set $index) (local.set $tertiary)
       (if (local.get $index) (then (return (local.get $tertiary))))
       (if (i32.gt_u (local.get $values-count) (i32.const 1))

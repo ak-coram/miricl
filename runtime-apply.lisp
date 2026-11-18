@@ -77,7 +77,8 @@
 ;; storage. Its prefix may already be raw; no temporary Lisp wrapper is used.
 (define-runtime-function $native-spread-arguments (($args :nullable-object)) (:nullable-object)
   (:locals ($data (ref null $objects)) ($source (ref null $objects))
-           ($tail :nullable-object) ($count i32) ($prefix i32) ($index i32) ($total i32))
+           ($tail :nullable-object) ($tail-count :nullable-object)
+           ($count i32) ($prefix i32) ($index i32) ($total i32))
   #@(if (i32.eqz (ref.test (ref $objects) (local.get $args)))
     (then (return (call $spread-arguments (local.get $args)))))
   #@(local.set $source (ref.cast (ref $objects) (local.get $args)))
@@ -86,8 +87,14 @@
   (wat-fail-when #@(i32.lt_u (local.get $count) (i32.const 2)) :wrong-arity)
   #@(local.set $prefix (i32.sub (local.get $count) (i32.const 2)))
   #@(local.set $tail (array.get $objects (local.get $source) (i32.sub (local.get $count) (i32.const 1))))
-  #@(call $check-apply-list (local.get $tail))
-  #@(local.set $total (i32.add (local.get $prefix) (call $natural-count (call $list-length-native (local.get $tail)))))
+  ;; Reuse the proper-list walk's count immediately, before any callback or
+  ;; checkpoint can mutate the public final spine. A cycle keeps the same
+  ;; CHECK-APPLY-LIST condition; dotted tails fail inside the checked walker.
+  #@(local.set $tail-count (call $list-length-native (local.get $tail)))
+  #@(if (ref.is_null (local.get $tail-count))
+    (then (call $type-fail (local.get $tail) (call $symbol-value ,(clos-library-reference '%proper-list-type))
+      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(local.set $total (i32.add (local.get $prefix) (call $natural-count (local.get $tail-count))))
   (wat-fail-when #@(i32.ge_u (local.get $total) (i32.const 65536)) :malformed-form)
   #@(local.set $data (array.new_default $objects (local.get $total)))
   #@(block $prefix-done (loop $copy-prefix
@@ -102,24 +109,20 @@
     (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy-tail)))
   #@(local.get $data))
 
-(define-runtime-function $apply-spread (($args :nullable-object)) (:nullable-object)
-  (:locals ($spread :nullable-object))
-  #@(local.set $spread (call $spread-arguments (local.get $args)))
-  #@(return_call $apply (call $car (local.get $args)) (local.get $spread)))
-
 (define-runtime-function $apply-source (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
-  (:locals ($params :nullable-object) ($env :nullable-object))
+  (:locals ($params :nullable-object) ($param :nullable-object) ($env :nullable-object))
   #@(block (result (ref null eq))
         (local.set $params (struct.get $obj $a (ref.cast (ref $obj) (local.get $name))))
         (local.set $env (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))
         (block $done (loop $next
           (br_if $done (ref.is_null (local.get $params)))
-          (if (i32.eq (call $id (call $car (local.get $params))) (i32.const ,(runtime-symbol-id '&rest)))
+          (local.set $param (call $car (local.get $params)))
+          (if (i32.eq (call $id (local.get $param)) (i32.const ,(runtime-symbol-id '&rest)))
             (then
               (local.set $env (call $bind (local.get $env) (call $car (call $cdr (local.get $params))) (local.get $args)))
               (local.set $args (ref.null eq)) (br $done)))
           ,(wat-fail-when #@(ref.is_null (local.get $args)) :wrong-arity)
-          (local.set $env (call $bind (local.get $env) (call $car (local.get $params)) (call $car (local.get $args))))
+          (local.set $env (call $bind (local.get $env) (local.get $param) (call $car (local.get $args))))
           (local.set $args (call $cdr (local.get $args)))
           (local.set $params (call $cdr (local.get $params))) (br $next)))
         ,(wat-fail-when #@(i32.eqz (ref.is_null (local.get $args))) :wrong-arity)
@@ -171,6 +174,19 @@
   ;; Source/HIR/builtin/public-MOP protocols genuinely consume Lisp lists.
   #@(if (ref.test (ref $objects) (local.get $args))
     (then (local.set $args (call $native-arguments-list (local.get $args)))))
+  ;; Source and direct closures need no builtin dispatch. Keep the checked
+  ;; packet-to-list conversion above this early dispatch.
+  #@(if (i32.eqz (local.get $code))
+      (then
+        (if (ref.test (ref $direct-function) (local.get $name))
+          (then (return (call $direct-function-call
+            (ref.cast (ref $direct-function) (local.get $name)) (local.get $args)))))
+        (if (ref.test (ref $generic-discriminator) (local.get $name))
+          (then (return_call $apply
+            (struct.get $obj $a (ref.cast (ref $obj) (local.get $name))) (local.get $args))))
+        ,(if *source-bootstrap-p*
+             '(return_call $apply-source (local.get $name) (local.get $args))
+             (wat-fail :malformed-form))))
   #@(if (i32.eq (local.get $code) (i32.const 2147483641))
     (then (return_call $hir-apply (local.get $name) (local.get $args))))
   #@(if (i32.eq (local.get $code) (i32.const 2147483642))
@@ -194,14 +210,10 @@
                  (i32.lt_u (local.get $code) (i32.const 2147483641)))
       (then (return (call $clos-primitive
         (i32.sub (local.get $code) (i32.const ,+clos-primitive-base+)) (local.get $args)))))
-  #@(if (i32.eq (local.get $code) (i32.const 2147483645))
-      (then (return (call $generic-apply (local.get $name) (local.get $args)))))
   #@(if (i32.ge_u (local.get $code) (i32.const 2147483646))
       (then (if (i32.le_u (local.get $code) (i32.const 2147483647))
         (then (return (call $condition-reader (local.get $name) (local.get $args)))))))
   #@(local.set $id (i32.sub (local.get $code) (i32.const 1)))
-  #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'apply)))
-    (then (return (call $apply-spread (local.get $args)))))
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'string)))
     (then ,(wat-arity 1) (return (call $string-designator (call $car (local.get $args))))))
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'string=)))
@@ -264,17 +276,6 @@
       (then (return (call $condition-apply (local.get $id) (local.get $args)))))
   #@(if (i32.lt_s (local.get $code) (i32.const 0))
       (then (return (call $symbol-setter (i32.sub (i32.const -1) (local.get $code)) (local.get $args)))))
-  #@(if (i32.eqz (local.get $code))
-      (then
-        (if (ref.test (ref $direct-function) (local.get $name))
-          (then (return (call $direct-function-call
-            (ref.cast (ref $direct-function) (local.get $name)) (local.get $args)))))
-        (if (ref.test (ref $generic-discriminator) (local.get $name))
-          (then (return_call $apply
-            (struct.get $obj $a (ref.cast (ref $obj) (local.get $name))) (local.get $args))))
-        ,(if *source-bootstrap-p*
-             '(return_call $apply-source (local.get $name) (local.get $args))
-             (wat-fail :malformed-form))))
   #@(if (i32.and (i32.ge_u (local.get $id) (i32.const ,(runtime-symbol-id 'make-package)))
                (i32.le_u (local.get $id) (i32.const ,(runtime-symbol-id 'values))))
       (then (return (call $package-apply (local.get $id) (local.get $args)))))
@@ -409,9 +410,6 @@
       #@(return (call $cdr (local.get $a))))
     (list
       #@(return (local.get $args)))
-    (funcall
-      (wat-arity 1 2147483647)
-      #@(return_call $apply (local.get $a) (local.get $rest)))
     (gcd
       #@(local.set $power (call $int (i32.const 0)))
       #@(block $done (loop $next (br_if $done (ref.is_null (local.get $args)))
@@ -465,5 +463,5 @@
 (define-runtime-section apply-runtime-wat ()
   ($apply0)
   (if *source-bootstrap-p* ($apply-source) "")
-  ($spread-arguments) ($native-spread-arguments) ($apply-spread)
+  ($spread-arguments) ($native-spread-arguments)
   ($apply1))

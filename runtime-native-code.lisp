@@ -377,11 +377,17 @@
 
 ;; Representation adapters used only by sealed portable CL packet kernels.
 (define-runtime-function $native-packet-length-cl (($args :nullable-object)) (:nullable-object)
+  (:locals ($count :nullable-object))
   #@(local.set $args (call $argument-context-arguments (local.get $args)))
   #@(if (ref.test (ref $objects) (local.get $args))
     (then (return (call $int (array.len (ref.cast (ref $objects) (local.get $args)))))))
-  #@(call $check-apply-list (local.get $args))
-  #@(call $list-length-native (local.get $args)))
+  ;; The checked walker already supplies the count. Keep its cycle rejection
+  ;; here instead of validating and then traversing the same spine again.
+  #@(local.set $count (call $list-length-native (local.get $args)))
+  #@(if (ref.is_null (local.get $count))
+    (then (call $type-fail (local.get $args) (call $symbol-value ,(clos-library-reference '%proper-list-type))
+      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(local.get $count))
 
 (define-runtime-function $native-packet-ref-cl (($args :nullable-object) ($index :nullable-object)) (:nullable-object)
   #@(local.set $args (call $argument-context-arguments (local.get $args)))
@@ -1067,18 +1073,6 @@
   #@(extern.convert_any (array.get $objects
     (call $vector-data ,(native-object '(local.get $vector))) (i32.wrap_i64 (local.get $index)))))
 
-(define-runtime-function $native-car-list (($function externref) ($list externref)) (externref)
-  (:export-raw "native-car-list")
-  #@(return_call $native-car-list-inline (local.get $list)))
-
-(define-runtime-function $native-car-checked (($function externref) ($list externref)) (externref)
-  (:export-raw "native-car-checked")
-  #@(return_call $native-car-inline-checked (local.get $list)))
-
-(define-runtime-function $native-cdr-checked (($function externref) ($list externref)) (externref)
-  (:export-raw "native-cdr-checked")
-  #@(return_call $native-cdr-inline-checked (local.get $list)))
-
 (define-runtime-function $native-vector-ref-inline (($vector externref) ($index i64)) (externref)
   (:export-raw "native-vector-ref-inline")
   ;; The compiler proved the representation and captured the canonical
@@ -1128,15 +1122,6 @@
   #@(extern.convert_any (call $checked-row-major-set
     ,(native-object '(local.get $value)) ,(native-object '(local.get $array))
     ,(native-object '(local.get $index)))))
-
-(define-runtime-function $native-character-code (($function externref) ($character externref)) (externref)
-  (:export-raw "native-character-code")
-  #@(return_call $native-character-code-inline (local.get $character)))
-
-(define-runtime-function $native-character-ref
-    (($function externref) ($string externref) ($index externref)) (externref)
-  (:export-raw "native-character-ref")
-  #@(return_call $native-character-ref-inline (local.get $string) (local.get $index)))
 
 (define-runtime-function $native-character-code-inline (($character externref)) (externref)
   (:export-raw "native-character-code-inline")
@@ -1292,10 +1277,6 @@
   #@(call $native-unbox-int64
     (call $native-character-code-inline
       (call $native-character-ref-inline (local.get $string) (extern.convert_any (call $int64 (local.get $index)))))))
-
-(define-runtime-function $native-cdr-list (($function externref) ($list externref)) (externref)
-  (:export-raw "native-cdr-list")
-  #@(return_call $native-cdr-list-inline (local.get $list)))
 
 (define-runtime-function $native-car-list-inline (($list externref)) (externref)
   (:export-raw "native-car-list-inline")
@@ -1932,6 +1913,63 @@
         (if (local.get $hit)
           (then (call $clear-values) (return (extern.convert_any (local.get $direct-result))))))))))
 
+(defun native-fixed-builtin-functions (arity)
+  "Conservative checked builtin capabilities of NATIVE-CALL0..4.
+This records implementations, not signatures or successful result counts."
+  (case arity
+    (0 '(vector))
+    ;; The accessor decoder already provides checked fixed entries for this
+    ;; shared implementation family; the contract join still proves arity
+    ;; and exact value count independently for every member.
+    (1 (append '(car cdr not null identity consp atom symbolp listp stringp
+                 integerp numberp rationalp realp complexp floatp 1+ 1- length list vector
+                 string symbol-name char-upcase char-downcase alphanumericp oddp evenp abs signum)
+               *list-accessors*))
+    (2 '(eq eql cons + - * / = /= < > <= >= list vector string=
+         vector-push vector-push-extend bit sbit aref svref))
+    ((3 4) '(list vector))))
+
+(defun native-standard-fixed-functions (arity)
+  "Join checked implementation capabilities with shared ANSI contracts.
+Unknown identity, arity or result count leaves the ordinary evaluator path."
+  (when (and (integerp arity) (<= 0 arity 4))
+    (remove-if-not
+      (lambda (name)
+        (and (member name *runtime-functions* :test #'eq)
+             (not (assoc name *native-public-functions* :test #'eq))
+             (member (miricl-compiler::standard-function-property name :kind)
+                     '(:function :accessor) :test #'eq)
+             (let ((limits (miricl-compiler::standard-function-property name :arity)))
+               (and limits (<= (car limits) arity)
+                    (or (null (cdr limits)) (<= arity (cdr limits)))))
+             (eql (miricl-compiler::standard-function-result-count name arity) 1)))
+      (native-fixed-builtin-functions arity))))
+
+(defun native-standard-fixed-dispatch-wat (value arity hit miss)
+  ;; Resolve contracts during runtime generation. No guest table or query is
+  ;; added; eligible entries keep the existing compact symbol-ID dispatcher.
+  ;; These facts do not prove operand types or replace checked native entries.
+  ;; The caller checked ARITY in 0..4. Group identical capability intersections
+  ;; so constructor-only arities share their dispatcher, retaining the common
+  ;; one/two-argument order without widening their symbol lookup trees.
+  (let ((groups nil))
+    (dolist (count '(1 2 0 3 4))
+      (let* ((eligible (native-standard-fixed-functions count))
+             (group (find eligible groups :key #'cdr :test #'equal)))
+        (if group
+            (setf (car group) (append (car group) (list count)))
+            (setf groups (append groups (list (cons (list count) eligible)))))))
+    (apply #'runtime-wat-sequence
+      (loop for ((counts . eligible) . rest) on groups
+            for dispatch = (if eligible
+                (wat-symbol-dispatch (runtime-wat-sequence value)
+                  (list (cons eligible (runtime-wat-sequence hit))))
+                (runtime-wat-sequence))
+            collect (if rest
+                (wat-integer-branch (runtime-wat-sequence arity) counts
+                  (runtime-wat-sequence dispatch miss))
+                dispatch)))))
+
 (defun native-fixed-primitive-entries ()
   ;; Only checked object-argument entries belong here. Their fixed ABI accepts
   ;; already evaluated Lisp values and never exposes the caller's argument
@@ -2560,15 +2598,13 @@
   ($native-mod-general-inline) ($native-rounding-primary-inline) ($native-truncate-primary-inline)
   ($ordered-compare-native) ($native-ordered-compare-inline)
   ($native-zero-inline)
-  ($native-vector-ref-trusted) ($native-car-list) ($native-cdr-list)
-  ($native-car-checked) ($native-cdr-checked)
+  ($native-vector-ref-trusted)
   ($native-car-inline-checked) ($native-cdr-inline-checked)
   ($native-car-list-inline) ($native-cdr-list-inline)
   ($native-vector-ref-trusted64)
   ($native-vector-ref-inline)
   ($checked-sbit-ref) ($native-sbit-ref-inline) ($native-row-major-ref-inline)
   ($checked-row-major-set) ($native-row-major-set-inline)
-  ($native-character-ref) ($native-character-code)
   ($native-character-ref-inline) ($native-character-code-inline) ($native-character-set-inline)
   ($native-simple-character-set-inline)
   ($native-code-character-inline)

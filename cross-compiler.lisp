@@ -694,7 +694,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
           (when (string= target "native-vector-set-inline") (setf vector-write t))
           (let ((arity (position target '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4") :test #'equal)))
             (when arity (setf call-slots (max call-slots (1+ arity)))))
-          (when (member target '("native-call" "native-primary-call" "native-character-code") :test #'equal)
+          (when (member target '("native-call" "native-primary-call") :test #'equal)
             (setf call-slots (max call-slots 2)))
           (when (string= target "native-character-ref-inline") (setf call-slots (max call-slots 2)))
           (when (string= target "native-character-set-inline") (setf call-slots (max call-slots 3)))
@@ -715,7 +715,6 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
           (when (equal (cdr (assoc target miricl-compiler::*native-imports* :test #'equal))
                        '((:object :i64 :i64) :object))
             (setf integer-call t call-slots (max call-slots 1)))
-          (when (string= target "native-character-ref") (setf call-slots (max call-slots 3)))
           (when (member target '("native-arguments" "native-argument-set" "native-argument"
                                 "native-rest-argument" "native-check-arguments" "native-argument-present"
                                 "native-keyword-present" "native-keyword-argument" "native-check-keywords") :test #'equal)
@@ -864,10 +863,8 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                   ;; and the full scalar operands selected by the range proof.
                   (format out "local.set ~D local.set ~D local.set ~D~%local.get ~D extern.convert_any local.get ~D local.get ~D call $~A any.convert_extern ref.cast (ref null eq)~%"
                     integer-right integer-left call-base call-base integer-left integer-right target))
-                 ((member target '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4" "native-character-code" "native-character-ref" "native-character-ref-inline" "native-character-code-inline" "native-character-code-at-inline") :test #'equal)
-                  (let ((count (cond ((string= target "native-character-code") 2)
-                                     ((string= target "native-character-ref") 3)
-                                     ((string= target "native-character-code-inline") 1)
+                 ((member target '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4" "native-character-ref-inline" "native-character-code-inline" "native-character-code-at-inline") :test #'equal)
+                  (let ((count (cond ((string= target "native-character-code-inline") 1)
                                      ((string= target "native-character-ref-inline") 2)
                                      ((string= target "native-character-code-at-inline") 2)
                                      (t (1+ (position target '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4") :test #'equal))))))

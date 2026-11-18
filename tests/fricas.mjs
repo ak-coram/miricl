@@ -27,6 +27,11 @@ try {
   session = await start();
   assert.equal(session.vm.evaluate(`(and (compiled-function-p #'boot::|parseAndInterpret|)
     (plusp (miricl-compiler::compiler-primitive 26 #'boot::|parseAndInterpret|)))`).output, 'T\n');
+  // Predicate indices may be freshly boxed or come from another algebra FASL.
+  assert.equal(session.vm.evaluate(`(list
+    (boot::|testBitVector| 0 (- 1 1))
+    (boot::|testBitVector| 2 (+ 1 1))
+    (boot::|testBitVector| 2 (+ 1 2)))`).output, '(T T NIL)\n');
   for (const example of examples) {
     console.log(`FriCAS example: ${example.title}`);
     const result = await session.evaluate(example.code);

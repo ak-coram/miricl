@@ -11,6 +11,12 @@
      (error "Native FriCAS service ~A is unavailable in this environment." ,c-name)))
 
 (defun |miricl-host-services| ()
+  ;; Upstream tests the sentinel predicate index with EQ. Equal boxed integers
+  ;; from separate algebra files need not be identical; zero means that the
+  ;; predicate is unconditional, rather than a request to test bit -1.
+  (setf (symbol-function 'boot::|testBitVector|)
+    (lambda (vector index)
+      (if (eql index 0) t (logbitp (1- index) vector))))
   ;; Upstream defines these helpers only for its named Lisp implementations.
   (setf (symbol-function 'boot::bpiname)
     (lambda (function)

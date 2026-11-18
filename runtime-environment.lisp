@@ -3,9 +3,10 @@
 (named-readtables:in-readtable :miricl-wat)
 
 (define-runtime-function $specialp (($name :nullable-object)) (i32)
-  #@(if (i32.eq (call $id (local.get $name)) (i32.const ,(runtime-symbol-id '*package*)))
+  (:locals ($id i32))
+  #@(if (i32.eq (local.tee $id (call $id (local.get $name))) (i32.const ,(runtime-symbol-id '*package*)))
     (then (return (i32.const 1))))
-  #@(i32.eqz (ref.is_null (call $symbol-index-get (global.get $specials) (call $id (local.get $name))))))
+  #@(i32.eqz (ref.is_null (call $symbol-index-get (global.get $specials) (local.get $id)))))
 
 (define-runtime-function $proclaim-special (($name :nullable-object)) ()
   #@(call $symbol-index-set (global.get $specials) (call $id (local.get $name)) (call $symbol (i32.const 1))))

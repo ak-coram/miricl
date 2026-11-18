@@ -493,6 +493,16 @@ Checked linkage needs no operand-type proof, while unchecked workers still requi
 NOTINLINE calls remain out of line. Host runtime-kernel adapters retain their explicit linkage
 and conservatively decline these mixed-signature plans.
 
+The evaluator's fixed-call selector intersects checked native capabilities with standard
+function/accessor kind, accepted arity and exactly one successful value. Public Lisp overrides
+and unknown contracts retain ordinary application. Host generation groups identical accepted
+name sets across arities, sharing dispatch without a guest contract table or query.
+
+Typed and checked CAR/CDR call lowering shares the same single-argument runtime entries as
+inline plans. Exact CHAR-CODE and CHAR calls likewise share the checked character workers.
+The function-reference producer retains ordinary evaluation; shared workers receive only the
+operation's operands. SAFETY and list proofs still select checked or unchecked list access.
+
 Composite list reads use shared checked list paths, including under NOTINLINE, with NIL
 behavior and each intermediate CAR/CDR check preserved. Standard list-place DEFSETF expanders
 emit the prefix accessor or NTHCDR followed by RPLACA/RPLACD and return the stored value. These

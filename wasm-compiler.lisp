@@ -156,8 +156,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-sbit-ref-inline" (:object :object) :object)
     ("native-row-major-ref-inline" (:object :object) :object)
     ("native-row-major-set-inline" (:object :object :object) :object)
-    ("native-character-ref" (:object :object :object) :object)
-    ("native-character-code" (:object :object) :object)
     ("native-character-ref-inline" (:object :object) :object)
     ("native-character-set-inline" (:object :object :object) :object)
     ("native-simple-character-set-inline" (:object :object :i64) :object)
@@ -172,10 +170,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-character-code-at64-inline" (:object :i64) :object)
     ("native-character-code-at-unboxed-inline" (:object :object) :i64)
     ("native-character-code-at64-unboxed-inline" (:object :i64) :i64)
-    ("native-car-list" (:object :object) :object)
-    ("native-cdr-list" (:object :object) :object)
-    ("native-car-checked" (:object :object) :object)
-    ("native-cdr-checked" (:object :object) :object)
     ("native-car-inline-checked" (:object) :object)
     ("native-cdr-inline-checked" (:object) :object)
     ("native-list-path" (:object :i32) :object)
@@ -1938,10 +1932,12 @@ exhausted work budgets keep every incoming value group."
                     (eq (hir-instruction-opcode producer) :function-reference)
                     (not (eq (second (hir-instruction-attributes producer)) 'notinline))
                     (first (hir-instruction-attributes producer))))
-         (target (cond ((and (= (length inputs) 3) (eq name 'char-code)) "native-character-code")
-                       ((and (= (length inputs) 4) (eq name 'char)) "native-character-ref"))))
+         (target (cond ((and (= (length inputs) 3) (eq name 'char-code)) "native-character-code-inline")
+                       ((and (= (length inputs) 4) (eq name 'char)) "native-character-ref-inline"))))
     (when target
-      (dolist (value (cdr inputs)) (wasm-get value))
+      ;; Retain the function-reference producer's ordinary evaluation while
+      ;; sharing the checked worker without an unused function operand.
+      (dolist (value (cddr inputs)) (wasm-get value))
       (wasm-call target)
       t)))
 
@@ -1957,10 +1953,13 @@ exhausted work budgets keep every incoming value group."
     ;; LIST includes NIL and arbitrary conses, including dotted lists. These
     ;; declarations justify removing the generic argument tag dispatch.
     (when (member name '(car first cdr rest))
-      (wasm-get function) (wasm-get (third inputs))
+      ;; These exact standard entries ignore the captured function object.
+      ;; Its producer retains normal evaluation; only the unused ABI operand
+      ;; disappears. Reuse the same single-argument helpers as inline plans.
+      (wasm-get (third inputs))
       (wasm-call (if (and (zerop safety) listp)
-                    (if (member name '(car first)) "native-car-list" "native-cdr-list")
-                    (if (member name '(car first)) "native-car-checked" "native-cdr-checked")))
+                    (if (member name '(car first)) "native-car-list-inline" "native-cdr-list-inline")
+                    (if (member name '(car first)) "native-car-inline-checked" "native-cdr-inline-checked")))
       t)))
 
 (defun native-plan-inline-simple (unit)
