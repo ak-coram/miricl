@@ -1341,6 +1341,25 @@ try {
       (${consumer} unit))`, /output|owner|producer/, 'compiler-input-error');
   }
 
+  // Capture slots require shared cells. A client cannot clear the binding's
+  // capture flag and select private storage for a cell used by a closure.
+  for (const consumer of ['infer-hir-types', 'emit-native-module', 'emit-hir-code'])
+    reject(`(let* ((unit (compile-to-hir '(lambda (replacement)
+          (declare (optimize (safety 1) (debug 0)))
+          (let ((x 0))
+            (flet ((change () (setq x replacement))) (change) x)))))
+        (root (first (hir-unit-functions unit)))
+        (binding (find 'x (hir-function-bindings root)
+          :key (lambda (binding) (hir-binding-name binding)))))
+      (setf (hir-binding-captured-p binding) nil)
+      (${consumer} unit))`, /captured binding|marked captured/);
+  check(`(let ((function (compile-native '(lambda (replacement)
+        (declare (optimize (safety 1) (debug 0)))
+        (let ((x 0))
+          (flet ((change () (setq x replacement))) (change) x))))))
+    (and (eq (funcall function :replacement) :replacement)
+      (= (funcall function 1073741824) 1073741824)))`);
+
   // Block-group metadata is untrusted current-format input. Check both
   // callable loading and native reconstruction, with recovery after each
   // malformed descriptor. The scalar parameter field encodes register+1.
@@ -2022,6 +2041,102 @@ try {
     (let* ((unit (compile-to-hir source))
            (facts (infer-hir-types-checked unit nil nil nil t)))
       (gethash (first (hir-unit-functions unit)) facts t))) (values)`);
+  // A private literal cursor retains proper suffixes across control flow and
+  // effects. Early exits keep sharing and the complete multiple-value result.
+  check(`(let* ((source '(lambda (stop)
+        (declare (optimize (safety 1) (debug 0)))
+        (let* ((cursor '(a b c)) (original cursor) (seen nil))
+          (block done
+            (loop while cursor do
+              (when (eq stop :zero) (return-from done (values)))
+              (when (eq (car cursor) stop)
+                (return-from done (values cursor (nreverse seen) original)))
+              (push (car cursor) seen)
+              (setq cursor (cdr cursor)))
+            (values cursor (nreverse seen) original)))))
+      (function (compile-native source))
+      (early (multiple-value-list (funcall function 'b)))
+      (complete (multiple-value-list (funcall function :absent))))
+    (and (hir-type-proves-p (soundness-proven-result source) 'list)
+      (equal early '((b c) (a) (a b c)))
+      (eq (first early) (cdr (third early)))
+      (equal complete '(nil (a b c) (a b c)))
+      (null (multiple-value-list (funcall function :zero)))))`);
+  // One arbitrary replacement invalidates the suffix invariant. Dotted tails
+  // remain observable; invalid CAR/CDR arguments keep checked Lisp failures.
+  check(`(let* ((source '(lambda (replacement)
+        (declare (optimize (safety 1) (debug 0)))
+        (let ((cursor '(a b c)))
+          (setq cursor replacement) (setq cursor (cdr cursor)) cursor)))
+      (function (compile-native source)))
+    (and (not (hir-type-proves-p (soundness-proven-result source) 'list))
+      (eq (funcall function '(a . :tail)) :tail)
+      (handler-case (progn (funcall function :invalid) nil) (type-error () t))
+      (equal (funcall function '(a b)) '(b))))`);
+  // The bounded proof inspection must accept legal dotted and cyclic quoted
+  // data without trying to establish a proper-spine invariant for it.
+  check(`(and
+    (eq (funcall (compile-native '(lambda ()
+      (declare (optimize (safety 1) (debug 0)))
+      (let ((cursor '(a . :tail))) (setq cursor (cdr cursor)) cursor)))) :tail)
+    (equal (multiple-value-list (funcall (compile-native '(lambda ()
+      (declare (optimize (safety 1) (debug 0)))
+      (let ((cursor '#1=(a . #1#)))
+        (dotimes (i 3) (setq cursor (cdr cursor)))
+        (values (eq cursor (cdr cursor)) (car cursor))))))) '(t a)))`);
+  // Literal traversals bound integer counters in both ordinary and executable
+  // inference. Mixed steps and LOOP's final increment remain observable.
+  for (const [body, expected, result] of [
+    ["(let ((i 0)) (dolist (x '(a b c) i) (incf i)))", '(integer 0 16)', 3],
+    ["(loop for x in '(a b c) for i from 0 finally (return i))", '(integer 0 16)', 3],
+    ["(let ((i 5)) (dolist (x '(a b c) i) (decf i 2) (incf i)))", '(integer -16 16)', 2],
+    ["(let ((i 5)) (dolist (x '() i) (incf i)))", '(integer 0 16)', 5],
+  ]) check(`(let* ((source '(lambda ()
+        (declare (optimize (safety 1) (debug 0))) ${body}))
+      (unit (compile-to-hir source)) (owner (first (hir-unit-functions unit)))
+      (ordinary (infer-hir-types unit)))
+    (and (hir-type-proves-p (gethash owner ordinary t) '${expected})
+      (hir-type-proves-p (soundness-proven-result source) '${expected})
+      (= (funcall (compile-native source)) ${result})))`);
+  // A repeated body GO and an unknown write must not inherit the traversal's
+  // counter envelope. Errors still leave the compiled function reusable.
+  check(`(let* ((source '(lambda (replacement)
+        (declare (optimize (safety 1) (debug 0)))
+        (let ((i 0))
+          (dolist (x '(a b c) i) (setq i replacement) (incf i)))))
+      (function (compile-native source)))
+    (and (not (hir-type-proves-p (soundness-proven-result source) 'integer))
+      (= (funcall function 0.5d0) 1.5d0)
+      (handler-case (progn (funcall function :invalid) nil) (type-error () t))
+      (= (funcall function 100) 101)))`);
+  check(`(let* ((source '(lambda ()
+        (declare (optimize (safety 1) (debug 0)))
+        (let ((i 0)) (dolist (x '(a b c) i)
+          (tagbody again (incf i) (when (< i 20) (go again)))))))
+      (function (compile-native source)))
+    (and (not (hir-type-proves-p (soundness-proven-result source) '(integer 0 16)))
+      (= (funcall function) 22)))`);
+  // Bounded recurrences retain executable finite ranges without declarations.
+  // Check useful bounds rather than the widening ladder's exact thresholds.
+  for (const [test, update, expected] of [
+    ['(< i 100)', '(incf i)', '(integer 0 2147483647)'],
+    ['(> i -100)', '(decf i)', '(integer -2147483648 0)'],
+  ]) check(`(hir-type-proves-p
+    (soundness-proven-result '(lambda ()
+      (declare (optimize (safety 1) (debug 0)))
+      (let ((i 0)) (loop while ${test} do ${update}) i))) '${expected})`);
+  // Every write participates in the recurrence. Unknown replacement values
+  // must retain floating-point arithmetic and its ordinary checked failures.
+  check(`(let* ((source '(lambda (replacement)
+        (declare (optimize (safety 1) (debug 0)))
+        (let ((i 0))
+          (loop while (< i 100) do
+            (when (= i 0) (setq i replacement)) (incf i)) i)))
+      (function (compile-native source)))
+    (and (not (hir-type-proves-p (soundness-proven-result source) 'integer))
+      (= (funcall function 0.5d0) 100.5d0)
+      (handler-case (progn (funcall function :invalid) nil) (type-error () t))
+      (= (funcall function 1000) 1001)))`);
   // Standard result facts remain valid for out-of-line calls. Result counts
   // are independent of primary types and remain unknown for forwarded values.
   check(`(with-compilation-statistics (statistics)

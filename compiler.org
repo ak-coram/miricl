@@ -99,6 +99,8 @@ operand, parent, register and control contracts, then recomputes analysis. Priva
 fresh owned containers; public emission and loading remain checked. The interpreter has fixed
 small-call encodings, primary-call specialization and a bounded transient decoding cache
 excluded from snapshots. Full-value and debugger calls retain their general protocols.
+Capture identities require bindings marked captured, ensuring closure cells retain shared
+storage; client metadata cannot request private storage for an actual captured binding.
 
 =hir-types.lisp= shares target relationships across inference, proof queries and lowering:
 nominal families, unions/intersections, EQL/MEMBER, MOD, integer intervals, array rank and
@@ -107,6 +109,40 @@ DEFTYPE or execute SATISFIES. EQL identity and cyclic literal handling remain in
 Depth/work limits yield no proof on exhaustion. Fresh inference propagates local values,
 ranges, joins and closed-call arguments/returns while accounting for outside callers at
 entries and escapes. HIR changes invalidate dependent facts.
+
+Repeatedly growing integer joins widen after four strict range expansions.
+Declaration-independent queries and function results move each expanding endpoint
+outward through sign boundaries and the target signed-31, signed-32 and signed-64
+boundaries, then to infinity; stable endpoints remain exact. Every later threshold
+crossing reschedules dependent facts. The finite ladder bounds cyclic range growth without asserting a
+machine width. Integer joins normalize infinite endpoints, while dominated branch
+premises can retain narrower body bounds. Ordinary declared inference keeps informative
+assertion fallbacks and otherwise uses the same ladder. Arithmetic outside the finite
+scalar domain retains its shared successful-return type, which can lose integer membership
+or sign information.
+
+Private cells initialized by proper quoted lists retain an executable LIST invariant
+when every write is a canonical CDR or REST of a read of that same cell. Empty
+literal spines retain NULL. A bounded spine inspection declines dotted, circular
+and oversized literals without rejecting quoted data. The complete private-use
+audit excludes aliases, captures and unresolved entries; facts are recomputed for
+each inference. Literal immutability makes historical suffix reads safe without a
+runtime list-length or mutation analysis. ENDP supplies the same truth premise as
+NULL, so ordinary dominated nonempty paths can narrow these observations to CONS.
+
+A narrow literal-traversal certificate also bounds private integer counters.
+It recognizes one linear jump cycle with a fresh cursor guard and one CDR advance
+of that exact observation. Actual predecessor edges permit entry only before the
+first guard; all cursor and counter writes are audited across the whole function.
+Every counter write must use a fresh same-block self-read, or the exact value of
+the latest preceding write, plus or minus a literal integer. For literal length N,
+each update site runs at most N+1 times, including
+the entry prefix and final increment. Summed negative and positive steps give a
+conservative cell interval retained after widening in both inference modes.
+Branches within the cycle, reentry, capture, unsupported control transfers and
+unknown writes decline this certificate. Inspection and graph work are bounded.
+These mathematical bounds enable existing arithmetic plans without asserting an
+object representation or changing checked storage and scheduling contracts.
 
 Dominated truth tests and canonical predicates narrow values only across paths that establish
 the premise. Aliases, writes, captured landings and unresolved entries prevent unsupported
@@ -215,6 +251,18 @@ Intermediate SSA results share the existing raw i64 locals after signed extensio
 arithmetic chains to avoid intermediate boxes. Reference consumers box using the proved
 result width and canonical integer conversion, including results outside the i31 range.
 Private cell storage and loop induction require their separate existing proofs.
+The mixed-fact filter in =native-plan-proven-integers= can still omit cyclic arithmetic
+whose ordinary inference retains a broad numeric successful-return type, even when the
+declaration-independent query would retain finite bounds. Cell origins also retain their
+separate representation and storage requirements.
+In =native-plan-unboxed-cell-values=, initializers and every write must fit i64,
+all cell uses must remain structurally private, and cell creation and writes require
+SAFETY 0. Reads receive independent SSA snapshots. These storage checks do not yet
+consume declaration-independent cyclic bounds to admit cells at SAFETY 1.
+The =hir-inline-result-type= LENGTH rules cover vectors, including sized simple vectors;
+they do not infer list lengths or relate a changing list cursor to a loop counter.
+Such relationships require facts valid under aliases, writes and calls that can mutate
+the list spine, in addition to proper-list validation.
 Opt-in =WITH-COMPILATION-STATISTICS= records accepted plans as
 =:proof/integer-arithmetic-i32= and emitted lowerings as
 =:optimization/integer-arithmetic-i32=, with the arithmetic operator as detail.
@@ -380,6 +428,13 @@ NOTINLINE preserves semantic facts while prohibiting expansion. Integer predicat
 supports unbounded and bignum intervals; declaration-derived unchecked facts retain their
 separate SAFETY restrictions. Native scalar result planning and eligible tail-result cleanup
 also consume shared count facts, independently of effects and argument checks.
+
+The shared executable-fact query also admits canonical CAR/CDR and FIRST/REST
+accesses at SAFETY 1 when their operands are proved LIST, selecting direct field
+reads for CONS and the NIL-aware helpers otherwise. Proven LIST operands allow
+ENDP to use a null test while retaining its original scheduling checkpoint, even
+when the result is discarded. Mixed declaration facts only select query roots;
+the final proof ignores declarations. NOTINLINE still vetoes expansion.
 
 =hir-standard-operations= computes fresh semantic provenance through bounded primary-value
 flow, copies, compatible joins and certified private-cell reads. It shares primary-flow and

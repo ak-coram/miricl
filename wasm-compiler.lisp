@@ -618,6 +618,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (when (and *wasm-proven-integer-arithmetic*
              (gethash instruction *wasm-proven-integer-arithmetic*))
     (return-from native-removable-p nil))
+  (when (and *wasm-inline-simple-calls*
+             (eq (gethash instruction *wasm-inline-simple-calls*) :endp-list))
+    (return-from native-removable-p nil))
   ;; These operations cannot signal or change observable state in valid HIR.
   ;; Global lookups and calls stay live even when their result is discarded.
   (or (and *wasm-proper-list-checks* (gethash instruction *wasm-proper-list-checks*))
@@ -1960,7 +1963,7 @@ exhausted work budgets keep every incoming value group."
   ;; Each CASE arm names an exact standard CL operation. These bounded plans
   ;; reuse compact checked helpers or replace the ordinary argument packet;
   ;; NOTINLINE still vetoes expansion. Never classify a private builtin by ID.
-  (let ((arithmetic nil) (fuel 4096))
+  (let ((arithmetic nil) (list-accesses nil) (fuel 4096))
     (declare (type (integer -1 4096) fuel))
     (dolist (function (hir-unit-functions unit))
       ;; Only inline TRUNCATE needs full multiple-value demand here. Compute
@@ -1975,10 +1978,10 @@ exhausted work budgets keep every incoming value group."
         (let ((allocated nil))
         (dolist (instruction (hir-block-instructions block))
           ;; Share the ordinary traversal, including the old selection budget
-          ;; for instructions in eligible functions. Exhaustion discards only
-          ;; arithmetic candidates; ordinary and comparison planning continue.
+          ;; for instructions in eligible functions. Exhaustion discards the
+          ;; arithmetic/list candidates; ordinary and comparison plans continue.
           (when (and arithmeticp (not (minusp fuel)) (minusp (decf fuel)))
-            (setq arithmetic nil))
+            (setq arithmetic nil list-accesses nil))
           (when (eq (hir-instruction-opcode instruction) :call)
             (let* ((inputs (hir-instruction-inputs instruction)) (reference (second inputs))
                    (producer (hir-value-producer reference))
@@ -2161,6 +2164,15 @@ exhausted work budgets keep every incoming value group."
                       ;; NAME already requires a direct canonical reference
                       ;; with expansion permission, including NOTINLINE.
                       (push (cons instruction name) arithmetic))
+                    (when (and arithmeticp (not (minusp fuel))
+                               (= (hir-instruction-safety-level instruction) 1)
+                               (= (length inputs) 3)
+                               (member name '(car first cdr rest endp))
+                               *wasm-inferred-types*
+                               (hir-type-proves-p (gethash (third inputs) *wasm-inferred-types* t) 'list))
+                      ;; Mixed facts only select roots. The shared executable
+                      ;; query below independently certifies every operand.
+                      (push (cons instruction name) list-accesses))
                     (when (member kind '(:cons :list :list-star)) (setq allocated t))
                     (when (and allocated *wasm-cons-forward-blocks*
                                (member kind '(:car :cdr :car-cons :cdr-cons :checked-car :checked-cdr)))
@@ -2171,7 +2183,7 @@ exhausted work budgets keep every incoming value group."
                     ;; Computed designators retain their evaluation and identity.
                     (when attributes
                       (setf (gethash reference *wasm-inline-references*) t))))))))))
-  (native-plan-proven-integers unit arithmetic)
+  (native-plan-proven-integers unit arithmetic list-accesses)
   (native-plan-character-code-fusion unit)
   *wasm-inline-simple-calls*))
 
@@ -2202,8 +2214,8 @@ exhausted work budgets keep every incoming value group."
                       (eq (gethash producer *wasm-inline-simple-calls*) :logand-general)))))
         (otherwise (return nil))))))
 
-(defun native-plan-proven-integers (unit candidates)
-  "Share one executable-fact query between arithmetic and comparison plans."
+(defun native-plan-proven-integers (unit candidates &optional list-accesses)
+  "Share one executable-fact query between integer and list-access plans."
   (let ((arithmetic nil) (comparisons nil) (roots nil)
         (prospective (make-hash-table :test 'eq)))
     (dolist (entry (nreverse candidates))
@@ -2232,6 +2244,8 @@ exhausted work budgets keep every incoming value group."
                        (cddr (hir-instruction-inputs instruction))))
             (push instruction comparisons)
             (dolist (operand (cddr (hir-instruction-inputs instruction))) (push operand roots))))))
+    (dolist (entry list-accesses)
+      (push (third (hir-instruction-inputs (car entry))) roots))
     (when roots
       ;; These maps describe the current owned HIR, independently of inferred
       ;; types and declarations. All functions remain externally callable for
@@ -2239,7 +2253,17 @@ exhausted work budgets keep every incoming value group."
       (let ((proven (infer-hir-types-checked unit roots t (hir-unit-functions unit) t
                        *wasm-result-callees* *hir-standard-operations* *wasm-type-guards*)))
         (native-plan-proven-integer-arithmetic arithmetic proven)
-        (native-plan-proven-integer-comparisons comparisons proven)))))
+        (native-plan-proven-integer-comparisons comparisons proven)
+        (dolist (entry list-accesses)
+          (let* ((instruction (car entry)) (name (cdr entry))
+                 (type (gethash (third (hir-instruction-inputs instruction)) proven t)))
+            (when (hir-type-proves-p type 'list)
+              (compiler-statistic :proof/list-access name)
+              (setf (gethash instruction *wasm-inline-simple-calls*)
+                (cond ((eq name 'endp) :endp-list)
+                      ((hir-type-proves-p type 'cons)
+                       (if (member name '(car first)) :car-cons :cdr-cons))
+                      (t (if (member name '(car first)) :car :cdr)))))))))))
 
 (defun native-plan-proven-integer-arithmetic (pending proven)
   "Choose exact i32 arithmetic from executable operand facts at SAFETY 1."
@@ -2759,6 +2783,11 @@ exhausted work budgets keep every incoming value group."
              ((eq kind :false) (wasm-null))
              ((eq kind :left) (wasm-get (third inputs)))
              ((eq kind :right) (wasm-get (fourth inputs)))
+             ((eq kind :endp-list)
+              ;; The checked standard call polls after operand evaluation.
+              ;; Keep that checkpoint even when its result is unused.
+              (wasm-call "native-poll")
+              (wasm-get (third inputs)) (wasm-byte #xd1) (wasm-call "native-boolean"))
              ((eq kind :list) (wasm-list (cddr inputs) nil))
              ((eq kind :list-star) (wasm-list (cddr inputs) t))
              ((eq kind :consp)
@@ -5194,9 +5223,9 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-fixed-arity emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-restore emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    emit-native-structured-target emit-native-structured-jump emit-native-structured-region
                    hir-capture hir-cell-for-binding
-                   hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell
+                   hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-widen-integer-interval hir-type-restrict hir-constant-type hir-type-cell
                    hir-type-without-null hir-copy-source hir-type-truth-premise hir-type-branch-guards
-                   hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-symbolic-target-type-p hir-type-query-result-type hir-integer-identity hir-integer-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
+                   hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-literal-list-cells hir-literal-counter-cells hir-symbolic-target-type-p hir-type-query-result-type hir-integer-identity hir-integer-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
                    hir-dispatch-candidate
                    hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells
                    hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-tail-pair-p hir-share-branch-tails hir-refresh-predecessors hir-proper-list-checks optimize-hir-checked optimize-hir
@@ -5259,7 +5288,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
   ;; interpreter still installs and executes ordinary global definitions.
   '((wasm-byte wasm-append wasm-u32 wasm-u32-width wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call)
     (hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant hir-clear-source)
-    (hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-type-restrict hir-constant-type hir-type-cell)
+    (hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-widen-integer-interval hir-type-restrict hir-constant-type hir-type-cell hir-literal-list-cells hir-literal-counter-cells)
     (hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells)
     (miricl::%file-lexical-name miricl::%file-lexical-specials miricl::%file-lexical-bind
      miricl::%file-lexical-reference miricl::%file-code-cons miricl::%file-lexical-forms
