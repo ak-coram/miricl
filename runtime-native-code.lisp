@@ -1432,6 +1432,23 @@
 (define-runtime-function $native-ordered-compare-inline
     (($left externref) ($right externref) ($mode i32)) (externref)
   (:export-raw "native-ordered-compare-inline")
+  (:locals ($a i32) ($b i32))
+  ;; Actual i31 operands are real integers throughout their signed range.
+  ;; Other representations and modes retain the checked general comparison.
+  #@(if (i32.and (i32.le_u (local.get $mode) (i32.const 3))
+          (i32.and (ref.test (ref i31) ,(native-object '(local.get $left)))
+                   (ref.test (ref i31) ,(native-object '(local.get $right)))))
+    (then
+      (local.set $a (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $left)))))
+      (local.set $b (i31.get_s (ref.cast (ref i31) ,(native-object '(local.get $right)))))
+      (return (extern.convert_any (call $bool
+        (if (result i32) (i32.eq (local.get $mode) (i32.const 0))
+          (then (i32.lt_s (local.get $a) (local.get $b)))
+          (else (if (result i32) (i32.eq (local.get $mode) (i32.const 1))
+            (then (i32.gt_s (local.get $a) (local.get $b)))
+            (else (if (result i32) (i32.eq (local.get $mode) (i32.const 2))
+              (then (i32.le_s (local.get $a) (local.get $b)))
+              (else (i32.ge_s (local.get $a) (local.get $b)))))))))))))
   #@(extern.convert_any (call $ordered-compare-native
     ,(native-object '(local.get $left)) ,(native-object '(local.get $right)) (local.get $mode))))
 
