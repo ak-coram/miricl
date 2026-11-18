@@ -226,7 +226,8 @@ declaration-independent inference proves both operand ranges fit signed i64. A s
 bounded representation check follows copies and primary extraction to integer literals,
 retained checked binary LOGAND calls or the proved arithmetic plans below. LOGAND validates its operands and canonicalizes
 successful signed-i64 results. Extraction accepts both i31 and boxed i64 even for narrow
-ranges; a range alone does not prove an i31 representation. Unknown facts or origins retain
+ranges; accepted raw SSA snapshots are read directly. A range alone does not prove an i31
+representation. Unknown facts or origins retain
 the checked comparison helper. This comparison plan preserves producer evaluation and checks,
 returns one ordinary Lisp value, and does not enable raw cells, branch fusion or loop motion.
 
@@ -256,9 +257,15 @@ whose ordinary inference retains a broad numeric successful-return type, even wh
 declaration-independent query would retain finite bounds. Cell origins also retain their
 separate representation and storage requirements.
 In =native-plan-unboxed-cell-values=, initializers and every write must fit i64,
-all cell uses must remain structurally private, and cell creation and writes require
-SAFETY 0. Reads receive independent SSA snapshots. These storage checks do not yet
-consume declaration-independent cyclic bounds to admit cells at SAFETY 1.
+and all cell uses must remain structurally private. SAFETY 0 admits ordinary type
+facts; SAFETY 1 requires separate declaration-independent executable facts for the
+initializer and every actual stored operand. A bounded root scan shares the integer
+proof query, and a bounded full-function operand audit rejects unknown uses,
+captures and stores outside the emitted graph. Exhaustion retains boxed storage.
+DEBUG and captured landing entries retain their existing storage restrictions.
+Reads receive independent SSA snapshots, and generic uses materialize integers
+through the existing canonical boxing path. Mathematical ranges do not license
+i31 extraction from an arbitrary integer object.
 The =hir-inline-result-type= LENGTH rules cover vectors, including sized simple vectors;
 they do not infer list lengths or relate a changing list cursor to a loop counter.
 Such relationships require facts valid under aliases, writes and calls that can mutate

@@ -75,6 +75,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-inline-vector-calls* nil)
 (defvar *wasm-inline-simple-calls* nil)
 (defvar *wasm-proven-integer-arithmetic* nil)
+(defvar *wasm-proven-cell-types* nil)
 (defvar *wasm-inline-references* nil)
 (defvar *wasm-branch-tests* nil)
 (defvar *wasm-reused-values* nil)
@@ -2214,9 +2215,43 @@ exhausted work budgets keep every incoming value group."
                       (eq (gethash producer *wasm-inline-simple-calls*) :logand-general)))))
         (otherwise (return nil))))))
 
+(defun native-cell-storage-roots (unit)
+  "Bound the extra executable query for private SAFETY 1 integer storage."
+  (let ((cells (make-hash-table :test 'eq)) (roots nil) (fuel 4096))
+    ;; Count operands as well as instructions before the second graph scan.
+    ;; Exhaustion supplies no storage roots, including partially found cells.
+    (dolist (function (hir-unit-functions unit))
+      (dolist (block (hir-function-blocks function))
+        (when (minusp (decf fuel)) (return-from native-cell-storage-roots nil))
+        (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+          (when (minusp (decf fuel)) (return-from native-cell-storage-roots nil))
+          (dolist (input (hir-instruction-inputs instruction))
+            (declare (ignore input))
+            (when (minusp (decf fuel)) (return-from native-cell-storage-roots nil)))
+          (when (and (eq (hir-instruction-opcode instruction) :cell-new)
+                     (= (hir-instruction-safety-level instruction) 1)
+                     (< (hir-function-debug-level function) 2)
+                     *wasm-optimization-barriers*
+                     (not (gethash function *wasm-optimization-barriers*))
+                     (not (gethash (hir-instruction-output instruction) *wasm-optimization-barriers*))
+                     (native-compute-integer-width (first (hir-instruction-inputs instruction))))
+            ;; Mixed facts only select roots. The query proves each value anew.
+            (setf (gethash (hir-instruction-output instruction) cells) t)
+            (push (first (hir-instruction-inputs instruction)) roots)))))
+    (when (zerop (hash-table-count cells)) (return-from native-cell-storage-roots nil))
+    (dolist (function (hir-unit-functions unit))
+      (dolist (block (hir-function-blocks function))
+        (dolist (instruction (hir-block-instructions block))
+          (when (and (eq (hir-instruction-opcode instruction) :cell-write)
+                     (gethash (first (hir-instruction-inputs instruction)) cells))
+            ;; Include every actual store, even when its mixed type is unknown.
+            (push (second (hir-instruction-inputs instruction)) roots)))))
+    roots))
+
 (defun native-plan-proven-integers (unit candidates &optional list-accesses)
   "Share one executable-fact query between integer and list-access plans."
-  (let ((arithmetic nil) (comparisons nil) (roots nil)
+  (let* ((cell-roots (native-cell-storage-roots unit))
+         (arithmetic nil) (comparisons nil) (roots cell-roots)
         (prospective (make-hash-table :test 'eq)))
     (dolist (entry (nreverse candidates))
       (let* ((instruction (car entry)) (name (cdr entry))
@@ -2252,6 +2287,7 @@ exhausted work budgets keep every incoming value group."
       ;; this proof. No metadata or facts survive this emission.
       (let ((proven (infer-hir-types-checked unit roots t (hir-unit-functions unit) t
                        *wasm-result-callees* *hir-standard-operations* *wasm-type-guards*)))
+        (setq *wasm-proven-cell-types* (and cell-roots proven))
         (native-plan-proven-integer-arithmetic arithmetic proven)
         (native-plan-proven-integer-comparisons comparisons proven)
         (dolist (entry list-accesses)
@@ -2325,15 +2361,15 @@ exhausted work budgets keep every incoming value group."
         (setf (gethash instruction *wasm-inline-simple-calls*) kind)))))
 
 (defun emit-native-proven-integer-comparison (inputs kind)
-  ;; Use the full scalar extractor even for narrow mathematical ranges: an
-  ;; integer range alone never licenses an i31 representation cast. Operand
-  ;; producers have already run in source order, including all their checks.
+  ;; Read accepted raw SSA snapshots directly. Other operands retain the full
+  ;; scalar extractor: a range alone never licenses an i31 representation cast.
+  ;; Producers have already run in source order, including all their checks.
   (dolist (operand (cddr inputs))
     (multiple-value-bind (known literal) (native-checked-integer-origin-p operand)
       (declare (ignore known))
       (if (integerp literal)
           (progn (wasm-byte #x42) (wasm-s64 literal))
-          (progn (wasm-get operand) (wasm-call "native-unbox-int64")))))
+          (emit-native-unboxed-integer operand 64))))
   (wasm-byte (case kind (:proven-less-int64 #x53) (:proven-greater-int64 #x55)
                        (:proven-not-greater-int64 #x57) (:proven-not-less-int64 #x59)))
   (wasm-call "native-boolean"))
@@ -2711,13 +2747,15 @@ exhausted work budgets keep every incoming value group."
            (compiler-statistic :optimization/unboxed-cell opcode)
            (case opcode
              (:cell-new
-              (emit-native-unboxed-integer (first inputs) (native-integer-width (first inputs)))
+              (emit-native-unboxed-integer (first inputs)
+                (if (svref cell 6) (svref cell 2) (native-integer-width (first inputs))))
               (wasm-byte #x21) (wasm-u32 (svref cell 0)))
              (:cell-read
               (wasm-local (svref cell 0))
               (emit-native-raw-result-store (native-value-slot *wasm-unboxed-values* output) output))
              (:cell-write
-              (emit-native-unboxed-integer (second inputs) (native-integer-width (second inputs)))
+              (emit-native-unboxed-integer (second inputs)
+                (if (svref cell 6) (svref cell 2) (native-integer-width (second inputs))))
               (wasm-byte #x21) (wasm-u32 (svref cell 0))
               (when (native-value-slot *wasm-live-values* output)
                 (wasm-local (svref cell 0))
@@ -3764,12 +3802,16 @@ entry backedges keep the ordinary representation. HIR and snapshots stay boxed."
 (defun native-plan-unboxed-cell-values (function blocks table count offset)
   "Keep structurally private integer cells scalar across loop backedges.
 All writes must fit i64; read results get separate SSA snapshots so a later
-write cannot change an earlier observation. Unknown storage uses keep boxes."
+write cannot change an earlier observation. SAFETY 1 requires executable
+initializer and store facts, independently of declarations. Unknown uses keep boxes."
   (declare (type simple-vector function) (type list blocks)
            (type (or null simple-vector) table) (type (unsigned-byte 32) count offset))
-  (let ((cells nil) (fuel 4096) (chosen nil))
+  (let ((cells nil) (fuel 4096) (chosen nil) (emitted (make-hash-table :test 'eq)))
     (declare (type (or null simple-vector) cells) (type (integer -1 4096) fuel))
     (dolist (block blocks)
+      (when (minusp (decf fuel))
+        (return-from native-plan-unboxed-cell-values (values table count)))
+      (setf (gethash block emitted) t)
       (dolist (instruction (hir-block-instructions block))
         (when (minusp (decf fuel))
           (return-from native-plan-unboxed-cell-values (values table count)))
@@ -3777,19 +3819,33 @@ write cannot change an earlier observation. Unknown storage uses keep boxes."
           (when (and (eq (hir-instruction-opcode instruction) :cell-new)
                      (native-value-slot *wasm-local-cells* cell)
                      (native-value-slot *wasm-live-values* cell)
-                     (zerop (hir-instruction-safety-level instruction)))
-            (let ((width (native-compute-integer-width (first (hir-instruction-inputs instruction)))))
+                     (or (zerop (hir-instruction-safety-level instruction))
+                         (and (= (hir-instruction-safety-level instruction) 1)
+                              *wasm-proven-cell-types* *wasm-optimization-barriers*
+                              (not (gethash cell *wasm-optimization-barriers*))
+                              (eq (hir-value-kind (first (hir-instruction-inputs instruction))) :single))))
+            (let* ((provenp (= (hir-instruction-safety-level instruction) 1))
+                   (width (if provenp
+                              (native-type-integer-width
+                                (gethash (first (hir-instruction-inputs instruction)) *wasm-proven-cell-types* t))
+                              (native-compute-integer-width (first (hir-instruction-inputs instruction))))))
               (when (and width (<= width 64))
                 (unless cells (setq cells (native-value-table function)))
-                (setf (native-value-slot cells cell) (vector width 0 0 nil))))))))
+                (setf (native-value-slot cells cell) (vector width 0 0 nil provenp))))))))
     (unless cells (return-from native-plan-unboxed-cell-values (values table count)))
     ;; Inspect operands rather than trusting client-visible capture flags.
-    (dolist (block blocks)
+    (dolist (block (hir-function-blocks function))
+      (when (minusp (decf fuel))
+        (return-from native-plan-unboxed-cell-values (values table count)))
       (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+        (when (minusp (decf fuel))
+          (return-from native-plan-unboxed-cell-values (values table count)))
         (let* ((opcode (hir-instruction-opcode instruction)) (inputs (hir-instruction-inputs instruction))
                (kind (and (eq opcode :call) (gethash instruction *wasm-inline-simple-calls*))))
           (when (or (integerp kind) (member kind '(:evenp :oddp)))
             (dolist (input (cddr inputs))
+              (when (minusp (decf fuel))
+                (return-from native-plan-unboxed-cell-values (values table count)))
               (let* ((source (native-predicate-source input *wasm-reused-values*))
                      (producer (hir-value-producer source))
                      (cell (and (%hir-instruction-p producer)
@@ -3798,13 +3854,23 @@ write cannot change an earlier observation. Unknown storage uses keep boxes."
                      (record (and cell (native-value-slot cells cell))))
                 (when record (setf (svref record 3) t)))))
           (loop for input in inputs for index from 0 do
+            (when (minusp (decf fuel))
+              (return-from native-plan-unboxed-cell-values (values table count)))
             (let ((record (native-value-slot cells input)))
               (when record
                 (cond
+                  ((and (svref record 4)
+                        (or (not (gethash block emitted))
+                            (not (hir-instruction-output instruction))
+                            (not (eq (hir-value-kind (hir-instruction-output instruction)) :single))))
+                   (setf (native-value-slot cells input) nil))
                   ((and (eq opcode :cell-read) (zerop index)) (incf (svref record 1)))
                   ((and (eq opcode :cell-write) (zerop index)
-                        (zerop (hir-instruction-safety-level instruction)))
-                   (let ((width (native-compute-integer-width (second inputs))))
+                        (or (svref record 4) (zerop (hir-instruction-safety-level instruction))))
+                   (let ((width (if (svref record 4)
+                                    (and (eq (hir-value-kind (second inputs)) :single)
+                                         (native-type-integer-width (gethash (second inputs) *wasm-proven-cell-types* t)))
+                                    (native-compute-integer-width (second inputs)))))
                      (if (and width (<= width 64))
                          (progn (setf (svref record 0) (max width (svref record 0)))
                                 (incf (svref record 2)))
@@ -3816,7 +3882,8 @@ write cannot change an earlier observation. Unknown storage uses keep boxes."
           (unless table (setq table (native-value-table function)))
           (compiler-statistic :planning/unboxed-cell (svref record 0))
           (setq chosen t)
-          (setf (native-value-slot table value) (vector (+ offset count) value (svref record 0) nil :cell 0))
+          (setf (native-value-slot table value)
+            (vector (+ offset count) value (svref record 0) nil :cell 0 (svref record 4)))
           (incf count))))
     (unless chosen (return-from native-plan-unboxed-cell-values (values table count)))
     (when table
@@ -4998,6 +5065,7 @@ the named-entry format for hosts that translate individual Wasm workers."
     (let ((*wasm-inline-vector-calls* (make-hash-table :test 'eq))
           (*wasm-inline-simple-calls* (make-hash-table :test 'eq))
           (*wasm-proven-integer-arithmetic* (make-hash-table :test 'eq))
+          (*wasm-proven-cell-types* nil)
           (*wasm-cons-forward-blocks* (make-hash-table :test 'eq))
           (*wasm-proper-list-checks* nil)
           (*wasm-inline-references* (make-hash-table :test 'eq)))
@@ -5217,7 +5285,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-generic-candidate native-proven-generic-mask native-plan-generic-calls emit-native-generic-call
                    emit-native-unboxed-integer native-integer-result-fits-p native-inline-shift-opcode native-inline-nonnegative-division-opcode native-inline-integer-opcode emit-native-integer-chain emit-native-inline-integer emit-native-integer-call
                    native-simple-vector-value-p native-list-value-p emit-native-vector-call emit-native-list-call emit-native-character-call
-                   native-plan-inline-simple native-checked-integer-origin-p native-plan-proven-integers native-plan-proven-integer-arithmetic emit-native-proven-integer-arithmetic native-plan-proven-integer-comparisons emit-native-proven-integer-comparison
+                   native-plan-inline-simple native-checked-integer-origin-p native-cell-storage-roots native-plan-proven-integers native-plan-proven-integer-arithmetic emit-native-proven-integer-arithmetic native-plan-proven-integer-comparisons emit-native-proven-integer-comparison
                    native-plan-character-code-fusion native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-builtin emit-native-tail-call
                    native-fixed-arity emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-restore emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward

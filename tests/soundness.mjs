@@ -2098,6 +2098,17 @@ try {
     (and (hir-type-proves-p (gethash owner ordinary t) '${expected})
       (hir-type-proves-p (soundness-proven-result source) '${expected})
       (= (funcall (compile-native source)) ${result})))`);
+  // Scalar private storage preserves a read observed after a later write,
+  // including integer representation boundaries and a bignum fallback.
+  for (const initial of ['0', '1073741822', '2147483646', '9223372036854775806']) {
+    check(`(equal (multiple-value-list (funcall (compile-native '(lambda ()
+        (declare (optimize (safety 1) (debug 0)))
+        (let ((i ${initial}) (seen nil))
+          (dolist (x '(a b c))
+            (let ((before i)) (incf i) (push before seen)))
+          (values i (nreverse seen)))))))
+      (list (+ ${initial} 3) (list ${initial} (+ ${initial} 1) (+ ${initial} 2))))`);
+  }
   // A repeated body GO and an unknown write must not inherit the traversal's
   // counter envelope. Errors still leave the compiled function reusable.
   check(`(let* ((source '(lambda (replacement)
@@ -2291,6 +2302,31 @@ try {
               (list (+ a 1073741823) (- a 1) a))))
         (handler-case (progn (funcall function :invalid) nil) (type-error () t))
         (equal (multiple-value-list (funcall function 7)) '(1073741830 6 7))))`);
+  }
+  // Ordered comparisons consume saved arithmetic results across later writes
+  // and callbacks, retaining values when the result crosses the i31 boundary.
+  for (const operator of ['<', '<=', '>', '>=']) {
+    check(`(let ((function (compile-native
+        '(lambda (x effect)
+           (declare (optimize (safety 1) (debug 0)))
+           (let ((a (+ (logand x 1023) 1073741823)))
+             (setq x 0)
+             (funcall effect)
+             (values (${operator} a 1073741824) (- a 1073741823) x)))))
+        (inputs '(0 1 1023 -1 1267650600228229401496703205375)) (effects 0))
+      (and (loop for x in inputs always
+          (let ((low (logand x 1023)))
+            (equal (multiple-value-list
+                (funcall function x (lambda () (incf effects) (values :extra :ignored))))
+              (list (${operator} (+ low 1073741823) 1073741824) low 0))))
+        (= effects (length inputs))
+        (handler-case
+          (progn (funcall function :invalid (lambda () (incf effects))) nil)
+          (type-error () t))
+        (= effects (length inputs))
+        (equal (multiple-value-list (funcall function 1 (lambda () (incf effects))))
+          (list (${operator} 1073741824 1073741824) 1 0))
+        (= effects (1+ (length inputs)))))`);
   }
   // Statistics distinguish accepted plans from emitted arithmetic. Checked
   // fixed calls remain available under NOTINLINE; expansion honors its veto.
