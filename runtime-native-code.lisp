@@ -1849,6 +1849,19 @@
       (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
       (global.set $backtrace-depth (local.get $backtrace-depth)))))
 
+(define-runtime-function $native-direct-primary-apply
+    (($name (ref $native-function)) ($a :nullable-object) ($b :nullable-object)
+     ($c :nullable-object) ($d :nullable-object)) (externref)
+  (:locals ($result :nullable-object))
+  ;; Fixed-call dispatchers have large primitive fallback arms. Do not retain
+  ;; their physical frames while a selected native worker calls back into Lisp.
+  ;; DIRECT-APPLY still owns the Lisp frame, checkpoint and dynamic cleanup;
+  ;; this small primary-only adapter clears secondary values after success.
+  #@(local.set $result (call $native-direct-apply
+    (local.get $name) (local.get $a) (local.get $b) (local.get $c) (local.get $d)))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
 (define-runtime-function $native-set-argument-usage (($function externref) ($usage i32)) (externref)
   (:export-raw "native-set-argument-usage")
   (:locals ($body (ref $native-function)) ($arity i32))
@@ -1897,13 +1910,10 @@
          (direct (wat-fragment #@(if (i32.eqz (ref.is_null
                        (struct.get $native-function $direct ,native-fn)))
                      (then
-                       (local.set $direct-result
-                         (call $native-direct-apply ,native-fn
-                           ,@(loop for index below 4 collect (if (< index arity)
-                             (if arguments (nth index arguments)
-                               (native-object (list 'local.get (nth index names)))) '(ref.null eq)))))
-                       (call $clear-values)
-                       (return (extern.convert_any (local.get $direct-result))))))))
+                       (return_call $native-direct-primary-apply ,native-fn
+                         ,@(loop for index below 4 collect (if (< index arity)
+                           (if arguments (nth index arguments)
+                             (native-object (list 'local.get (nth index names)))) '(ref.null eq)))))))))
     (if checked direct
       (wat-fragment #@(if (ref.test (ref $native-function) ,fn)
         (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,fn)) (f64.const ,(+ arity 2)))
@@ -2522,7 +2532,7 @@
   ($compiler-image-function)
   ($native-install) ($native-function) ($native-function-with-code) ($native-close-with-arity) ($native-close) ($native-close-fixed) ($native-close-cached) ($native-close-static) ($native-with-arity) ($native-code-size) ($native-capture) ($native-code-storage) ($native-code-entry) ($native-code-bytes) ($native-literal)
   ($native-debug-wrap) ($native-debug-attach) ($native-debug-close) ($native-debug-info)
-  ($native-attach-direct) ($native-attach-direct-root) ($native-set-argument-usage) ($native-attach-direct-usage) ($native-direct-apply) ($native-shared-entry)
+  ($native-attach-direct) ($native-attach-direct-root) ($native-set-argument-usage) ($native-attach-direct-usage) ($native-direct-apply) ($native-direct-primary-apply) ($native-shared-entry)
   #@(global $native-argument-empty (mut (ref null eq)) (ref.null eq))
   ($native-checked-object) ($native-checked-value) ($native-arguments) ($native-argument-set) ($native-validate-packet) ($native-ingress-arguments) ($native-prepend-argument) ($native-packet-tail)
   ($native-packet-length-cl) ($native-packet-ref-cl) ($native-arguments-list)

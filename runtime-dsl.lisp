@@ -324,10 +324,26 @@ explicit labels for nested loops. The list local is consumed."
    #@(local.get $result)))
 
 (defun wat-integer-branch (value ids body)
-  (let ((condition
-          (reduce (lambda (a b) `(i32.or ,a ,b))
-                  (mapcar (lambda (id) `(i32.eq ,value (i32.const ,id))) ids))))
-    (wat-fragment (wat-string `(if ,condition (then ,body))))))
+  "Branch on a nonempty integer ID set. VALUE must have no side effects."
+  (let ((ranges nil))
+    ;; Consecutive IDs share one unsigned range test. Subtraction keeps both
+    ;; endpoints exact even when a signed input lies below the interval.
+    ;; Keep invalid I32.CONST inputs as singletons for assembler rejection.
+    (dolist (id (sort (copy-list ids) #'<))
+      (if (and ranges (= id (1+ (cdar ranges)))
+               (<= (- #x80000000) (caar ranges)) (< id #x100000000)
+               (< (- id (caar ranges)) #x100000000))
+          (setf (cdar ranges) id)
+          (push (cons id id) ranges)))
+    (let ((condition
+            (reduce (lambda (a b) `(i32.or ,a ,b))
+                    (mapcar (lambda (range)
+                              (if (= (car range) (cdr range))
+                                  `(i32.eq ,value (i32.const ,(car range)))
+                                  `(i32.le_u (i32.sub ,value (i32.const ,(car range)))
+                                              (i32.const ,(- (cdr range) (car range))))))
+                            (nreverse ranges)))))
+      (wat-fragment (wat-string `(if ,condition (then ,body)))))))
 
 (defun wat-symbol-branch (value symbols body)
   ;; Some runtime generators use a single symbol group without a full CASE.

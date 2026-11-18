@@ -207,6 +207,9 @@ lexical and computed native callees, including FUNCALL/APPLY/MVC. Checks, global
 values, dynamic cleanup and scheduler polls remain. Unsupported calls use ordinary
 application. Immutable captures can be direct; mutable captures share cells. Distinct function
 objects and required capture identities survive body sharing and closure caching.
+Fixed-call primitive dispatchers tail-call a small primary-result adapter when they select
+a native worker. The adapter retains the ordinary Lisp frame and dynamic cleanup while
+allowing the dispatcher's larger physical frame to leave the stack before reentrant calls.
 
 Integers use i31 immediates, boxed signed-i64 values or larger sign/magnitude
 integers; target FIXNUM spans signed i64 independently of immediate or boxed storage.
