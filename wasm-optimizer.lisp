@@ -955,7 +955,16 @@
                        (if (member (native-op-code op) '(#x20 #x21 #x22))
                            (progn (wasm-byte (native-op-code op))
                              (wasm-u32 (position (native-op-argument op) order)))
-                           (wasm-append body (native-op-start op) (native-op-end op))))
+                           (let ((first (native-op-start op)) (last (native-op-end op)))
+                             ;; Copy adjacent unchanged instructions together;
+                             ;; local operands still require alpha-renaming.
+                             (loop while (< (1+ i) end) do
+                               (let ((next (aref ops (1+ i))))
+                                 (unless (and (not (member (native-op-code next) '(#x20 #x21 #x22)))
+                                              (= last (native-op-start next)))
+                                   (return))
+                                 (incf i) (setq last (native-op-end next))))
+                             (wasm-append body first last))))
                      (dolist (index output) (wasm-byte #x20) (wasm-u32 (position index order))) (wasm-byte #x0b))))
       (unless (or *native-module-stack-effects*
                   (every (lambda (type) (and (= (length type) 1)
