@@ -2329,6 +2329,21 @@
 (define-runtime-function $native-standard-call1 (($code i32) ($value externref)) (externref)
   (:export-raw "native-standard-call1")
   (:locals ($function :nullable-object) ($a :nullable-object) ($id i32) ($result :nullable-object))
+  ;; Actual immediate input proves the checked standard successor/predecessor
+  ;; path. Widen before arithmetic so crossing the i31 boundary promotes.
+  #@(if (i32.and
+      (i32.or
+        (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id '1+))))
+        (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id '1-)))))
+      (ref.test (ref i31) (any.convert_extern (local.get $value))))
+    (then
+      (if (global.get $thread-active) (then (call $thread-checkpoint)))
+      (return (extern.convert_any (call $int64
+        (i64.add
+          (i64.extend_i32_s (i31.get_s (ref.cast (ref i31)
+            (any.convert_extern (local.get $value)))))
+          (select (i64.const 1) (i64.const -1)
+            (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id '1+)))))))))))
   #@(local.set $function (call $standard-function-code (local.get $code)))
   #@(local.set $a (call $native-checked-value (local.get $value)))
   #@(local.set $id (i32.sub (local.get $code) (i32.const 1)))
@@ -2352,6 +2367,35 @@
 (define-runtime-function $native-standard-call2
     (($code i32) ($left externref) ($right externref)) (externref)
   (:export-raw "native-standard-call2")
+  ;; The fixed standard identity and actual immediate operands establish both
+  ;; the operation and valid Lisp input without repeating callable ingress.
+  ;; Keep the ordinary checkpoint before arithmetic and preserve promotion.
+  #@(if (i32.and
+      (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id '+))))
+      (i32.and (ref.test (ref i31) (any.convert_extern (local.get $left)))
+               (ref.test (ref i31) (any.convert_extern (local.get $right)))))
+    (then
+      (if (global.get $thread-active) (then (call $thread-checkpoint)))
+      (return (extern.convert_any (call $int64
+        (i64.add
+          (i64.extend_i32_s (i31.get_s (ref.cast (ref i31)
+            (any.convert_extern (local.get $left)))))
+          (i64.extend_i32_s (i31.get_s (ref.cast (ref i31)
+            (any.convert_extern (local.get $right)))))))))))
+  ;; A difference of two signed i31 values also fits in i64. Keep this
+  ;; separate so addition retains its existing immediate path.
+  #@(if (i32.and
+      (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id '-))))
+      (i32.and (ref.test (ref i31) (any.convert_extern (local.get $left)))
+               (ref.test (ref i31) (any.convert_extern (local.get $right)))))
+    (then
+      (if (global.get $thread-active) (then (call $thread-checkpoint)))
+      (return (extern.convert_any (call $int64
+        (i64.sub
+          (i64.extend_i32_s (i31.get_s (ref.cast (ref i31)
+            (any.convert_extern (local.get $left)))))
+          (i64.extend_i32_s (i31.get_s (ref.cast (ref i31)
+            (any.convert_extern (local.get $right)))))))))))
   #@(drop (call $native-checked-value (local.get $left)))
   #@(drop (call $native-checked-value (local.get $right)))
   #@(return_call $native-call2

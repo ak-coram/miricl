@@ -691,7 +691,12 @@ try {
   // Canonical calls and shared list paths are public native boundaries too.
   // Invalid identities, foreign objects and unchecked path codes must signal
   // useful Lisp conditions while leaving subsequent compilation usable.
-  const identityCode = Number(evaluate("(native-canonical-builtin-code 'identity)").trim());
+  const canonicalCode = name => {
+    const code = Number(evaluate(`(native-canonical-builtin-code '${name})`).trim());
+    assert.ok(Number.isInteger(code) && code > 0, `${name} has a canonical standard identity.`);
+    return code;
+  };
+  const identityCode = canonicalCode('identity');
   const pair = vm.vm['native-cons'](elements[0], null);
   assert.equal(vm.vm['native-list-path'](pair, 2), elements[0]);
   assert.equal(vm.vm['native-standard-call1'](identityCode, pair), pair);
@@ -712,6 +717,19 @@ try {
     () => vm.vm['native-set-list-path'](foreign, pair, 2),
     () => vm.vm['native-set-list-path'](null, null, 2),
   ]) rejectPacketOperation(operation);
+  const immediate = vm.vm['native-int64'](1n);
+  for (const name of ['1+', '1-']) {
+    const code = canonicalCode(name);
+    for (const invalid of [foreign, packets.empty()])
+      rejectPacketOperation(() => vm.vm['native-standard-call1'](code, invalid));
+  }
+  for (const name of ['+', '-']) {
+    const code = canonicalCode(name);
+    for (const invalid of [foreign, packets.empty()]) {
+      rejectPacketOperation(() => vm.vm['native-standard-call2'](code, invalid, immediate));
+      rejectPacketOperation(() => vm.vm['native-standard-call2'](code, immediate, invalid));
+    }
+  }
   console.log('Soundness: canonical standard calls and list paths reject malformed ingress with recovery.');
 
   // Capture a Lisp function through the adapter's ordinary callback bridge,
