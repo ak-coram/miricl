@@ -33,12 +33,16 @@
   #@(block $done (loop $next
     (br_if $done (ref.is_null (local.get $env)))
     (local.set $binding (struct.get $obj $a (ref.cast (ref $obj) (local.get $env))))
-    (if (i32.and (if (result i32) (local.get $setf)
-                      (then (i32.eq (call $tag (local.get $binding)) (i32.const 32)))
-                      (else (i32.or (i32.eq (call $tag (local.get $binding)) (i32.const 30))
-                                     (i32.eq (call $tag (local.get $binding)) (i32.const 31)))))
-                    (i32.eq (call $value-n (local.get $binding)) (local.get $id)))
-      (then (return (local.get $binding))))
+    ;; The projection contains only heap bindings with tags 30, 31 and 32.
+    ;; Reject another name before distinguishing ordinary bindings from SETF;
+    ;; keep the binding itself live so LABELS initialization remains visible.
+    (if (i32.eq (struct.get $obj $n (ref.cast (ref $obj) (local.get $binding))) (local.get $id))
+      (then
+        (if (i32.eq
+              (i32.eq (i32.and (struct.get $obj $tag (ref.cast (ref $obj) (local.get $binding)))
+                        (i32.const 63)) (i32.const 32))
+              (i32.ne (local.get $setf) (i32.const 0)))
+          (then (return (local.get $binding))))))
     (local.set $env (struct.get $obj $b (ref.cast (ref $obj) (local.get $env)))) (br $next)))
   #@(ref.null eq))
 

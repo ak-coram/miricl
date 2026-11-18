@@ -459,7 +459,7 @@
       (call $format-param (local.get $params) (i32.const 4) (i32.const 32)) (i32.const 1)))))
 
 (define-runtime-function $format-exponential (($x :nullable-object) ($params (ref $objects)) ($at i32)) ()
-  (:locals ($float :object) ($q :object) ($text :nullable-object) ($digits :digits)
+  (:locals ($float :object) ($q :object) ($a :object) ($b :object) ($text :nullable-object) ($digits :digits)
            ($exponent i32) ($precision i32) ($width i32) ($d i32) ($k i32) ($e i32)
            ($edigits i32) ($fraction i32) ($maximum i32) ($sign i32) ($start i32) ($overflow i32) ($invalid i32) ($default i32) ($n i32) ($padding i32))
   #@(if (i32.or (i32.lt_u (call $tag (local.get $x)) (i32.const 1)) (i32.gt_u (call $tag (local.get $x)) (i32.const 4)))
@@ -473,9 +473,19 @@
   #@(local.set $d (call $format-param (local.get $params) (i32.const 1) (i32.const 0)))
   #@(local.set $overflow (call $format-param (local.get $params) (i32.const 4) (i32.const -1)))
   #@(local.set $sign (call $format-number-sign (ref.as_non_null (local.get $x)) (local.get $at)))
-  #@(local.set $exponent (i32.add (i32.sub (local.get $exponent) (local.get $k)) (i32.const 1)))
   (wat-fail-when #@(i32.or (i32.gt_u (local.get $d) (i32.const 1000))
     (i32.or (i32.gt_u (local.get $e) (i32.const 1000)) (i32.gt_u (i32.add (local.get $k) (i32.const 1000)) (i32.const 2000)))) :unsupported)
+  ;; A shortest round-trip spelling can round up across a power of ten,
+  ;; especially for subnormals. Explicit precision must normalize the exact
+  ;; value before rounding its significant digits, rather than that spelling.
+  #@(if (i32.eqz (local.get $default))
+    (then (local.set $q (call $rational (ref.as_non_null (local.get $x))))
+      (local.set $a (call $iabs (call $numerator (local.get $q))))
+      (local.set $b (call $denominator (local.get $q)))
+      (if (i32.and (i32.eqz (call $zero (local.get $a)))
+            (i32.lt_s (call $decimal-compare (local.get $a) (local.get $b) (local.get $exponent)) (i32.const 0)))
+        (then (local.set $exponent (i32.sub (local.get $exponent) (i32.const 1)))))))
+  #@(local.set $exponent (i32.add (i32.sub (local.get $exponent) (local.get $k)) (i32.const 1)))
   #@(local.set $edigits (array.len (struct.get $obj $digits (ref.cast (ref $obj) (call $decimal-text (call $iabs (call $int (local.get $exponent))))))))
   #@(if (i32.gt_s (local.get $edigits) (local.get $e))
     (then (if (i32.eqz (ref.is_null (array.get $objects (local.get $params) (i32.const 2)))) (then (local.set $invalid (i32.const 1))))

@@ -592,12 +592,12 @@
   #@(global.set $native-environment-cache (local.get $context))
   #@(extern.convert_any (local.get $context)))
 
-(define-runtime-function $native-global-read (($environment externref) ($name externref)) (externref)
+(define-runtime-function $native-global-read (($name externref)) (externref)
   (:export-raw "native-global-read")
   #@(extern.convert_any (call $symbol-value ,(native-object '(local.get $name)))))
 
 (define-runtime-function $native-global-write
-    (($environment externref) ($name externref) ($value externref)) (externref)
+    (($name externref) ($value externref)) (externref)
   (:export-raw "native-global-write")
   #@(extern.convert_any (call $set-symbol-value ,(native-object '(local.get $name)) ,(native-object '(local.get $value)))))
 
@@ -1066,17 +1066,12 @@
   #@(extern.convert_any (array.get $objects
     (call $vector-data ,(native-object '(local.get $vector))) (local.get $index))))
 
-(define-runtime-function $native-vector-ref-trusted64
-    (($vector externref) ($index i64)) (externref)
-  (:export-raw "native-vector-ref-trusted64")
-  ;; SAFETY 0 access uses Wasm's unsigned i32 array index.
-  #@(extern.convert_any (array.get $objects
-    (call $vector-data ,(native-object '(local.get $vector))) (i32.wrap_i64 (local.get $index)))))
-
 (define-runtime-function $native-vector-ref-inline (($vector externref) ($index i64)) (externref)
   (:export-raw "native-vector-ref-inline")
-  ;; The compiler proved the representation and captured the canonical
-  ;; standard operation with no NOTINLINE. No function or argument dispatch.
+  ;; Both SAFETY 0 vector-read paths share the scalar worker. The compiler
+  ;; proves the representation and canonical standard operation without
+  ;; NOTINLINE; access preconditions are trusted. Wasm wraps the wide index
+  ;; to its unsigned i32 array index and retains intrinsic cast/bounds traps.
   #@(extern.convert_any (array.get $objects
     (call $vector-data ,(native-object '(local.get $vector))) (i32.wrap_i64 (local.get $index)))))
 
@@ -2601,7 +2596,6 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-vector-ref-trusted)
   ($native-car-inline-checked) ($native-cdr-inline-checked)
   ($native-car-list-inline) ($native-cdr-list-inline)
-  ($native-vector-ref-trusted64)
   ($native-vector-ref-inline)
   ($checked-sbit-ref) ($native-sbit-ref-inline) ($native-row-major-ref-inline)
   ($checked-row-major-set) ($native-row-major-set-inline)

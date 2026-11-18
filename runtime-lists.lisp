@@ -54,8 +54,13 @@
 (define-runtime-function $arity
     (($args :nullable-object) ($min i32) ($max i32))
     ()
-  (:locals ($n i32))
-  #@(local.set $n (call $length (local.get $args)))
+  #@(return_call $arity-count (call $length (local.get $args)) (local.get $min) (local.get $max)))
+
+;; Reuse a checked count only while the spine is unchanged and no callback or
+;; checkpoint has run. This worker does not validate a public argument list.
+(define-runtime-function $arity-count
+    (($n i32) ($min i32) ($max i32))
+    ()
   (wat-fail-when #@(i32.or (i32.lt_u (local.get $n) (local.get $min)) (i32.gt_u (local.get $n) (local.get $max))) :wrong-arity))
 
 ;; Shared exact checks avoid repeating two constant operands at every call.
@@ -156,7 +161,7 @@
   ($car)
   ($cdr)
   ($length)
-  ($arity) ($arity0) ($arity1) ($arity2) ($arity3) ($list-accessor-code) ($read-list-path) ($write-list-path) ($list-accessor)
+  ($arity) ($arity-count) ($arity0) ($arity1) ($arity2) ($arity3) ($list-accessor-code) ($read-list-path) ($write-list-path) ($list-accessor)
   ($checked-list-path-code) ($native-list-path) ($native-set-list-path))
 
 (defun $member-eq ()

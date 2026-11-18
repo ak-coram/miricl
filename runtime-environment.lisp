@@ -25,10 +25,12 @@
   #@(block $done (loop $next
     (br_if $done (ref.is_null (local.get $env)))
     (local.set $binding (struct.get $obj $a (ref.cast (ref $obj) (local.get $env))))
-    (if (i32.and
-          (i32.lt_u (i32.and (struct.get $obj $tag (ref.cast (ref $obj) (local.get $binding))) (i32.const 63)) (i32.const 30))
-          (i32.eq (struct.get $obj $n (ref.cast (ref $obj) (local.get $binding))) (local.get $id)))
-        (then (return (local.get $binding))))
+    ;; Other names need no namespace test; all private bindings are heap records.
+    (if (i32.eq (struct.get $obj $n (ref.cast (ref $obj) (local.get $binding))) (local.get $id))
+      (then (if (i32.lt_u
+              (i32.and (struct.get $obj $tag (ref.cast (ref $obj) (local.get $binding))) (i32.const 63))
+              (i32.const 30))
+        (then (return (local.get $binding))))))
     (local.set $env (struct.get $obj $b (ref.cast (ref $obj) (local.get $env)))) (br $next)))
   #@(ref.null eq))
 
@@ -63,7 +65,9 @@
             (call $check-type (local.get $value) (struct.get $obj $b (ref.cast (ref $obj) (local.get $binding))))
             (return (local.get $value))))
   #@(if (i32.eqz (ref.is_null (global.get $symbol-macros)))
-    (then (if (i32.eqz (ref.is_null (call $symbol-macro-binding (local.get $name) (local.get $env))))
+    ;; FIND already proved no lexical binding, without running a callback or
+    ;; checkpoint. Probe only global symbol macros; expansion still sees ENV.
+    (then (if (i32.eqz (ref.is_null (call $symbol-macro-binding (local.get $name) (ref.null eq))))
       (then (return (call $evaluate-in-environment (call $macroexpand-1 (local.get $name) (local.get $env)) (local.get $env)))))))
   #@(call $symbol-value (local.get $name)))
 

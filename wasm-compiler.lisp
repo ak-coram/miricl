@@ -150,7 +150,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-ne-int64" (:i64 :i64) :object)
     ("native-vector-ref" (:object :i32) :object)
     ("native-vector-ref-trusted" (:object :i32) :object)
-    ("native-vector-ref-trusted64" (:object :i64) :object)
     ("native-vector-ref-inline" (:object :i64) :object)
     ("native-vector-set-inline" (:object :object :i64) :object)
     ("native-sbit-ref-inline" (:object :object) :object)
@@ -210,8 +209,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-check-apply-arguments" (:object :i32) nil)
     ("native-check-apply-list" (:object) nil)
     ("native-environment" nil :object)
-    ("native-global-read" (:object :object) :object)
-    ("native-global-write" (:object :object :object) :object)
+    ("native-global-read" (:object) :object)
+    ("native-global-write" (:object :object) :object)
     ("native-function-reference" (:object) :object)
     ("native-standard-function-reference" (:object) :object)
     ("native-cons" (:object :object) :object)
@@ -1916,7 +1915,7 @@ exhausted work budgets keep every incoming value group."
     (when (<= width 31) (wasm-byte #xa7))
     (wasm-call (cond ((not (zerop safety)) "native-vector-ref")
                      ((<= width 31) "native-vector-ref-trusted")
-                     (t "native-vector-ref-trusted64")))
+                     (t "native-vector-ref-inline")))
     t))
 
 (defun native-list-value-p (value)
@@ -2637,6 +2636,19 @@ exhausted work budgets keep every incoming value group."
       (progn (wasm-byte #xa7) (wasm-gc #x1c) (wasm-gc #x1b))
       (wasm-call "native-int64")))
 
+(defun emit-native-unused-context (value)
+  ;; Global access uses the active runtime state, but HIR retains its context
+  ;; dependency and producer effects. Usually WASM-GET is only a local load;
+  ;; public HIR can instead supply a value requiring materialization. Preserve
+  ;; those WASM-GET paths, including their conversions, before discarding it.
+  (declare (type simple-vector value))
+  (let* ((source (or (and *wasm-reused-values* (native-value-slot *wasm-reused-values* value)) value))
+         (raw (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* source))))
+    (when (or (and *wasm-multiple-result-locals* (native-value-slot *wasm-multiple-result-locals* value))
+              (and raw (eq (svref raw 4) :result))
+              (and *wasm-inline-constants* (native-value-slot *wasm-inline-constants* source)))
+      (wasm-get value) (wasm-byte #x1a))))
+
 (defun emit-native-instruction (instruction)
   (declare (type simple-vector instruction))
   (let ((inputs (hir-instruction-inputs instruction)) (attributes (hir-instruction-attributes instruction))
@@ -2708,9 +2720,12 @@ exhausted work budgets keep every incoming value group."
        (wasm-call (if (and (null *wasm-fixed-call-emitter*)
                            (native-standard-function-name-p (first attributes)))
                       "native-standard-function-reference" "native-function-reference")))
-      (:global-read (wasm-get (first inputs)) (wasm-literal (first attributes)) (wasm-call "native-global-read"))
+      (:global-read
+       (emit-native-unused-context (first inputs))
+       (wasm-literal (first attributes)) (wasm-call "native-global-read"))
       (:global-write
-       (wasm-get (first inputs)) (wasm-literal (first attributes)) (wasm-get (second inputs))
+       (emit-native-unused-context (first inputs))
+       (wasm-literal (first attributes)) (wasm-get (second inputs))
        (wasm-call "native-global-write"))
       (:dynamic-bind
        (wasm-get (first inputs)) (wasm-literal (first attributes)) (wasm-get (second inputs))
@@ -5276,7 +5291,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-plan-inline-simple native-checked-integer-origin-p native-cell-storage-roots native-plan-proven-integers native-plan-proven-integer-arithmetic emit-native-proven-integer-arithmetic native-plan-proven-integer-comparisons emit-native-proven-integer-comparison
                    native-plan-character-code-fusion native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-builtin emit-native-tail-call
-                   native-fixed-arity emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-restore emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward
+                   native-fixed-arity emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-unused-context emit-native-restore emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    emit-native-structured-target emit-native-structured-jump emit-native-structured-region
                    hir-capture hir-cell-for-binding
                    hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-widen-integer-interval hir-type-restrict hir-constant-type hir-type-cell

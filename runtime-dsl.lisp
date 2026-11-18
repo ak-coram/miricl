@@ -297,11 +297,14 @@ explicit labels for nested loops. The list local is consumed."
                  '(local.set ,list (call $cdr (local.get ,list)))
                  '(br ,next))))))
 
-(defun wat-arity (min &optional (max min))
-  "Check the builtin's $ARGS list, with an exact arity by default."
-  (if (and (= min max) (<= 0 min 3))
-      (wat-fragment (wat-string `(call ,(nth min '($arity0 $arity1 $arity2 $arity3)) (local.get $args))))
-      (wat-fragment #@(call $arity (local.get $args) (i32.const ,min) (i32.const ,max)))))
+(defun wat-arity (min &optional (max min) checked-count)
+  "Check $ARGS, or reuse CHECKED-COUNT while its validated spine is unchanged."
+  (cond
+    (checked-count
+     (wat-fragment #@(call $arity-count ,(runtime-wat-sequence checked-count) (i32.const ,min) (i32.const ,max))))
+    ((and (= min max) (<= 0 min 3))
+     (wat-fragment (wat-string `(call ,(nth min '($arity0 $arity1 $arity2 $arity3)) (local.get $args)))))
+    (t (wat-fragment #@(call $arity (local.get $args) (i32.const ,min) (i32.const ,max))))))
 
 (defparameter *runtime-dynamic-state*
   '($dynamic-package $dynamic-variables $handlers $restarts $restart-associations $catches $targets))
