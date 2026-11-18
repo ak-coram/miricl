@@ -52,6 +52,33 @@ clockAdvance += 1000;
 assert.deepEqual(await vm.readFile(transferPath), transferBytes);
 console.log('PASS file transfers after async evaluation and background work');
 
+// Native installation reenters Wasm synchronously to transfer computed integer
+// bytes. Force cooperative slices to expire, including the rejection path,
+// then check that ordinary scheduling and multiple values still work.
+const transferHostService = vm.hostService;
+vm.hostService = (operation, argument) => originalHostService(operation, argument)
+  + (operation === 1 ? (clockAdvance += 1000) : 0);
+try {
+  assert.equal((await vm.evaluateAsync(`(let ((miricl-compiler:*compile-evaluations* nil))
+    (let* ((unit (miricl-compiler:compile-to-hir '(lambda (x) (values (+ x 2) nil :compiled))))
+           (worker (miricl-threads:make-thread (lambda () (miricl-threads:thread-yield) :ran))))
+      (multiple-value-bind (bytes literals) (miricl-compiler:emit-native-module unit)
+        (let* ((computed (map 'vector (lambda (byte) (+ (ash 1 40) (- byte (ash 1 40)))) bytes))
+               (rejected (handler-case
+                   (progn (miricl-compiler::compiler-primitive 17 #(0) #() nil) nil)
+                 (error (condition) (plusp (length (princ-to-string condition)))))))
+          (and rejected
+            (loop repeat 8 always
+              (equal (multiple-value-list
+                (funcall (miricl-compiler::compiler-primitive 17 (copy-seq computed) literals nil) 40))
+                '(42 nil :compiled)))
+            (progn (miricl-threads:thread-yield) t)
+            (eq (miricl-threads:join-thread worker) :ran))))))`, {eof: true})).output, 'T\n');
+} finally {
+  vm.hostService = transferHostService;
+}
+console.log('PASS native installation and rejection preserve synchronous reentry and later scheduling');
+
 // A DOM-style callback can arrive while the last active Lisp thread is
 // sleeping in UNWIND-PROTECT cleanup, with a pending nonlocal transfer.
 await vm.evaluateAsync(`

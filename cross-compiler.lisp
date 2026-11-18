@@ -703,7 +703,8 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
             (setf integer-call t call-slots (max call-slots 2)))
           (when (string= target "native-code-character-inline") (setf call-slots (max call-slots 1)))
           (when (string= target "native-logand-general-inline") (setf call-slots (max call-slots 2)))
-          (when (member target '("native-mod-general-inline" "native-truncate-primary-inline") :test #'equal)
+          (when (member target '("native-mod-general-inline" "native-truncate-primary-inline"
+                                "native-add-integer" "native-sub-integer" "native-mul-integer") :test #'equal)
             (setf call-slots (max call-slots 2)))
           (when (string= target "native-character-code-at-inline") (setf call-slots (max call-slots 2)))
           (when (member target '("native-character-code-at64-inline" "native-character-code-at64-unboxed-inline") :test #'equal)
@@ -873,7 +874,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                     (loop for slot downfrom (1- count) to 0 do (format out "local.set ~D~%" (+ call-base slot)))
                     (dotimes (slot count) (format out "local.get ~D extern.convert_any~%" (+ call-base slot)))
                     (format out "call $~A any.convert_extern ref.cast (ref null eq)~%" target)))
-                 ((string= target "native-int64") (write-line "call $int64" out))
+                 ((string= target "native-int64") (write-line "call $box-int64" out))
                  ((string= target "native-unbox-int64") (write-line "ref.as_non_null call $scalar-integer-value" out))
                  ;; These imports already represent proven simple-vector
                  ;; operations. Lower their access directly in the core ABI;
@@ -937,7 +938,8 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                  ((string= target "native-simple-character-set-inline")
                   (format out "local.set ~D local.set ~D local.set ~D local.get ~D extern.convert_any local.get ~D extern.convert_any local.get ~D call $native-simple-character-set-inline any.convert_extern ref.cast (ref null eq)~%"
                     integer-left (1+ call-base) call-base call-base (1+ call-base) integer-left))
-                 ((member target '("native-mod-general-inline" "native-truncate-primary-inline") :test #'equal)
+                 ((member target '("native-mod-general-inline" "native-truncate-primary-inline"
+                                   "native-add-integer" "native-sub-integer" "native-mul-integer") :test #'equal)
                   (format out "local.set ~D local.set ~D local.get ~D extern.convert_any local.get ~D extern.convert_any call $~A any.convert_extern ref.cast (ref null eq)~%"
                     (1+ call-base) call-base call-base (1+ call-base) target))
                  (t (error "Unsupported runtime kernel dependency: ~S." target)))))))

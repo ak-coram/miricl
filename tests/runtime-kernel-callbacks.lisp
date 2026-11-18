@@ -34,6 +34,11 @@
  (func $bool (param i32) (result (ref null eq))
    local.get 0 if (result (ref null eq)) i32.const 1 ref.i31 else ref.null eq end)
  (func $int64 (param i64) (result (ref null eq)) local.get 0 i32.wrap_i64 ref.i31)
+ (func $box-int64 (param i64) (result (ref null eq)) local.get 0 struct.new $boxed-integer)
+ (func $scalar-integer-value (param (ref eq)) (result i64)
+   local.get 0 ref.test (ref i31)
+   if (result i64) local.get 0 ref.cast (ref i31) i31.get_s i64.extend_i32_s
+   else local.get 0 ref.cast (ref $boxed-integer) struct.get $boxed-integer 0 end)
  (func $eql (param (ref null eq) (ref null eq)) (result i32) local.get 0 local.get 1 ref.eq)
  (func $generic-dispatch-metadata-value (param (ref null eq) (ref null eq) (ref null eq)) (result (ref null eq))
    (global.set $direct (i32.add (global.get $direct) (i32.const 1)))
@@ -54,9 +59,11 @@
    (if (global.get $thread-active) (then (call $thread-checkpoint)))
    throw $transfer)
 " text
-"(func (export \"run\") (param i32 i32 i32 i32) (result i32)
+ ;; Append the substrate type so explicit worker type indices stay unchanged.
+"(type $boxed-integer (struct (field i64)))
+ (func (export \"run\") (param i32 i32 i32 i32) (result i32)
    local.get 0 ref.i31 local.get 1 ref.i31 local.get 2 ref.i31 local.get 3 ref.i31
-   call $entry ref.cast (ref i31) i31.get_s))")) out))
+   call $entry ref.as_non_null call $scalar-integer-value i32.wrap_i64))")) out))
                (push (list name (namestring image) runs) manifest))))
     (let ((copy (miricl-cross::kernel-fixed-callback-descriptor descriptor)))
       (assert (equal copy descriptor))

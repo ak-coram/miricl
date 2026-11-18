@@ -717,7 +717,7 @@ try {
     () => vm.vm['native-set-list-path'](foreign, pair, 2),
     () => vm.vm['native-set-list-path'](null, null, 2),
   ]) rejectPacketOperation(operation);
-  const immediate = vm.vm['native-int64'](1n);
+  const integerOne = vm.vm['native-int64'](1n);
   for (const name of ['1+', '1-']) {
     const code = canonicalCode(name);
     for (const invalid of [foreign, packets.empty()])
@@ -726,8 +726,8 @@ try {
   for (const name of ['+', '-']) {
     const code = canonicalCode(name);
     for (const invalid of [foreign, packets.empty()]) {
-      rejectPacketOperation(() => vm.vm['native-standard-call2'](code, invalid, immediate));
-      rejectPacketOperation(() => vm.vm['native-standard-call2'](code, immediate, invalid));
+      rejectPacketOperation(() => vm.vm['native-standard-call2'](code, invalid, integerOne));
+      rejectPacketOperation(() => vm.vm['native-standard-call2'](code, integerOne, invalid));
     }
   }
   console.log('Soundness: canonical standard calls and list paths reject malformed ingress with recovery.');
@@ -987,6 +987,50 @@ try {
     assert.equal(vm.javascript.integer(value), number);
     return value;
   };
+  const wideInteger = (value, expected) => {
+    assert.equal(vm.javascript.integer(value), expected);
+    assert.equal(typeof value, 'object', 'A wide result is stored in an immutable scalar box.');
+    assert.equal(vm.vm['core-object-type'](value), integerType,
+      'Computed scalar i64 results retain boxed storage, including zero.');
+    return value;
+  };
+  const freshInteger = number => vm.vm['native-call0'](
+    packetFunction(`(compile-native '(lambda () ${number}))`));
+  const freshZero = freshInteger(0n), freshOne = freshInteger(1n);
+  for (const [name, expected] of [['add', 2n], ['sub', 0n], ['mul', 1n]]) {
+    const operation = vm.vm[`native-${name}-integer`];
+    assert.equal(operation(freshOne, freshOne), freshInteger(expected),
+      'Scalar object entries preserve actual immediate operands without promotion.');
+    wideInteger(operation(boxedInteger(1n), freshOne), expected);
+    for (const invalid of [foreign, packets.empty(), null, freshInteger(1n << 80n)]) {
+      rejectPacketOperation(() => operation(invalid, freshOne));
+      rejectPacketOperation(() => operation(freshOne, invalid));
+    }
+    assert.equal(operation(freshOne, freshOne), freshInteger(expected));
+  }
+  for (const [name, left, right, expected] of [
+    ['+', 5n, -4n, 1n], ['-', 5n, 4n, 1n], ['*', -1n, -1n, 1n],
+    ['*', 5n, 0n, 0n], ['*', 0n, 5n, 0n],
+  ]) {
+    const code = canonicalCode(name), a = boxedInteger(left), b = boxedInteger(right);
+    wideInteger(vm.vm['native-standard-call2'](code, a, b), expected);
+    assert.equal(vm.javascript.integer(a), left, 'Arithmetic preserves shared input snapshots.');
+    assert.equal(vm.javascript.integer(b), right);
+  }
+  for (const [name, expected] of [['1+', 1n], ['1-', -1n], ['-', 0n]])
+    wideInteger(vm.vm['native-standard-call1'](canonicalCode(name), boxedInteger(0n)), expected);
+  for (const [name, expected] of [['add', 6n], ['sub', 4n], ['mul', 5n]])
+    for (const suffix of ['', '-checked'])
+      wideInteger(vm.vm[`native-${name}-int64${suffix}`](5n, 1n), expected);
+  const large = 1n << 80n, largeValue = freshInteger(large);
+  wideInteger(vm.vm['native-standard-call2'](canonicalCode('-'), largeValue,
+    freshInteger(large - 7n)), 7n);
+  wideInteger(vm.vm['native-standard-call2'](canonicalCode('-'), largeValue, largeValue), 0n);
+  wideInteger(vm.vm['native-standard-call2'](canonicalCode('*'), largeValue, freshZero), 0n);
+  const promoted = vm.vm['native-add-int64-checked']((1n << 63n) - 1n, 1n);
+  wideInteger(vm.vm['native-standard-call2'](canonicalCode('-'), promoted, freshOne), (1n << 63n) - 1n);
+  check(`(and (typep (- (expt 2 80) (- (expt 2 80) 7)) 'fixnum)
+    (not (typep (- (expt 2 80) (- (expt 2 80) 7)) 'bignum)))`);
   const narrowedInteger = packetFunction(`(compile-native '(lambda (x)
     (declare (optimize (safety 0) (debug 0)))
     (if (integerp x)
@@ -994,9 +1038,15 @@ try {
         0)))`);
   for (const number of [-1073741825n, -1n, 0n, 5n, 9n, 10n, 1073741823n, 1073741824n]) {
     const expected = number >= 0n && number < 10n ? number + 1n : number;
-    for (const value of [vm.vm['native-int64'](number), boxedInteger(number)])
-      assert.equal(vm.javascript.integer(vm.vm['native-call1'](narrowedInteger, value)), expected);
+    for (const value of [vm.vm['native-int64'](number), boxedInteger(number)]) {
+      const result = vm.vm['native-call1'](narrowedInteger, value);
+      assert.equal(vm.javascript.integer(result), expected);
+      if (number >= 0n && number < 10n) wideInteger(result, expected);
+    }
   }
+  const provenInteger = packetFunction(`(compile-native '(lambda (x)
+    (declare (optimize (safety 1) (debug 0))) (+ (logand x 7) 1)))`);
+  assert.equal(vm.javascript.integer(vm.vm['native-call1'](provenInteger, boxedInteger(5n))), 6n);
   recover();
 
   const reject = (source, reason, conditionType = 'compiler-input-error') => {

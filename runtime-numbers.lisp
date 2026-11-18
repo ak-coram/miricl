@@ -2,7 +2,7 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
-;; Integers have three canonical representations: immediate signed i31,
+;; Integers have three representations: immediate signed i31,
 ;; boxed signed i64, then immutable signed-magnitude base-2^15 bignums.
 ;; The common object layout and the portable digit transport remain independent
 ;; of these representations. Only the boxed scalar subtype has an i64 field.
@@ -10,6 +10,11 @@
   #@(if (i32.and (i64.ge_s (local.get $value) (i64.const -1073741824))
                  (i64.le_s (local.get $value) (i64.const 1073741823)))
     (then (return (ref.i31 (i32.wrap_i64 (local.get $value))))))
+  #@(call $box-int64 (local.get $value)))
+
+;; Arithmetic which has reached the scalar i64 tier keeps that tier, even
+;; when cancellation produces a value in the immediate range.
+(define-runtime-function $box-int64 (($value i64)) (:object)
   #@(struct.new $fixnum (call $allocate-object-tag (i32.const 1))
     (i32.sub (i64.gt_s (local.get $value) (i64.const 0)) (i64.lt_s (local.get $value) (i64.const 0)))
     (f64.const 0) (ref.null $digits) (ref.null eq) (ref.null eq) (ref.null eq) (local.get $value)))
@@ -50,8 +55,8 @@
     (then (array.get $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $x))) (local.get $i)))
     (else (i32.const 0))))
 
-(define-runtime-function $integer
-    (($sign i32) ($digits :digits)) (:object)
+(define-runtime-function $integer-normalized
+    (($sign i32) ($digits :digits) ($wide i32)) (:object)
   (:locals ($length i32) ($trimmed :digits) ($bits i64) ($i i32) ($high i32))
   #@(local.set $length (array.len (local.get $digits)))
   #@(block $done (loop $trim
@@ -60,7 +65,8 @@
     (local.set $length (i32.sub (local.get $length) (i32.const 1))) (br $trim)))
   #@(if (i32.or (i32.eqz (local.get $sign))
         (i32.and (i32.eq (local.get $length) (i32.const 1)) (i32.eqz (array.get $digits (local.get $digits) (i32.const 0)))))
-    (then (return (ref.i31 (i32.const 0)))))
+    (then (return (if (result (ref eq)) (local.get $wide)
+      (then (call $box-int64 (i64.const 0))) (else (ref.i31 (i32.const 0)))))))
   #@(local.set $high (array.get $digits (local.get $digits) (i32.sub (local.get $length) (i32.const 1))))
   #@(if (i32.or (i32.lt_u (local.get $length) (i32.const 5))
         (i32.and (i32.eq (local.get $length) (i32.const 5)) (i32.le_u (local.get $high) (i32.const 8))))
@@ -72,13 +78,25 @@
           (i64.extend_i32_u (array.get $digits (local.get $digits) (local.get $i))))) (br $load)))
       (if (i32.or (i64.ge_s (local.get $bits) (i64.const 0))
             (i32.and (i32.lt_s (local.get $sign) (i32.const 0)) (i64.eq (local.get $bits) (i64.const -9223372036854775808))))
-        (then (return (call $int64 (select (i64.sub (i64.const 0) (local.get $bits)) (local.get $bits)
-          (i32.lt_s (local.get $sign) (i32.const 0)))))))))
+        (then
+          (local.set $bits (select (i64.sub (i64.const 0) (local.get $bits)) (local.get $bits)
+            (i32.lt_s (local.get $sign) (i32.const 0))))
+          (return (if (result (ref eq)) (local.get $wide)
+            (then (call $box-int64 (local.get $bits)))
+            (else (call $int64 (local.get $bits)))))))))
   #@(local.set $trimmed (local.get $digits))
   #@(if (i32.ne (local.get $length) (array.len (local.get $digits)))
     (then (local.set $trimmed (array.new_default $digits (local.get $length)))
       (array.copy $digits $digits (local.get $trimmed) (i32.const 0) (local.get $digits) (i32.const 0) (local.get $length))))
   (wat-new-object :integer :n #@(local.get $sign) :digits #@(local.get $trimmed)))
+
+(define-runtime-function $integer (($sign i32) ($digits :digits)) (:object)
+  ;; Fresh source and transport integers may use the immediate tier.
+  #@(call $integer-normalized (local.get $sign) (local.get $digits) (i32.const 0)))
+
+(define-runtime-function $wide-integer (($sign i32) ($digits :digits)) (:object)
+  ;; Arithmetic digit results normalize to boxed i64, never to immediate i31.
+  #@(call $integer-normalized (local.get $sign) (local.get $digits) (i32.const 1)))
 
 (define-runtime-function $small-integer-value (($x :object)) (i32)
   ;; Callers prove at most two magnitude limbs (or otherwise an i32 range).
@@ -86,13 +104,16 @@
 
 (define-runtime-function $negative (($x :object)) (:object)
   (:locals ($value i64))
+  #@(if (ref.test (ref i31) (local.get $x))
+    (then (return (call $int (i32.sub (i32.const 0)
+      (i31.get_s (ref.cast (ref i31) (local.get $x))))))))
   #@(if (call $scalar-integer-p (local.get $x))
     (then (local.set $value (call $scalar-integer-value (local.get $x)))
       (if (i64.eq (local.get $value) (i64.const -9223372036854775808))
         (then (return (call $uint64 (local.get $value)))))
-      (return (call $int64 (i64.sub (i64.const 0) (local.get $value))))))
+      (return (call $box-int64 (i64.sub (i64.const 0) (local.get $value))))))
   ;; Negating positive 2^63 demotes to MIN-I64; other bignums retain their digits.
-  #@(call $integer (i32.sub (i32.const 0) (call $value-n (local.get $x)))
+  #@(call $wide-integer (i32.sub (i32.const 0) (call $value-n (local.get $x)))
     (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $x))))))
 
 (define-runtime-function $iabs
@@ -147,7 +168,7 @@
     (array.set $digits (local.get $digits) (local.get $i) (i32.and (local.get $v) (i32.const 32767)))
     (local.set $carry (i32.shr_s (local.get $v) (i32.const 15)))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  #@(call $integer (i32.const 1) (local.get $digits)))
+  #@(call $wide-integer (i32.const 1) (local.get $digits)))
 
 (define-runtime-function $iadd
     (($a :object) ($b :object))
@@ -167,7 +188,7 @@
       (local.set $sum (i64.add (local.get $av) (local.get $bv)))
       (if (i64.ge_s (i64.and (i64.xor (local.get $av) (local.get $sum))
                              (i64.xor (local.get $bv) (local.get $sum))) (i64.const 0))
-        (then (return (call $int64 (local.get $sum)))))))
+        (then (return (call $box-int64 (local.get $sum)))))))
   #@(local.set $r (local.get $a))
   #@(local.set $s (call $value-n (local.get $a)))
   #@(if (i32.eqz (local.get $s)) (then (return (local.get $b))))
@@ -194,7 +215,7 @@
       (local.set $difference (i64.sub (local.get $av) (local.get $bv)))
       (if (i64.ge_s (i64.and (i64.xor (local.get $av) (local.get $bv))
                              (i64.xor (local.get $av) (local.get $difference))) (i64.const 0))
-        (then (return (call $int64 (local.get $difference)))))))
+        (then (return (call $box-int64 (local.get $difference)))))))
   #@(call $iadd (local.get $a) (call $negative (local.get $b))))
 
 (define-runtime-function $imul
@@ -219,12 +240,12 @@
     (then
       (local.set $av (call $magnitude64 (local.get $a)))
       (local.set $bv (call $magnitude64 (local.get $b)))
-      (if (i64.eqz (local.get $bv)) (then (return (ref.i31 (i32.const 0)))))
+      (if (i64.eqz (local.get $bv)) (then (return (call $box-int64 (i64.const 0)))))
       (local.set $negative (i32.lt_s (i32.mul (call $value-n (local.get $a)) (call $value-n (local.get $b))) (i32.const 0)))
       (local.set $limit (select (i64.const -9223372036854775808) (i64.const 9223372036854775807) (local.get $negative)))
       (if (i64.le_u (local.get $av) (i64.div_u (local.get $limit) (local.get $bv)))
         (then (local.set $product64 (i64.mul (local.get $av) (local.get $bv)))
-          (return (call $int64 (select (i64.sub (i64.const 0) (local.get $product64))
+          (return (call $box-int64 (select (i64.sub (i64.const 0) (local.get $product64))
             (local.get $product64) (local.get $negative))))))))
   #@(local.set $na (call $integer-length (ref.as_non_null (local.get $a))))
   #@(local.set $nb (call $integer-length (ref.as_non_null (local.get $b))))
@@ -259,7 +280,7 @@
       (local.set $j (i32.add (local.get $j) (i32.const 1))) (br $inner)))
     (array.set $digits (local.get $digits) (i32.add (local.get $i) (local.get $nb)) (local.get $carry))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $outer)))
-  #@(call $integer (i32.mul (call $value-n (local.get $a)) (call $value-n (local.get $b)))
+  #@(call $wide-integer (i32.mul (call $value-n (local.get $a)) (call $value-n (local.get $b)))
         (local.get $digits)))
 
 (define-runtime-function $idiv
@@ -413,8 +434,8 @@
   #@(local.get $a))
 
 (define-runtime-section integer-runtime-wat ()
-  ($int64) ($scalar-integer-p) ($scalar-integer-value) ($magnitude64) ($integer-length)
-  ($integer)
+  ($box-int64) ($int64) ($scalar-integer-p) ($scalar-integer-value) ($magnitude64) ($integer-length)
+  ($integer-normalized) ($integer) ($wide-integer)
   ($int)
   ($small-integer-value)
   ($digit)

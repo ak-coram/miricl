@@ -129,6 +129,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-tail-multiple-value-call" (:object :object :object) :object)
     ("native-int64" (:i64) :object)
     ("native-unbox-int64" (:object) :i64)
+    ("native-add-integer" (:object :object) :object)
+    ("native-sub-integer" (:object :object) :object)
+    ("native-mul-integer" (:object :object) :object)
     ("native-add-int64" (:i64 :i64) :object)
     ("native-sub-int64" (:i64 :i64) :object)
     ("native-mul-int64" (:i64 :i64) :object)
@@ -351,15 +354,10 @@ Bind to NIL to interpret forms, including forms without native lowering.")
           (svref previous 2) index (svref previous 3) start (svref previous 4) kind)))
 
 (defun emit-native-integer-box (value)
-  (declare (type simple-vector value))
-  (let ((width (native-integer-width value)))
-    (if (and width (<= width 31) *wasm-import-counts*
-             (not (gethash "native-int64" *wasm-import-counts*)))
-        ;; Avoid importing a generic box operation solely for a proven i31.
-        ;; Once that import is needed elsewhere, CALL is three bytes smaller.
-        (progn (compiler-statistic :optimization/immediate-integer-box)
-          (wasm-byte #xa7) (wasm-gc #x1c) (wasm-gc #x1b))
-        (wasm-call "native-int64"))))
+  (declare (type simple-vector value) (ignore value))
+  ;; A mathematical result range does not recover the tier of raw arithmetic
+  ;; or a private cell snapshot. Materialization preserves the i64 tier.
+  (wasm-call "native-int64"))
 
 (defun wasm-get (value)
   (declare (type simple-vector value *wasm-locals*) (type (or null simple-vector) *wasm-last-local*))
@@ -559,12 +557,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defun wasm-literal (value)
   (cond ((null value) (wasm-null))
     ((and (integerp value) (<= -1073741824 value 1073741823))
-     (if (and *wasm-import-counts* (gethash "native-int64" *wasm-import-counts*))
-         ;; Reuse an existing boxing import: CONST + CALL is two bytes less
-         ;; than repeating REF.I31 + EXTERN.CONVERT_ANY at every literal.
-         ;; Small modules keep immediate boxing and acquire no new import.
-         (progn (wasm-byte #x42) (wasm-s32 value) (wasm-call "native-int64"))
-         (progn (wasm-integer value) (wasm-gc #x1c) (wasm-gc #x1b))))
+     ;; Fresh literals retain immediate storage independently of the presence
+     ;; of the computed-i64 boxing import.
+     (wasm-integer value) (wasm-gc #x1c) (wasm-gc #x1b))
     ((and *wasm-literal-locals* (gethash value *wasm-literal-locals*))
      (wasm-local (gethash value *wasm-literal-locals*)))
     ((eq value t) (wasm-integer 1) (wasm-call "native-boolean"))
@@ -1703,11 +1698,9 @@ exhausted work budgets keep every incoming value group."
            (wasm-byte #x42) (wasm-s32 literal))
           (t
            (wasm-get operand)
-           ;; A narrow mathematical range does not establish ref.i31. Only
-           ;; a canonical checked producer licenses that representation cast.
-           (if (and (<= width 31) (native-checked-integer-origin-p operand))
-               (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
-               (wasm-call "native-unbox-int64"))
+           ;; Logical ranges and checked producer origins permit scalar
+           ;; extraction, but do not distinguish immediate from boxed i64.
+           (wasm-call "native-unbox-int64")
            (when cached
              ;; The planner proves a real first use in the entry block. Cache
              ;; at that original read, preserving checks and effects before it.
@@ -1808,9 +1801,7 @@ exhausted work budgets keep every incoming value group."
                    (if (integerp literal)
                        (progn (wasm-byte #x42) (wasm-s64 literal))
                        (progn (wasm-get value)
-                         (if (and (<= width 31) (native-checked-integer-origin-p value))
-                             (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
-                             (wasm-call "native-unbox-int64")))))
+                         (wasm-call "native-unbox-int64"))))
                  (emit-native-unboxed-integer value width))))
     (loop for tail on arguments for sizes on widths while (cdr tail)
           for first = t then nil do
@@ -1880,6 +1871,21 @@ exhausted work budgets keep every incoming value group."
     (unless (and opcode (every #'identity widths))
       (return-from emit-native-integer-call nil))
     (when (and arithmetic
+               (every (lambda (operand)
+                        ;; Match WASM-GET's reuse and boxing rules. A raw SSA
+                        ;; value with no saved reference stays on the raw ABI.
+                        (and (not (and *wasm-multiple-result-locals*
+                                       (native-value-slot *wasm-multiple-result-locals* operand)))
+                             (let* ((value (or (and *wasm-reused-values*
+                                                  (native-value-slot *wasm-reused-values* operand)) operand))
+                                    (raw (and *wasm-unboxed-values*
+                                              (native-value-slot *wasm-unboxed-values* value))))
+                               (not (and raw (eq (svref raw 4) :result) (<= (svref raw 5) 1))))))
+                      (cddr inputs)))
+      (dolist (operand (cddr inputs)) (wasm-get operand))
+      (wasm-call (ecase name (+ "native-add-integer") (- "native-sub-integer") (* "native-mul-integer")))
+      (return-from emit-native-integer-call t))
+    (when (and arithmetic
                (not (if (eq name '*) (<= (+ (first widths) (second widths)) 64)
                         (<= (max (first widths) (second widths)) 63)))
                (not (native-integer-result-fits-p name inputs))
@@ -1912,10 +1918,8 @@ exhausted work budgets keep every incoming value group."
     (unless (and width (<= width (if (zerop safety) 64 31))) (return-from emit-native-vector-call nil))
     (wasm-get (third inputs))
     (wasm-get (fourth inputs))
-    (if (and (<= width 31) (native-checked-integer-origin-p (fourth inputs)))
-        (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d))
-        (progn (wasm-call "native-unbox-int64")
-          (when (<= width 31) (wasm-byte #xa7))))
+    (wasm-call "native-unbox-int64")
+    (when (<= width 31) (wasm-byte #xa7))
     (wasm-call (cond ((not (zerop safety)) "native-vector-ref")
                      ((<= width 31) "native-vector-ref-trusted")
                      (t "native-vector-ref-trusted64")))
@@ -2189,11 +2193,9 @@ exhausted work budgets keep every incoming value group."
   *wasm-inline-simple-calls*))
 
 (defun native-checked-integer-origin-p (value &optional prospective-arithmetic)
-  ;; A mathematical range does not prove the runtime representation. Retained
-  ;; checked LOGAND canonicalizes successful signed-i64 results through INT64
-  ;; or INTEGER. Proven arithmetic uses the same canonical boxing contract.
-  ;; Copies and primary extraction preserve that representation;
-  ;; cells, joins and external returns need a separate representation proof.
+  ;; Retained checked LOGAND and accepted arithmetic establish logical scalar
+  ;; integers after their checks. This is not a physical i31 representation
+  ;; proof: arithmetic can retain boxed i64 even for a small result.
   ;; PROSPECTIVE-ARITHMETIC is private candidate admission only. Callers that
   ;; justify extraction must omit it and inspect accepted plans instead.
   (loop repeat 32 do
@@ -2323,15 +2325,11 @@ exhausted work budgets keep every incoming value group."
   ;; snapshots remain i64 so the existing storage/alias ABI stays unchanged.
   (wasm-call "native-poll")
   (loop for operand in (cddr inputs) for width in (svref proof 0) do
-    (let* ((cached (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* operand)))
-           (producer (hir-value-producer operand))
+    (let* ((producer (hir-value-producer operand))
            (literal (and (%hir-instruction-p producer)
                          (eq (hir-instruction-opcode producer) :constant)
                          (first (hir-instruction-attributes producer)))))
       (cond ((integerp literal) (wasm-integer literal))
-            ((and (<= width 31) (native-checked-integer-origin-p operand)
-                  (not (and cached (or (eq (svref cached 4) :result) (svref cached 3)))))
-             (wasm-get operand) (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d))
             (t (emit-native-unboxed-integer operand width) (wasm-byte #xa7)))))
   (when (= (length inputs) 3) (wasm-integer 1))
   (wasm-byte (if (= opcode #x7c) #x6a #x6b))
@@ -2631,21 +2629,14 @@ exhausted work budgets keep every incoming value group."
       (progn (wasm-byte #x21) (wasm-u32 (svref raw 0)))))
 
 (defun emit-native-raw-result-box (raw)
-  ;; Some raw plans replace a noninteger HIR producer, notably the unobserved
-  ;; CHAR in CHAR-CODE(CHAR(...)). Use the plan's successful-result width when
-  ;; its HIR type cannot describe the lowered integer. Keep the ordinary box
-  ;; helper's fixed-arity ABI and policy for all existing callers.
+  ;; Materializing an arithmetic result or SSA snapshot keeps the i64 tier.
+  ;; Its mathematical width does not establish an immediate representation.
   (declare (type simple-vector raw))
-  (let* ((producer (hir-value-producer (svref raw 1)))
-         (proof (and *wasm-proven-integer-arithmetic*
-                     (gethash producer *wasm-proven-integer-arithmetic*)))
-         (width (if proof (svref proof 1)
-                    (or (native-integer-width (svref raw 1)) (svref raw 2)))))
-    (if (and width (<= width 31) *wasm-import-counts*
-             (not (gethash "native-int64" *wasm-import-counts*)))
-        (progn (compiler-statistic :optimization/immediate-integer-box)
-               (wasm-byte #xa7) (wasm-gc #x1c) (wasm-gc #x1b))
-        (wasm-call "native-int64"))))
+  (if (eq (gethash (hir-value-producer (svref raw 1)) *wasm-inline-simple-calls*) :character-code-at)
+      ;; A checked character read produces a fresh Unicode code, bounded by
+      ;; the target character representation, independently of numeric inputs.
+      (progn (wasm-byte #xa7) (wasm-gc #x1c) (wasm-gc #x1b))
+      (wasm-call "native-int64")))
 
 (defun emit-native-instruction (instruction)
   (declare (type simple-vector instruction))
@@ -3686,16 +3677,14 @@ exhausted work budgets keep every incoming value group."
        (wasm-integer (first (hir-instruction-attributes (svref record 0))))
        (wasm-call "native-capture"))
       ((or (integerp kind) (member kind '(:evenp :oddp)))
-       (loop for input in arguments for width in widths do
+       (loop for input in arguments do
          (let* ((producer (hir-value-producer input))
                 (literal (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant)
                               (first (hir-instruction-attributes producer)))))
            (if (integerp literal)
                (progn (wasm-byte #x42) (wasm-s64 literal))
                (progn (wasm-get input)
-                 (if (and (<= width 31) (native-checked-integer-origin-p input))
-                     (progn (wasm-gc #x1a) (wasm-gc #x16 #x6c) (wasm-gc #x1d) (wasm-byte #xac))
-                     (wasm-call "native-unbox-int64"))))))
+                 (wasm-call "native-unbox-int64")))))
        (cond ((member kind '(:evenp :oddp))
               (wasm-byte #x42) (wasm-s32 1) (wasm-byte #x83)
               (wasm-byte (if (eq kind :evenp) #x50 #xa7)))

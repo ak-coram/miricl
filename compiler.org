@@ -209,12 +209,28 @@ application. Immutable captures can be direct; mutable captures share cells. Dis
 objects and required capture identities survive body sharing and closure caching.
 
 Integers use i31 immediates, boxed signed-i64 values or larger sign/magnitude
-integers; target FIXNUM spans signed i64. Proven scalar work can stay raw and share canonical
-boxing. Overflow, large shifts, division traps and infinite two's-complement semantics retain
+integers; target FIXNUM spans signed i64 independently of immediate or boxed storage.
+Fresh literals and checked object-arithmetic paths on actual i31 operands retain
+immediate results when they fit.
+Computed i64 addition, subtraction, multiplication and negation retain boxed i64 results;
+overflow promotes to bignums, whose arithmetic results normalize back to boxed i64 when they fit.
+The digit normalizer selects fresh or wide result construction before boxing, including zero.
+Raw arithmetic and private-cell snapshots stay i64 when materialized; scalar extraction accepts
+both immediate and boxed storage even for narrow mathematical ranges. Algebraic identities
+may reuse existing operands without computing or converting a result. Shift, division and
+logical-operation helpers still use their existing result-construction policies.
+Proven binary addition, subtraction and multiplication preserve existing object
+operands through scalar object entries when references are already available.
+These internal entries accept only actual i31 or boxed-i64 FIXNUM storage,
+preserve immediate arithmetic on i31 inputs, and retain wide results for boxed
+inputs and overflow. They validate foreign references, packets and scalar subtypes
+before integer workers, without adding a scheduling poll or changing multiple values.
+Raw SSA operands without saved references keep the raw integer ABI; the compiler
+does not construct boxes merely to inspect their representation.
+Overflow, large shifts, division traps and infinite two's-complement semantics retain
 checks or general helpers. Private numeric cells require proofs for every write and no
-capture/escape; reads keep SSA snapshots. Object extraction uses direct i31 casts only with
-canonical producer provenance and an i31 range; other proven scalar integers use an extractor
-accepting both immediate and boxed storage, including restored boxed small integers.
+capture/escape; reads keep SSA snapshots. Logical checked-producer provenance establishes
+scalar extraction, not a physical i31 representation, including restored boxed small integers.
 Predicates can feed branches directly; bounded reuse
 and loop motion require stable operands and nontrapping canonical operations. Typed
 list/vector operations retain safety, definition and boundary contracts; LIST/LIST* preserve
@@ -224,8 +240,8 @@ unchecked reads.
 At SAFETY 1, binary ordered comparisons can use signed-i64 instructions when fresh,
 declaration-independent inference proves both operand ranges fit signed i64. A separate,
 bounded representation check follows copies and primary extraction to integer literals,
-retained checked binary LOGAND calls or the proved arithmetic plans below. LOGAND validates its operands and canonicalizes
-successful signed-i64 results. Extraction accepts both i31 and boxed i64 even for narrow
+retained checked binary LOGAND calls or the proved arithmetic plans below. LOGAND validates its operands;
+successful signed-i64 results can use either scalar representation. Extraction accepts both i31 and boxed i64 even for narrow
 ranges; accepted raw SSA snapshots are read directly. A range alone does not prove an i31
 representation. Unknown facts or origins retain
 the checked comparison helper. This comparison plan preserves producer evaluation and checks,
@@ -246,11 +262,11 @@ query. All maps and facts belong to the unchanged validated HIR during this emis
 and must be discarded after mutation. The bounded arithmetic planner omits selection at maximum COMPILATION-SPEED;
 unknown or exhausted selection retains the checked call. Operand producers stay in order,
 and each selected operation retains its scheduling poll at the original call site, including
-unused results. These plans do not participate in loop motion. Canonical producers with
-proved i31 ranges use i31 extraction; other objects use the scalar extractor before wrapping.
+unused results. These plans do not participate in loop motion. Objects use the scalar
+extractor before wrapping, independently of a proved i31 range.
 Intermediate SSA results share the existing raw i64 locals after signed extension, allowing
-arithmetic chains to avoid intermediate boxes. Reference consumers box using the proved
-result width and canonical integer conversion, including results outside the i31 range.
+arithmetic chains to avoid intermediate boxes. Reference consumers retain the i64 tier
+when boxing computed results, independently of the proved result width.
 Private cell storage and loop induction require their separate existing proofs.
 The mixed-fact filter in =native-plan-proven-integers= can still omit cyclic arithmetic
 whose ordinary inference retains a broad numeric successful-return type, even when the
@@ -264,7 +280,7 @@ proof query, and a bounded full-function operand audit rejects unknown uses,
 captures and stores outside the emitted graph. Exhaustion retains boxed storage.
 DEBUG and captured landing entries retain their existing storage restrictions.
 Reads receive independent SSA snapshots, and generic uses materialize integers
-through the existing canonical boxing path. Mathematical ranges do not license
+through the i64 boxing path. Mathematical ranges do not license
 i31 extraction from an arbitrary integer object.
 The =hir-inline-result-type= LENGTH rules cover vectors, including sized simple vectors;
 they do not infer list lengths or relate a changing list cursor to a loop counter.

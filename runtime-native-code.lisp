@@ -928,11 +928,38 @@
 
 (define-runtime-function $native-int64 (($value i64)) (externref)
   (:export-raw "native-int64")
-  #@(extern.convert_any (call $int64 (local.get $value))))
+  #@(extern.convert_any (call $box-int64 (local.get $value))))
 
 (define-runtime-function $native-unbox-int64 (($value externref)) (i64)
   (:export-raw "native-unbox-int64")
   #@(call $scalar-integer-value (ref.as_non_null ,(native-object '(local.get $value)))))
+
+(defun native-object-integer-entry-wat (worker)
+  (runtime-wat-sequence
+     ;; Keep actual immediate operands immediate without constructing boxes
+     ;; merely to call the raw-i64 ABI. This entry adds no poll or values reset.
+     #@(if (i32.and (ref.test (ref i31) (any.convert_extern (local.get $left)))
+                    (ref.test (ref i31) (any.convert_extern (local.get $right))))
+       (then (return (extern.convert_any (call ,worker
+         (ref.as_non_null ,(native-object '(local.get $left)))
+         (ref.as_non_null ,(native-object '(local.get $right))))))))
+     #@(local.set $a (call $native-checked-value (local.get $left)))
+     #@(if (i32.eqz (call $scalar-integer-p (local.get $a)))
+       (then (call $list-type-error (local.get $a) (i32.const ,(runtime-symbol-id 'fixnum)))))
+     #@(local.set $b (call $native-checked-value (local.get $right)))
+     #@(if (i32.eqz (call $scalar-integer-p (local.get $b)))
+       (then (call $list-type-error (local.get $b) (i32.const ,(runtime-symbol-id 'fixnum)))))
+     #@(extern.convert_any (call ,worker (ref.as_non_null (local.get $a)) (ref.as_non_null (local.get $b))))))
+
+(defmacro define-native-object-integer-entry (name export worker)
+  `(define-runtime-function ,name (($left externref) ($right externref)) (externref)
+     (:export-raw ,export)
+     (:locals ($a :nullable-object) ($b :nullable-object))
+     (native-object-integer-entry-wat ',worker)))
+
+(define-native-object-integer-entry $native-add-integer "native-add-integer" $iadd)
+(define-native-object-integer-entry $native-sub-integer "native-sub-integer" $isub)
+(define-native-object-integer-entry $native-mul-integer "native-mul-integer" $imul)
 
 (defun native-integer-fit-wat (function)
   ;; The computed result has wrapped i64 bits. Test whether the mathematical
@@ -966,7 +993,7 @@
         (br_if $overflow (i32.eqz ,(native-integer-fit-wat function)))
         (return (extern.convert_any (call ,result (local.get $computed)))))
       #@(extern.convert_any (call $op (i32.const ,(ecase function (+ 0) (- 1) (* 2)))
-        (call $int64 (local.get $left)) (call $int64 (local.get $right)))))
+        (call $box-int64 (local.get $left)) (call $box-int64 (local.get $right)))))
     #@(extern.convert_any (call ,result (,opcode (local.get $left) (local.get $right))))))
 
 (defmacro define-native-integer-entry (name export function opcode result &optional checked)
@@ -975,9 +1002,9 @@
      ,@(when checked '((:locals ($computed i64))))
      (native-integer-entry-wat ',function ',opcode ',result ,checked)))
 
-(define-native-integer-entry $native-add-int64 "native-add-int64" + i64.add $int64)
-(define-native-integer-entry $native-sub-int64 "native-sub-int64" - i64.sub $int64)
-(define-native-integer-entry $native-mul-int64 "native-mul-int64" * i64.mul $int64)
+(define-native-integer-entry $native-add-int64 "native-add-int64" + i64.add $box-int64)
+(define-native-integer-entry $native-sub-int64 "native-sub-int64" - i64.sub $box-int64)
+(define-native-integer-entry $native-mul-int64 "native-mul-int64" * i64.mul $box-int64)
 (define-native-integer-entry $native-logand-int64 "native-logand-int64" logand i64.and $int64)
 (define-native-integer-entry $native-logior-int64 "native-logior-int64" logior i64.or $int64)
 (define-native-integer-entry $native-logxor-int64 "native-logxor-int64" logxor i64.xor $int64)
@@ -1003,9 +1030,9 @@
   ;; Positive shifts that overflow i64 use arbitrary-precision arithmetic.
   #@(extern.convert_any (call $ash-native
     (call $int64 (local.get $left)) (call $int64 (local.get $right)))))
-(define-native-integer-entry $native-add-int64-checked "native-add-int64-checked" + i64.add $int64 t)
-(define-native-integer-entry $native-sub-int64-checked "native-sub-int64-checked" - i64.sub $int64 t)
-(define-native-integer-entry $native-mul-int64-checked "native-mul-int64-checked" * i64.mul $int64 t)
+(define-native-integer-entry $native-add-int64-checked "native-add-int64-checked" + i64.add $box-int64 t)
+(define-native-integer-entry $native-sub-int64-checked "native-sub-int64-checked" - i64.sub $box-int64 t)
+(define-native-integer-entry $native-mul-int64-checked "native-mul-int64-checked" * i64.mul $box-int64 t)
 (define-native-integer-entry $native-lt-int64 "native-lt-int64" < i64.lt_s $bool)
 (define-native-integer-entry $native-gt-int64 "native-gt-int64" > i64.gt_s $bool)
 (define-native-integer-entry $native-le-int64 "native-le-int64" <= i64.le_s $bool)
@@ -2510,6 +2537,7 @@
   ($native-call) ($native-primary-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1)
   ($native-int64) ($native-unbox-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)
+  ($native-add-integer) ($native-sub-integer) ($native-mul-integer)
   ($native-logand-int64) ($native-logior-int64) ($native-logxor-int64) ($native-ash-int64)
   ($native-add-int64-checked) ($native-sub-int64-checked) ($native-mul-int64-checked)
   ($native-lt-int64) ($native-gt-int64) ($native-le-int64) ($native-ge-int64) ($native-eq-int64) ($native-ne-int64)

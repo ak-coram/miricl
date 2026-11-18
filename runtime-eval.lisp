@@ -330,9 +330,9 @@
     (then
       (if (i32.eq (local.get $kind) (i32.const 6))
         (then
-          (if (i32.eq (call $value-n (local.get $form)) (i32.const ,(runtime-symbol-id '*package*)))
+          (if (i32.eq (local.tee $kind (call $value-n (local.get $form))) (i32.const ,(runtime-symbol-id '*package*)))
             (then (return (call $active-package))))
-          (if (i32.or (i32.eq (call $value-n (local.get $form)) (i32.const 1))
+          (if (i32.or (i32.eq (local.get $kind) (i32.const 1))
                       (ref.eq (struct.get $obj $b (ref.cast (ref $obj) (local.get $form))) (global.get $keyword-package)))
             (then (return (local.get $form))))
           (return (call $lookup (local.get $env) (local.get $form)))))

@@ -1215,6 +1215,10 @@ export class Miricl {
     if (this.vm['native-services']) {
       this.nativeModules = new WeakMap();
       const bridge = new WebAssembly.Instance(nativeCompilerBridge, {host: {service: (code, literals, name) => {
+        // Runtime helpers can reach cooperative checkpoints while copying
+        // boxed code bytes. This synchronous JS frame cannot be suspended.
+        const depth = this.vm['javascript-depth'].value;
+        this.vm['javascript-depth'].value = depth + 1;
         try {
         const storage = this.vm['native-code-storage'](code);
         let compiled = this.nativeModules.get(storage);
@@ -1261,6 +1265,8 @@ export class Miricl {
           if (this.javascript)
             return this.vm['native-module-error'](this.javascript.makeText(String(error.message).slice(0, 1024)));
           throw error;
+        } finally {
+          this.vm['javascript-depth'].value = depth;
         }
       }}});
       this.vm['native-services'].set(0, bridge.exports.service);
