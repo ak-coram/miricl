@@ -112,11 +112,15 @@
     (list-length . %%list-length)
     (copy-list . %%copy-list)
     (slot-value . %%slot-value)
+    (%optimize-debug-level . %%optimize-debug-level)
+    (miricl-compiler::compiler-list-length . %%compiler-list-length)
     (list* . list*)))
 ;; Keep new private IDs after every existing primitive interval.
 (setf *clos-primitives* (append *clos-primitives* '(%%copy-list %%slot-value %%nth)))
 (defparameter *native-clos-symbols* nil)
 (setf *clos-primitives* (append *clos-primitives* '(%%allocate-method)))
+(setf *clos-primitives* (append *clos-primitives* '(%%optimize-debug-level)))
+(setf *clos-primitives* (append *clos-primitives* '(%%compiler-list-length)))
 
 (assert (<= (length *clos-primitives*) (- 2147483640 +clos-primitive-base+)))
 
@@ -174,25 +178,6 @@ Generate only source forms here; the compiler-free guest needs no contract table
           ;; invoked implementation setter keeps its ordinary live binding.
           (setf forms (append forms
                         (mapcar #'lower-runtime-library (standard-list-place-expanders)))))
-        (when (equal file "compiler-input.lisp")
-          ;; Every guest has the checked list scanner. Call it directly,
-          ;; avoiding the host-probing ABI and its multiple-value packet on
-          ;; every FASL record and compiler input list. Keep the portable
-          ;; scanner in the host source, with identical rejection conditions.
-          (setf forms
-            (loop for form in forms collect
-              (if (eq (second form) 'miricl-compiler::compiler-list-length)
-                  (lower-runtime-library
-                    '(defun miricl-compiler::compiler-list-length (object context)
-                       (declare (optimize (safety 3)))
-                       (if (null object) 0
-                           (let ((count (%%compile 40 object)))
-                             (case count
-                               (-1 (miricl-compiler::compiler-input-fail context object
-                                     "expected a proper list; found a dotted tail"))
-                               (-2 (miricl-compiler::compiler-input-fail context object "circular list"))
-                               (otherwise count))))))
-                  form))))
         (when (equal file "hir-code.lisp")
           ;; Host Common Lisp needs portable fallbacks. Both guest images
           ;; always have the shared Wasm readers; do not ship duplicate parsers.

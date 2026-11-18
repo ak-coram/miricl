@@ -21,6 +21,35 @@
            #:proper-list-count #:check-arity-count #:check-zero-arity #:check-one-arity #:check-two-arity #:check-three-arity #:sequence-index-value #:native-list-tail-value #:arrays-same-shape-p #:array-contents-count #:array-subscript-value #:complex-component-type #:cons-type-components #:printer-limit-value #:pretty-tab-distance #:compiled-byte-header-p #:text-position-column #:read-ordering-buffer #:merge-ordering-buffers #:loop-syntax-equal-p #:copy-loop-syntax #:tree-value-equal-p #:path-directory-value-p #:format-small-integer))
 (in-package #:miricl-runtime)
 
+(define-condition miricl::%optimization-quality-error (program-error type-error) ())
+
+(export '(optimization-quality-level))
+(defun optimization-quality-level (qualities inherited quality-name error-class)
+  "Read one optimization quality after the adapter checks the outer list."
+  (declare (type list qualities) (optimize (safety 0) (debug 0))
+           (inline car cdr consp symbolp integerp <= eq))
+  (values
+   (block done
+     (tagbody next
+        (if qualities nil (return-from done inherited))
+        (let* ((quality (car (the cons qualities)))
+               (name quality) (level 3))
+          (if (block valid
+                (if (consp quality)
+                    (let ((tail (cdr (the cons quality))))
+                      (if (consp tail) nil (return-from valid nil))
+                      (if (cdr (the cons tail)) (return-from valid nil))
+                      (setq name (car (the cons quality)) level (car (the cons tail)))))
+                (if (symbolp name) nil (return-from valid nil))
+                (if (integerp level) nil (return-from valid nil))
+                (<= 0 level 3))
+              (if (eq name quality-name) (setq inherited level))
+              (error error-class :datum quality :expected-type
+                     (list 'or 'symbol
+                       (list 'cons 'symbol (list 'cons (list 'integer 0 3) 'null))))))
+        (setq qualities (cdr (the cons qualities)))
+        (go next)))))
+
 (export '(find-sequence-value))
 
 (defun find-sequence-value (item sequence function state)

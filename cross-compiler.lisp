@@ -804,7 +804,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                   (if (and (eq result :truth) (return-next-p index))
                       (progn (write-line "i32.eqz i32.eqz" out) (setq raw-truth t))
                       (write-line "call $bool" out)))
-                 ((member target '("native-car-list-inline" "native-car-inline-checked") :test #'equal)
+                 ((string= target "native-car-list-inline")
                   (write-line "call $car" out))
                  ((member target '("native-cdr-list-inline" "native-cdr-inline-checked") :test #'equal)
                   (write-line "call $cdr" out))

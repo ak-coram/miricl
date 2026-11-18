@@ -53,13 +53,15 @@
 (define-runtime-function $lookup
     (($env :nullable-object) ($name :nullable-object))
     (:nullable-object)
-  (:locals ($binding :nullable-object) ($value :nullable-object))
+  (:locals ($binding :nullable-object) ($value :nullable-object) ($state i32))
   #@(local.set $binding (call $find (local.get $env) (call $id (local.get $name))))
   #@(if (i32.eqz (ref.is_null (local.get $binding)))
       (then (if (ref.is_null (struct.get $obj $c (ref.cast (ref $obj) (local.get $binding))))
-                (then (if (i32.eq (call $value-n (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))) (i32.const 2))
+                ;; The symbol-macro path returns; otherwise no callback or
+                ;; checkpoint can change the cell before its unbound test.
+                (then (if (i32.eq (local.tee $state (call $value-n (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding))))) (i32.const 2))
                         (then (return (call $evaluate-in-environment (call $macroexpand-1 (local.get $name) (local.get $env)) (local.get $env)))))
-                      ,(wat-fail-when #@(call $value-n (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding)))) :unbound-variable)
+                      ,(wat-fail-when #@(local.get $state) :unbound-variable)
                       (return (call $binding-value (local.get $binding)))))
             (local.set $value (call $symbol-value (local.get $name)))
             (call $check-type (local.get $value) (struct.get $obj $b (ref.cast (ref $obj) (local.get $binding))))

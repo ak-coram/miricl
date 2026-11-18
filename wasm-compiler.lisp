@@ -169,7 +169,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-character-code-at64-inline" (:object :i64) :object)
     ("native-character-code-at-unboxed-inline" (:object :object) :i64)
     ("native-character-code-at64-unboxed-inline" (:object :i64) :i64)
-    ("native-car-inline-checked" (:object) :object)
     ("native-cdr-inline-checked" (:object) :object)
     ("native-list-path" (:object :i32) :object)
     ("native-set-list-path" (:object :object :i32) :object)
@@ -218,7 +217,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-list2" (:object :object) :object)
     ("native-cell" (:object) :object)
     ("native-primary" (:object) :object)
-    ("native-cell-read" (:object) :object)
     ("native-cell-write" (:object :object) :object)
     ("native-call" (:object :object :object) :object)
     ("native-primary-call" (:object :object :object) :object)
@@ -1958,7 +1956,7 @@ exhausted work budgets keep every incoming value group."
       (wasm-get (third inputs))
       (wasm-call (if (and (zerop safety) listp)
                     (if (member name '(car first)) "native-car-list-inline" "native-cdr-list-inline")
-                    (if (member name '(car first)) "native-car-inline-checked" "native-cdr-inline-checked")))
+                    (if (member name '(car first)) "native-primary" "native-cdr-inline-checked")))
       t)))
 
 (defun native-plan-inline-simple (unit)
@@ -2784,7 +2782,7 @@ exhausted work budgets keep every incoming value group."
          (t
           (dolist (input inputs) (wasm-get input))
           (wasm-call (ecase (hir-instruction-opcode instruction)
-                    (:cell-new "native-cell") (:cell-read "native-cell-read")
+                    (:cell-new "native-cell") (:cell-read "native-primary")
                     (:cell-write "native-cell-write") (:primary "native-primary"))))))
       (:call
        ;; The host closed-worker linker supports primary calls and direct
@@ -2875,7 +2873,7 @@ exhausted work budgets keep every incoming value group."
                  (setq *wasm-object-types* t)
                  (wasm-gc #x1a) (wasm-gc #x16 1)
                  (wasm-gc 2 1 (if (eq kind :car-cons) 4 5)) (wasm-gc #x1b))
-                (:checked-car (wasm-call "native-car-inline-checked"))
+                (:checked-car (wasm-call "native-primary"))
                 (:checked-cdr (wasm-call "native-cdr-inline-checked"))
                 (:list-path
                  (wasm-integer (native-list-path-code
@@ -5266,7 +5264,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    emit-native-tag-test
                    ;; These small constructors and declaration readers are
                    ;; exercised while compiling nearly every remaining kernel.
-                   compiler-input-summary compiler-input-fail compiler-list-length compiler-type-specifier compiler-variable-name compiler-function-name
+                   compiler-input-summary compiler-input-fail compiler-type-specifier compiler-variable-name compiler-function-name
                    compiler-lambda-list compiler-body compiler-source-form validate-hir-shapes
                    hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant
                    hir-clear-source

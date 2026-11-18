@@ -19,8 +19,11 @@
 
 (define-runtime-function $constant-symbol-p (($x :nullable-object)) (i32)
   (:locals ($binding :nullable-object) ($id i32))
-  #@(if (i32.or (i32.le_u (local.tee $id (call $id (local.get $x))) (i32.const 1))
-                          (call $keywordp (local.get $x))) (then (return (i32.const 1))))
+  ;; Callers establish SYMBOLP. Return for NIL/T before reading a symbol's home.
+  #@(if (i32.le_u (local.tee $id (call $id (local.get $x))) (i32.const 1))
+    (then (return (i32.const 1))))
+  #@(if (ref.eq (struct.get $obj $b (ref.cast (ref $obj) (local.get $x))) (global.get $keyword-package))
+    (then (return (i32.const 1))))
   #@(local.set $binding (call $global-binding (local.get $id)))
   #@(if (ref.is_null (local.get $binding)) (then (return (i32.const 0))))
   #@(i32.eqz (ref.is_null (struct.get $obj $b (ref.cast (ref $obj) (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding))))))))

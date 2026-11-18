@@ -819,7 +819,7 @@ try {
   vm.vm['native-cell-write'](sharedOperand, changedFirst);
   const sharedValues = vm.javascript.list(vm.vm['native-call'](null, sharedEscaped, packets.empty()), value => value);
   assert.equal(sharedValues[1], sharedOperand, 'Snapshotting slots preserves referenced Lisp object identity.');
-  assert.equal(vm.vm['native-cell-read'](sharedValues[1]), changedFirst,
+  assert.equal(vm.vm['native-primary'](sharedValues[1]), changedFirst,
     'Changes to an argument object remain visible through the original argument.');
   console.log('Soundness: native ingress snapshots foreign raw slots before retaining escaped next-method calls.');
 

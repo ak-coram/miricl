@@ -205,6 +205,25 @@
   (runtime-function-definition '$list-length-native
     (wat-fragment (miricl-cross:runtime-kernel-wat '$list-length-native 'miricl-runtime:list-length-or-cycle))))
 
+(define-runtime-function $checked-compiler-list-length
+    (($object :nullable-object) ($context :nullable-object)) (:nullable-object)
+  (:locals ($count :nullable-object) ($status i64))
+  ;; Share the checked spine traversal with source, HIR and FASL validation.
+  ;; Its count is a full scalar integer, never a truncated length selector.
+  #@(local.set $count (call $compiler-list-length (local.get $object)))
+  #@(local.set $status (call $scalar-integer-value (ref.as_non_null (local.get $count))))
+  #@(if (i32.or (i64.eq (local.get $status) (i64.const -1))
+                (i64.eq (local.get $status) (i64.const -2)))
+    ;; Keep ordinary helper rebinding, effects and all returned values, even
+    ;; when a replacement returns normally instead of signaling a condition.
+    (then (return_call $apply ,(clos-library-reference 'miricl-compiler::compiler-input-fail)
+      (call $cons (local.get $context) (call $cons (local.get $object)
+        (call $cons (if (result (ref null eq)) (i64.eq (local.get $status) (i64.const -1))
+          (then ,(wat-text-literal "expected a proper list; found a dotted tail"))
+          (else ,(wat-text-literal "circular list"))) (ref.null eq)))))))
+  #@(call $clear-values)
+  #@(local.get $count))
+
 (defun $pair-lists-onto ()
   (runtime-function-definition '$pair-lists-onto
     (wat-fragment (miricl-cross:runtime-kernel-wat '$pair-lists-onto 'miricl-runtime:pair-lists-onto))))
@@ -693,6 +712,8 @@
         (%%define-package 2 $defpackage (0 1))
         (%%copy-list 1 $copy-spine (0 (:constant 0)))
         (%%slot-value 2 $instance-slot-operation ((:constant 0) 0 1 (:null)))
+        (%%optimize-debug-level 2 $optimize-debug-level (0 1))
+        (%%compiler-list-length 2 $checked-compiler-list-length (0 1))
         (%%nth 2 $public-nth-cl (0 1))))
 
 (defun list-primitive-operand-wat (operand argument)
@@ -791,6 +812,6 @@
   ($make-list-bounded) ($make-list-native) ($nthcdr-bounded) ($nthcdr-general) ($nthcdr-native) ($public-nth-cl) ($last-bounded) ($last-native)
   ($copy-butlast-bounded) ($truncate-butlast-bounded) ($butlast-native)
   ($copy-before-tail) ($tail-member-p) ($tail-difference)
-  ($list-length-native) ($pair-lists-onto) ($pairlis-native) ($callable) ($mapping-argument-cl) ($mapping-argument) ($map-lists-cl) ($map-lists-native) ($map-sequence-result-cl) ($map-sequences-native) ($map-into-apply) ($bounded-index-cl) ($bounded-index)
+  ($list-length-native) ($checked-compiler-list-length) ($pair-lists-onto) ($pairlis-native) ($callable) ($mapping-argument-cl) ($mapping-argument) ($map-lists-cl) ($map-lists-native) ($map-sequence-result-cl) ($map-sequences-native) ($map-into-apply) ($bounded-index-cl) ($bounded-index)
   ($sequence-character-kind) ($sequence-character-needle) ($simple-predicate-value) ($sequence-key-value) ($sequence-item-match)
   ($search-list-cl) ($native-search-list) ($search-list-native) ($list-exclusive-cl) ($list-exclusive-native) ($list-set-apply) ($list-set-values-cl) ($list-set-native) ($count-sequence-value-cl) ($count-sequence-native) ($list-copy-fixed) ($slot-operation-fixed) ($copy-list-native) ($slot-value-native) ($list-primitive))

@@ -678,6 +678,7 @@
   (%iteration-expansion var (list '%%package-symbol-list nil 2) result body :symbols))
 (setf (macro-function 'psetq) #'%%psetq-expander)
 (define-condition %macro-structure-error (program-error simple-condition) ())
+(define-condition %optimization-quality-error (program-error type-error) ())
 (defparameter %iteration-body-error-controls
   (vector "Iteration: expected a proper body list."
           "Iteration: circular body list."

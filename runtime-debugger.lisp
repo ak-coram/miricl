@@ -2,6 +2,20 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defun $optimization-quality-level-cl ()
+  (runtime-function-definition '$optimization-quality-level-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$optimization-quality-level-cl
+                   'miricl-runtime:optimization-quality-level))))
+
+(define-runtime-function $optimize-debug-level
+    (($qualities :nullable-object) ($inherited :nullable-object)) (:nullable-object)
+  ;; The outer list is public source data. Check cycles and dotted tails before
+  ;; entering the worker; each quality pair is checked within the worker.
+  #@(call $check-apply-list (local.get $qualities))
+  #@(call $optimization-quality-level-cl (local.get $qualities) (local.get $inherited)
+      ,(clos-library-reference 'debug)
+      ,(clos-library-reference '%optimization-quality-error)))
+
 (defun debug-protected-call (expression cleanup)
   (runtime-wat-sequence
     #@(block $returned
@@ -211,5 +225,6 @@
   #@(global $debug-depth (mut i32) (i32.const 0))
   #@(global $debug-step-depth (mut i32) (i32.const -1))
   #@(global $debug-frames (mut (ref null eq)) (ref.null eq))
+  ($optimization-quality-level-cl) ($optimize-debug-level)
   (if *source-bootstrap-p* (source-debugger-runtime-wat) "")
   ($apply) ($debug-apply) ($debug-stack-string) ($debug-operation))

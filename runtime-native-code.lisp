@@ -666,11 +666,8 @@
 
 (define-runtime-function $native-primary (($values externref)) (externref)
   (:export-raw "native-primary")
+  ;; Value packets, boxed cells and checked CAR calls share this checked read.
   #@(extern.convert_any (call $car ,(native-object '(local.get $values)))))
-
-(define-runtime-function $native-cell-read (($cell externref)) (externref)
-  (:export-raw "native-cell-read")
-  #@(extern.convert_any (call $car ,(native-object '(local.get $cell)))))
 
 (define-runtime-function $native-cell-write (($cell externref) ($value externref)) (externref)
   (:export-raw "native-cell-write")
@@ -1278,10 +1275,6 @@
   #@(if (ref.is_null ,(native-object '(local.get $list))) (then (return (ref.null extern))))
   #@(extern.convert_any (struct.get $obj $a
     (ref.cast (ref $obj) ,(native-object '(local.get $list))))))
-
-(define-runtime-function $native-car-inline-checked (($list externref)) (externref)
-  (:export-raw "native-car-inline-checked")
-  #@(extern.convert_any (call $car ,(native-object '(local.get $list)))))
 
 (define-runtime-function $native-cdr-inline-checked (($list externref)) (externref)
   (:export-raw "native-cdr-inline-checked")
@@ -2000,9 +1993,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ;; and other arities continue through ordinary APPLY, including its errors.
   (let ((arguments (ecase arity (1 '($value)) (2 '($left $right))
                                (3 '($a $b $c)) (4 '($a $b $c $d))))
-        (id (if (= arity 4)
-                `(call $native-builtin-id ,(native-object '(local.get $function)))
-                '(local.get $id))))
+        (id '(local.get $id)))
     (runtime-wat-forms
       (loop for (name count target) in (native-fixed-primitive-entries)
             when (= count arity) collect
@@ -2025,7 +2016,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   (let* ((arguments (ecase arity
                       (0 nil) (1 '($a)) (2 '($a $b))
                       (3 '($a $b $c)) (4 '($a $b $c $d))))
-         (id (if (member arity '(1 2 3)) '(local.get $id)
+         (id (if (member arity '(1 2 3 4)) '(local.get $id)
                  `(call $native-builtin-id ,(native-object '(local.get $function)))))
          (expected (runtime-symbol-id 'vector)))
     (wat-fragment #@(if (i32.eq ,id (i32.const ,(if (= arity 3) (- -2 expected) expected)))
@@ -2084,6 +2075,22 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (then (local.set $result (call $value-list (local.get $result)))))
   #@(call $clear-values)
   #@(extern.convert_any (local.get $result)))
+
+(defun native-fixed-fallback-arguments-wat (arity)
+  ;; Only actual HIR functions accept raw packets in this fallback. Keep
+  ;; ordinary callees' list protocol, and enter HIR through APPLY0 so slot
+  ;; validation, checkpoints, frames and dynamic cleanup remain in force.
+  (let* ((arguments (ecase arity
+                      (1 '((local.get $a)))
+                      (2 '((local.get $a) (local.get $b)))
+                      (3 (mapcar (lambda (name) (native-object `(local.get ,name))) '($a $b $c)))
+                      (4 (mapcar (lambda (name) (native-object `(local.get ,name))) '($a $b $c $d)))))
+         (id '(local.get $id))
+         (hir-id (if (= arity 3) (- -2 2147483640) 2147483640)))
+    `(if (result (ref null eq)) (i32.eq ,id (i32.const ,hir-id))
+       (then (array.new_fixed $objects ,arity ,@arguments))
+       (else ,(reduce (lambda (argument tail) `(call $cons ,argument ,tail))
+                      arguments :from-end t :initial-value '(ref.null eq))))))
 
 (define-runtime-function $native-call1 (($function externref) ($value externref)) (externref)
   (:export-raw "native-call1")
@@ -2197,7 +2204,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   (native-fixed-primitive-call-wat 1)
   (native-generic-fast-call-wat 1)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-    (call $cons (local.get $a) (ref.null eq)))))
+    ,(native-fixed-fallback-arguments-wat 1))))
 
 ;; A canonical builtin and two actual i31 values prove these operations exact.
 ;; Signed i31 addition fits i32; INT retains promotion beyond the i31 range.
@@ -2338,7 +2345,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   (native-fixed-primitive-call-wat 2)
   (native-generic-fast-call-wat 2)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-    (call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq))))))
+    ,(native-fixed-fallback-arguments-wat 2))))
 
 (define-runtime-function $native-call3
     (($function externref) ($a externref) ($b externref) ($c externref)) (externref)
@@ -2384,13 +2391,12 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   (native-fixed-primitive-call-wat 3)
   (native-generic-fast-call-wat 3)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-    (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
-      (call $cons ,(native-object '(local.get $c)) (ref.null eq)))))))
+    ,(native-fixed-fallback-arguments-wat 3))))
 
 (define-runtime-function $native-call4
     (($function externref) ($a externref) ($b externref) ($c externref) ($d externref)) (externref)
   (:export-raw "native-call4")
-  (:locals ($direct-result :nullable-object))
+  (:locals ($direct-result :nullable-object) ($id i32))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
     (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 6))
@@ -2399,16 +2405,18 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
         ,(native-object '(local.get $function)) (array.new_fixed $objects 4
           ,(native-object '(local.get $a)) ,(native-object '(local.get $b))
           ,(native-object '(local.get $c)) ,(native-object '(local.get $d))))))))))
+  ;; Failed fixed guards only read this actual function; successful ones return.
+  ;; Share its ID from the original first query until the ordinary fallback.
+  #@(local.set $id (call $native-builtin-id ,(native-object '(local.get $function))))
   (native-fixed-vector-call-wat 4)
-  #@(if (i32.eq (call $native-builtin-id ,(native-object '(local.get $function)))
+  #@(if (i32.eq (local.get $id)
                  (i32.const ,(runtime-symbol-id 'list)))
     (then (return (extern.convert_any
       (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
         (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null eq)))))))))
   (native-fixed-primitive-call-wat 4)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
-    (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
-      (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null eq))))))))
+    ,(native-fixed-fallback-arguments-wat 4))))
 
 ;; Fixed primary-value calls use exact standard identities independently of
 ;; inline expansion. The retained helpers are also suitable for NOTINLINE.
@@ -2576,7 +2584,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-block-enter) ($native-block-environment) ($native-block-return) ($native-block-match) ($native-block-values)
   ($native-control) ($native-restart-signal) ($native-throw)
   ($native-global-read) ($native-global-write) ($native-function-reference) ($native-standard-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
-  ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-read) ($native-cell-write)
+  ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-write)
   ($native-call) ($native-primary-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1)
   ($native-int64) ($native-unbox-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)
@@ -2594,7 +2602,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($ordered-compare-native) ($native-ordered-compare-inline)
   ($native-zero-inline)
   ($native-vector-ref-trusted)
-  ($native-car-inline-checked) ($native-cdr-inline-checked)
+  ($native-cdr-inline-checked)
   ($native-car-list-inline) ($native-cdr-list-inline)
   ($native-vector-ref-inline)
   ($checked-sbit-ref) ($native-sbit-ref-inline) ($native-row-major-ref-inline)

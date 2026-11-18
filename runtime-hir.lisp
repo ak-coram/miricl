@@ -518,8 +518,9 @@
             (- (second spec) 2))))))
     `(block $invalid ,body)))
 
-(define-runtime-function $hir-execute (($function :nullable-object) ($args :nullable-object) ($frame :nullable-object)) (:nullable-object)
-  (:locals ($payload :nullable-object) ($descriptor (ref $objects)) ($blocks (ref $objects))
+(define-runtime-function $hir-execute
+    (($function :nullable-object) ($args :nullable-object) ($descriptor (ref $objects)) ($frame :nullable-object)) (:nullable-object)
+  (:locals ($payload :nullable-object) ($blocks (ref $objects))
            ($literals (ref $objects)) ($captures (ref $objects)) ($registers (ref $objects))
            ($decoded (ref $digits)) ($targets (ref $objects)) ($block-data (ref $objects))
            ($bytes (ref null $digits)) ($pc i32) ($block i32) ($enter i32) ($opcode i32) ($header i32)
@@ -527,9 +528,6 @@
            ($output i32) ($count i32) ($a i32) ($b i32) ($i i32) ($word i32)
            ($value :nullable-object) ($incoming :nullable-object) ($ticks i32))
   #@(local.set $payload (struct.get $obj $a (ref.cast (ref $obj) (local.get $function))))
-  #@(local.set $descriptor (call $vector-data (array.get $objects
-    (call $vector-data ,(hir-field '(local.get $payload) 1))
-    (i32.trunc_f64_u (struct.get $obj $f (ref.cast (ref $obj) (local.get $function)))))))
   #@(local.set $blocks (call $vector-data (array.get $objects (local.get $descriptor) (i32.const 5))))
   #@(local.set $literals (call $vector-data ,(hir-field '(local.get $payload) 0)))
   #@(local.set $captures (call $vector-data (struct.get $obj $b (ref.cast (ref $obj) (local.get $function)))))
@@ -746,7 +744,10 @@
         (array.get $objects (local.get $descriptor) (i32.const 0)) (ref.null eq) (ref.null eq)
         (call $int (local.get $depth)) (ref.null eq) (call $int (global.get $backtrace-depth)) (ref.null eq))))
       (global.set $debug-frames (call $cons (local.get $frame) (global.get $debug-frames)))))
-  (debug-protected-call #@(call $hir-execute (local.get $function) (local.get $args) (local.get $frame))
+  ;; Reuse the private descriptor already decoded for the callee's DEBUG policy.
+  ;; Frame construction cannot call Lisp or yield before execution begins.
+  (debug-protected-call #@(call $hir-execute
+    (local.get $function) (local.get $args) (local.get $descriptor) (local.get $frame))
     #@(block (global.set $debug-frames (local.get $saved)) (global.set $debug-depth (local.get $depth))
       (global.set $debug-evaluating (local.get $enabled)))))
 

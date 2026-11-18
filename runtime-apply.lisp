@@ -110,10 +110,12 @@
   #@(local.get $data))
 
 (define-runtime-function $apply-source (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
-  (:locals ($params :nullable-object) ($param :nullable-object) ($env :nullable-object))
+  (:locals ($params :nullable-object) ($param :nullable-object) ($env :nullable-object) ($stop :nullable-object))
   #@(block (result (ref null eq))
         (local.set $params (struct.get $obj $a (ref.cast (ref $obj) (local.get $name))))
-        (local.set $env (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))
+        ;; Successful binding checks names and allocates private cells without a
+        ;; callback or checkpoint. Retain its original environment as STOP.
+        (local.set $env (local.tee $stop (struct.get $obj $c (ref.cast (ref $obj) (local.get $name)))))
         (block $done (loop $next
           (br_if $done (ref.is_null (local.get $params)))
           (local.set $param (call $car (local.get $params)))
@@ -123,11 +125,15 @@
               (local.set $args (ref.null eq)) (br $done)))
           ,(wat-fail-when #@(ref.is_null (local.get $args)) :wrong-arity)
           (local.set $env (call $bind (local.get $env) (local.get $param) (call $car (local.get $args))))
-          (local.set $args (call $cdr (local.get $args)))
-          (local.set $params (call $cdr (local.get $params))) (br $next)))
+          ;; Each checked CAR above proved its current non-NIL cell. Successful
+          ;; binding cannot callback or checkpoint before these same-cell reads.
+          (local.set $args (struct.get $obj $b (ref.cast (ref $obj) (local.get $args))))
+          (local.set $params (struct.get $obj $b (ref.cast (ref $obj) (local.get $params)))) (br $next)))
         ,(wat-fail-when #@(i32.eqz (ref.is_null (local.get $args))) :wrong-arity)
-        (call $activate-bindings (local.get $env) (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))
+        (call $activate-bindings (local.get $env) (local.get $stop))
         (local.set $args (struct.get $obj $b (ref.cast (ref $obj) (local.get $name))))
+        ;; Activation may checkpoint while resolving *PACKAGE*. Reload the
+        ;; closure environment after it, including live documentation changes.
         (return_call $body (local.get $args) (local.get $env) (struct.get $obj $c (ref.cast (ref $obj) (local.get $name))))
   ))
 
@@ -171,7 +177,12 @@
       (call $native-check-arguments (extern.convert_any (local.get $args)) (i32.const 2) (i32.const -1))
       (return_call $apply (call $native-packet-ref-cl (local.get $args) (call $int (i32.const 0)))
         (call $native-spread-arguments (local.get $args)))))
-  ;; Source/HIR/builtin/public-MOP protocols genuinely consume Lisp lists.
+  ;; HIR argument binders accept owned raw packets as well as Lisp lists.
+  ;; APPLY0 has validated every raw slot before its checkpoint, independently
+  ;; of whether the public HIR body contains CHECK-ARGUMENTS.
+  #@(if (i32.eq (local.get $code) (i32.const 2147483641))
+    (then (return_call $hir-apply (local.get $name) (local.get $args))))
+  ;; Source/builtin/public-MOP protocols genuinely consume Lisp lists.
   #@(if (ref.test (ref $objects) (local.get $args))
     (then (local.set $args (call $native-arguments-list (local.get $args)))))
   ;; Source and direct closures need no builtin dispatch. Keep the checked
@@ -187,8 +198,6 @@
         ,(if *source-bootstrap-p*
              '(return_call $apply-source (local.get $name) (local.get $args))
              (wat-fail :malformed-form))))
-  #@(if (i32.eq (local.get $code) (i32.const 2147483641))
-    (then (return_call $hir-apply (local.get $name) (local.get $args))))
   #@(if (i32.eq (local.get $code) (i32.const 2147483642))
     (then ,(wat-arity 1 2147483647)
       (return (call $formatter-call (call $car (local.get $args))

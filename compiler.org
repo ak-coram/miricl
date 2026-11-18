@@ -393,6 +393,14 @@ replacement, capture, escape or unknown provenance. List/sequence/stream/package
 kernels share compiler sources; remaining representation adapters stay native until equivalent
 lowering is suitable. Host tooling is not a shipped runtime dependency.
 
+Source DEBUG declaration scanning calls the live =%optimize-debug-level= binding through
+ordinary APPLY, retaining its entry scheduling checkpoint and redefinition behavior. Its
+native adapter checks the outer quality list for improper tails and cycles before an atomic
+CL kernel checks each symbol or exact two-element quality/level pair. Malformed elements
+signal a PROGRAM-ERROR/TYPE-ERROR subtype retaining the datum and expected syntax. The kernel
+does not yield during validated traversal; declaration forms remain shared and are rescanned
+on each call rather than cached.
+
 Effective-slot lookup uses the saved private metadata callback proof to call the checked
 metadata service directly. This removes generic callback transport while retaining slot-list
 validation before copying, live MOP slot-name reads, scheduling checkpoints and value handling.
