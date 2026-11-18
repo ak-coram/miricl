@@ -202,10 +202,23 @@
   (call $unpack-library-bytes
     (array.new_data $bootstrap-bytes $test-library-packed-data (local.get $start) (local.get $size))
     (local.get $length)))
+(func (export ~S) (param $start i32) (param $size i32) (param $length i32) (result externref)
+  (global.set $cursor (i32.const 37)) (global.set $limit (i32.const 91))
+  (extern.convert_any (call $unpack-bootstrap-names
+    (array.new_data $bootstrap-bytes $test-library-packed-data (local.get $start) (local.get $size))
+    (local.get $length))))
+(func (export ~S) (param $names externref) (param $index i32) (result i32)
+  (array.get_u $bootstrap-names
+    (ref.cast (ref $bootstrap-names) (any.convert_extern (local.get $names))) (local.get $index)))
+(func (export ~S) (param $names externref) (result i32)
+  (array.len (ref.cast (ref $bootstrap-names) (any.convert_extern (local.get $names)))))
+(func (export ~S) (result i32 i32) (global.get $cursor) (global.get $limit))
 ~A
 " "test-library-prepare" "test-library-read" "test-library-bind"
                     (miricl::runtime-symbol-id '*) "test-library-same" "test-library-car"
                     "test-library-cdr" "test-library-exhaust" "test-library-unpack"
+                    "test-bootstrap-names-unpack" "test-bootstrap-names-byte"
+                    "test-bootstrap-names-length" "test-bootstrap-names-state"
                     (format nil "(data $test-library-packed-data \"~{\\~2,'0X~}\")"
                             (coerce compression-bytes 'list)))))
     (with-open-file (out image :direction :output :element-type '(unsigned-byte 8))

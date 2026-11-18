@@ -392,9 +392,9 @@
 (named-readtables:in-readtable :miricl-wat)
 
 (define-runtime-function $initialize-loop-symbols () ()
-  (:locals ($names (ref $bootstrap-bytes)))
+  (:locals ($names (ref $bootstrap-names)))
   #@(if (array.len (global.get $loop-library-symbols)) (then (return)))
-  #@(local.set $names (array.new_data $bootstrap-bytes $loop-name-data
+  #@(local.set $names (array.new_data $bootstrap-names $loop-name-data
     (i32.const 0) (i32.const ,(length (bootstrap-private-symbol-bytes *loop-library-symbols*)))))
   #@(data.drop $loop-name-data)
   #@(global.set $loop-library-symbols (call $bootstrap-private-symbols
@@ -406,8 +406,10 @@
   #@(call $reset-library-reader)
   #@(global.set $cursor (i32.const 0))
   #@(global.set $limit (i32.const ,(length (loop-library-bytes))))
-  #@(call $reserve (global.get $limit))
-  #@(memory.init $loop-library-data (i32.const 0) (i32.const 0) (global.get $limit))
+  #@(call $unpack-library-bytes
+    (array.new_data $bootstrap-bytes $loop-library-data (i32.const 0)
+      (i32.const ,(length (compress-runtime-library-bytes (loop-library-bytes)))))
+    (global.get $limit))
   #@(data.drop $loop-library-data)
   #@(call $prepare-library-reader)
   #@(block $done (loop $next
@@ -722,7 +724,7 @@
 
 (define-runtime-section loop-runtime-wat ()
   #@(data $loop-name-data ,(runtime-library-data (bootstrap-private-symbol-bytes *loop-library-symbols*)))
-  #@(data $loop-library-data ,(runtime-library-data (loop-library-bytes)))
+  #@(data $loop-library-data ,(runtime-library-data (compress-runtime-library-bytes (loop-library-bytes))))
   #@(global $loop-library-symbols (mut (ref $objects)) (array.new_default $objects (i32.const 0)))
   #@(global $loop-expansions (ref $objects) (array.new_default $objects (i32.const 32)))
   #@(global $loop-expansion-slot (mut i32) (i32.const 0))

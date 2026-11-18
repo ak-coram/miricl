@@ -1135,10 +1135,13 @@ Generate only source forms here; the compiler-free guest needs no contract table
   #@(return_call $read-library-string))
 
 (define-runtime-function $initialize-clos-symbols () ()
-  (:locals ($names (ref $bootstrap-bytes)))
+  (:locals ($names (ref $bootstrap-names)))
   #@(if (array.len (global.get $clos-library-symbols)) (then (return)))
-  #@(local.set $names (array.new_data $bootstrap-bytes $clos-name-data
-    (i32.const 0) (i32.const ,(length (bootstrap-private-symbol-bytes *clos-library-symbols* *clos-primitives*)))))
+  #@(local.set $names (call $unpack-bootstrap-names
+    (array.new_data $bootstrap-bytes $clos-name-data (i32.const 0)
+      (i32.const ,(length (compress-runtime-library-bytes
+        (bootstrap-private-symbol-bytes *clos-library-symbols* *clos-primitives*)))))
+    (i32.const ,(length (bootstrap-private-symbol-bytes *clos-library-symbols* *clos-primitives*)))))
   #@(data.drop $clos-name-data)
   #@(global.set $clos-library-symbols (call $bootstrap-private-symbols
     (local.get $names) (i32.const ,(length *clos-library-symbols*)))))
@@ -1176,7 +1179,8 @@ Generate only source forms here; the compiler-free guest needs no contract table
   #@(global $library-replaying (mut i32) (i32.const 0))
   #@(global $library-reference-count (mut i32) (i32.const 0))
   #@(global $library-read-budget (mut i32) (i32.const 0))
-  #@(data $clos-name-data ,(runtime-library-data (bootstrap-private-symbol-bytes *clos-library-symbols* *clos-primitives*)))
+  #@(data $clos-name-data ,(runtime-library-data (compress-runtime-library-bytes
+    (bootstrap-private-symbol-bytes *clos-library-symbols* *clos-primitives*))))
   #@(data $clos-library-data ,(clos-library-data))
   #@(global $library-prefixes (ref $digits) (array.new_fixed $digits 256
     ,@(loop for tag below 128

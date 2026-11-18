@@ -688,11 +688,11 @@
         (cond (primitive (+ primitive 2)) ((keywordp symbol) 1) (t 0))))))
 
 (define-runtime-function $bootstrap-symbol-name
-    (($bytes (ref $bootstrap-bytes)) ($position i32) ($previous :nullable-object)) (:object i32)
+    (($bytes (ref $bootstrap-names)) ($position i32) ($previous :nullable-object)) (:object i32)
   (:locals ($length i32) ($prefix i32) ($i i32) ($digits :digits))
-  #@(local.set $prefix (array.get_u $bootstrap-bytes (local.get $bytes) (local.get $position)))
+  #@(local.set $prefix (array.get_u $bootstrap-names (local.get $bytes) (local.get $position)))
   #@(local.set $position (i32.add (local.get $position) (i32.const 1)))
-  #@(local.set $length (array.get_u $bootstrap-bytes (local.get $bytes) (local.get $position)))
+  #@(local.set $length (array.get_u $bootstrap-names (local.get $bytes) (local.get $position)))
   #@(local.set $position (i32.add (local.get $position) (i32.const 1)))
   #@(local.set $digits (array.new_default $digits (i32.add (local.get $prefix) (local.get $length))))
   #@(if (local.get $prefix)
@@ -701,7 +701,7 @@
   #@(block $done (loop $copy
     (br_if $done (i32.eq (local.get $i) (local.get $length)))
     (array.set $digits (local.get $digits) (i32.add (local.get $prefix) (local.get $i))
-      (array.get_u $bootstrap-bytes (local.get $bytes) (i32.add (local.get $position) (local.get $i))))
+      (array.get_u $bootstrap-names (local.get $bytes) (i32.add (local.get $position) (local.get $i))))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $copy)))
   #@(call $text (local.get $digits))
   #@(i32.add (local.get $position) (local.get $length)))
@@ -727,13 +727,13 @@
       (then (call $install-keyword (local.get $symbol)))))
 
 (define-runtime-function $bootstrap-private-symbols
-    (($names (ref $bootstrap-bytes)) ($count i32)) ((ref $objects))
+    (($names (ref $bootstrap-names)) ($count i32)) ((ref $objects))
   (:locals ($symbols (ref $objects)) ($index i32) ($position i32) ($kind i32)
            ($name :nullable-object) ($symbol :nullable-object))
   #@(local.set $symbols (array.new_default $objects (local.get $count)))
   #@(block $done (loop $next
     (br_if $done (i32.eq (local.get $index) (local.get $count)))
-    (local.set $kind (array.get_u $bootstrap-bytes (local.get $names) (local.get $position)))
+    (local.set $kind (array.get_u $bootstrap-names (local.get $names) (local.get $position)))
     (call $bootstrap-symbol-name (local.get $names) (i32.add (local.get $position) (i32.const 1)) (local.get $name))
     (local.set $position) (local.set $name)
     (local.set $symbol (if (result (ref null eq)) (i32.eq (local.get $kind) (i32.const 1))
@@ -747,11 +747,27 @@
     (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $next)))
   #@(local.get $symbols))
 
+(define-runtime-function $unpack-bootstrap-names
+    (($bytes (ref $bootstrap-bytes)) ($length i32)) ((ref $bootstrap-names))
+  (:locals ($names (ref $bootstrap-names)) ($index i32) ($cursor i32))
+  ;; Setup-only: the decoder overwrites linear scratch memory. Move its
+  ;; checked complete output into GC storage before allocating symbols.
+  #@(local.set $cursor (global.get $cursor))
+  #@(call $unpack-library-bytes (local.get $bytes) (local.get $length))
+  #@(local.set $names (array.new_default $bootstrap-names (local.get $length)))
+  #@(block $done (loop $copy
+    (br_if $done (i32.eq (local.get $index) (local.get $length)))
+    (array.set $bootstrap-names (local.get $names) (local.get $index)
+      (i32.load8_u (local.get $index)))
+    (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy)))
+  #@(global.set $cursor (local.get $cursor))
+  #@(local.get $names))
+
 (define-runtime-function $initialize
     ()
     ()
   (:export "initialize")
-  (:locals ($names (ref $bootstrap-bytes)) ($position i32) ($name :nullable-object)
+  (:locals ($names (ref $bootstrap-names)) ($position i32) ($name :nullable-object)
            ($id i32) ($kind i32))
   #@(if (i32.eqz (ref.is_null (global.get $cl-package))) (then (return)))
   #@(global.set $cl-package (call $make-package ,(wat-text-literal "COMMON-LISP")
@@ -764,12 +780,14 @@
   #@(global.set $implementation-package (call $make-package ,(wat-text-literal "MIRICL") (ref.null eq)))
   #@(global.set $nil-name ,(wat-text-literal "NIL"))
   #@(global.set $nil-package (global.get $cl-package))
-  #@(local.set $names (array.new_data $bootstrap-bytes $bootstrap-name-data
-    (i32.const 0) (i32.const ,(length (bootstrap-public-symbol-bytes)))))
+  #@(local.set $names (call $unpack-bootstrap-names
+    (array.new_data $bootstrap-bytes $bootstrap-name-data (i32.const 0)
+      (i32.const ,(length (compress-runtime-library-bytes (bootstrap-public-symbol-bytes)))))
+    (i32.const ,(length (bootstrap-public-symbol-bytes)))))
   #@(data.drop $bootstrap-name-data)
   #@(block $done (loop $next
     (br_if $done (i32.eq (local.get $id) (i32.const ,(length *runtime-symbols*))))
-    (local.set $kind (array.get_u $bootstrap-bytes (local.get $names) (local.get $position)))
+    (local.set $kind (array.get_u $bootstrap-names (local.get $names) (local.get $position)))
     (call $bootstrap-symbol-name (local.get $names) (i32.add (local.get $position) (i32.const 1)) (local.get $name))
     (local.set $position) (local.set $name)
     (call $bootstrap-symbol (local.get $id) (local.get $name)
@@ -1199,7 +1217,9 @@
 
 (define-runtime-section package-runtime-wat ()
   #@(type $bootstrap-bytes (array i8))
-  #@(data $bootstrap-name-data ,(runtime-library-data (bootstrap-public-symbol-bytes)))
+  #@(type $bootstrap-names (array (mut i8)))
+  #@(data $bootstrap-name-data ,(runtime-library-data
+    (compress-runtime-library-bytes (bootstrap-public-symbol-bytes))))
   #@(type $package-indexes (array (mut (ref null $objects))))
   #@(global $package-indexes (mut (ref $package-indexes))
     (array.new_default $package-indexes (i32.const 16)))
@@ -1248,7 +1268,7 @@
   ($export)
   ($rename-package)
   ($delete-package)
-  ($bootstrap-symbol-name) ($bootstrap-symbol) ($bootstrap-private-symbols)
+  ($bootstrap-symbol-name) ($bootstrap-symbol) ($bootstrap-private-symbols) ($unpack-bootstrap-names)
   ($initialize)
   ($resolve-symbol)
   ($package-entry-callbacks) ($collect-package-symbols-cl) ($package-symbols) ($package-symbol-list)

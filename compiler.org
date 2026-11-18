@@ -380,7 +380,12 @@ Bootstrap initialization bytes use a bounded LZ encoding with literal runs and o
 back references. A checked startup pass reconstructs the exact packed source bytes before
 the ordinary source reader runs; its object freshness, offsets, contract facts and private
 symbol identities are unchanged. The host encoder bounds its match search and the target
-checks input/output extents, backward distances and the decoded size before use. Native
+checks input/output extents, backward distances and the decoded size before use. Public and
+CLOS private symbol-name tables use the same checked decoder, then copy the complete bytes into
+a separate mutable GC byte array before symbol allocation can reuse linear scratch memory.
+The setup bridge restores the cursor after success; it does not preserve scratch contents
+or expose its temporary arrays through core image serialization. Immutable encoded byte
+arrays and retained output-literal storage keep their existing representation. Native
 images also omit repeated imports/exports from generated package preambles after each exact
 symbol's first installation, retaining generated record names and ordered registrations.
 These mechanisms affect initialization storage and startup work, not optimization policy or
@@ -534,9 +539,9 @@ functions solely to guard forbidden CL redefinition.
 
 *** Representation and remaining limits
 
-Startup packing requires a checked decoding pass and temporary byte storage. Further
-compression of =bootstrap-public-symbol-bytes= and =bootstrap-private-symbol-bytes= needs a
-checked bridge for their immutable byte-array readers. Retained output-literal compression
+Startup packing requires a checked decoding pass and temporary byte storage. The smaller
+LOOP symbol-name table retains direct data-array initialization. Further packing must account
+for setup work and complete image storage. Retained output-literal compression
 would also affect =$emit-literal=, =$ascii-text-literal=, caches and snapshots. These candidates
 must account for loader cost and compressed downloads as well as raw image storage;
 initialization encoding does not change authoritative contract facts or query representations.

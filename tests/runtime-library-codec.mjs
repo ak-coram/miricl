@@ -31,15 +31,31 @@ const unpack = (offset, size, length) => {
   vm.vm['test-library-unpack'](offset, size, length);
   return new Uint8Array(vm.vm.memory.buffer, 0, length).slice();
 };
+const unpackNames = (offset, size, length) =>
+  vm.vm['test-bootstrap-names-unpack'](offset, size, length);
+const namesContent = names => Uint8Array.from(
+  {length: vm.vm['test-bootstrap-names-length'](names)},
+  (_, index) => vm.vm['test-bootstrap-names-byte'](names, index));
 try {
   const compressionCases = JSON.parse(await fs.readFile(process.argv[6], 'utf8'));
   for (const [raw, offset, size] of compressionCases.valid)
     assert.deepEqual(unpack(offset, size, raw.length), Uint8Array.from(raw));
+  for (const [raw, offset, size] of compressionCases.valid) {
+    const names = unpackNames(offset, size, raw.length);
+    assert.deepEqual(vm.vm['test-bootstrap-names-state'](), [37, 91],
+      'Name setup restores the cursor and preserves the limit.');
+    new Uint8Array(vm.vm.memory.buffer, 0, raw.length).fill(0);
+    assert.deepEqual(namesContent(names), Uint8Array.from(raw),
+      'Decoded name storage survives reuse of linear scratch memory.');
+  }
   const [recoveryRaw, recoveryOffset, recoverySize] = compressionCases.valid.at(-1);
   for (const [offset, size, length] of compressionCases.invalid) {
     rejection(() => unpack(offset, size, length));
     assert.deepEqual(unpack(recoveryOffset, recoverySize, recoveryRaw.length),
       Uint8Array.from(recoveryRaw), 'Byte decompression recovers after rejection.');
+    rejection(() => unpackNames(offset, size, length));
+    assert.deepEqual(namesContent(unpackNames(recoveryOffset, recoverySize, recoveryRaw.length)),
+      Uint8Array.from(recoveryRaw), 'Name setup recovers after malformed packed bytes.');
   }
 
   prepare(await fs.readFile(process.argv[3]));
