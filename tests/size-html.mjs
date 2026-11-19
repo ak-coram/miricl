@@ -122,7 +122,11 @@ try {
   for (const file of ['index.html', 'app.mjs', 'startup.lisp', 'miricl.js'])
     fs.writeFileSync(path.join(directory, 'build/mcclim/site', file), 'McCLIM fixture λ🙂');
   fs.writeFileSync(path.join(directory, 'build/mcclim/site/miricl-mcclim.wasm'), repeatedSections);
-  for (const app of ['game-of-life/build', 'build/maxima/site', 'build/fricas/site', 'build/acl2/site', 'build/coalton/site', 'build/mcclim/site']) {
+  fs.mkdirSync(path.join(directory, 'build/lem/site'), {recursive: true});
+  for (const file of ['index.html', 'app.mjs', 'miricl.js'])
+    fs.writeFileSync(path.join(directory, 'build/lem/site', file), 'LEM fixture λ🙂');
+  fs.writeFileSync(path.join(directory, 'build/lem/site/miricl-lem.wasm'), repeatedSections);
+  for (const app of ['build/lem/site', 'game-of-life/build', 'build/maxima/site', 'build/fricas/site', 'build/acl2/site', 'build/coalton/site', 'build/mcclim/site']) {
     for (const name of fs.readdirSync(path.join(directory, app))) {
       if (name.endsWith('.gz')) {
         const file = path.join(directory, app, name);
@@ -139,6 +143,22 @@ try {
   const report = collectImageSizes(directory, {generatedAt: '2026-11-05T12:00:00.000Z',
     commit: hostile, runURL: 'https://example.com/run?a=1&b=2'});
   checkMeasurements(report, directory);
+  const lem = report.artifacts.find(artifact => artifact.file === 'lem/');
+  assert.ok(lem.files.some(file => file.file.endsWith('/miricl-lem.wasm.gz')));
+  assert.ok(!lem.files.some(file => file.file.endsWith('/miricl.wasm.gz')), 'The embedded compiler is counted once');
+  for (const file of ['app.mjs', 'miricl.js'])
+    assert.equal(report.artifacts.find(artifact => artifact.file === 'build/lem/site/' + file).rawBytes,
+      fs.statSync(path.join(directory, 'build/lem/site', file)).size);
+  assert.match(renderImageSizes(report), /href="lem\/"/);
+  assert.doesNotThrow(() => renderImageSizes({...report,
+    artifacts: report.artifacts.filter(artifact => artifact.file !== 'lem/' && !artifact.file.startsWith('build/lem/'))}));
+  const selectedRoot = path.join(directory, 'lem-only');
+  fs.mkdirSync(selectedRoot); fs.copyFileSync(path.join(directory, 'miricl.wasm'), path.join(selectedRoot, 'miricl.wasm'));
+  fs.cpSync(path.join(directory, 'build/lem/site'), path.join(selectedRoot, 'build/lem/site'), {recursive: true});
+  const selectedLem = collectImageSizes(selectedRoot, {selection: 'lem'});
+  checkMeasurements(selectedLem, selectedRoot);
+  assert.doesNotThrow(() => renderImageSizes(selectedLem));
+  assert.ok(selectedLem.artifacts.every(artifact => artifact.file === 'miricl.wasm' || artifact.file === 'lem/' || artifact.file.startsWith('build/lem/')));
   const checkpoint = path.join(directory, 'build/acl2/site/acl2-image.wasm.gz');
   fs.writeFileSync(checkpoint, gzipSync(repeatedSections));
   fs.writeFileSync(path.join(directory, 'build/acl2/site/build.json'), JSON.stringify({imageBytes: repeatedSections.length}));

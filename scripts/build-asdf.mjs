@@ -59,7 +59,11 @@ export function buildAsdf(output = path.join(root, 'build/asdf')) {
     fs.rmSync(source, {recursive: true, force: true});
     fs.renameSync(work, source);
     const temporary = path.join(output, 'asdf.lisp.tmp');
-    fs.copyFileSync(path.join(source, 'build/asdf.lisp'), temporary);
+    // The genuine optional package API must be installed before READ selects
+    // UIOP's feature-dependent package imports and nickname installers.
+    fs.writeFileSync(temporary,
+      fs.readFileSync(path.join(root, 'compatibility/package-local-nicknames.lisp'), 'utf8') + '\n' +
+      fs.readFileSync(path.join(source, 'build/asdf.lisp'), 'utf8'));
     fs.renameSync(temporary, path.join(output, 'asdf.lisp'));
     return path.join(output, 'asdf.lisp');
   } finally {

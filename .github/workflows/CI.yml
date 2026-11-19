@@ -72,11 +72,43 @@ jobs:
         with:
           lisp: 'true'
           c-api: 'true'
-      - name: Build once, reuse the cached core in the same Lisp process
+      - name: Identify exact compiler, runtime, ASDF and host tool inputs
+        id: runtime-inputs
         run: |
-          # A failed LOAD must stop the build before publishing partial artifacts.
-          ros -L sbcl-bin run -- --disable-debugger --load scripts/build-wasm.lisp --load scripts/build-html.lisp --load scripts/build-todo.lisp --quit
+          node --test tests/runtime-image-cache.mjs
+          ros -L sbcl-bin run -- --disable-debugger --load scripts/runtime-cache-host-inputs.lisp --quit
+          node scripts/runtime-image-cache.mjs key
+      - name: Cache complete matching runtime distribution
+        uses: actions/cache@v4
+        id: runtime-images
+        with:
+          path: |
+            miricl.js
+            miricl.wasm
+            miricl-interpreter.wasm
+            miricl-cold.wasm
+            miricl-repl.wasm
+            miricl-asdf.wasm
+            runtime/miricl.js
+            runtime/version-assets.mjs
+            runtime/compress-images.mjs
+            build/asdf/asdf.lisp
+            build/runtime-images.json
+          key: runtime-images-v1-${{ runner.os }}-${{ steps.runtime-inputs.outputs.key }}
+      - name: Build runtime images and ASDF on an exact cache miss
+        if: steps.runtime-images.outputs.cache-hit != 'true'
+        run: |
+          # Preserve the interpreted guest bootstrap and native compiler stages.
+          ros -L sbcl-bin run -- --disable-debugger --load scripts/build-wasm.lisp --quit
           node scripts/build-asdf.mjs build/asdf miricl.wasm miricl-asdf.wasm
+          node scripts/runtime-image-cache.mjs record
+      - name: Validate cached artifacts and regenerate current standalone pages
+        run: |
+          node scripts/runtime-image-cache.mjs verify
+          ros -L sbcl-bin run -- --disable-debugger --load scripts/build-runtime-pages.lisp --quit
+      - name: Record reused compiler bootstrap
+        if: steps.runtime-images.outputs.cache-hit == 'true'
+        run: node scripts/write-compilation-coverage.mjs compiler-bootstrap true 'runtime image cache'
       - name: Check TODO and shared application UI
         env:
           CHROMIUM: google-chrome
@@ -151,7 +183,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [game-of-life, maxima, fricas, mcclim]
+        app: [game-of-life, maxima, fricas, mcclim, lem]
     env:
       LISP: sbcl-bin
       CHROMIUM: google-chrome
@@ -160,11 +192,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: recursive
       - uses: ./.github/actions/setup-miricl
         with:
           lisp: ${{ matrix.app == 'game-of-life' && 'true' || 'false' }}
-          native-tools: ${{ (matrix.app == 'maxima' || matrix.app == 'fricas') && 'true' || 'false' }}
+          native-tools: ${{ (matrix.app == 'maxima' || matrix.app == 'fricas' || matrix.app == 'lem') && 'true' || 'false' }}
           just: 'true'
       - uses: actions/download-artifact@v4
         with:
@@ -210,6 +242,30 @@ jobs:
           fi
           node mcclim/page.mjs build/mcclim/miricl-mcclim.wasm build/mcclim/site
           node mcclim/tests/browser.mjs build/mcclim/miricl-mcclim.wasm
+      - name: Check and prepare pinned LEM inputs
+        if: matrix.app == 'lem'
+        id: lem-inputs
+        run: |
+          node --test lem/tests/sources.mjs
+          node lem/image.mjs miricl.wasm miricl-asdf.wasm build/lem/miricl-lem.wasm --prepare-only
+      - name: Cache guest-compiled LEM image
+        if: matrix.app == 'lem'
+        uses: actions/cache@v4
+        id: lem-image
+        with:
+          path: |
+            build/lem/miricl-lem.wasm
+            build/lem/miricl-lem.wasm.json
+          key: lem-guest-image-v1-${{ runner.os }}-${{ steps.lem-inputs.outputs.key }}
+      - name: Build LEM and check the local Lisp browser application
+        if: matrix.app == 'lem'
+        run: |
+          set -o pipefail
+          mkdir -p build/lem
+          node lem/image.mjs miricl.wasm miricl-asdf.wasm build/lem/miricl-lem.wasm 2>&1 | tee build/lem/build.log
+          node lem/page.mjs build/lem/miricl-lem.wasm build/lem/site
+          node lem/tests/image.mjs build/lem/miricl-lem.wasm
+          LEM_BROWSER_EVIDENCE=build/lem/browser node lem/tests/browser.mjs build/lem/site
       - name: Cache upstream FriCAS bootstrap
         if: matrix.app == 'fricas'
         uses: actions/cache@v4
@@ -273,9 +329,13 @@ jobs:
             build/${{ matrix.app }}/retention.txt
             build/${{ matrix.app }}/tests.json
             build/${{ matrix.app }}/core-tests.json
+            build/${{ matrix.app }}/miricl-lem.wasm.json
+            build/${{ matrix.app }}/miricl-lem.wasm.inputs.json
+            build/${{ matrix.app }}/browser/
+            build/${{ matrix.app }}/*.log
           if-no-files-found: ignore
-      - name: Record reused native compilation
-        if: always()
+      - name: Record reused compilation
+        if: always() && matrix.app != 'lem'
         env:
           NATIVE_CACHE_HIT: ${{ matrix.app == 'mcclim' && steps.mcclim-image.outputs.cache-hit || steps.native.outputs.cache-hit }}
         run: node scripts/write-compilation-coverage.mjs '${{ matrix.app }}' "$NATIVE_CACHE_HIT"
@@ -613,6 +673,10 @@ jobs:
           path: build/mcclim/site
       - uses: actions/download-artifact@v4
         with:
+          name: application-lem
+          path: build/lem/site
+      - uses: actions/download-artifact@v4
+        with:
           name: acl2-math-books
           path: build/acl2/books
       - name: Assemble static site and measure the actual payloads
@@ -626,6 +690,7 @@ jobs:
           cp -R build/acl2/site public/acl2
           cp -R build/coalton/site public/coalton
           cp -R build/mcclim/site public/mcclim
+          cp -R build/lem/site public/lem
           node scripts/build-size-html.mjs . public/image-sizes.html index.html
       - uses: actions/upload-artifact@v4
         with:

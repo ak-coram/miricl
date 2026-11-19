@@ -55,6 +55,26 @@ bootstrap. =miricl-cross:compile-lambda= emits target bytes, literals and debug 
 code. Target macro and LOAD-TIME-VALUE adapters are explicit; host expansion and EVAL are not
 target semantics.
 
+** Package-local names
+
+The runtime keeps one owner-indexed package-local nickname registry, shared by
+=FIND-PACKAGE=, the qualified reader and =DEFPACKAGE=. Declaration validation
+checks finite nested pairs and global target identities, then normalizes the
+complete candidate before creating its owner or publishing aliases. The checked
+private package bridge copies query results and validates replacement alists,
+including live targets, duplicate conflicts and copied string keys, before a
+single commit. The registry is part of ordinary saved runtime state. Deleting a
+package clears its mappings and all aliases targeting it. Symbol printing chooses
+a local or unshadowed global prefix resolving to the actual home package;
+unrepresentable readable symbols signal =PRINT-NOT-READABLE=.
+
+=compatibility/package-local-nicknames.lisp= supplies the optional public
+=MIRICL-PACKAGES= query/add/remove API using the canonical existing private
+primitive identity. The ASDF build places this source before UIOP, installs the
+API before advertising its feature during compilation and loading, and imports
+these actual functions into UIOP's package-local nickname facade. No second Lisp
+registry or compiler bootstrap identity is introduced by the optional API.
+
 ** Frontend, ownership and policy
 
 The frontend assigns identities to lexical bindings, functions and control targets. FLET uses
@@ -467,6 +487,9 @@ preservation of ordinary reference consumers. That cache trades one i64 local an
 entry extraction against repeated loop extractions. Raw predicate consumption removes
 the boolean conversion and its otherwise unused import without duplicating the loop.
 Both mechanisms retain the existing declaration scope and polls.
+Simple-vector index lowering shares the integer operand emitter: literal indices
+and available scalar snapshots avoid boxing and extraction, while ordinary object
+indices retain scalar extraction and the selected safety-level bounds checks.
 
 In =native-plan-unboxed-cell-values=, initializers and every write must fit i64,
 and all cell uses must remain structurally private. SAFETY 0 admits ordinary type
@@ -682,6 +705,55 @@ on each call rather than cached.
 Effective-slot lookup uses the saved private metadata callback proof to call the checked
 metadata service directly. This removes generic callback transport while retaining slot-list
 validation before copying, live MOP slot-name reads, scheduling checkpoints and value handling.
+
+=DOCUMENTATION= with documentation type =T= reads retained slot-definition metadata
+after checking physical instance representation and logical slot-definition membership.
+Direct slots retain their source documentation. Effective-slot construction does not
+merge direct documentation; explicit later documentation assignments remain visible.
+The optional =MIRICL-IDE-MOP= service provides a shared slot-documentation generic
+and imports canonical MOP identities into dedicated backend facades. Its entire
+capability and package-conflict preflight precedes placeholder replacement; nonexpanding
+type-binding and symbol-macro queries protect definitions outside symbol value/function
+cells. Unsupported generic-function declaration metadata supplies no capability.
+
+The optional =MIRICL-IDE-SERVICES= system supplies same-heap Lisp sessions without
+an editor dependency. Checked request boundaries validate source, operation,
+package and callbacks before queueing. Each session runs serially on a lazy green
+worker, reads forms sequentially in its package/readtable context, preserves complete
+value lists and captures ordered output through the genuine Gray protocol. Terminal
+request state and cleanup remain owned through cancellation and unwind. Scalar I/O
+settings reset per request; package, readtable and request-level history remain
+explicit session state. Interactive input and the debugger UI report unavailable
+conditions. Retained output/results and queue sizes are bounded; arbitrary custom
+printer work still requires cooperative yielding.
+
+Compilation requests use the guest =COMPILE-FILE= and =LOAD= over private scratch
+files, preserving file compilation phases and diagnostics. A thin editor provider
+owns continuation delivery, transcript destinations, buffer identities and lifecycle
+generations; it rechecks ownership before queueing and delivering editor events.
+Region/definition compilation uses that service. Original-file compilation remains
+unavailable in the initial LEM provider because scratch pathnames do not preserve
+original source identity. Explicit compile-policy override options are separately
+unsupported; ordinary source declarations retain their contracts.
+
+Separate application checkpoints start from matching ready runtime/compiler and
+ASDF artifacts. The LEM builder authenticates pinned source checkouts, applies
+checked overlays and loads the selected ASDF graph through its Lisp-mode system
+inside Wasm. Isolated pristine host sources run the upstream Unicode data generator;
+only its generated source data enters the target compilation. The builder saves
+before editor/DOM/service invocation and validates a fresh restore. The image keeps
+ASDF/UIOP, sources, resources and the ready compiler for interactive compilation and
+runtime system metadata. Portable application FASLs do not establish native
+application entries or a minimal deployment image.
+
+Application cache identities include actual selected mounted names/bytes, pins,
+generated data, matching compiler/runtime/ASDF artifacts and build/adapter tools.
+Cache hits still authenticate sources and restore the image. The shared runtime
+cache additionally binds actual host dependency sources/versions and tool identities;
+cache misses retain the interpreted guest bootstrap followed by native compiler
+compilation. Explicit-image page generation consumes validated distribution files
+without invoking another compiler bootstrap. Cached statistics record reuse, and
+portable/native compilation stages retain separate coverage.
 
 Runtime multiple values use small slots/native tuples and checked owned overflow storage,
 preserving full values across callbacks and unwind. Lexical binding views share mutable cells.

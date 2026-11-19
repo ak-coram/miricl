@@ -130,7 +130,7 @@
                         (otherwise (error "Unexpected native GC instruction ~D." argument))))
              (multiple-value-bind (ignored next) (native-read-uleb bytes position)
                (declare (ignore ignored)) (setq position next))))
-          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4b #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd1 #xd3)))
+          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad #xd1 #xd3)))
            (error "Unexpected native instruction ~D." code)))
         (when (or (not references-only) (member code '(#x10 #x12 #xd2)))
           (push (make-native-op code argument start position) ops))))
@@ -299,9 +299,9 @@
     (case code
       ((#x20 #x41 #x42 #xd0 #xd2) (values 0 1))
       ((#x21 #x1a) (values 1 0))
-      ((#x22 #x45 #x50 #xa7 #xac #xd1) (values 1 1))
+      ((#x22 #x45 #x50 #xa7 #xac #xad #xd1) (values 1 1))
       (#xfb (if (= (native-op-argument op) 5) (values 2 0) (values 1 1)))
-      ((#x46 #x48 #x4a #x4b #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3) (values 2 1))
+      ((#x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3) (values 2 1))
       ((#x10 #x12)
        (when (and *native-call-stack-effects* (< (native-op-argument op) (length *native-call-stack-effects*)))
          (let ((effect (svref *native-call-stack-effects* (native-op-argument op))))
@@ -768,9 +768,29 @@
              (#xd1 (when (and previous (member (native-op-code previous) '(#xd0 #xd2)))
               (setf (native-op-argument previous) (if (= (native-op-code previous) #xd0) 1 0)
                     (native-op-code previous) #x41 (native-op-code op) nil)))
-             (#x45 (when (and previous (eql (native-op-code previous) #x41))
-              (setf (native-op-argument previous) (if (zerop (native-op-argument previous)) 1 0)
-                    (native-op-code op) nil)))
+             (#xa7
+              (when previous
+                (case (native-op-code previous)
+                  (#x42
+                   (setf (native-op-argument previous) (native-i32 (native-op-argument previous))
+                         (native-op-code previous) #x41 (native-op-code op) nil))
+                  ((#xac #xad)
+                   (setf (native-op-code previous) nil (native-op-code op) nil) (decf top)))))
+             (#x45
+              (when previous
+                (let ((previous-code (native-op-code previous)))
+                  (cond
+                    ((eql previous-code #x41)
+                     (setf (native-op-argument previous) (if (zerop (native-op-argument previous)) 1 0)
+                           (native-op-code op) nil))
+                    ((and previous-code (<= #x46 previous-code #x4f))
+                     (setf (native-op-code previous) (logxor previous-code (if (< previous-code #x48) 1 6))
+                           (native-op-code op) nil))
+                    ((and previous-code (<= #x51 previous-code #x5a))
+                     (setf (native-op-code previous)
+                             (- (if (<= previous-code #x52) #xa3 (if (oddp previous-code) #xac #xae))
+                                previous-code)
+                           (native-op-code op) nil))))))
              ((#x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x6a #x6b #x6c #x71 #x72 #x73 #x74 #x75 #x76)
               (cond
                ((and prior (eql (native-op-code previous) #x41) (eql (native-op-code prior) #x41))
@@ -799,6 +819,12 @@
                    (setf (native-op-code previous) nil) (decf top))
                   (t (return)))))
              ((#x04 #x0d)
+              ;; Only i32 truth consumers admit dropping normalization. GC
+              ;; conditional branches can share the analysis opcode #x0d.
+              (when (and previous prior (eql (native-op-code previous) #x45)
+                         (eql (native-op-code prior) #x45)
+                         (member (aref bytes (native-op-start op)) '(#x04 #x0d)))
+                (setf (native-op-code previous) nil (native-op-code prior) nil) (decf top 2))
               (when (and previous (eql (native-op-code previous) #x41)
                          (or (= code #x04) (= (aref bytes (native-op-start op)) #x0d)))
               (let ((zero (zerop (native-op-argument previous))))
@@ -889,6 +915,14 @@
                              (wasm-byte code) (wasm-byte (native-op-argument op)))
                             ((= code #x1a) (wasm-byte code))
                             ((= code #x41) (wasm-byte code) (wasm-s32 (native-op-argument op)))
+                            ;; Comparison inversion changes a literal numeric
+                            ;; opcode only; normalized calls and GC operations
+                            ;; must continue to copy their original bytes.
+                            ((and (or (<= #x46 code #x4f) (<= #x51 code #x5a))
+                                  (= (native-op-end op) (1+ (native-op-start op)))
+                                  (let ((original (aref bytes (native-op-start op))))
+                                    (or (<= #x46 original #x4f) (<= #x51 original #x5a))))
+                             (wasm-byte code))
                             ((and (= code #x44) (integerp (native-op-argument op)))
                              ;; The host module reader proved exact conversion.
                              ;; Keep F64 stack semantics during analysis and
@@ -929,8 +963,8 @@
     (case code
       ((#x20 #x22) (aref types argument))
       (#x10 (first (second (aref signatures argument))))
-      ((#x41 #x45 #x46 #x48 #x4a #x4b #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #xa7 #xd1 #xd3) '(#x7f))
-      ((#x42 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xac) '(#x7e))
+      ((#x41 #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #xa7 #xd1 #xd3) '(#x7f))
+      ((#x42 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xac #xad) '(#x7e))
       (#xd0 (let ((start (1+ (native-op-start op))))
               (if (and (= (native-op-end op) (1+ start))
                        (member (aref bytes start) '(#x6f #x6e #x6d #x70)))
@@ -1092,7 +1126,7 @@ Return replacement bodies and (body parameters results) helper records."
                       ;; barriers. Regions neither consume an outside operand
                       ;; nor introduce a new branch or retained recursive frame.
                       (unless (and (plusp work) (plusp function-work) (or (/= code #x10) (= (aref body (native-op-start op)) #x10))
-                                   (member code '(#x10 #x1a #x20 #x21 #x22 #x41 #x42 #x45 #x46 #x48 #x4a #x4b #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd0 #xd1 #xd3 #xfb)))
+                                   (member code '(#x10 #x1a #x20 #x21 #x22 #x41 #x42 #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad #xd0 #xd1 #xd3 #xfb)))
                         (return))
                       (multiple-value-bind (pops pushes)
                           (if (= code #x10)

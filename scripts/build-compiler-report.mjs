@@ -71,7 +71,7 @@ export function renderCompilerReport(report) {
   const metric = value => integer(value) ? number(value) : '—';
   const stageRows = report.records.map(record => `<tr data-stage data-workload="${escape(record.workload)}">
     <th>${escape(record.workload)}<small>${escape(record.phase)}</small></th>
-    <td>${escape(status(record))}${record.failure ? `<small class="error">${escape(record.failure)}</small>` : ''}</td>
+    <td>${escape(status(record))}${record.failure ? `<small class="error">${escape(record.failure)}</small>` : ''}${record.reason ? `<small>${escape(record.reason)}</small>` : ''}</td>
     <td>${Number.isFinite(record.elapsedMs) ? `${number(Math.round(record.elapsedMs))} ms${record.timingIncludesCollection ? '<small>collection enabled</small>' : ''}` : '—'}</td>
     <td>${metric(record.runtimeBytes)}</td><td>${metric(record.inputBytes)}</td><td>${metric(record.outputBytes)}</td>
     <td>${escape(record.job || 'not recorded')}</td></tr>`).join('\n');
@@ -98,7 +98,7 @@ main{border:1px solid #000;background:var(--paper);min-height:calc(100dvh - 40px
 <header><strong>miricl / Compiler and prover</strong><nav><a href="index.html">REPL</a><a href="image-sizes.html">Image sizes</a><a href="ansi-results.html">ANSI</a>${safeURL(report.runURL) ? `<a href="${escape(report.runURL)}">CI run</a>` : ''}<a href="compiler-statistics.json">JSON</a></nav></header>
 <section><h1>Compilation across the CI run</h1><p>${number(report.records.length)} stage records · ${number(names.length)} measured workloads · ${number(report.jobs.length)} CI jobs</p><p class="muted">${metadata}</p>
 <p>These are static compilation events, not runtime execution frequencies. Proof queries can revisit the same fact. Planned substitutions and emitted substitutions are separate. Byte counters describe pass input/output, not marginal savings attributable to one rule.</p>
-<p>Absent records are missing coverage, not zero usage. Cached builds are excluded from current-run totals; failed stages may contribute partial counters. Collection covers instrumented compiler passes in native application builds and self-compilation; host/browser test status does not imply every test compilation was measured.</p>
+<p>Absent records are missing coverage, not zero usage. Cached builds are excluded from current-run totals; failed stages may contribute partial counters. Collection covers instrumented compiler passes in application builds and self-compilation; portable and native stages are labelled separately; host/browser test status does not imply every test compilation was measured.</p>
 <p>Use counts alongside application size and performance measurements. An uncommon rule may still be valuable for typed code or a particular application.</p>
 ${report.diagnostics?.length ? `<p class="error">Incomplete input: ${report.diagnostics.map(escape).join('; ')}</p>` : ''}</section>
 <details open><summary>CI jobs</summary><div class="table-wrap"><table><thead><tr><th>Job</th><th>Result</th><th>Duration</th></tr></thead><tbody>${jobRows || '<tr><td colspan="3">Job results were not supplied.</td></tr>'}</tbody></table></div></details>

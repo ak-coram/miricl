@@ -50,7 +50,7 @@
       (error "Embedded module ~A contains an HTML script terminator." pathname))
     source))
 
-(defun build-browser-page (template-name output-name output-directory &key (compiler t))
+(defun build-browser-page (template-name output-name output-directory &key (compiler t) image)
   (let* ((root *browser-page-root*)
          (output (uiop:ensure-directory-pathname output-directory))
          (path (merge-pathnames output-name output))
@@ -64,16 +64,24 @@
                       (write-line (if (uiop:string-prefix-p "export class " line)
                                       (subseq line (length "export ")) line)
                                   out)))))
-    (asdf:load-asd (merge-pathnames "miricl.asd" root))
-    (if (find-package :ql) (uiop:symbol-call :ql :quickload :miricl) (asdf:load-system :miricl))
+    ;; Explicit distribution input avoids rebuilding the compiler when CI reuses
+    ;; matching runtime artifacts. Ordinary callers still build current sources.
+    (unless image
+      (asdf:load-asd (merge-pathnames "miricl.asd" root))
+      (if (find-package :ql) (uiop:symbol-call :ql :quickload :miricl) (asdf:load-system :miricl)))
     ;; The adapter is embedded in a script element.
     (when (search "</script" adapter :test #'char-equal)
       (error "The JavaScript adapter contains an HTML script terminator."))
     (let ((replacements
             (list (cons "@@MIRICL_ADAPTER@@" adapter)
                   (cons "@@MIRICL_WASM@@"
-                        (browser-compressed-image (uiop:symbol-call :miricl :interpreter-wasm
-                                                                  :compiler compiler :native-compiler compiler))))))
+                        (browser-compressed-image
+                         (if image
+                             (with-open-file (in image :element-type '(unsigned-byte 8))
+                               (let ((bytes (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                                 (read-sequence bytes in) bytes))
+                             (uiop:symbol-call :miricl :interpreter-wasm
+                                               :compiler compiler :native-compiler compiler)))))))
       (dolist (replacement replacements)
         (let ((start (search (car replacement) template)))
           (unless (and start (not (search (car replacement) template :start2 (1+ start))))

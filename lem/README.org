@@ -1,0 +1,361 @@
+#+title: LEM browser application
+
+LEM is a separate MIRICL application. The browser frontend uses local
+Lisp services and Canvas/DOM interop. The selected core supports headless buffer
+editing. The owned Canvas frontend runs the real editor command loop; full local
+Lisp IDE services remain under development.
+
+* Building the browser application
+
+The frontend is an independent primary ASDF system, =lem-browser-frontend=,
+depending on =lem-browser/core=. Its source map uses =/lem-browser-frontend/=;
+loading its ASD does not redefine the retained core graph. Its definitions create
+no DOM, JavaScript callbacks or editor threads until =LEM-BROWSER:START-EDITOR=.
+The frontend paints LEM's actual drawing objects and windows, delivers keyboard
+input to its concurrent command queue, and uses its ordinary resize algorithm.
+
+The builder starts a fresh ordinary ready compiler image and matching ASDF
+library, authenticates the checked source map, and guest-compiles the selected
+ASDF graph through =lem-browser-lisp-mode=. It saves before starting the editor:
+
+#+begin_src sh
+node lem/image.mjs miricl.wasm miricl-asdf.wasm build/lem/miricl-lem.wasm
+node lem/page.mjs build/lem/miricl-lem.wasm build/lem/site
+node lem/tests/image.mjs build/lem/miricl-lem.wasm
+node lem/tests/browser.mjs build/lem/site
+#+end_src
+
+The browser check streams the packaged files and limits Chromium to one renderer.
+=LEM_BROWSER_EVIDENCE= selects its observation directory; otherwise it creates a
+temporary directory. A failed observation records scalar Lisp/DOM state, console
+events and a screenshot before browser cleanup.
+
+The image retains the ready compiler, ASDF/UIOP, selected sources, resources and
+licenses for interactive compilation and runtime system/version queries. The
+separate application image includes its compiler once; the default MIRICL compiler
+image remains independent. Application forms are compiled inside Wasm as portable
+FASLs. This build does not establish native optimized application entries. The
+page requires the actual asynchronous Wasm scheduler and reports an error when it is unavailable. =LEM-BROWSER:START-EDITOR= focuses an existing live
+editor; =STOP-EDITOR= requests normal editor exit and resource cleanup.
+=EDITOR-STATUS= returns scalar lifecycle and queue diagnostics.
+
+This milestone accepts physical single-character keydown input and named editing
+keys. Printable Shift input uses the character supplied by the browser. It
+explicitly rejects composition, dead keys, AltGraph and browser paste; clipboard
+and font/fullscreen operations report useful editor errors. IME, mobile text entry,
+accessibility, mouse selection, full window/prompt support and persistence remain
+incomplete. The local provider supplies listener evaluation and region/definition
+compilation below; navigation, completion and the debugger UI remain unavailable.
+Browser reload/address/tab/window shortcuts remain with the browser.
+
+DOM callbacks copy bounded scalar records into an atomic inbox and return;
+a yielding Lisp bridge constructs keys and sends events. Both the inbox and
+forwarded queue have bounded backlog. Resize closures run on the editor thread
+in input order, including when keys follow a resize. Canvas allocations use
+validated geometry and a total pixel budget; a tiny container retains a minimal
+logical grid and resizes normally when usable space returns.
+
+Floating windows use LEM's character geometry. Their content Canvas sits inside
+the declared outside border margin; CSS edges implement normal and drop-curtain
+shapes without additional raster buffers. The root clips the complete group.
+Display updates order floating groups from the actual frame list, above ordinary
+windows, including newly created splits. Per-window backgrounds fill blank areas
+and margins, while explicit text attributes and cursor colors keep their meaning.
+Message windows retain the editor root's keyboard focus. Pixel positioning and
+general mouse interaction remain separate frontend capabilities.
+
+Each editor owns a subclass of LEM's real popup messenger. Scoped BT2 bindings
+carry it into the editor, bridge and their descendants without replacing the
+global messenger. The genuine popup implementation creates and deletes windows;
+the yielding bridge schedules their expiry through the ordinary editor queue.
+Timeouts accept =NIL= or finite real seconds from zero through 86400. Zero expires
+on a later bridge turn. The registry admits at most 128 live popup entries,
+including untimed direct clients; replacement credits its owned destination.
+Validation precedes popup allocation and destination deletion. Public display
+defaults, explicit message intervals and =NIL= retain their original meanings.
+
+Expiry checks the exact browser, messenger, frame, window and lifecycle at enqueue
+and execution. Replacement, external deletion and accepted STOP revoke pending
+and queued work. Already accepted events can still display useful messages while
+STOP drains them, without acquiring new expiry authority. Teardown clears all
+owned JavaScript view handles and removes the stopped browser's exact frame map
+through the public cleanup API after the editor thread exits.
+
+For headless frontend checks, load =lem/tests/backend.lisp= in a ready core with
+the frontend loaded, then call =lem-browser-tests:check-boundaries= and
+=lem-browser-tests:check-popups=. The latter exercises timeout validation, the
+real BT2 binding adapter and public frame cleanup without creating DOM resources.
+Visible geometry, focus and pixels require the packaged browser check.
+
+* Sources
+
+LEM and its dependencies use ordinary Git submodules. Gitlinks pin revisions;
+=.gitmodules= records their repositories. Existing project Alexandria and
+ASDF's nested CL-PPCRE submodule are reused. Upstream sources remain clean.
+
+#+begin_src sh
+node scripts/prepare-lem.mjs --sources-only
+node --test lem/tests/sources.mjs
+#+end_src
+
+=files.mjs= maps selected source trees into guest paths. Preparation performs
+no network operations and never changes a repository. It checks each source
+against its owning superproject's Gitlink and =.gitmodules= entry, rejects dirty
+checkouts, unsafe paths, symlinks and excessive inputs, and applies small patches
+with exact anchors. ASDF definitions own dependency resolution.
+
+The frame overlay corrects =UNMAP-FRAME='s =REMHASH= table argument. The public
+function still returns the original frame, returns =NIL= for an absent mapping
+and preserves other displays. It does not alter Common Lisp hash-table behavior
+or rely on private frame-map mutation in the frontend.
+
+The STR overlay replaces its optional Ideographic Space and No-break Space
+reader aliases with the corresponding Unicode =CODE-CHAR= forms. It preserves
+the source's implementation branches and whitespace bag; it does not install
+global character names. After ASDF compiles and loads the prepared =str= system,
+load =tests/str.lisp= and call =lem-browser-str-tests:check-str= to check real
+trim behavior and literal splitting. Regex whitespace matching remains the
+responsibility of CL-PPCRE.
+
+The LEM encodings overlay replaces its optional =CR= and =LF= character names
+with the target's =Return= and =Linefeed= names. It checks the reviewed token
+counts, preserves read-time =CHAR-CODE= evaluation and leaves the upstream EOL
+algorithms intact. It does not install global character aliases.
+
+The point overlay qualifies the =LINE= slot's type as =LINE:LINE=, using the
+buffer internal package's local nickname for =LEM/BUFFER/LINE=. A package
+nickname does not import the class symbol. The checked patch retains the actual
+line class constraint and leaves the rest of the point implementation unchanged.
+The buffer overlay similarly qualifies its =SYNTAX-TABLE= slot type with the
+structure's defining package, =LEM/BUFFER/SYNTAX-TABLE::SYNTAX-TABLE=. That
+private type name is distinct from the internal package's exported symbol;
+the patch preserves the slot constraint without changing either package's API.
+
+The overlay adaptation resolves named attributes before typed initialization and
+writer storage, preserving the =(OR NULL ATTRIBUTE)= slot constraint and existing
+attribute object identities. It normalizes only the effective leftmost initarg,
+preserves unrelated initargs and generic writer dispatch, and validates factory
+results. Construction still rejects a raw =NIL= attribute and requires a supplied
+attribute or subclass default/initform; the writer accepts =NIL=. A named factory
+may return =NIL= without being resolved a second time. Failed ordinary and
+line-ending constructors release their owned inserting point copies. After loading
+the prepared core, load =tests/overlay.lisp= and call
+=lem-browser-overlay-tests:check-overlays= with an active implementation for named
+theme attributes. With the frontend definitions loaded, the following uses a real
+browser implementation without invoking it or creating DOM resources or threads:
+
+#+begin_src lisp
+(lem:with-implementation (make-instance 'lem-browser:browser)
+  (lem-browser-overlay-tests:check-overlays))
+#+end_src
+
+The version and modeline overlays query the genuine =lem-browser= ASDF system
+for application version metadata. They preserve upstream =DEFVAR= caching and
+modeline formatting. The separate Git revision cache uses the pinned source
+revision without running Git in the guest; the desktop =lem= system is not
+needed for either cache.
+
+Reusable implementation ports live in =compatibility/=. The Closer MOP port
+uses a distinct =CLOSER-MOP= package importing native =MIRICL-MOP= identities
+and retains the upstream portable helpers. It exports supported facilities;
+unimplemented MOP metadata and method-construction protocols remain absent.
+
+The optional =compatibility/gray-streams/miricl-gray.asd= system provides real
+=MIRICL-GRAY= stream classes and protocols used by ordinary Common Lisp I/O,
+including the reader, formatter, binary and sequence operations. Canonical
+=CLOSE=, =OPEN-STREAM-P= and =STREAM-ELEMENT-TYPE= support user methods while
+retaining native stream defaults. Checked source overlays make the real
+Trivial Gray Streams system depend on this module and load thin signature
+adapters; Flexi Streams retains its own encoding and in-memory stream code.
+This support does not install an editor. The older McCLIM
+compatibility launcher still uses its separate stream facade.
+
+The optional =compatibility/ide-backends/= adapters map the real Micros,
+Swank and Slynk backend interfaces to =MIRICL-GRAY= and =MIRICL-THREADS=
+recursive locks. They preserve callback values and release locks on unwind.
+Micros' checked ASDF graph loads its adapter after backend definitions and
+before reading the Gray file's package imports. Slynk's standalone route loads
+its genuine =slynk-backend.lisp=, the =MIRICL-GRAY= and =MIRICL-IDE-MOP= systems,
+the adapter, then =slynk-gray.lisp=. Both shared packages must exist when the
+adapter is read. Micros
+and Slynk support ordinary Gray stream I/O and recursive locking through their
+real backend interfaces. The Swank mapping requires backend definitions from
+its genuine loader and =packages.lisp=; its loader currently lacks a MIRICL
+implementation selection and fails at =*SYSDEP-FILES*= initialization. Swank
+Gray loading remains unsupported. The reference Swank/Slynk sources are absent
+from the LEM application map. Server initialization, transports and background
+autoflush threads need separate implementation support.
+
+=compatibility/ide-backends/miricl-ide-mop.asd= supplies a shared checked MOP
+adapter. It imports canonical Common Lisp and native MOP symbols into the real
+backend facades, preserving class and generic-function identity. Each facade's
+complete exported inventory and downstream package conflicts are checked before
+inert placeholders are replaced; existing bindings reject adaptation. The
+facades must have empty package use lists. =GENERIC-FUNCTION-DECLARATIONS=
+remains explicitly unsupported and unbound. The shared
+=SLOT-DEFINITION-DOCUMENTATION= generic function reads retained metadata through
+=DOCUMENTATION=. Direct slots retain their documentation; effective slots do not
+merge direct documentation, but later explicit documentation assignments are
+visible. The source graph loads this shared service before backend adaptation
+and before compiling portable MOP consumers.
+
+=tests/ide-streams.lisp= checks those real loaded streams through ordinary
+Common Lisp I/O, including callback failure recovery and recursive locking.
+Call =lem-browser-ide-stream-tests:check-backend= with the backend and Gray
+package designators after loading the selected genuine files. Run it through
+the asynchronous green-thread driver so the lock ownership-transfer check can
+start and join its test thread.
+
+=tests/ide-mop.lisp= checks canonical identities, real class/slot/method queries,
+documentation and permitted generic-method extensions. Call =check-backend=
+with the actual backend MOP package after loading the service and adapter;
+=check-micros-inspector= exercises the real initialized fancy inspector after
+its full source has loaded.
+
+* Application graph
+
+The independent =lem-browser-lisp-mode= system selects upstream Lisp editing,
+syntax, evaluation overlays and listener REPL components over the existing core.
+Its local connection uses Lisp request objects and continuations in the same
+Wasm heap. It does not open sockets or run a Micros server. Checked overlays
+replace the actual desktop connection/process entry points before Lisp reads
+their sources; upstream checkouts remain unchanged. Desktop commands report
+their unavailable operation. Completion, navigation, inspector and debugger
+services remain separate capabilities; their context-menu and automatic
+completion entry points are disabled in this initial provider.
+
+The Lisp buffer uses =C-c C-z= for the real listener REPL, =C-x C-e= or =C-c C-e=
+for expression/selected-region evaluation, and =lisp-eval-buffer= for the buffer.
+=C-c C-c= compiles a definition in a source buffer and cancels requests in the
+REPL; =C-c g= cancels local requests from a Lisp source buffer. Traditional
+compilation writes a private scratch source, calls the guest =COMPILE-FILE=,
+loads its actual result on success and cleans its scratch files. Compilation
+retains warnings, failure status and diagnostics. This operation makes no
+native-Wasm claim, and scratch =*COMPILE-FILE-PATHNAME*= is not an original-file
+source map. The additional native compile-and-evaluate operation is not exposed.
+File compilation and explicit compile-policy overrides report useful unavailable
+operation conditions; region/definition compilation does not substitute scratch
+file identity for a requested original-file compilation.
+The listener accepts one request at a time and keeps its input read-only until
+completion or cancellation produces the next prompt. Navigation and source-buffer
+editing remain available while yielding Lisp work runs; pending unsent REPL input
+is not accepted and then overwritten by a later result.
+
+The optional =miricl-ide-services= system in =compatibility/ide-services/=
+has no LEM dependency and supplies reusable evaluation/compilation sessions.
+Requests run serially on a lazily created green thread. The editor only submits
+requests and receives ordinary events, so yielding Lisp work can run while the
+editor processes input. Cancellation targets an exact request and preserves
+already executed effects; arbitrary user code and custom printers are not
+guaranteed to yield. Physical browser =Ctrl+g= during a busy editor command is a
+separate frontend limitation.
+
+Evaluation reads forms sequentially in a validated package. Package/readtable
+changes persist through request errors, and complete value lists distinguish
+zero values from one =NIL=. Listener history follows Micros' request-level
+behavior: only a completed successful region shifts =*=, =+= and =/= histories.
+Scalar reader/printer settings reset through =WITH-STANDARD-IO-SYNTAX= for each
+request, with =*PRINT-READABLY*= initially =NIL=; setting those scalars affects
+subsequent forms within that request. This differs from a persistent desktop
+Micros REPL thread. =COMPILE-FILE= and =LOAD= retain their ordinary file-local
+package/readtable bindings.
+
+Actual Gray streams capture ordered standard/error/trace output. Real two-way
+terminal/query/debug streams use that sink and signal a useful condition when
+interactive input is requested. The live debugger UI is unavailable and reports
+the original diagnostic. Limits are 1,048,576 source characters, 65,536 retained
+output characters per request, 32 pending requests and 128 retained results.
+Truncation is marked, printing uses circle/depth/length controls, and printer
+errors do not strand the queue. These controls do not bound custom printer time.
+
+Each local UI request owns its source/destination identities, browser generation,
+spinner and finalizer. Delivery checks authority before enqueueing and again on
+the editor thread. Source edits preserve labelled transcript results and output
+while suppressing stale point overlays. Deleted targets and stopped/restarted
+editors revoke delivery. STOP cancels the session and retains worker authority
+until actual unwind and exit; it does not discard a live thread on a timeout.
+No worker or DOM callback is created by loading the provider before editor start.
+
+Checked patches derive =lem-browser/core= and =lem-browser/lisp-syntax= from
+the actual upstream systems. The desktop ASD is absent from the guest map.
+Unused TCP port probing, optional DeepL translation, the Mustache image wrapper
+and Quicklisp extension installation are excluded. Other core commands remain
+selected, including operations needing actual browser adapters.
+
+The browser core replaces Dexador with a direct dependency on the real QURI
+URI library. Its ASDF graph loads IDNA and CL-UTILITIES alongside the existing
+Babel, Alexandria and Split Sequence sources. CL-UTILITIES uses the Publitechs
+Git mirror of the official tarball/CVS project; its portable source matches
+release 1.2.4, with SBCL-specific loading and feature-guard changes. QURI's
+upstream =data/effective_tld_names.dat= is mapped unchanged for its read-time
+ETLD initialization. Preparation requires that data file and the three ASDs.
+The upstream link implementation is retained; its Git-backed repository
+navigation still requires a browser platform adapter.
+
+=buffer-system.asd= supplies =lem-browser/buffer= using the actual upstream
+common/character and text-buffer files through =buffer/internal/basic= in
+upstream order. Its API scope is =LEM/BUFFER/INTERNAL=. File loading, encodings,
+syntax parsing, streams and the editor frontend are outside that subsystem.
+Selected functions retain their real STR, Babel and LOG4CL dependencies.
+
+Micros is mapped under =/deps/micros= with its real ASDF definition. Its
+portable Lisp IDE backend still needs further thread and MOP services,
+implementation introspection, platform operations and the
+browser frontend. No substitute package or remote TCP service implements
+those contracts.
+
+The preparation command and =lemFiles= expose the checked selected source graph.
+They do not initialize an editor or certify every desktop IDE service. Runtime
+limitations above apply to the local provider.
+
+* Build inputs, cache and CI
+
+SBCL is used only to run the pinned upstream CL-UNICODE data generator over
+isolated pristine copies of CL-UNICODE, CL-PPCRE, FLEXI-STREAMS and
+TRIVIAL-GRAY-STREAMS. Only its three generated Lisp data sources enter the target
+map; the guest compiler compiles them with the application. Generation needs no
+network or Quicklisp. Upstream vendor trees remain unchanged. Identical output
+bytes across host implementations or versions are not promised: the upstream
+hash-table dumper does not sort its keys.
+
+=OUTPUT.wasm.inputs.json= records the exact source/build input key, matching
+runtime/ASDF identities and generated-data hashes. =OUTPUT.wasm.json= records the
+completed image digest and guest build mode. Generated data lives in a sibling
+=unicode-data/= directory keyed by pristine source and generator/tool identity.
+The final image cache requires the exact selected mounted names and bytes,
+runtime/compiler and ASDF, adapter, graph/overlay, generator and build/page tools.
+Both source authentication and a fresh image restore run on a cache hit.
+The image retains development sources and system-loading support; this route
+does not produce a minimal application payload. A corrupt
+cache fails usefully. Only successfully built and restored images are published.
+Use a fresh output directory for a clean build. =--prepare-only= prepares these
+inputs and the cache key, including host data generation; it does not build or
+certify an application image.
+
+The applications CI matrix builds LEM, runs source, fresh-restore and browser
+checks, uploads the actual site and results, and assembles it as =public/lem/= in
+the existing browser-examples artifact. Its checkout initializes recursive pinned
+submodules. CI uses the runner and runtime memory defaults; optional local
+=LEM_SBCL_DYNAMIC_SPACE_SIZE= and =LEM_BROWSER_HEAP_MIB= settings are separate
+from CI configuration. Existing Pages consumes that assembled artifact; no separate
+publication workflow is required. Workflow source integration does not establish
+that a remote run or external deployment has succeeded.
+
+=MIRICL_COMPILER_STATISTICS_DIRECTORY= enables statistics around actual guest
+ASDF compilation. Portable compilation is reported as a measurement; the native
+application stage is explicitly skipped. Cache reuse records cached coverage and
+no invented fresh counters. Instrumented durations include counter collection.
+The size report includes the complete image and separate adapter/application
+JavaScript, with raw, gzip level 9 and Brotli quality 11 measurements; the compiler
+inside the saved image is not added twice.
+
+For a focused report from existing matching artifacts, without rebuilding or
+measuring unrelated applications:
+
+#+begin_src sh
+node scripts/build-size-html.mjs --lem . build/lem/image-sizes.html miricl.html build/lem/site
+#+end_src
+
+This measures the complete default compiler separately and the LEM application's
+actual page, application script, adapter and saved image. A complete site report
+uses the ordinary command without =--lem=.

@@ -143,7 +143,7 @@
               (local.set $count (i32.sub (local.get $count) (i32.const 1))) (br $gc-next)))
             (br $decoded)))
         (br_if $unsupported (i32.eqz ,(wat-native-op-member
-          '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4b #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd1 #xd3)))))
+          '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad #xd1 #xd3)))))
       (if (i32.or (ref.is_null (local.get $references))
                   ,(wat-native-op-member '(#x10 #x12 #xd2)))
         (then
@@ -257,9 +257,9 @@
           (then
             (if (i32.eq (call $natural-count (array.get $objects (local.get $op) (i32.const 1))) (i32.const 5))
               (then (local.set $consumed (i32.const 2)) (br $effect-done)))))
-        (if ,(wat-native-op-member '(#x22 #x45 #x50 #xa7 #xac #xd1 #xfb))
+        (if ,(wat-native-op-member '(#x22 #x45 #x50 #xa7 #xac #xad #xd1 #xfb))
           (then (local.set $consumed (i32.const 1)) (local.set $produced (i32.const 1)) (br $effect-done)))
-        (if ,(wat-native-op-member '(#x46 #x48 #x4a #x4b #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3))
+        (if ,(wat-native-op-member '(#x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3))
           (then (local.set $consumed (i32.const 2)) (local.set $produced (i32.const 1)) (br $effect-done)))
         (if ,(wat-native-op-member '(#x10 #x12))
           (then
@@ -608,13 +608,46 @@
                 (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 0) (call $int (i32.const 65)))
                 ,(wat-native-simplify-clear '$op)))
             (br $rewritten)))
+        (if (i32.eq (local.get $code) (i32.const 167))
+          (then
+            (if (i32.eq (local.get $previous-code) (i32.const 66))
+              (then
+                (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 1)
+                  (call $int (call $native-simplify-argument (local.get $previous))))
+                (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 0) (call $int (i32.const 65)))
+                ,(wat-native-simplify-clear '$op))
+              (else
+                (if (i32.or (i32.eq (local.get $previous-code) (i32.const 172))
+                            (i32.eq (local.get $previous-code) (i32.const 173)))
+                  (then ,(wat-native-simplify-clear '$previous) ,(wat-native-simplify-clear '$op)
+                    (local.set $top (i32.sub (local.get $top) (i32.const 1)))))))
+            (br $rewritten)))
         (if (i32.eq (local.get $code) (i32.const 69))
           (then
             (if (i32.eq (local.get $previous-code) (i32.const 65))
               (then
                 (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 1)
                   (call $int (i32.eqz (call $native-simplify-argument (local.get $previous)))))
-                ,(wat-native-simplify-clear '$op)))
+                ,(wat-native-simplify-clear '$op))
+              (else
+                (if (i32.and (i32.ge_u (local.get $previous-code) (i32.const 70))
+                             (i32.le_u (local.get $previous-code) (i32.const 79)))
+                  (then
+                    (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 0)
+                      (call $int (i32.xor (local.get $previous-code)
+                        (select (i32.const 1) (i32.const 6) (i32.lt_u (local.get $previous-code) (i32.const 72))))))
+                    ,(wat-native-simplify-clear '$op))
+                  (else
+                    (if (i32.and (i32.ge_u (local.get $previous-code) (i32.const 81))
+                                 (i32.le_u (local.get $previous-code) (i32.const 90)))
+                      (then
+                        (array.set $objects (ref.as_non_null (local.get $previous)) (i32.const 0)
+                          (call $int (i32.sub
+                            (select (i32.const 163)
+                              (select (i32.const 172) (i32.const 174) (i32.and (local.get $previous-code) (i32.const 1)))
+                              (i32.le_u (local.get $previous-code) (i32.const 82)))
+                            (local.get $previous-code))))
+                        ,(wat-native-simplify-clear '$op)))))))
             (br $rewritten)))
         (if ,(wat-native-op-member '(#x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f
                                     #x6a #x6b #x6c #x71 #x72 #x73 #x74 #x75 #x76))
@@ -669,6 +702,17 @@
             (br $rewritten)))
         (if ,(wat-native-op-member '(#x04 #x0d))
           (then
+            ;; The reference branches normalized as #x0d are not i32 truth
+            ;; consumers. Keep their actual source opcode as the admission.
+            (if (i32.and
+                  (i32.and (i32.eq (local.get $previous-code) (i32.const 69))
+                           (i32.eq (local.get $prior-code) (i32.const 69)))
+                  (i32.or (i32.eq (local.get $code) (i32.const 4))
+                    (i32.eq (call $natural-count (call $array-raw-element (local.get $bytes)
+                      (call $natural-count ,(wat-native-simplify-field '$op 2)) (ref.null eq) (i32.const 0))) (i32.const 13))))
+              (then ,(wat-native-simplify-clear '$previous) ,(wat-native-simplify-clear '$prior)
+                (local.set $top (i32.sub (local.get $top) (i32.const 2)))
+                (local.set $previous-code (i32.const -1))))
             (if (if (result i32) (i32.eq (local.get $previous-code) (i32.const 65))
                   (then (if (result i32) (i32.eq (local.get $code) (i32.const 4))
                     (then (i32.const 1))

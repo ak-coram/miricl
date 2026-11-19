@@ -1,0 +1,43 @@
+;;;; Record the actual host dependency source/version closure before restoring
+;;;; runtime artifacts. This loads host libraries, never a guest compiler image.
+(require :asdf)
+(if (find-package :ql)
+    (uiop:symbol-call :ql :quickload '(alexandria named-readtables cffi))
+    (asdf:load-systems* '(alexandria named-readtables cffi)))
+(defun cache-json-string (value stream)
+  (write-char #\" stream)
+  (loop for char across (princ-to-string value) do
+    (case char
+      (#\" (write-string "\\\"" stream))
+      (#\\ (write-string "\\\\" stream))
+      (t (if (< (char-code char) 32) (format stream "\\u~4,'0X" (char-code char))
+             (write-char char stream)))))
+  (write-char #\" stream))
+(let ((output (merge-pathnames "build/runtime-host-inputs.json" (uiop:getcwd))))
+  (ensure-directories-exist output)
+  (with-open-file (out output :direction :output :if-exists :supersede :external-format :utf-8)
+    (write-string "{\"implementation\":" out)
+    (cache-json-string (format nil "~A ~A" (lisp-implementation-type) (lisp-implementation-version)) out)
+    (write-string ",\"asdf\":" out) (cache-json-string (asdf:asdf-version) out)
+    (write-string ",\"systems\":[" out)
+    (loop for name in (sort (copy-list (asdf:already-loaded-systems)) #'string<)
+          for first = t then nil
+          for system = (asdf:find-system name) do
+      (unless first (write-char #\, out))
+      (write-string "{\"name\":" out) (cache-json-string name out)
+      (write-string ",\"version\":" out) (cache-json-string (or (asdf:component-version system) "") out)
+      (write-string ",\"files\":[" out)
+      (let ((files nil))
+        (labels ((visit (component)
+                   (if (typep component 'asdf:parent-component)
+                       (mapc #'visit (asdf:component-children component))
+                       (let ((file (asdf:component-pathname component)))
+                         (when (and file (probe-file file) (not (uiop:directory-pathname-p file)))
+                           (pushnew (namestring (truename file)) files :test #'equal))))))
+          (visit system))
+        (let ((asd (asdf:system-source-file system)))
+          (when (and asd (probe-file asd)) (pushnew (namestring (truename asd)) files :test #'equal)))
+        (loop for file in (sort files #'string<) for first = t then nil do
+          (unless first (write-char #\, out)) (cache-json-string file out)))
+      (write-string "]}" out))
+    (write-string "]}" out)))

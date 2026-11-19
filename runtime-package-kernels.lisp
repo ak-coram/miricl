@@ -4,7 +4,39 @@
 (export '(package-bootstrap-name-list package-name-list collect-package-users collect-live-packages
           package-fold-name package-name-contains-folded-p filter-apropos-symbols
           check-package-options find-global-package-name find-local-package-name
-          find-all-package-symbols))
+          find-all-package-symbols copy-package-local-names))
+
+(defun copy-package-local-names (names)
+  "Validate and detach a finite nickname alist before publishing trusted state."
+  (declare (optimize (safety 0) (debug 0))
+           (inline car cdr cons consp stringp packagep list-length copy-seq eq))
+  (values
+   (progn
+     (if (list-length names) nil
+         (error 'type-error :datum names :expected-type (list 'satisfies 'list-length)))
+     (let ((scan names) (result nil))
+       (tagbody next
+          (if scan nil (go done))
+          (let ((entry (car scan)))
+            (if (consp entry) nil
+                (error 'type-error :datum entry :expected-type 'cons))
+            (let ((name (car (the cons entry))) (target (cdr (the cons entry))))
+              (if (stringp name) nil
+                  (error 'type-error :datum name :expected-type 'string))
+              (if (packagep target) nil
+                  (error 'type-error :datum target :expected-type 'package))
+              (if (package-name target) nil
+                  (error 'package-error :package target))
+              (let ((old (assoc name result :test #'string=)))
+                (if old
+                    (if (eq (cdr old) target) nil
+                        (error 'type-error :datum entry
+                               :expected-type (list 'cons (list 'eql name)
+                                                    (list 'eql (cdr old)))))
+                    (setq result (cons (cons (copy-seq name) target) result))))))
+          (setq scan (cdr scan)) (go next)
+         done)
+       result))))
 
 (defun find-global-package-name (name packages metadata)
   "Find a normalized name in the registry, including trusted early startup."
@@ -272,7 +304,23 @@
                                       (if (eq keyword :export) (setq group 16)
                                           (if (eq keyword :nicknames) nil
                                               (if (eq keyword :use) nil
-                                                  (if (eq keyword :local-nicknames) nil
+                                                  (if (eq keyword :local-nicknames)
+                                                      (let ((pairs items))
+                                                        (tagbody pair
+                                                           (if pairs nil (go pairs-done))
+                                                           (let* ((pair (car pairs))
+                                                                  (count (list-length pair)))
+                                                             (if count nil
+                                                                 (error 'type-error :datum pair
+                                                                        :expected-type (list 'satisfies 'list-length)))
+                                                             (if (= count 2) nil
+                                                                 (error 'type-error :datum pair
+                                                                        :expected-type (list 'cons t (list 'cons t 'null))))
+                                                             (string (car pair))
+                                                             (let ((target (car (cdr pair))))
+                                                               (if (packagep target) nil (string target))))
+                                                           (setq pairs (cdr pairs)) (go pair)
+                                                          pairs-done))
                                                       (error 'program-error)))))))))))
               (if (if (= group 4) t (= group 8))
                   (progn

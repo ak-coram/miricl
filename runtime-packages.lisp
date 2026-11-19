@@ -128,9 +128,25 @@
   (wat-fail-when #@(ref.is_null (struct.get $obj $a (ref.cast (ref $obj) (local.get $p)))) :invalid-package)
   #@(ref.as_non_null (local.get $p)))
 
+(defun $copy-package-local-names-cl ()
+  (runtime-function-definition '$copy-package-local-names-cl
+    (wat-fragment (miricl-cross:runtime-kernel-wat '$copy-package-local-names-cl
+      'miricl-runtime:copy-package-local-names))))
+
 (define-runtime-function $package-node-ref (($node :nullable-object) ($selector i32) ($index :nullable-object)) (:nullable-object)
   (:locals ($meta :nullable-object) ($table (ref null $objects)) ($id i32) ($slot i64))
-  (wat-fail-when #@(i32.gt_u (local.get $selector) (i32.const 12)) :invalid-package)
+  (wat-fail-when #@(i32.gt_u (local.get $selector) (i32.const 14)) :invalid-package)
+  #@(if (i32.ge_u (local.get $selector) (i32.const 13))
+    (then
+      (local.set $node (call $require-package (local.get $node)))
+      (local.set $id (call $value-n (local.get $node)))
+      ,(wat-fail-when #@(i32.ge_u (local.get $id) (array.len (global.get $package-local-names))) :invalid-package)
+      (if (i32.eq (local.get $selector) (i32.const 13))
+        (then (return_call $copy-package-local-names-cl
+          (array.get $objects (global.get $package-local-names) (local.get $id)))))
+      (local.set $meta (call $copy-package-local-names-cl (local.get $index)))
+      (array.set $objects (global.get $package-local-names) (local.get $id) (local.get $meta))
+      (return (local.get $node))))
   ;; Canonical saved PACKAGE-NAME and PACKAGE-NICKNAMES semantics, including
   ;; unnamed deleted package objects. FIND-PACKAGE validates designators.
   #@(if (i32.ge_u (local.get $selector) (i32.const 11))
@@ -183,7 +199,7 @@
   (:locals ($code i64))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :invalid-package)
   #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
-  (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 12)) :invalid-package)
+  (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 14)) :invalid-package)
   #@(return_call $package-node-ref (local.get $node) (i32.wrap_i64 (local.get $code)) (local.get $index)))
 
 (defun package-entry-primitive-arity (count)
@@ -631,7 +647,8 @@
 (define-runtime-function $delete-package
     (($p :nullable-object))
     (i32)
-  (:locals ($entries :nullable-object) ($users :nullable-object))
+  (:locals ($entries :nullable-object) ($users :nullable-object)
+           ($names :nullable-object) ($kept :nullable-object) ($id i32))
   #@(if (ref.is_null (struct.get $obj $a (ref.cast (ref $obj) (local.get $p)))) (then (return (i32.const 0))))
   #@(if (i32.eqz (ref.is_null (call $used-by (local.get $p))))
     (then (call $package-cerror ,(wat-text-literal "Remove dependencies and delete the package.") (local.get $p))
@@ -643,6 +660,19 @@
   #@(block $done (loop $next (br_if $done (ref.is_null (local.get $entries)))
     (call $remove-present (struct.get $obj $a (ref.cast (ref $obj) (call $car (local.get $entries)))) (local.get $p))
     (local.set $entries (call $cdr (local.get $entries))) (br $next)))
+  ;; Remove incoming aliases and the owner's own state from the one registry.
+  #@(block $done (loop $owner
+    (br_if $done (i32.ge_u (local.get $id) (array.len (global.get $package-local-names))))
+    (local.set $names (array.get $objects (global.get $package-local-names) (local.get $id)))
+    (local.set $kept (ref.null eq))
+    (if (i32.ne (local.get $id) (call $value-n (local.get $p)))
+      (then (block $names-done (loop $name
+        (br_if $names-done (ref.is_null (local.get $names)))
+        (if (i32.eqz (ref.eq (call $cdr (call $car (local.get $names))) (local.get $p)))
+          (then (local.set $kept (call $cons (call $car (local.get $names)) (local.get $kept)))))
+        (local.set $names (call $cdr (local.get $names))) (br $name)))))
+    (array.set $objects (global.get $package-local-names) (local.get $id) (local.get $kept))
+    (local.set $id (i32.add (local.get $id) (i32.const 1))) (br $owner)))
   #@(struct.set $obj $a (ref.cast (ref $obj) (local.get $p)) (ref.null eq))
   #@(struct.set $obj $a (ref.cast (ref $obj) (struct.get $obj $c (ref.cast (ref $obj) (local.get $p)))) (ref.null eq))
   #@(array.set $package-indexes (global.get $package-indexes) (call $value-n (local.get $p))
@@ -1006,6 +1036,29 @@
       (return)))
   #@(call $import (local.get $symbol) (local.get $target) (local.get $shadow)))
 
+(define-runtime-function $defpackage-local-names
+    (($options :nullable-object) ($p :nullable-object)) (:nullable-object)
+  (:locals ($names :nullable-object) ($items :nullable-object)
+           ($pair :nullable-object) ($target :nullable-object) ($name :nullable-object))
+  #@(if (i32.eqz (ref.is_null (local.get $p)))
+    (then (local.set $names (array.get $objects (global.get $package-local-names) (call $value-n (local.get $p))))))
+  ;; CHECK-DEFPACKAGE has validated every finite nested pair before this scan.
+  #@(block $done (loop $option (br_if $done (ref.is_null (local.get $options)))
+    (local.set $pair (call $car (local.get $options)))
+    (if (i32.eq (call $id (call $car (local.get $pair))) (i32.const ,(runtime-symbol-id :local-nicknames)))
+      (then
+        (local.set $items (call $cdr (local.get $pair)))
+        (block $names-done (loop $next (br_if $names-done (ref.is_null (local.get $items)))
+          (local.set $pair (call $car (local.get $items)))
+          (local.set $name (call $string-contents (call $string-designator (call $car (local.get $pair)))))
+          ;; Declaration targets use global names independently of active aliases.
+          (local.set $target (call $find-global-package (call $car (call $cdr (local.get $pair)))))
+          ,(wat-fail-when #@(ref.is_null (local.get $target)) :invalid-package)
+          (local.set $names (call $cons (call $cons (local.get $name) (local.get $target)) (local.get $names)))
+          (local.set $items (call $cdr (local.get $items))) (br $next)))))
+    (local.set $options (call $cdr (local.get $options))) (br $option)))
+  #@(return_call $copy-package-local-names-cl (local.get $names)))
+
 (define-runtime-function $defpackage
     (($name :nullable-object) ($options :nullable-object))
     (:nullable-object)
@@ -1016,13 +1069,16 @@
            ($source :nullable-object)
            ($symbol :nullable-object)
            ($nicknames :nullable-object)
+           ($local-names :nullable-object)
            ($nicknames-p i32)
            ($id i32)
            ($pass i32)
            ($use-specified i32))
   #@(call $check-defpackage (local.get $options))
   #@(local.set $p (call $find-package (local.get $name)))
+  #@(local.set $local-names (call $defpackage-local-names (local.get $options) (local.get $p)))
   #@(if (ref.is_null (local.get $p)) (then (local.set $p (call $make-package (local.get $name) (ref.null eq)))))
+  #@(array.set $objects (global.get $package-local-names) (call $value-n (local.get $p)) (local.get $local-names))
   #@(block $done (loop $passes
     (local.set $scan (local.get $options))
     (block $options-done (loop $next (br_if $options-done (ref.is_null (local.get $scan)))
@@ -1037,17 +1093,7 @@
                 (then (call $arity (local.get $items) (i32.const 1) (i32.const 1))
                       (struct.set $obj $c (ref.cast (ref $obj) (struct.get $obj $c (ref.cast (ref $obj) (local.get $p)))) (call $car (local.get $items)))))
             (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id :use))) (then (local.set $use-specified (i32.const 1))))
-            (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id :local-nicknames)))
-              (then
-                (block $names-done (loop $name (br_if $names-done (ref.is_null (local.get $items)))
-                  (local.set $source (call $car (local.get $items)))
-                  (call $arity (local.get $source) (i32.const 2) (i32.const 2))
-                  (local.set $symbol (call $string-contents (call $string-designator (call $car (local.get $source)))))
-                  (local.set $source (call $require-package (call $car (call $cdr (local.get $source)))))
-                  (array.set $objects (global.get $package-local-names) (call $value-n (local.get $p))
-                    (call $cons (call $cons (local.get $symbol) (local.get $source))
-                      (array.get $objects (global.get $package-local-names) (call $value-n (local.get $p)))))
-                  (local.set $items (call $cdr (local.get $items))) (br $name)))))))
+            ))
       (if (i32.eq (local.get $pass) (i32.const 1))
           (then
             (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id :shadow)))
@@ -1244,7 +1290,7 @@
   ($require-package)
   ($package-name-bucket)
   ($initialize-package-index) ($rehash-package-index)
-  ($package-node-ref) ($package-node-ref-value) ($package-entry-primitive) ($package-entry-function)
+  ($copy-package-local-names-cl) ($package-node-ref) ($package-node-ref-value) ($package-entry-primitive) ($package-entry-function)
   ($present-entry-cl) ($package-name-hash-cl) ($inherited-entry-cl) ($accessible-entry-cl)
   ($symbol-shadowed-cl) ($entry-conflict-cl)
   ($present)
@@ -1276,6 +1322,6 @@
   ($collect-all-package-symbols-cl) ($all-symbols) ($package-fold-name-cl) ($package-fold-function) ($package-name-contains-folded-cl) ($name-contains-folded)
   ($filter-apropos-symbols-cl) ($apropos-list)
   ($check-defpackage-cl) ($check-defpackage)
-  ($defpackage-import) ($defpackage)
+  ($defpackage-import) ($defpackage-local-names) ($defpackage)
   ($package-apply)
   ($find-all-package-symbols-cl) ($package-apply1))

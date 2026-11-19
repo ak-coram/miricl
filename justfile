@@ -298,3 +298,14 @@ test-ansi-html:
 [positional-arguments]
 ansi-cons +files: build
     {{ quote(node) }} tests/ansi.mjs {{ quote(interpreter_only) }} --helpers=cons "$@"
+
+# Build the separate LEM editor from checked pins using the guest compiler.
+# Uses existing matching runtime/ASDF artifacts; no compiler bootstrap is repeated.
+build-lem:
+    {{ quote(node) }} lem/image.mjs {{ quote(precompiled) }} {{ quote(build_dir / 'miricl-asdf.wasm') }} build/lem/miricl-lem.wasm
+    {{ quote(node) }} lem/page.mjs build/lem/miricl-lem.wasm build/lem/site
+
+test-lem:
+    {{ quote(node) }} --test lem/tests/sources.mjs
+    {{ quote(node) }} lem/tests/image.mjs build/lem/miricl-lem.wasm
+    {{ quote(node) }} lem/tests/browser.mjs build/lem/site

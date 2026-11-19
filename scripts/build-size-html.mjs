@@ -62,8 +62,16 @@ const mcclimArtifacts = [
       .map(file => `build/mcclim/site/${file}`)},
   {file: 'build/mcclim/site/miricl-mcclim.wasm.gz', description: 'McCLIM — native compiled library, demonstrations, resources and ready compiler (included in total above)', kind: 'wasm'},
 ];
+const lemArtifacts = [
+  {file: 'lem/', description: 'LEM — editor page, scripts and initialized guest-compiled Lisp image',
+    kind: 'application', files: ['index.html', 'app.mjs', 'miricl.js', 'miricl-lem.wasm.gz']
+      .map(file => `build/lem/site/${file}`)},
+  {file: 'build/lem/site/miricl-lem.wasm.gz', description: 'LEM — complete editor, Lisp services, sources, ASDF and ready compiler (included in total above)', kind: 'wasm'},
+  {file: 'build/lem/site/app.mjs', description: 'LEM — application JavaScript (included in total above)', kind: 'javascript'},
+  {file: 'build/lem/site/miricl.js', description: 'LEM — JavaScript runtime adapter (included in total above)', kind: 'javascript'},
+];
 const artifactDefinitions = [...artifacts, ...acl2Preview, ...acl2Image, booksArtifact,
-  ...coaltonArtifacts, ...coaltonImage, ...mcclimArtifacts];
+  ...coaltonArtifacts, ...coaltonImage, ...mcclimArtifacts, ...lemArtifacts];
 const escape = value => String(value ?? '').replace(/[&<>"']/g,
   char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
 const number = value => value.toLocaleString('en-US');
@@ -71,14 +79,16 @@ const kib = value => `${(value / 1024).toFixed(2)} KiB`;
 const size = value => `<strong>${kib(value)}</strong><small>${number(value)} bytes</small>`;
 const webURL = value => /^https?:\/\//.test(value ?? '');
 
-export function collectImageSizes(directory, {commit = '', runURL = '', generatedAt = new Date().toISOString(),
+export function collectImageSizes(directory, {commit = '', runURL = '', generatedAt = new Date().toISOString(), selection,
   applicationDirectory = path.join(directory, 'game-of-life'),
   maximaDirectory = path.join(directory, 'build/maxima/site'),
   fricasDirectory = path.join(directory, 'build/fricas/site'),
   acl2Directory = path.join(directory, 'build/acl2/site'),
   coaltonDirectory = path.join(directory, 'build/coalton/site'),
   mcclimDirectory = path.join(directory, 'build/mcclim/site'),
+  lemDirectory = path.join(directory, 'build/lem/site'),
   acl2BooksDirectory = path.join(directory, 'build/acl2/books')} = {}) {
+  if (selection !== undefined && selection !== 'lem') throw new Error('Unknown size report selection.');
   const wasm = new Set(artifactDefinitions
     .filter(artifact => artifact.kind === 'wasm').map(artifact => artifact.file));
   const measurements = new Map();
@@ -88,6 +98,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
       : name.startsWith('build/acl2/site/') ? path.join(acl2Directory, name.slice('build/acl2/site/'.length))
       : name.startsWith('build/acl2/books/') ? path.join(acl2BooksDirectory, name.slice('build/acl2/books/'.length))
       : name.startsWith('build/coalton/site/') ? path.join(coaltonDirectory, name.slice('build/coalton/site/'.length))
+      : name.startsWith('build/lem/site/') ? path.join(lemDirectory, name.slice('build/lem/site/'.length))
       : name.startsWith('build/mcclim/site/') ? path.join(mcclimDirectory, name.slice('build/mcclim/site/'.length))
       : name.startsWith('build/fricas/site/') ? path.join(fricasDirectory, name.slice('build/fricas/site/'.length))
       : name.startsWith('build/maxima/site/') ? path.join(maximaDirectory, name.slice('build/maxima/site/'.length)) : path.join(directory, name);
@@ -97,7 +108,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
   };
   let acl2Artifacts = [];
   const acl2Manifest = path.join(acl2Directory, 'build.json');
-  if (fs.existsSync(acl2Manifest)) {
+  if (selection !== 'lem' && fs.existsSync(acl2Manifest)) {
     acl2Artifacts = acl2Preview;
     if (fs.existsSync(path.join(acl2Directory, acl2ImageFile))) {
       const {imageBytes} = JSON.parse(fs.readFileSync(acl2Manifest, 'utf8'));
@@ -109,7 +120,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
   }
   let selectedCoalton = [];
   const coaltonManifest = path.join(coaltonDirectory, 'build.json');
-  if (fs.existsSync(coaltonManifest)) {
+  if (selection !== 'lem' && fs.existsSync(coaltonManifest)) {
     selectedCoalton = coaltonArtifacts;
     if (fs.existsSync(path.join(coaltonDirectory, coaltonImageFile))) {
       const {snapshotBytes} = JSON.parse(fs.readFileSync(coaltonManifest, 'utf8'));
@@ -118,15 +129,16 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
       selectedCoalton = [application, {...archive, uncompressedBytes: snapshotBytes}];
     }
   }
-  return {schemaVersion: 1, generatedAt, commit, runURL,
-    compression: {gzipLevel: 9, brotliQuality: 11},
-    tools: {node: process.versions.node, zlib: process.versions.zlib},
-    artifacts: [...artifacts,
+  const selected = selection === 'lem' ? [artifacts.find(artifact => artifact.file === 'miricl.wasm'), ...lemArtifacts] : [...artifacts,
       ...acl2Artifacts,
       ...(fs.existsSync(path.join(acl2BooksDirectory, 'manifest.json')) ? [booksArtifact] : []),
       ...selectedCoalton,
       ...(fs.existsSync(path.join(mcclimDirectory, 'miricl-mcclim.wasm.gz')) ? mcclimArtifacts : []),
-    ].map(({files: names, ...artifact}) => {
+      ...(fs.existsSync(path.join(lemDirectory, 'miricl-lem.wasm.gz')) ? lemArtifacts : [])];
+  return {schemaVersion: 1, generatedAt, commit, runURL, ...(selection ? {selection} : {}),
+    compression: {gzipLevel: 9, brotliQuality: 11, brotliMode: 'generic'},
+    tools: {node: process.versions.node, zlib: process.versions.zlib, brotli: process.versions.brotli},
+    artifacts: selected.map(({files: names, ...artifact}) => {
       if (!names) return {...measure(artifact.file, artifact.kind), ...artifact};
       const files = names.map(name => measure(name));
       const totals = Object.fromEntries(['rawBytes', 'gzipBytes', 'brotliBytes', 'downloadBytes'].map(key =>
@@ -136,8 +148,10 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
 }
 
 export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = 'image-sizes.json'} = {}) {
+  const required = report.selection === 'lem' ? [{file: 'miricl.wasm'}, ...lemArtifacts] : artifacts;
   if (report.schemaVersion !== 1 || !Array.isArray(report.artifacts)
-    || artifacts.some(required => !report.artifacts.some(artifact => artifact.file === required.file)))
+    || (report.selection !== undefined && report.selection !== 'lem')
+    || required.some(required => !report.artifacts.some(artifact => artifact.file === required.file)))
     throw new Error('Expected measurements for the required build artifacts.');
   for (const artifact of report.artifacts) {
     for (const key of ['rawBytes', 'gzipBytes', 'brotliBytes',
@@ -161,13 +175,14 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
   </tr>`;
   const initializedAcl2 = report.artifacts.some(artifact => artifact.file.endsWith('/' + acl2ImageFile));
   const rows = [
-    ['Runtime files', artifact => artifact.kind === 'wasm' && !/^(game-of-life|build\/(?:maxima|fricas|acl2|coalton|mcclim))\//.test(artifact.file)],
+    ['Runtime files', artifact => artifact.kind === 'wasm' && !/^(game-of-life|build\/(?:maxima|fricas|acl2|coalton|mcclim|lem))\//.test(artifact.file)],
     ['Standalone applications', artifact => artifact.kind === 'html'],
     ['Game of Life', artifact => artifact.file.startsWith('game-of-life/')],
     ['FriCAS', artifact => artifact.file === 'fricas/' || artifact.file.startsWith('build/fricas/')],
     ['Maxima', artifact => artifact.file === 'maxima/' || artifact.file.startsWith('build/maxima/')],
     [initializedAcl2 ? 'ACL2' : 'ACL2 (development preview)', artifact => artifact.file === 'acl2/' || artifact.file.startsWith('build/acl2/')],
     ['Coalton', artifact => artifact.file === 'coalton/' || artifact.file.startsWith('build/coalton/')],
+    ['LEM', artifact => artifact.file === 'lem/' || artifact.file.startsWith('build/lem/')],
     ['McCLIM', artifact => artifact.file === 'mcclim/' || artifact.file.startsWith('build/mcclim/')],
   ].filter(([, matches]) => report.artifacts.some(matches)).map(([title, matches]) => `<tbody><tr class="group"><th colspan="5" scope="rowgroup">${title}</th></tr>\n` +
     report.artifacts.filter(matches).map(row).join('\n') + '</tbody>').join('\n');
@@ -193,6 +208,7 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
     '@@ACL2@@': report.artifacts.some(artifact => artifact.file === 'acl2/')
       ? `<a href="acl2/">${initializedAcl2 ? 'ACL2' : 'ACL2 preview'}</a>` : '',
     '@@COALTON@@': report.artifacts.some(artifact => artifact.file === 'coalton/') ? '<a href="coalton/">Lisp + Coalton REPL</a>' : '',
+    '@@LEM@@': report.artifacts.some(artifact => artifact.file === 'lem/') ? '<a href="lem/">LEM Lisp editor</a>' : '',
     '@@MCCLIM@@': report.artifacts.some(artifact => artifact.file === 'mcclim/') ? '<a href="mcclim/">McCLIM</a>' : '',
     '@@REPL@@': escape(replPage), '@@JSON@@': escape(jsonPage)};
   const template = fs.readFileSync(new URL('./image-sizes.html', import.meta.url), 'utf8');
@@ -203,17 +219,20 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const directory = process.argv[2] ?? '.';
-  const output = process.argv[3] ?? path.join(directory, 'image-sizes.html');
+  const args = process.argv.slice(2), lemOnly = args[0] === '--lem';
+  if (lemOnly) args.shift();
+  const directory = args[0] ?? '.';
+  const output = args[1] ?? path.join(directory, 'image-sizes.html');
   if (!output.endsWith('.html')) throw new Error('Output filename must end in .html.');
   const json = output.slice(0, -5) + '.json';
   const runURL = process.env.GITHUB_RUN_ID && process.env.GITHUB_REPOSITORY
     ? `${process.env.GITHUB_SERVER_URL ?? 'https://github.com'}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}` : '';
   const report = collectImageSizes(directory, {commit: process.env.GITHUB_SHA, runURL,
-    ...(process.argv[5] ? {applicationDirectory: process.argv[5]} : {}),
-    ...(process.argv[6] ? {maximaDirectory: process.argv[6]} : {}),
-    ...(process.argv[7] ? {fricasDirectory: process.argv[7]} : {})});
-  const html = renderImageSizes(report, {replPage: process.argv[4] ?? 'miricl.html', jsonPage: path.basename(json)});
+    ...(lemOnly ? {selection: 'lem', ...(args[3] ? {lemDirectory: args[3]} : {})} : {
+      ...(args[3] ? {applicationDirectory: args[3]} : {}),
+      ...(args[4] ? {maximaDirectory: args[4]} : {}),
+      ...(args[5] ? {fricasDirectory: args[5]} : {})})});
+  const html = renderImageSizes(report, {replPage: args[2] ?? 'miricl.html', jsonPage: path.basename(json)});
   fs.mkdirSync(path.dirname(path.resolve(output)), {recursive: true});
   fs.writeFileSync(json, JSON.stringify(report, null, 2) + '\n');
   fs.writeFileSync(output, html);

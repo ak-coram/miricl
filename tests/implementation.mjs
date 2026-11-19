@@ -5,7 +5,7 @@
 // Hostless source evaluation uses miricl-interpreter.wasm beside IMAGE.wasm.
 const [image = 'miricl.wasm', wasi, ...extra] = process.argv.slice(2);
 if (extra.length) throw new Error('Expected [IMAGE.wasm] [WASI-REPL.wasm]');
-for (const name of ['transport', 'filesystem-archive', 'mounted-filesystem', 'dev-filesystem', 'hir-debugger', 'threads']) {
+for (const name of ['transport', 'filesystem-archive', 'mounted-filesystem', 'dev-filesystem', 'hir-debugger', 'threads', 'package-local-nicknames']) {
   console.log(`Implementation: ${name} (${image}${name === 'threads' && wasi ? `; ${wasi}` : ''})`);
   await import(`./implementation/${name}.mjs`);
 }

@@ -1,0 +1,16 @@
+From: miricl contributors
+Subject: [PATCH] Import the genuine optional MIRICL package-local nickname API
+
+--- a/uiop/package.lisp
++++ b/uiop/package.lisp
+@@ -80,8 +80,9 @@
+    #+(or clasp abcl ecl cmu) #:ext
+    #+ccl #:ccl
+    #+lispworks #:hcl
+-   #-(or allegro sbcl clasp abcl ccl lispworks ecl cmu)
++   #+miricl #:miricl-packages
++   #-(or miricl allegro sbcl clasp abcl ccl lispworks ecl cmu)
+    (error "Don't know from which package this lisp supplies the local-package-nicknames API.")
+    #:remove-package-local-nickname #:package-local-nicknames #:add-package-local-nickname)
+   (:export
+    #:add-package-local-nickname #:remove-package-local-nickname #:package-local-nicknames))

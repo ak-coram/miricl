@@ -63,6 +63,23 @@ try {
                   (eq (car default-values) (miricl-mop:class-default-initargs class))
                   (recover)))))))))`);
   console.log('Soundness: native MOP readers reject invalid calls with recovery and retain finalization callbacks, sharing and values.');
+  // MIRICL retains direct slot documentation; effective slots initially have
+  // no merged documentation but support explicit assignments through the GF.
+  evaluate(`(defclass soundness-slot-documentation ()
+    ((documented :documentation "Retained slot documentation") (undocumented))) (values)`);
+  check(`(let* ((class (find-class 'soundness-slot-documentation))
+      (direct (miricl-mop:class-direct-slots class))
+      (documented (find 'documented direct :key #'miricl-mop:slot-definition-name))
+      (undocumented (find 'undocumented direct :key #'miricl-mop:slot-definition-name))
+      (effective (find 'documented (miricl-mop:class-slots class)
+                      :key #'miricl-mop:slot-definition-name))
+      (reader (compile-native '(lambda (slot) (documentation slot t)))))
+    (and (equal (funcall reader documented) "Retained slot documentation")
+      (null (funcall reader undocumented)) (null (funcall reader effective))
+      (unwind-protect
+        (progn (setf (documentation effective t) "Assigned effective documentation")
+          (equal (funcall reader effective) "Assigned effective documentation"))
+        (setf (documentation effective t) nil))))`);
   // Unary runtime callbacks preserve complete method values and cleanup. Keep
   // dispatch class-only: EQL profiles deliberately retain ordinary dispatch.
   evaluate(`(defgeneric soundness-unary-callback (object))

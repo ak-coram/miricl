@@ -13,24 +13,30 @@ const section = (kind, bytes) => [kind, ...word(bytes.length), ...bytes];
 const body = instructions => {const bytes = [0, ...instructions, 0x0b]; return [...word(bytes.length), ...bytes];};
 const fixture = ({tagName = 'transfer', payload = false, catchIndex = 0} = {}) => {
   const throwing = [...(payload ? [0xd0, 0x6f] : []), 0x08, 0];
+  const comparisons = [...Array.from({length: 10}, (_, index) => [3, 0x46 + index]),
+    ...Array.from({length: 10}, (_, index) => [4, 0x51 + index])];
   return Uint8Array.from([
     0, 97, 115, 109, 1, 0, 0, 0,
-    ...section(1, [3, 0x60, 1, 0x6f, 1, 0x6f,
+    ...section(1, [6, 0x60, 1, 0x6f, 1, 0x6f,
       0x60, 2, 0x6f, 0x6f, 1, 0x6f,
-      0x60, payload ? 1 : 0, ...(payload ? [0x6f] : []), 0]),
+      0x60, payload ? 1 : 0, ...(payload ? [0x6f] : []), 0,
+      0x60, 2, 0x7f, 0x7f, 1, 0x7f, 0x60, 2, 0x7e, 0x7e, 1, 0x7f,
+      0x60, 1, 0x7f, 1, 0x7e]),
     // The tag sits between two function imports but occupies no function slot.
     ...section(2, [3, ...name('m'), ...name('before'), 0, 0,
       ...name('m'), ...name(tagName), 4, 0, 2,
       ...name('m'), ...name('after'), 0, 0]),
-    ...section(3, [2, 1, 1]),
+    ...section(3, [3 + comparisons.length, 1, 1, ...comparisons.map(([type]) => type), 5]),
     ...section(7, [1, ...name('entry'), 0, 3]),
-    ...section(10, [2,
+    ...section(10, [3 + comparisons.length,
       ...body([0x20, 0, 0x10, 0, 0x10, 1]),
       ...body([0x20, 1, 0xd1, 0x04, 0x40, ...throwing, 0x0b,
         0x02, payload ? 0x6f : 0x40,
         0x1f, 0x40, 1, 0, catchIndex, 0, ...throwing, 0x0b,
         ...(payload ? [0xd0, 0x6f] : []), 0x0b, ...(payload ? [0x1a] : []),
         0x20, 0, 0x20, 1, 0x10, 2]),
+      ...comparisons.flatMap(([, opcode]) => body([0x20, 0, 0x20, 1, opcode])),
+      ...body([0x20, 0, 0xad]),
     ]),
   ]);
 };
@@ -48,6 +54,7 @@ const check = bytes => {
     error => error instanceof WebAssembly.Exception && error.is(transfer));
   assert.deepEqual(events, ['before', 'after'], 'An uncaught transfer skips subsequent calls.');
   assert.equal(module.exports.entry(original, original), after, 'A caught call still works after propagation.');
+  return module.exports;
 };
 
 // The counter emitter uses immediate references, i32 steps and i64-valued
@@ -112,10 +119,36 @@ const checkCounters = bytes => {
 // Copies have repeated consumers, so keeping a value on the stack alone cannot
 // remove their traffic. Joins retain locals used after the first load; other
 // entries invalidate copy and join facts deliberately.
+const comparisonNames = ['eq', 'ne', 'lt_s', 'lt_u', 'gt_s', 'gt_u', 'le_s', 'le_u', 'ge_s', 'ge_u'];
+const wrappingConstants = [0n, -1n, 0x7fffffffn, 0x80000000n, 0xffffffffn,
+  0x100000000n, -0x100000001n, -(1n << 63n), (1n << 63n) - 1n];
 const optimizerFixture = `(module
   (type $box (struct (field i32)))
   (import "m" "hook" (func $hook (param externref) (result externref)))
   (import "m" "fail" (func $fail))
+  (import "m" "i32-hook" (func $i32-hook (param i32) (result i32)))
+  (import "m" "i64-hook" (func $i64-hook (param i64) (result i64)))
+  ${wrappingConstants.map((value, index) => `(func (export "wrap-${index}") (result i32)
+    i64.const ${value} i32.wrap_i64)`).join('\n')}
+  ${['i32', 'i64'].flatMap(type => comparisonNames.map(name => `
+    (func (export "negate-${type}-${name}") (param ${type} ${type}) (result i32)
+      local.get 0 call $${type}-hook local.get 1 call $${type}-hook ${type}.${name} i32.eqz)`)).join('\n')}
+  (func (export "extend-signed") (param i32) (result i32)
+    local.get 0 call $i32-hook i64.extend_i32_s i32.wrap_i64)
+  (func (export "extend-unsigned") (param i32) (result i32)
+    local.get 0 call $i32-hook i64.extend_i32_u i32.wrap_i64)
+  (func (export "truth-if") (param i32) (result i32)
+    local.get 0 i32.eqz i32.eqz if (result i32) i32.const 17 else i32.const 29 end)
+  (func (export "truth-branch") (param i32) (result i32)
+    block $done (result i32)
+      i32.const 17 local.get 0 i32.eqz i32.eqz br_if $done drop i32.const 29
+    end)
+  (func (export "truth-value") (param i32) (result i32)
+    local.get 0 i32.eqz i32.eqz)
+  (func (export "negate-float-lt") (param f64 f64) (result i32)
+    local.get 0 local.get 1 f64.lt i32.eqz)
+  (func (export "trapping-comparison") (param i32 i32) (result i32)
+    i32.const 17 local.get 0 i32.div_s local.get 1 i32.eq i32.eqz)
   (func (export "copies") (param externref externref) (result externref externref)
     (local externref)
     local.get 0 local.set 2 local.get 2 local.get 2)
@@ -242,6 +275,8 @@ const checkOptimized = bytes => {
   const failure = new Error('optimizer callback'), events = [];
   let reenter = true, throwing = false, entries;
   entries = new WebAssembly.Instance(new WebAssembly.Module(bytes), {m: {
+    'i32-hook'(value) {events.push(value); if (throwing) throw failure; return value;},
+    'i64-hook'(value) {events.push(value); if (throwing) throw failure; return value;},
     hook(value) {
       events.push(value);
       if (throwing) throw failure;
@@ -254,6 +289,51 @@ const checkOptimized = bytes => {
     },
     fail() {throw failure;},
   }}).exports;
+  wrappingConstants.forEach((value, index) =>
+    assert.equal(entries[`wrap-${index}`](), Number(BigInt.asIntN(32, value))));
+  const compare = (name, left, right, width) => {
+    if (name.endsWith('_u')) {
+      left = BigInt.asUintN(width, BigInt(left)); right = BigInt.asUintN(width, BigInt(right));
+    }
+    switch (name.split('_')[0]) {
+      case 'eq': return left === right;
+      case 'ne': return left !== right;
+      case 'lt': return left < right;
+      case 'gt': return left > right;
+      case 'le': return left <= right;
+      case 'ge': return left >= right;
+    }
+    throw new Error('Unknown comparison');
+  };
+  for (const [type, width, inputs] of [
+    ['i32', 32, [-2147483648, -1, 0, 1, 2, 2147483647]],
+    ['i64', 64, [-(1n << 63n), -1n, 0n, 1n, 2n, (1n << 63n) - 1n]],
+  ]) {
+    for (const name of comparisonNames) for (const left of inputs) for (const right of inputs) {
+      events.length = 0;
+      assert.equal(entries[`negate-${type}-${name}`](left, right), Number(!compare(name, left, right, width)));
+      assert.deepEqual(events, [left, right], 'Comparison operands retain their callback order.');
+    }
+    throwing = true; events.length = 0;
+    assert.throws(() => entries[`negate-${type}-eq`](inputs[0], inputs[1]), error => error === failure);
+    assert.deepEqual(events, [inputs[0]], 'A failing operand skips the later callback.');
+    throwing = false;
+  }
+  for (const input of [-2147483648, -1, 0, 1, 2, 2147483647]) {
+    assert.equal(entries['truth-if'](input), input ? 17 : 29);
+    assert.equal(entries['truth-branch'](input), input ? 17 : 29);
+    assert.equal(entries['truth-value'](input), Number(input !== 0), 'A value context retains boolean normalization.');
+    for (const kind of ['signed', 'unsigned']) {
+      events.length = 0;
+      assert.equal(entries[`extend-${kind}`](input), input);
+      assert.deepEqual(events, [input]);
+    }
+  }
+  for (const left of [NaN, -Infinity, -0, 0, Infinity]) for (const right of [NaN, -1, 0, 1])
+    assert.equal(entries['negate-float-lt'](left, right), Number(!(left < right)));
+  assert.throws(() => entries['trapping-comparison'](0, 17), WebAssembly.RuntimeError);
+  assert.equal(entries['trapping-comparison'](1, 17), 0, 'Comparison remains usable after an operand trap.');
+  events.length = 0;
   assert.deepEqual(entries.copies(original, replacement), [original, original]);
   assert.deepEqual(entries['source-write'](original, replacement), [original, replacement]);
   assert.deepEqual(entries['copy-write'](original, replacement), [replacement, replacement]);
@@ -352,7 +432,7 @@ if (mode === 'prepare') {
     assert.equal(WebAssembly.validate(malformed), valid);
     assert.throws(() => linkNativeModules([malformed]), reason);
   }
-  const {wat, entries} = linkNativeModules([bytes]);
+  const {wat, entries, declarations} = linkNativeModules([bytes]);
   await fs.writeFile(pathname, `(module
     (type $native-entry (func (param externref externref) (result externref)))
     (type $native-direct-entry (func (param externref externref externref externref externref) (result externref)))
@@ -360,10 +440,26 @@ if (mode === 'prepare') {
     (import "m" "transfer" (tag $transfer))
     (import "m" "after" (func $native-after (param externref) (result externref)))
     ${wat}
-    (export "entry" (func ${entries[0]})))`);
+    (export "entry" (func ${entries[0]}))
+    ${declarations.slice(2).map((declaration, index) => `(export "numeric-${index}" (func ${declaration}))`).join('\n')})`);
   console.log('Native module linker: original transfer behavior and malformed-input rejection pass.');
 } else if (mode === 'verify') {
-  check(await fs.readFile(pathname));
+  const entries = check(await fs.readFile(pathname));
+  for (const [type, inputs] of [['i32', [-2147483648, -1, 0, 1, 2147483647]],
+    ['i64', [-(1n << 63n), -1n, 0n, 1n, (1n << 63n) - 1n]]]) {
+    for (const [index, relation] of comparisonNames.entries()) for (let left of inputs) for (let right of inputs) {
+      const actual = entries[`numeric-${(type === 'i32' ? 0 : comparisonNames.length) + index}`](left, right);
+      if (relation.endsWith('_u')) {
+        const width = type === 'i32' ? 32 : 64;
+        left = BigInt.asUintN(width, BigInt(left)); right = BigInt.asUintN(width, BigInt(right));
+      }
+      const expected = {eq: left === right, ne: left !== right, lt: left < right,
+        gt: left > right, le: left <= right, ge: left >= right}[relation.split('_')[0]];
+      assert.equal(actual, Number(expected));
+    }
+  }
+  for (const input of [-2147483648, -1, 0, 1, 2147483647])
+    assert.equal(entries[`numeric-${comparisonNames.length * 2}`](input), BigInt(input >>> 0));
   console.log('Native module linker: linked catches, propagation, function calls and recovery pass.');
 } else if (mode === 'prepare-counters') {
   await fs.writeFile(pathname, counterFixture);

@@ -148,6 +148,10 @@ builds and compiler bootstraps. Keep persistent REPLs and reuse compiled
 payloads for fast iteration. Idle REPLs are not active workloads; do not
 close them or reload reusable state merely to reduce process counts.
 
+Do not impose explicit process memory or heap limits in CI workflows or build tools
+invoked by CI. Use the CI runner and runtime defaults. Keep local shared-machine
+resource checks and optional caps separate from CI configuration.
+
 Keep the default precompiled browser image below 1 MiB (1,048,576 raw bytes). Track raw
 and compressed sizes separately; download compression does not replace this
 size budget. Preserve the compiler-free image for lightweight scripting.

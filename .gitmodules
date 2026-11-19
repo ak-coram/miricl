@@ -40,3 +40,99 @@
 [submodule "mcclim/deps/cl-who"]
 	path = mcclim/deps/cl-who
 	url = https://github.com/edicl/cl-who.git
+[submodule "lem/deps/micros"]
+	path = lem/deps/micros
+	url = https://github.com/lem-project/micros.git
+[submodule "vendor/lem"]
+	path = vendor/lem
+	url = https://github.com/lem-project/lem
+[submodule "lem/deps/lem-mailbox"]
+	path = lem/deps/lem-mailbox
+	url = https://github.com/lem-project/lem-mailbox.git
+[submodule "lem/deps/iterate"]
+	path = lem/deps/iterate
+	url = https://gitlab.common-lisp.net/iterate/iterate.git
+[submodule "lem/deps/trivia"]
+	path = lem/deps/trivia
+	url = https://github.com/guicho271828/trivia.git
+[submodule "lem/deps/babel"]
+	path = lem/deps/babel
+	url = https://github.com/cl-babel/babel.git
+[submodule "lem/deps/str"]
+	path = lem/deps/str
+	url = https://github.com/vindarel/cl-str.git
+[submodule "lem/deps/log4cl"]
+	path = lem/deps/log4cl
+	url = https://github.com/sharplispers/log4cl.git
+[submodule "lem/deps/type-i"]
+	path = lem/deps/type-i
+	url = https://github.com/guicho271828/type-i.git
+[submodule "lem/deps/introspect-environment"]
+	path = lem/deps/introspect-environment
+	url = https://github.com/Bike/introspect-environment.git
+[submodule "lem/deps/lisp-namespace"]
+	path = lem/deps/lisp-namespace
+	url = https://github.com/guicho271828/lisp-namespace.git
+[submodule "lem/deps/trivial-cltl2"]
+	path = lem/deps/trivial-cltl2
+	url = https://github.com/Zulu-Inuoe/trivial-cltl2.git
+[submodule "lem/deps/trivial-features"]
+	path = lem/deps/trivial-features
+	url = https://github.com/trivial-features/trivial-features
+[submodule "lem/deps/cl-change-case"]
+	path = lem/deps/cl-change-case
+	url = https://github.com/rudolfochrist/cl-change-case.git
+[submodule "lem/deps/cl-unicode"]
+	path = lem/deps/cl-unicode
+	url = https://github.com/edicl/cl-unicode.git
+[submodule "lem/deps/bordeaux-threads"]
+	path = lem/deps/bordeaux-threads
+	url = https://github.com/sionescu/bordeaux-threads.git
+[submodule "lem/deps/global-vars"]
+	path = lem/deps/global-vars
+	url = https://github.com/lmj/global-vars.git
+[submodule "lem/deps/trivial-garbage"]
+	path = lem/deps/trivial-garbage
+	url = https://github.com/trivial-garbage/trivial-garbage.git
+[submodule "lem/deps/trivial-gray-streams"]
+	path = lem/deps/trivial-gray-streams
+	url = https://github.com/trivial-gray-streams/trivial-gray-streams.git
+[submodule "lem/deps/flexi-streams"]
+	path = lem/deps/flexi-streams
+	url = https://github.com/edicl/flexi-streams.git
+[submodule "vendor/sly"]
+	path = vendor/sly
+	url = https://github.com/joaotavora/sly.git
+[submodule "vendor/slime"]
+	path = vendor/slime
+	url = https://github.com/slime/slime.git
+[submodule "lem/deps/trivial-types"]
+	path = lem/deps/trivial-types
+	url = https://github.com/m2ym/trivial-types.git
+[submodule "lem/deps/inquisitor"]
+	path = lem/deps/inquisitor
+	url = https://github.com/t-sin/inquisitor.git
+[submodule "lem/deps/anaphora"]
+	path = lem/deps/anaphora
+	url = https://github.com/spwhitton/anaphora.git
+[submodule "lem/deps/yason"]
+	path = lem/deps/yason
+	url = https://github.com/phmarek/yason.git
+[submodule "lem/deps/split-sequence"]
+	path = lem/deps/split-sequence
+	url = https://github.com/sharplispers/split-sequence.git
+[submodule "lem/deps/bt-semaphore"]
+	path = lem/deps/bt-semaphore
+	url = https://github.com/rmoritz/bt-semaphore.git
+[submodule "lem/deps/queues"]
+	path = lem/deps/queues
+	url = https://github.com/oconnore/queues.git
+[submodule "lem/deps/quri"]
+	path = lem/deps/quri
+	url = https://github.com/fukamachi/quri.git
+[submodule "lem/deps/idna"]
+	path = lem/deps/idna
+	url = https://github.com/antifuchs/idna.git
+[submodule "lem/deps/cl-utilities"]
+	path = lem/deps/cl-utilities
+	url = https://github.com/Publitechs/cl-utilities.git

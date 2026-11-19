@@ -20,7 +20,7 @@
 Miricl is a Common Lisp implementation for browsers, Node.js and
 Wasmtime, with an interactive interpreter, a self-hosted native Wasm
 compiler, and a whole-program optimizer. Try the [[https://ak-coram.github.io/miricl/][browser REPL]], [[https://ak-coram.github.io/miricl/game-of-life/][Game of
-Life]], [[https://ak-coram.github.io/miricl/maxima/][Maxima]], [[https://ak-coram.github.io/miricl/fricas/][FriCAS]], [[https://ak-coram.github.io/miricl/acl2/][ACL2]], [[https://ak-coram.github.io/miricl/coalton/][Coalton]] or [[https://ak-coram.github.io/miricl/mcclim/][McCLIM demonstrations]].
+Life]], [[https://ak-coram.github.io/miricl/maxima/][Maxima]], [[https://ak-coram.github.io/miricl/fricas/][FriCAS]], [[https://ak-coram.github.io/miricl/acl2/][ACL2]], [[https://ak-coram.github.io/miricl/coalton/][Coalton]], [[https://ak-coram.github.io/miricl/mcclim/][McCLIM demonstrations]] or [[https://ak-coram.github.io/miricl/lem/][LEM Lisp editor]].
 [[https://ak-coram.github.io/miricl/compiler-statistics.html][Compiler and prover statistics]] cover the runtime and application builds.
 
 The runtime implements CLOS, conditions and restarts, packages,
@@ -114,6 +114,14 @@ and =miricl-repl.wasm=, the WASI 0.3 terminal
 REPL and development command. The adapter and WASI command provide the
 development bridge.  It also writes =miricl.js= and the optional
 =miricl-asdf.wasm=.
+
+CI caches the complete matching runtime distribution and optional ASDF library
+under an exact compiler/runtime source, adapter, ASDF pin/patch and host tool/
+dependency key. An application-only edit reuses those images. Cache hits verify
+the output digests and raw compiler size budget, regenerate current standalone
+pages from the explicit images, and run the ordinary checks. A miss keeps the
+interpreted guest bootstrap followed by native compiler compilation. Cached
+statistics report reuse without invented current-run compiler counters.
 
 The default =miricl.wasm= avoids first-use compiler bootstrapping. Its native compiler
 and runtime receive the shared size optimizations during the build; no
@@ -289,6 +297,23 @@ This applies =patches/asdf/series= to a source copy under
 submodule stays clean; a failed patch stops the build. The
 distribution already includes this optional file; ASDF is not included
 in the base interpreter images.
+
+The optional library also installs =MIRICL-PACKAGES:PACKAGE-LOCAL-NICKNAMES=,
+=ADD-PACKAGE-LOCAL-NICKNAME= and =REMOVE-PACKAGE-LOCAL-NICKNAME= and advertises
+=:PACKAGE-LOCAL-NICKNAMES=. The standalone source
+=compatibility/package-local-nicknames.lisp= can be loaded without ASDF.
+Names belong to their owner package and affect =FIND-PACKAGE= and qualified
+reader syntax. Queries return detached alists, including copied name strings.
+Adding an existing name for the same target is harmless; a different target
+signals =PACKAGE-ERROR=. Remove returns whether the name was present. These
+operations accept package designators and string designators for names;
+package designators follow the current package's local lookup rules.
+Native =DEFPACKAGE :LOCAL-NICKNAMES= resolves its targets globally and merges
+nonconflicting mappings after validating all pairs. UIOP =DEFINE-PACKAGE=
+replaces the owner's mappings with its declaration. Global names can be
+shadowed locally; readable symbol printing selects a prefix that resolves to
+the actual home package, or signals =PRINT-NOT-READABLE= if none exists.
+This extension does not provide SBCL's nickname-conflict restarts.
 
 With the application directory served by the dev server and ={dev:
 true}= in the browser, load ASDF and your application's system from
