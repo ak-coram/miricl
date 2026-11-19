@@ -1818,6 +1818,76 @@ try {
         (eq (first snapshot) object) (null (second snapshot))
         ${count === 3 ? '(null (third snapshot))' : 't'}))`);
   }
+  // Ordinary DEBUG 1 entries retain their own frame contract while adapting
+  // exact private results. Exercise both lexical call shapes and escaped
+  // entries, including live named dispatch after the original entry is warm.
+  for (const count of [2, 3]) {
+    check(`(let* ((factory (compile-native '(lambda (mode capture x)
+          (declare (optimize (debug 1)))
+          (flet ((worker (y) (values capture y ${count === 3 ? 'nil' : ''})))
+            (declare (notinline worker))
+            (case mode
+              (:escape #'worker)
+              (:list (multiple-value-list (worker x)))
+              (otherwise (worker x)))))))
+        (unknown (compile-native '(lambda (function x)
+          (declare (optimize (debug 1))) (funcall function x))))
+        (named (compile-native '(lambda (x)
+          (declare (optimize (debug 1))) (soundness-normal-tuple x))))
+        (object (list :identity)) (snapshot nil))
+      (unwind-protect
+        (and
+          (loop for entry in (list (list object nil) (list nil object) (list nil nil)) always
+            (let* ((capture (first entry)) (x (second entry))
+                   (expected (list capture x ${count === 3 ? 'nil' : ''}))
+                   (worker (funcall factory :escape capture nil)))
+              (setf (symbol-function 'soundness-normal-tuple) worker)
+              (dotimes (i 8) (funcall named x))
+              (let ((result (multiple-value-list (funcall named x))))
+                (unless snapshot (setq snapshot result))
+                (and (equal result expected)
+                  (equal (multiple-value-list (funcall unknown worker x)) expected)
+                  (equal (multiple-value-list (funcall factory :tail capture x)) expected)
+                  (equal (funcall factory :list capture x) expected)))))
+          (eq (first snapshot) object) (null (second snapshot))
+          ${count === 3 ? '(null (third snapshot))' : 't'}
+          (loop for replacement in
+              (list (compile-native '(lambda (x) (declare (ignore x)) (values)))
+                    (compile-native '(lambda (x) (declare (ignore x)) (values nil)))
+                    (compile-native '(lambda (x) (values x nil :third :fourth :fifth))))
+                for expected in '(nil (nil) (:changed nil :third :fourth :fifth)) always
+            (progn (setf (symbol-function 'soundness-normal-tuple) replacement)
+              (equal (multiple-value-list (funcall named :changed)) expected))))
+        (fmakunbound 'soundness-normal-tuple)))`);
+  }
+  // A checked secondary result fails inside the retained named leaf, before
+  // any result group is committed. Cleanup still sees its dynamic scope and
+  // the same entry remains usable after unwinding across the host boundary.
+  evaluate(`(defvar *soundness-normal-scope* :outside)
+    (defvar *soundness-normal-cleanup* nil)
+    (setf (symbol-function 'soundness-normal-checked)
+      (compile-native '(lambda (x)
+        (declare (inline car) (optimize (debug 1) (safety 1)))
+        (values nil (car x) nil)) :name 'soundness-normal-checked))
+    (setf (symbol-function 'soundness-normal-cleanup-call)
+      (compile-native '(lambda (x)
+        (declare (optimize (debug 1)))
+        (let ((*soundness-normal-scope* :inside))
+          (unwind-protect (soundness-normal-checked x)
+            (push *soundness-normal-scope* *soundness-normal-cleanup*)))))) (values)`);
+  try {
+    assert.throws(() => evaluate('(soundness-normal-cleanup-call :invalid)'), error =>
+      /SOUNDNESS-NORMAL-CHECKED/.test(error.backtrace ?? ''));
+    check(`(and (eq *soundness-normal-scope* :outside)
+      (equal *soundness-normal-cleanup* '(:inside))
+      (equal (multiple-value-list (soundness-normal-cleanup-call '(17))) '(nil 17 nil))
+      (equal *soundness-normal-cleanup* '(:inside :inside))
+      (eq *soundness-normal-scope* :outside))`);
+  } finally {
+    evaluate("(fmakunbound 'soundness-normal-checked) (fmakunbound 'soundness-normal-cleanup-call) (values)");
+  }
+  console.log('Soundness: ordinary tuple entries retain complete values, live bindings, checked leaf frames and dynamic cleanup.');
+
   // Mixed targets, unknown ingress and a captured mutable function variable
   // must retain general dispatch and the replacement's complete return group.
   for (const selection of [

@@ -439,6 +439,56 @@ try {
   }
   console.log('Optimizations: executable scalar comparison proofs retain checked producers, operand effects and multiple values.');
 
+  define('optimization-counter-snapshots', `(lambda (initial count)
+    (declare (type (integer 0 32) count)
+      (optimize (speed 1) (space 3) (safety 1) (debug 1)))
+    (let ((value initial) (previous initial))
+      (dotimes (i count)
+        (setq previous value)
+        (setq value (1+ value)))
+      (values initial previous value :fourth nil :sixth :seventh :eighth :ninth)))`);
+  check('private counter snapshots survive writes and full-value returns', `(and
+    (loop for initial in '(0 1073741823 -1073741825 1099511627776
+                           9223372036854775807 -9223372036854775809 3/2 2.5 #C(1 2))
+      always (loop for count in '(0 1 2 32) always
+        (equal (multiple-value-list (optimization-counter-snapshots initial count))
+          (list initial (+ initial (max 0 (1- count))) (+ initial count)
+            :fourth nil :sixth :seventh :eighth :ninth))))
+    (let ((object (list :original)))
+      (eq (nth-value 2 (optimization-counter-snapshots object 0)) object))
+    (handler-case (progn (optimization-counter-snapshots :bad 1) nil)
+      (type-error () t))
+    (= (nth-value 2 (optimization-counter-snapshots 7 2)) 9))`);
+  define('optimization-counter-capture', `(lambda (value)
+    (declare (optimize (speed 1) (space 3) (safety 1) (debug 1)))
+    (let ((reader (lambda () value)))
+      (setq value (1+ value))
+      (values (funcall reader) reader)))`);
+  check('evolving counters retain shared captured state', `(multiple-value-bind (value reader)
+    (optimization-counter-capture 1099511627776)
+    (and (= value 1099511627777) (= (funcall reader) value)))`);
+  for (const [index, operator] of ['<', '>', '<=', '>=', '=', '/='].entries()) {
+    const name = `optimization-counter-predicate-${index}`;
+    define(name, `(lambda (value limit effects)
+      (declare (optimize (speed 1) (space 3) (safety 1) (debug 1)))
+      (push :body (car effects))
+      (setq value (1+ value))
+      (values (if (not (null (not (${operator} value limit)))) :yes :no) value))`);
+    check('counter predicate polarity preserves promotion, checked errors and recovery', `(and
+      (loop for pair in '((0 1) (1073741823 1073741824)
+                         (1099511627776 1099511627778)
+                         (9223372036854775807 9223372036854775808) (3/2 2) (2.5 4))
+        always (let* ((value (first pair)) (limit (second pair)) (effects (list nil)))
+          (and (equal (multiple-value-list (${name} value limit effects))
+                 (list (if (not (${operator} (1+ value) limit)) :yes :no) (1+ value)))
+            (equal (car effects) '(:body)))))
+      (let ((effects (list nil)))
+        (and (handler-case (progn (${name} 0 :bad effects) nil) (type-error () t))
+          (equal (car effects) '(:body))))
+      (equal (multiple-value-list (${name} 0 2 (list nil)))
+        (list (if (not (${operator} 1 2)) :yes :no) 1)))`);
+  }
+
   // Declared hot paths deliberately exercise inlining and scalar lowering.
   // The assertions concern legal input, effects and values, not a prescribed
   // lowering strategy or the optimizer's private representation.

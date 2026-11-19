@@ -192,6 +192,29 @@
       (fixture "integer-result-join" nil
         '((0 7 23 41 17 :ordinary) (0 7 31 43 29 :ordinary)
           (0 -1 23 41 :transfer :ordinary) (0 7 31 43 29 :ordinary)) nil worker))
+    ;; Tiered integer workers retain nullable i31 locals and test their
+    ;; physical representation. Preserve both the initialized and null paths
+    ;; when adapting external references into the runtime's raw reference ABI.
+    (let* ((bytes (miricl-compiler::optimize-wasm-module
+                   (wasmtime:wat-to-wasm
+"(module
+ (import \"m\" \"call3\" (func $callback (param externref externref externref externref) (result externref)))
+ (import \"m\" \"int64\" (func $integer (param i64) (result externref)))
+ (func (export \"entry\") (param externref externref externref externref externref) (result externref)
+   (local (ref null i31))
+   local.get 3 any.convert_extern ref.cast (ref i31) i31.get_s i32.const 23 i32.eq
+   if i32.const 17 ref.i31 local.set 5 end
+   local.get 1 local.get 2
+   local.get 5 ref.test (ref i31)
+   if (result i64)
+     local.get 5 ref.cast (ref i31) i31.get_s i64.extend_i32_s
+   else i64.const 29 end
+   call $integer local.get 4 call $callback))")))
+           (worker (miricl-cross::kernel-worker-wat bytes
+                     (miricl-cross::kernel-export-index bytes "entry") "$entry" 4 :object nil)))
+      (fixture "i31-local-test" nil
+        '((0 7 23 41 17 :ordinary) (0 7 31 43 29 :ordinary)
+          (0 -1 23 41 :transfer :ordinary) (0 7 23 41 17 :ordinary)) nil worker))
     ;; A positive type index can have the same decoded integer as an abstract
     ;; reference type byte. Its longer signed-LEB encoding still selects the
     ;; function type, whose scalar result must survive listing and adaptation.

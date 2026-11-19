@@ -182,20 +182,29 @@ plans. Public and escaping entries retain complete values.
 
 Result-count proofs independently distinguish zero values from one NIL. Executable VALUES,
 copies, equal-count joins and proved closed calls can give exact counts; FTYPE cannot.
-Eligible DEBUG 0 fixed-arity callees with a proved small result tuple and actual closed
-consumers can use native multiple-result workers. Primary/full/tail/join consumers use
-component locals; ordinary boundaries pack values. Failed signature-preserving rewriting falls
-back. General primary/discard calls use =native-primary-call= and clear secondary state after
+Eligible fixed-arity bodies with a proved two- or three-value result tuple can use private
+native multiple-result workers at ordinary DEBUG 1, including exported entries and methods.
+Their scalar adapters call the tuple body under the ordinary runtime entry's Lisp frame and
+dynamic cleanup, then commit the exact value count and secondary slots through shared runtime
+helpers. The public and raw kernel ABIs remain scalar. Own-body tuple eligibility does not
+authorize bypassing ordinary dispatch or omitting a frame. Primary/full/tail/join consumers use
+component locals where their actual lowering supplies tuples; ordinary calls retain scalar
+adapters. Failed signature-preserving rewriting falls back for the whole emission. General
+primary/discard calls use =native-primary-call= and clear secondary state after
 success; full consumers retain =native-call= .
 
-Frame-omission certificates for exact two-to-four-value workers grow from eligible leaves
+Separate DEBUG 0 frame-omission certificates for exact two-to-four-value workers grow from eligible leaves
 through closed forwarding calls. Each nonprimitive call must have proved callee identity and
 matching fixed arity, and target an already certified tuple worker. These calls lower before
 tail-frame setup, so an omitted forwarder frame cannot replace its caller's retained frame.
 The planner starts with a fresh table for each emission and bounds both individual body scans
 and aggregate repeated work. Recursive dependencies cannot seed a certificate; unknown
 callees, exhausted work and bodies with dynamic state or captured exits retain ordinary
-lowering. This admission does not apply to open named calls or relax DEBUG contracts.
+lowering. Ordinary tuple bodies can use this certified subset but cannot seed frame-omission
+proofs. Open named calls still resolve live bindings, and tail calls to an uncertified tuple
+body use its scalar adapter. Current body admission excludes dynamic state and arbitrary calls;
+emissions containing DEBUG 2 or higher and host-linked closed kernels retain scalar lowering.
+These are lowering limits, and tuple admission does not change DEBUG or optimization policy.
 
 Direct closed calls and frame omission require the applicable effect/debug contract. Dynamic
 state, cleanup, captured exits and unknown calls retain ordinary dispatch. Global calls
@@ -243,7 +252,12 @@ Overflow, large shifts, division traps and infinite two's-complement semantics r
 checks or general helpers. Private numeric cells require proofs for every write and no
 capture/escape; reads keep SSA snapshots. Logical checked-producer provenance establishes
 scalar extraction, not a physical i31 representation, including restored boxed small integers.
-Predicates can feed branches directly; bounded reuse
+Predicates can feed branches directly. A bounded same-block, single-use suffix
+folds canonical NOT/NULL calls into branch polarity. One active plan controls
+operand liveness, exact call suppression and condition emission. Potentially
+signaling ordered comparisons move to the terminator only when both successors
+are forward edges, preserving their error position before backedge polling.
+Observed predicate results retain ordinary Lisp booleans. Bounded reuse
 and loop motion require stable operands and nontrapping canonical operations. Typed
 list/vector operations retain safety, definition and boundary contracts; LIST/LIST* preserve
 fresh spines and operand order. APPLY/MVC binding rewrites check proper lists and arity before
@@ -260,8 +274,10 @@ the checked comparison helper. This comparison plan preserves producer evaluatio
 returns one ordinary Lisp value, and does not enable raw cells, branch fusion or loop motion.
 
 At SAFETY 1 and DEBUG below 2, binary addition/subtraction and unary 1+/1- can use
-i32 arithmetic when fresh, declaration-independent inference bounds both operands and the
-computed result within signed i32. The result proof comes from operand facts rather than
+i64 arithmetic when fresh, declaration-independent inference bounds both operands and the
+computed result within signed i64. When both operand bounds and the result bound
+fit signed i32, emission uses i32 arithmetic followed by signed extension.
+The result proof comes from operand facts rather than
 an asserted output type. Existing mixed inference first filters out operands or results
 whose ranges cannot support this plan; only the fresh declaration-independent query grants
 the proof. Arithmetic candidates are collected during ordinary primitive planning.
@@ -276,7 +292,7 @@ unknown or exhausted selection retains the checked call. Operand producers stay 
 and each selected operation retains its scheduling poll at the original call site, including
 unused results. These plans do not participate in loop motion. Objects use the scalar
 extractor before wrapping, independently of a proved i31 range.
-Intermediate SSA results share the existing raw i64 locals after signed extension, allowing
+Intermediate SSA results share the existing raw i64 locals, allowing
 arithmetic chains to avoid intermediate boxes. Reference consumers retain the i64 tier
 when boxing computed results, independently of the proved result width.
 Private cell storage and loop induction require their separate existing proofs.
@@ -294,13 +310,37 @@ DEBUG and captured landing entries retain their existing storage restrictions.
 Reads receive independent SSA snapshots, and generic uses materialize integers
 through the i64 boxing path. Mathematical ranges do not license
 i31 extraction from an arbitrary integer object.
+
+Private canonical 1+/1- counters without an existing raw plan can instead use
+emitter-owned physical storage with immediate, signed-i64 and generic tiers.
+Entry classification checks actual representation without signaling; it supplies
+no logical type proof. A bounded full-function operand audit rejects captured or
+escaping cells, unsupported stores and overlapping raw plans. Accepted reads
+retain independent snapshots across writes, including COPY/PRIMARY aliases.
+Small arithmetic widens at immediate endpoints, signed-i64 arithmetic promotes
+through checked helpers, and generic arithmetic retains ordinary numeric behavior.
+Unary calls and backedges retain their scheduling checkpoints. Calls and returns
+materialize temporary ABI references; zero-trip reads retain the original object.
+Comparisons consume native snapshots when both operands have scalar integer
+storage, otherwise retaining the checked numeric helper. Planner exhaustion
+discards the whole physical-storage plan. DEBUG 2 and captured landing entries
+retain ordinary storage. The separate storage and comparison scratch budgets
+bound local growth. These physical counters retain wide storage after arithmetic
+within signed i64; generic results are reclassified.
+
+Outside those counter plans, guarded canonical 1+/1- and proven integer binary
++/- with literal one use immediate arithmetic only after checking actual i31
+representation and the directional endpoint. Other values retain the original
+worker. Ordered comparison guards similarly preserve general real-number
+semantics. Existing proven raw arithmetic takes precedence over these guards.
 The =hir-inline-result-type= LENGTH rules cover vectors, including sized simple vectors;
 they do not infer list lengths or relate a changing list cursor to a loop counter.
 Such relationships require facts valid under aliases, writes and calls that can mutate
 the list spine, in addition to proper-list validation.
 Opt-in =WITH-COMPILATION-STATISTICS= records accepted plans as
-=:proof/integer-arithmetic-i32= and emitted lowerings as
-=:optimization/integer-arithmetic-i32=, with the arithmetic operator as detail.
+=:proof/integer-arithmetic-i32= or =:proof/integer-arithmetic-i64= and emitted
+lowerings as =:optimization/integer-arithmetic-i32= or
+=:optimization/integer-arithmetic-i64=, with the arithmetic operator as detail.
 These count compilation events rather than unique sites or runtime executions.
 
 Acyclic regions use forward structure; proved reducible natural loops use Wasm loops.

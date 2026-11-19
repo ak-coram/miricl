@@ -674,8 +674,10 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
       (dotimes (i (miricl-compiler::module-uleb input))
         (let ((count (miricl-compiler::module-uleb input))
               (type (miricl-compiler::module-byte input)))
-          (unless (member type '(#x7f #x7e #x6f)) (error "Unsupported runtime local type: ~D." type))
-          (dotimes (j count) (push (case type (#x7f "i32") (#x7e "i64") (otherwise "(ref null eq)")) locals))))
+          (unless (member type '(#x7f #x7e #x6f #x6c)) (error "Unsupported runtime local type: ~D." type))
+          (dotimes (j count)
+            (push (case type (#x7f "i32") (#x7e "i64")
+                             (#x6c "(ref null i31)") (otherwise "(ref null eq)")) locals))))
       (multiple-value-bind (literal-replacements literal-skips flow-ops)
           (kernel-literal-plan ops imports literals)
       ;; An entry has no closure object or padded arguments. Prove those
@@ -959,9 +961,11 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                  (#x1c (write-line "ref.i31" out))
                  (#x1d (write-line "i31.get_s" out))
                  (#x14
-                  (unless (= (miricl-compiler::native-read-sleb body position) 1)
-                    (error "Unsupported runtime heap type test."))
-                  (write-line "ref.test (ref $obj)" out))
+                  (let ((type (miricl-compiler::native-read-sleb body position)))
+                    (case type
+                      (1 (write-line "ref.test (ref $obj)" out))
+                      (-20 (write-line "ref.test (ref i31)" out))
+                      (otherwise (error "Unsupported runtime heap type test: ~D." type)))))
                  ((2 5) (let ((type nil) (field nil))
                       (multiple-value-setq (type position) (miricl-compiler::native-read-uleb body position))
                       (multiple-value-setq (field position) (miricl-compiler::native-read-uleb body position))

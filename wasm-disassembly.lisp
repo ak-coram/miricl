@@ -22,7 +22,7 @@
                        (format nil "(ref ~A~D)" (if (= type #x63) "null " "") heap))
                      (or (cdr (assoc type '((#x7f . "i32") (#x7e . "i64") (#x7d . "f32")
                                            (#x7c . "f64") (#x6f . "externref") (#x70 . "funcref")
-                                           (#x6d . "eqref"))))
+                                           (#x6d . "eqref") (#x6c . "i31ref"))))
                          (format nil "type-~X" type)))))
              (field () (value-type) (incf position))
              (type-definition ()
@@ -167,7 +167,7 @@
           (setq type (aref body position)) (incf position)
           (when (plusp count)
             (format t "  ;; locals ~D..~D: ~D x ~A~%" local (+ local count -1) count
-              (case type (#x7f "i32") (#x7e "i64") (#x6f "externref"))))
+              (case type (#x7f "i32") (#x7e "i64") (#x6c "i31ref") (#x6f "externref"))))
           (incf local count)))
       (loop for op across ops for code = (native-op-code op) do
         (when (member code '(#x05 #x0b)) (decf depth))

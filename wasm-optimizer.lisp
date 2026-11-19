@@ -84,7 +84,7 @@
         (multiple-value-bind (count next) (native-read-uleb bytes position)
           (setq position next)
           (case (aref bytes position)
-            ((#x7f #x7e) (incf offset count))
+            ((#x7f #x7e #x6c) (incf offset count))
             (#x6f (incf locals count))
             (otherwise (error "Unexpected native local type.")))
           (incf position))))
@@ -130,7 +130,7 @@
                         (otherwise (error "Unexpected native GC instruction ~D." argument))))
              (multiple-value-bind (ignored next) (native-read-uleb bytes position)
                (declare (ignore ignored)) (setq position next))))
-          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd1 #xd3)))
+          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x48 #x4a #x4b #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd1 #xd3)))
            (error "Unexpected native instruction ~D." code)))
         (when (or (not references-only) (member code '(#x10 #x12 #xd2)))
           (push (make-native-op code argument start position) ops))))
@@ -301,7 +301,7 @@
       ((#x21 #x1a) (values 1 0))
       ((#x22 #x45 #x50 #xa7 #xac #xd1) (values 1 1))
       (#xfb (if (= (native-op-argument op) 5) (values 2 0) (values 1 1)))
-      ((#x46 #x48 #x4a #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3) (values 2 1))
+      ((#x46 #x48 #x4a #x4b #x4c #x4e #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3) (values 2 1))
       ((#x10 #x12)
        (when (and *native-call-stack-effects* (< (native-op-argument op) (length *native-call-stack-effects*)))
          (let ((effect (svref *native-call-stack-effects* (native-op-argument op))))
@@ -309,9 +309,29 @@
              (return-from native-op-stack (values (car effect) (if (= code #x10) (cdr effect) 0))))
            (return-from native-op-stack (values (ash effect -1) (if (= code #x10) (logand effect 1) 0)))))
        (let ((import (nth (native-op-argument op) *native-imports*)))
-               (if import (values (length (second import)) (if (and (= code #x10) (third import)) 1 0))
+               (if import
+                   (values (length (second import))
+                     (if (= code #x10)
+                         (let ((results (third import))) (if (listp results) (length results) 1)) 0))
                    (values 2 (if (= code #x10) 1 0)))))
       (otherwise (values 0 0)))))
+
+(defun native-scalar-call-effects (ops effects)
+  ;; Preserve the scalar primitive39 ABI. Unused multi-result signatures have
+  ;; inert placeholders in a cached adapter; a body actually calling one uses
+  ;; the general pass. Never pass a cons effect to the unchecked native kernel.
+  (unless (and *native-scalar-stack-effects* (eq (svref *native-scalar-stack-effects* 0) effects))
+    (let ((multiple (not (every #'integerp effects))))
+      (setq *native-scalar-stack-effects*
+        (vector effects multiple
+          (if multiple (map 'simple-vector (lambda (effect) (if (integerp effect) effect 0)) effects) effects)))))
+  (when (svref *native-scalar-stack-effects* 1)
+    (loop for op across ops when (member (native-op-code op) '(#x10 #x12)) do
+      (let ((index (native-op-argument op)))
+        (unless (and (typep index '(unsigned-byte 32)) (< index (length effects))
+                     (integerp (svref effects index)))
+          (return-from native-scalar-call-effects nil)))))
+  (svref *native-scalar-stack-effects* 2))
 
 (defun native-stackify-ops (ops &optional exceptions types total)
   (declare (type simple-vector ops) (type (or null simple-vector) types)
@@ -320,9 +340,6 @@
   ;; particular numeric representation. Typed i64 locals can use it too.
   ;; Arbitrary module effects and non-defaultable refs retain the Lisp pass.
   (when (and (null *native-module-stack-effects*)
-             ;; The native kernel's compact ABI encodes at most one result.
-             ;; Exact multi-result effects use the general shared Lisp pass.
-             (or (null *native-call-stack-effects*) (every #'integerp *native-call-stack-effects*))
              (or (null types) (every (lambda (type) (not (eql (car type) #x64))) types)))
     (unless total
       (setq total (loop for op across ops
@@ -334,9 +351,11 @@
       (setq *native-import-stack-effects*
         (cons *native-imports*
           (map 'simple-vector (lambda (import)
-            (+ (* 2 (length (second import))) (if (third import) 1 0))) *native-imports*))))
-    (when (compiler-primitive 39 ops (vector exceptions (or *native-call-stack-effects* (cdr *native-import-stack-effects*))) total)
-      (return-from native-stackify-ops ops)))
+            (native-signature-stack-effect (cdr import))) *native-imports*))))
+    (let ((effects (native-scalar-call-effects ops
+                     (or *native-call-stack-effects* (cdr *native-import-stack-effects*)))))
+      (when (and effects (compiler-primitive 39 ops (vector exceptions effects) total))
+        (return-from native-stackify-ops ops))))
   (native-stackify-ops-lisp ops exceptions types total))
 
 (defun native-stackify-ops-lisp (ops &optional exceptions types total)
@@ -910,7 +929,7 @@
     (case code
       ((#x20 #x22) (aref types argument))
       (#x10 (first (second (aref signatures argument))))
-      ((#x41 #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #xa7 #xd1 #xd3) '(#x7f))
+      ((#x41 #x45 #x46 #x48 #x4a #x4b #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #xa7 #xd1 #xd3) '(#x7f))
       ((#x42 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xac) '(#x7e))
       (#xd0 (let ((start (1+ (native-op-start op))))
               (if (and (= (native-op-end op) (1+ start))
@@ -992,7 +1011,7 @@
            (local-types (mapcar (lambda (index) (aref types index)) temporaries)))
       (unless (or *native-module-stack-effects*
                   (every (lambda (type) (and (= (length type) 1)
-                                             (member (first type) '(#x6f #x7f #x7e #x70))))
+                                             (member (first type) '(#x6f #x7f #x7e #x70 #x6c))))
                          (append parameters results local-types)))
         (return-from native-outline-region nil))
       (dolist (group bucket)
@@ -1073,7 +1092,7 @@ Return replacement bodies and (body parameters results) helper records."
                       ;; barriers. Regions neither consume an outside operand
                       ;; nor introduce a new branch or retained recursive frame.
                       (unless (and (plusp work) (plusp function-work) (or (/= code #x10) (= (aref body (native-op-start op)) #x10))
-                                   (member code '(#x10 #x1a #x20 #x21 #x22 #x41 #x42 #x45 #x46 #x48 #x4a #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd0 #xd1 #xd3 #xfb)))
+                                   (member code '(#x10 #x1a #x20 #x21 #x22 #x41 #x42 #x45 #x46 #x48 #x4a #x4b #x4c #x4e #x50 #x51 #x52 #x53 #x55 #x57 #x59 #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xd0 #xd1 #xd3 #xfb)))
                         (return))
                       (multiple-value-bind (pops pushes)
                           (if (= code #x10)

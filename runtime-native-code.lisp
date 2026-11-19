@@ -2103,14 +2103,47 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
        (else ,(reduce (lambda (argument tail) `(call $cons ,argument ,tail))
                       arguments :from-end t :initial-value '(ref.null eq))))))
 
+(define-runtime-function $native-call-values1
+    (($function externref) ($value externref)) (externref externref externref externref i32)
+  (:export-raw "native-call-values1")
+  (:locals ($function-object :nullable-object) ($a :nullable-object) ($result :nullable-object)
+           ($b :nullable-object) ($c :nullable-object) ($extra :nullable-object) ($count i32)
+           ($id i32) ($native-function (ref $native-function)))
+  ;; This raw export has the same checked Lisp-value boundary as NATIVE-CALL.
+  ;; Preserve the public scalar worker ABI and its ordinary frame/cleanup owner.
+  #@(local.set $function-object (call $native-checked-value (local.get $function)))
+  #@(local.set $a (call $native-checked-value (local.get $value)))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(block $called
+    (if (ref.test (ref $native-function) (local.get $function-object))
+      (then
+        (local.set $native-function (ref.cast (ref $native-function) (local.get $function-object)))
+        (if (f64.eq (struct.get $obj $f (local.get $native-function)) (f64.const 3))
+          (then
+            (if (ref.is_null (struct.get $native-function $direct (local.get $native-function)))
+              (then (local.set $result (call $apply (local.get $function-object)
+                (array.new_fixed $objects 1 (local.get $a)))))
+              (else (local.set $result (call $native-direct-apply (local.get $native-function)
+                (local.get $a) (ref.null eq) (ref.null eq) (ref.null eq)))))
+            (br $called)))))
+    (local.set $id (call $native-builtin-id (local.get $function-object)))
+    (local.set $result (call $apply (local.get $function-object)
+      ,(native-fixed-fallback-arguments-wat 1))))
+  ;; EXTRA owns the complete secondary spine for large groups, as supplied by
+  ;; the existing VALUES/VALUES-LIST snapshot contract. No list is made here.
+  #@(call $capture-values)
+  #@(local.set $count) #@(local.set $extra) #@(local.set $c) #@(local.set $b)
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result))
+  #@(extern.convert_any (local.get $b)) #@(extern.convert_any (local.get $c))
+  #@(extern.convert_any (local.get $extra)) #@(local.get $count))
+
 (define-runtime-function $native-call1 (($function externref) ($value externref)) (externref)
   (:export-raw "native-call1")
   (:locals ($direct-result :nullable-object) ($hit i32) ($id i32) ($tag i32) ($accessor i32)
            ($a :nullable-object) ($function-object :nullable-object) ($native-function (ref $native-function)))
   #@(local.set $a ,(native-object '(local.get $value)))
   #@(local.set $function-object ,(native-object '(local.get $function)))
-  #@(local.set $id (call $native-builtin-id (local.get $function-object)))
-  #@(local.set $tag (call $tag (local.get $a)))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) (local.get $function-object))
     (then (if (f64.eq (struct.get $obj $f
@@ -2118,6 +2151,8 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
       (then ,(native-direct-call-wat 1 t '(local.get $function-object) '((local.get $a)) '(local.get $native-function))
         (return (extern.convert_any (call $native-primary-apply
         (local.get $function-object) (array.new_fixed $objects 1 (local.get $a)))))))))
+  #@(local.set $id (call $native-builtin-id (local.get $function-object)))
+  #@(local.set $tag (call $tag (local.get $a)))
   (native-fixed-vector-call-wat 1)
   (wat-symbol-case #@(local.get $id)
     ((not null) #@(return (extern.convert_any (call $bool (ref.is_null (local.get $a))))))
@@ -2630,7 +2665,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-character-code-at64-unboxed-inline)
   ($native-vector-set-inline)
   ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
-  ($native-call0) ($native-call1) ($native-call2) ($native-call3) ($native-call4) ($native-generic-call)
+  ($native-call0) ($native-call1) ($native-call-values1) ($native-call2) ($native-call3) ($native-call4) ($native-generic-call)
   ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)
   ($native-generic-fixed-tail-call)
