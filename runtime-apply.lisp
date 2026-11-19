@@ -347,8 +347,8 @@
   #@(if (i32.or (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '1+)))
               (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '1-))))
       (then ,(wat-arity 1 1 #@(local.get $n))
-            (return (call $op (i32.const 0) (local.get $a)
-              (call $int (select (i32.const 1) (i32.const -1) (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '1+)))))))))
+            (return (call $number-step (local.get $a)
+              (select (i32.const 1) (i32.const -1) (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '1+))))))))
   (wat-symbol-case #@(local.get $id)
     (abs
       (wat-arity 1 1 #@(local.get $n))

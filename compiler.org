@@ -35,7 +35,16 @@ remain below 1 MiB raw; compressed download size is a separate concern.
 
 The required bootstrap runs the compiler interpreted inside Wasm, compiles its kernels, and
 compiles its definitions into a sealed native payload with shared literals and lexical
-bindings. =ensure-compiler= coordinates requests, records failure or completion, and avoids
+bindings. The image builder favors SPEED over SPACE for the disposable first native
+compiler, then restores the preceding optimization policy before that compiler emits
+the saved original source corpus for shipping. SAFETY, DEBUG and COMPILATION-SPEED
+are unchanged by this temporary policy. The first generation is not retained in the
+shipped payload. =*native-compiler-seeds*= selects the native shipping corpus;
+=*native-compiler-cold-functions*= retains opt-in counter expansion workers and
+rare source/report builders in the ordinary interpreted compiler library. Native
+admission wrappers bypass those workers under compact policy. The image builder
+temporarily compiles the cold helpers too, then emits only the shipping corpus.
+=ensure-compiler= coordinates requests, records failure or completion, and avoids
 recursive bootstrap. Explicit =:interpreted= state preserves live source definitions.
 Node/browser adapters instantiate emitted modules; WASI executes linked code and portable
 FASLs but cannot load generated native code dynamically.
@@ -236,6 +245,13 @@ immediate results when they fit.
 Computed i64 addition, subtraction, multiplication and negation retain boxed i64 results;
 overflow promotes to bignums, whose arithmetic results normalize back to boxed i64 when they fit.
 The digit normalizer selects fresh or wide result construction before boxing, including zero.
+The runtime's =number-step= worker handles 1+/1- with an actual-i31 check,
+directional signed-i64 overflow check, then a bignum or general-number fallback.
+The =bignum-step= worker copies the immutable magnitude once and propagates only
+the carry or borrow prefix; the common wide normalizer handles demotion and limb
+trimming. Native scalar ingress uses this worker after representation checks,
+preserving the unary scheduling checkpoint and rejecting foreign references
+before generic numeric dispatch.
 Raw arithmetic and private-cell snapshots stay i64 when materialized; scalar extraction accepts
 both immediate and boxed storage even for narrow mathematical ranges. Algebraic identities
 may reuse existing operands without computing or converting a result. Shift, division and
@@ -311,8 +327,17 @@ Reads receive independent SSA snapshots, and generic uses materialize integers
 through the i64 boxing path. Mathematical ranges do not license
 i31 extraction from an arbitrary integer object.
 
-Private canonical 1+/1- counters without an existing raw plan can instead use
+When SPEED exceeds SPACE, private canonical 1+/1- counters and checked binary
++/- updates with literal one without an existing raw plan can instead use
 emitter-owned physical storage with immediate, signed-i64 and generic tiers.
+This gate uses the function's existing maximum-SPEED/minimum-SPACE
+summary across lexical scopes; the emitter does not retain per-update size policy.
+Compact updates keep their shared checked helpers, immediate guards or existing
+proven raw plans. The physical tier expansion duplicates classification,
+update and materialization arms and is not a compact-code optimization.
+The admission checks remain native, while the opt-in planning and emission workers
+use the retained interpreted compiler library. This changes compilation throughput
+for speed-oriented code, not the generated counter representation or its run-time cost.
 Entry classification checks actual representation without signaling; it supplies
 no logical type proof. A bounded full-function operand audit rejects captured or
 escaping cells, unsupported stores and overlapping raw plans. Accepted reads
@@ -328,11 +353,14 @@ retain ordinary storage. The separate storage and comparison scratch budgets
 bound local growth. These physical counters retain wide storage after arithmetic
 within signed i64; generic results are reclassified.
 
-Outside those counter plans, guarded canonical 1+/1- and proven integer binary
-+/- with literal one use immediate arithmetic only after checking actual i31
-representation and the directional endpoint. Other values retain the original
-worker. Ordered comparison guards similarly preserve general real-number
-semantics. Existing proven raw arithmetic takes precedence over these guards.
+Outside those counter plans, speed-oriented callers can inline guarded canonical
+1+/1- and proven integer binary +/- with literal one. These use immediate arithmetic
+only after checking actual i31 representation and the directional endpoint.
+Other values retain the original worker. Ordered comparison guards similarly
+preserve general real-number semantics. When SPEED does not exceed SPACE, calls
+use the shared scalar-step and ordered-comparison workers rather than duplicating
+their immediate guards at each site. Existing proven raw arithmetic takes
+precedence over these guards at every policy.
 The =hir-inline-result-type= LENGTH rules cover vectors, including sized simple vectors;
 they do not infer list lengths or relate a changing list cursor to a loop counter.
 Such relationships require facts valid under aliases, writes and calls that can mutate
@@ -342,6 +370,10 @@ Opt-in =WITH-COMPILATION-STATISTICS= records accepted plans as
 lowerings as =:optimization/integer-arithmetic-i32= or
 =:optimization/integer-arithmetic-i64=, with the arithmetic operator as detail.
 These count compilation events rather than unique sites or runtime executions.
+Tiered comparison operands without counter storage are still classified at
+each comparison. =native-plan-tiered-comparisons= does not yet hoist classification
+of immutable loop limits; =emit-native-tiered-update= also retains separate
+immediate-endpoint, i64-overflow and generic arms at each update site.
 
 Acyclic regions use forward structure; proved reducible natural loops use Wasm loops.
 Irreducible, captured or exhausted cases retain dense dispatch. Transfers preserve block

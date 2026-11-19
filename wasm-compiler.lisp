@@ -2092,6 +2092,13 @@ exhausted work budgets keep every incoming value group."
 
 (defun emit-native-i31-step (inputs &optional binary-integer-p)
   "Inline immediate successor/predecessor; retain the original fallback."
+  ;; The shared scalar entries already handle actual i31 inputs. Duplicate
+  ;; their representation/endpoint checks only when the caller favors speed.
+  (let ((policy (hir-function-optimization-policy *wasm-current-function*)))
+    (when (> (logand policy 3) (logand 3 (ash policy -2)))
+      (emit-native-i31-step-worker inputs binary-integer-p))))
+
+(defun emit-native-i31-step-worker (inputs binary-integer-p)
   (let* ((producer (hir-value-producer (second inputs)))
          (attributes (and (%hir-instruction-p producer)
                           (eq (hir-instruction-opcode producer) :function-reference)
@@ -2108,7 +2115,7 @@ exhausted work budgets keep every incoming value group."
                           (eq (hir-instruction-opcode literal-producer) :constant)
                           (eql (first (hir-instruction-attributes literal-producer)) 1))
                      (and (= (length inputs) 3) (member name '(1+ 1-)))))
-      (return-from emit-native-i31-step nil))
+      (return-from emit-native-i31-step-worker nil))
     ;; Only actual i31 values enter the cast. The directional endpoint
     ;; keeps the original worker so promotion never wraps the immediate.
     (emit-native-i31-operand value t)
@@ -2140,6 +2147,16 @@ exhausted work budgets keep every incoming value group."
   ;; The guard supplies an executable representation fact even for a mutable
   ;; counter or an outside caller. Every non-i31 value keeps the real-number
   ;; comparison, including boxed i64, bignums, numeric contagion and errors.
+  (let ((policy (hir-function-optimization-policy *wasm-current-function*)))
+    (unless (> (logand policy 3) (logand 3 (ash policy -2)))
+      (wasm-get (third inputs)) (wasm-get (fourth inputs))
+      (wasm-integer (position kind '(:less-real :greater-real :not-greater-real :not-less-real)))
+      (wasm-call "native-ordered-compare-inline")
+      (when raw (wasm-byte #xd1) (wasm-byte #x45))
+      (return-from emit-native-i31-comparison nil)))
+  (emit-native-i31-comparison-worker inputs kind raw))
+
+(defun emit-native-i31-comparison-worker (inputs kind raw)
   (emit-native-i31-operand (third inputs) t)
   (emit-native-i31-operand (fourth inputs) t) (wasm-byte #x71)
   (wasm-byte #x04) (wasm-type (if raw :i32 :object))
@@ -4100,18 +4117,26 @@ exhausted work budgets keep every incoming value group."
 
 (defun native-tiered-unary (instruction)
   (when (and (eq (hir-instruction-opcode instruction) :call)
-             (= (length (hir-instruction-inputs instruction)) 3))
+             (member (length (hir-instruction-inputs instruction)) '(3 4)))
     (let* ((reference (second (hir-instruction-inputs instruction)))
            (producer (hir-value-producer reference)))
       (when (and (%hir-instruction-p producer)
                  (eq (hir-instruction-opcode producer) :function-reference)
                  (not (eq (second (hir-instruction-attributes producer)) 'notinline)))
-        (let ((name (first (hir-instruction-attributes producer))))
-          (and (member name '(1+ 1-))
+        (let* ((name (first (hir-instruction-attributes producer)))
+               (inputs (hir-instruction-inputs instruction))
+               (unary (= (length inputs) 3))
+               (literal (and (not unary) (hir-value-producer (fourth inputs)))))
+          (and (if unary (member name '(1+ 1-))
+                   (and (member name '(+ -)) (%hir-instruction-p literal)
+                        (eq (hir-instruction-opcode literal) :constant)
+                        (eql (first (hir-instruction-attributes literal)) 1)))
+               ;; These checked binary calls poll just like unary stepping.
+               ;; Existing raw integer plans keep their own checkpoint rules.
                (or (eq (gethash instruction *wasm-inline-simple-calls*) :standard-call)
-                   (and *wasm-proven-integer-arithmetic*
+                   (and unary *wasm-proven-integer-arithmetic*
                         (gethash instruction *wasm-proven-integer-arithmetic*)))
-               name))))))
+               (if (member name '(1+ +)) '1+ '1-)))))))
 
 (defun native-tiered-source (value)
   ;; Do not follow arbitrary PHIs or client capture metadata.
@@ -4126,16 +4151,24 @@ exhausted work budgets keep every incoming value group."
 (defun native-plan-tiered-counters (function blocks raw)
   "Admit private canonical successor/predecessor cells after existing raw facts.
 All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
-  (when (or (>= (hir-function-debug-level function) 2)
+  ;; Three physical tiers duplicate classification, update and materialization
+  ;; arms. Keep that growth local to speed-oriented callers; proven raw storage
+  ;; and shared checked arithmetic remain available under compact policy.
+  (when (or (let ((policy (hir-function-optimization-policy function)))
+              (<= (logand policy 3) (logand 3 (ash policy -2))))
+            (>= (hir-function-debug-level function) 2)
             (hir-block-predecessors (hir-function-entry function))
             (and *wasm-optimization-barriers* (gethash function *wasm-optimization-barriers*)))
     (return-from native-plan-tiered-counters nil))
+  (native-compute-tiered-counters function blocks raw))
+
+(defun native-compute-tiered-counters (function blocks raw)
   (let ((cells (native-value-table function)) (table (native-value-table function))
         (chosen nil) (fuel 4096) (emitted (make-hash-table :test 'eq)))
     (dolist (block blocks) (setf (gethash block emitted) t))
     (dolist (block blocks)
       (dolist (instruction (hir-block-instructions block))
-        (when (minusp (decf fuel)) (return-from native-plan-tiered-counters nil))
+        (when (minusp (decf fuel)) (return-from native-compute-tiered-counters nil))
         (let ((cell (hir-instruction-output instruction)))
           (when (and (eq (hir-instruction-opcode instruction) :cell-new)
                      (native-value-slot *wasm-local-cells* cell)
@@ -4149,9 +4182,9 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
     ;; Audit all actual operands, including unreachable/captured paths.
     (dolist (block (hir-function-blocks function))
       (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
-        (when (minusp (decf fuel)) (return-from native-plan-tiered-counters nil))
+        (when (minusp (decf fuel)) (return-from native-compute-tiered-counters nil))
         (loop for input in (hir-instruction-inputs instruction) for index from 0 do
-          (when (minusp (decf fuel)) (return-from native-plan-tiered-counters nil))
+          (when (minusp (decf fuel)) (return-from native-compute-tiered-counters nil))
           (let ((record (native-value-slot cells input)))
             (when record
               (let ((opcode (hir-instruction-opcode instruction)))
@@ -4178,7 +4211,7 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
                          (setf (svref record 3) nil))))
                   (t (setf (svref record 3) nil)))))))))
     (dolist (value (hir-function-values function))
-      (when (minusp (decf fuel)) (return-from native-plan-tiered-counters nil))
+      (when (minusp (decf fuel)) (return-from native-compute-tiered-counters nil))
       (let ((record (native-value-slot cells value)))
         (when (and record (svref record 3) (plusp (svref record 0)) (plusp (svref record 1)))
           ;; Four indices are assigned only after ordinary body-local layout.
@@ -4187,10 +4220,10 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
           (dolist (update (svref record 2))
             (setf (native-value-slot table (hir-instruction-output update)) (make-array 4))))))
     (when (or (null chosen) (> (length chosen) 4))
-      (return-from native-plan-tiered-counters nil))
+      (return-from native-compute-tiered-counters nil))
     (dolist (block blocks)
       (dolist (instruction (hir-block-instructions block))
-        (when (minusp (decf fuel)) (return-from native-plan-tiered-counters nil))
+        (when (minusp (decf fuel)) (return-from native-compute-tiered-counters nil))
         (let* ((opcode (hir-instruction-opcode instruction))
                (output (hir-instruction-output instruction))
                (cell (and (member opcode '(:cell-read :cell-write))
@@ -4199,7 +4232,7 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
             (setf (native-value-slot table output) (make-array 4))))))
     ;; Flatten accepted single-value aliases, independently of HIR ID order.
     (dolist (value (hir-function-values function))
-      (when (minusp (decf fuel)) (return-from native-plan-tiered-counters nil))
+      (when (minusp (decf fuel)) (return-from native-compute-tiered-counters nil))
       (let* ((source (native-tiered-source value))
              (record (and source (native-value-slot table source))))
         (when (and record (not (member source chosen :test #'eq))
@@ -4208,12 +4241,15 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
           (setf (native-value-slot table value) record))))
     (let ((records nil))
       (loop for record across table when record do (pushnew record records :test #'eq))
-      (when (> (length records) 32) (return-from native-plan-tiered-counters nil)))
+      (when (> (length records) 32) (return-from native-compute-tiered-counters nil)))
     table))
 
 (defun native-plan-tiered-comparisons (blocks table)
   (when table
-    (let ((comparisons (make-hash-table :test 'eq)) (count 0))
+    (native-compute-tiered-comparisons blocks table)))
+
+(defun native-compute-tiered-comparisons (blocks table)
+  (let ((comparisons (make-hash-table :test 'eq)) (count 0))
       (dolist (block blocks)
         (dolist (instruction (hir-block-instructions block))
           (let* ((inputs (hir-instruction-inputs instruction))
@@ -4226,15 +4262,20 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
             (when (and (= (length inputs) 4) (member name '(< > <= >= = /=))
                        (or (native-value-slot table (third inputs))
                            (native-value-slot table (fourth inputs))))
-              (when (> (incf count) 16) (return-from native-plan-tiered-comparisons :exhausted))
+              (when (> (incf count) 16) (return-from native-compute-tiered-comparisons :exhausted))
               (setf (gethash instruction comparisons)
                 (vector (or (native-value-slot table (third inputs)) (make-array 4))
                         (or (native-value-slot table (fourth inputs)) (make-array 4))
                         (not (native-value-slot table (third inputs)))
                         (not (native-value-slot table (fourth inputs))) name))))))
-      comparisons)))
+    comparisons))
 
 (defun native-assign-tiered-locals (table comparisons offset)
+  (if (or table comparisons)
+      (native-compute-tiered-locals table comparisons offset)
+      0))
+
+(defun native-compute-tiered-locals (table comparisons offset)
   (let ((records nil))
     (when table
       (loop for record across table when record do (pushnew record records :test #'eq)))
@@ -4354,6 +4395,10 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
 
 (defun emit-native-tiered-instruction (instruction)
   (when *wasm-tiered-values*
+    (emit-native-tiered-instruction-worker instruction)))
+
+(defun emit-native-tiered-instruction-worker (instruction)
+  (when *wasm-tiered-values*
     (let* ((opcode (hir-instruction-opcode instruction))
            (inputs (hir-instruction-inputs instruction))
            (output (hir-instruction-output instruction))
@@ -4373,6 +4418,10 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
                                    record (native-tiered-unary instruction)) t)))))
 
 (defun emit-native-tiered-comparison (instruction &optional raw)
+  (when *wasm-tiered-comparisons*
+    (emit-native-tiered-comparison-worker instruction raw)))
+
+(defun emit-native-tiered-comparison-worker (instruction raw)
   (let ((plan (and *wasm-tiered-comparisons* (gethash instruction *wasm-tiered-comparisons*))))
     (when plan
       (let ((left (svref plan 0)) (right (svref plan 1)) (name (svref plan 4))
@@ -5971,7 +6020,24 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     miricl::%dispatch-cache-permitted-p miricl::%quote miricl::%coerce
     mapc nreverse member (setf slot-value) (setf cdr)))
 
+(defparameter *native-compiler-cold-functions*
+  ;; Keep opt-in expansion machinery and rarely used source/report builders
+  ;; in the ordinary compiler library. Native admission wrappers avoid an
+  ;; interpreted call on the compact compiler's normal path. The image builder
+  ;; may compile these functions in its disposable bootstrap generation.
+  '(emit-native-i31-operand emit-native-i31-step-worker emit-native-i31-comparison-worker
+    native-tiered-unary native-tiered-source native-compute-tiered-counters
+    native-compute-tiered-comparisons native-compute-tiered-locals
+    emit-native-tiered-copy emit-native-tiered-small emit-native-tiered-i64
+    emit-native-tiered-materialize emit-native-tiered-classify emit-native-tiered-update
+    emit-native-tiered-instruction-worker emit-native-tiered-comparison-worker
+    compilation-statistics-report compiler-input-summary
+    hir-assert-form hir-correctable-place-form hir-restart-options
+    hir-condition-initializer hir-define-condition hir-restart-expression
+    structure-info class-info method-info))
+
 (defparameter *native-compiler-seeds*
+  (remove-if (lambda (name) (member name *native-compiler-cold-functions*))
   '(compiler-primitive record-compilation-statistic compilation-statistics-report
                    standard-function-contract standard-function-name-p standard-function-property
                    standard-function-result-type standard-function-result-count
@@ -6071,7 +6137,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    prepare-native-unit native-unit-records compile-native-bundle
                    hir-code-parameters hir-code-name hir-code-debug-info hir-code-cell-aliases hir-code-register hir-code-single-calls
                    hir-code-scope-aliases
-                   emit-hir-code emit-hir-code-checked hir-unit-function compile-native-hir))
+                   emit-hir-code emit-hir-code-checked hir-unit-function compile-native-hir)))
 
 (defvar *native-compiler-functions* (make-hash-table :test 'eq))
 (defparameter *native-compiler-blocks*

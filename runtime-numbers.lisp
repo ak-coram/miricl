@@ -218,6 +218,58 @@
         (then (return (call $box-int64 (local.get $difference)))))))
   #@(call $iadd (local.get $a) (call $negative (local.get $b))))
 
+;; The input is a genuine bignum. Copy its immutable magnitude once, then
+;; visit only the carry/borrow prefix instead of dispatching two digit streams.
+(define-runtime-function $bignum-step (($x :object) ($step i32)) (:object)
+  (:locals ($source :digits) ($digits :digits) ($grown :digits)
+           ($n i32) ($i i32) ($carry i32) ($value i32) ($sign i32))
+  #@(local.set $source (ref.as_non_null (struct.get $obj $digits (ref.cast (ref $obj) (local.get $x)))))
+  #@(local.set $n (array.len (local.get $source)))
+  #@(local.set $sign (call $value-n (local.get $x)))
+  #@(local.set $carry (i32.mul (local.get $step) (local.get $sign)))
+  #@(local.set $digits (array.new_default $digits (local.get $n)))
+  #@(array.copy $digits $digits (local.get $digits) (i32.const 0)
+    (local.get $source) (i32.const 0) (local.get $n))
+  #@(block $done (loop $next
+    (local.set $value (i32.add (array.get $digits (local.get $digits) (local.get $i)) (local.get $carry)))
+    (array.set $digits (local.get $digits) (local.get $i) (i32.and (local.get $value) (i32.const 32767)))
+    (local.set $carry (i32.shr_s (local.get $value) (i32.const 15)))
+    (br_if $done (i32.eqz (local.get $carry)))
+    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+    (br_if $next (i32.lt_u (local.get $i) (local.get $n)))
+    ;; A nonzero carry here is +1: a nonzero magnitude cannot borrow past
+    ;; its last limb. Allocate the extra limb only when it is needed.
+    (local.set $grown (array.new_default $digits (i32.add (local.get $n) (i32.const 1))))
+    (array.copy $digits $digits (local.get $grown) (i32.const 0)
+      (local.get $digits) (i32.const 0) (local.get $n))
+    (array.set $digits (local.get $grown) (local.get $n) (i32.const 1))
+    (local.set $digits (local.get $grown))))
+  #@(call $wide-integer (local.get $sign) (local.get $digits)))
+
+;; Successor/predecessor do not need binary numeric dispatch for scalar
+;; integers. STEP is the internal constant +1 or -1, never a Lisp argument.
+(define-runtime-function $number-step (($x :nullable-object) ($step i32)) (:object)
+  (:locals ($value i64))
+  #@(if (ref.test (ref i31) (local.get $x))
+    (then (return (call $int (i32.add
+      (i31.get_s (ref.cast (ref i31) (local.get $x))) (local.get $step))))))
+  #@(if (ref.test (ref $fixnum) (local.get $x))
+    (then
+      (local.set $value (struct.get $fixnum $value (ref.cast (ref $fixnum) (local.get $x))))
+      (if (i64.ne (local.get $value)
+            (select (i64.const 9223372036854775807) (i64.const -9223372036854775808)
+              (i32.gt_s (local.get $step) (i32.const 0))))
+        (then (return (call $box-int64 (i64.add (local.get $value)
+          (i64.extend_i32_s (local.get $step)))))))))
+  #@(if (i32.eq (call $tag (local.get $x)) (i32.const 1))
+    (then
+      (if (ref.test (ref $fixnum) (local.get $x))
+        (then (return (call $iadd (ref.as_non_null (local.get $x)) (ref.i31 (local.get $step))))))
+      (return (call $bignum-step (ref.as_non_null (local.get $x)) (local.get $step)))))
+  ;; The rest of the numeric tower retains checked
+  ;; arithmetic, including numeric contagion and useful type conditions.
+  #@(call $op (i32.const 0) (local.get $x) (ref.i31 (local.get $step))))
+
 (define-runtime-function $imul
     (($a :object) ($b :object))
     (:object)
@@ -443,7 +495,7 @@
   ($iabs)
   ($cmpabs)
   ($addabs)
-  ($iadd) ($isub)
+  ($iadd) ($isub) ($bignum-step) ($number-step)
   ($imul)
   ($idiv)
   ($quotient)

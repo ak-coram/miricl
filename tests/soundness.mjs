@@ -1019,6 +1019,22 @@ try {
   }
   for (const [name, expected] of [['1+', 1n], ['1-', -1n], ['-', 0n]])
     wideInteger(vm.vm['native-standard-call1'](canonicalCode(name), boxedInteger(0n)), expected);
+  // Native unary ingress accepts restored scalar boxes as well as fresh
+  // immediates and bignums. Carry/borrow and promotion must leave shared
+  // input snapshots intact, including across complete base-2^15 limbs.
+  for (const name of ['1+', '1-']) {
+    const step = name === '1+' ? 1n : -1n, code = canonicalCode(name);
+    for (const bits of [30n, 63n, 75n, 150n]) {
+      for (const number of [(1n << bits) - 1n, 1n << bits, -(1n << bits), -(1n << bits) + 1n]) {
+        const inputs = [freshInteger(number)];
+        if (number >= -(1n << 63n) && number < (1n << 63n)) inputs.push(boxedInteger(number));
+        for (const input of inputs) {
+          assert.equal(vm.javascript.integer(vm.vm['native-standard-call1'](code, input)), number + step);
+          assert.equal(vm.javascript.integer(input), number, 'Unary arithmetic preserves shared integer snapshots.');
+        }
+      }
+    }
+  }
   for (const [name, expected] of [['add', 6n], ['sub', 4n], ['mul', 5n]])
     for (const suffix of ['', '-checked'])
       wideInteger(vm.vm[`native-${name}-int64${suffix}`](5n, 1n), expected);
@@ -2263,6 +2279,31 @@ try {
             (let ((before i)) (incf i) (push before seen)))
           (values i (nreverse seen)))))))
       (list (+ ${initial} 3) (list ${initial} (+ ${initial} 1) (+ ${initial} 2))))`);
+  }
+  // Speed-oriented unit steps can share private tiered storage.
+  // Both that path and compact checked calls preserve snapshots, generic
+  // numeric fallback and recovery after rejection.
+  for (const policy of ['(speed 1) (space 3)', '(speed 3) (space 1)']) {
+    for (const operator of ['+', '-', '1+', '1-']) {
+      const update = value => `(${operator} ${value}${operator === '+' || operator === '-' ? ' 1' : ''})`;
+      check(`(let ((function (compile-native '(lambda (x observe)
+        (declare (optimize ${policy} (safety 1) (debug 0)))
+        (dotimes (i 3 x)
+          (let ((before x)) (setq x ${update('x')}) (funcall observe before x)))))))
+      (and
+        (loop for initial in '(0 1073741823 -1073741824 9223372036854775807
+                              -9223372036854775808 1267650600228229401496703205376
+                              -1267650600228229401496703205376 1/2 0.5d0 #c(1 2)) always
+          (let ((expected initial) (valid t))
+            (and (= (funcall function initial (lambda (before after)
+                         (unless (and (= before expected) (= after ${update('expected')}))
+                           (setq valid nil))
+                         (setq expected ${update('expected')}))) expected)
+                 valid)))
+        (handler-case (progn (funcall function :invalid (lambda (a b) (declare (ignore a b)))) nil)
+          (type-error () t))
+        (= (funcall function 10 (lambda (a b) (declare (ignore a b)))) ${update(update(update('10')))})))`);
+    }
   }
   // A repeated body GO and an unknown write must not inherit the traversal's
   // counter envelope. Errors still leave the compiled function reusable.

@@ -36,6 +36,7 @@ export function nativeModuleToWat(bytes, moduleIndex, declarations, entries, cal
     if (type === 0x7e) return 'i64';
     if (type === 0x6f) return 'externref';
     if (type === 0x70) return 'funcref';
+    if (type === 0x6c) return 'i31ref';
     throw new Error(`Unexpected native local type ${type}`);
   };
   // Keep the compiler's canonical GC types in the index space, while
@@ -71,6 +72,7 @@ export function nativeModuleToWat(bytes, moduleIndex, declarations, entries, cal
     const type = byte();
     if (type === 0x40) return '';
     if (type === 0x7f) return ' (result i32)';
+    if (type === 0x7e) return ' (result i64)';
     if (type === 0x6f) return ' (result externref)';
     throw new Error(`Unexpected native block type ${type}`);
   };
@@ -170,6 +172,8 @@ export function nativeModuleToWat(bytes, moduleIndex, declarations, entries, cal
             case 0x55: instructions.push('i64.gt_s'); break;
             case 0x57: instructions.push('i64.le_s'); break;
             case 0x59: instructions.push('i64.ge_s'); break;
+            case 0x6a: instructions.push('i32.add'); break;
+            case 0x6b: instructions.push('i32.sub'); break;
             case 0x71: instructions.push('i32.and'); break;
             case 0x7c: instructions.push('i64.add'); break;
             case 0x7d: instructions.push('i64.sub'); break;
@@ -197,7 +201,11 @@ export function nativeModuleToWat(bytes, moduleIndex, declarations, entries, cal
                 assert.ok(type === 1 || type === 0x6d, `Unsupported nullable native heap type ${type}`);
                 instructions.push(`ref.cast (ref null ${type === 1 ? '$obj' : 'eq'})`);
               }
-              else if (gc === 0x14) {assert.equal(unsigned(), 1); instructions.push('ref.test (ref $obj)');}
+              else if (gc === 0x14) {
+                const type = unsigned();
+                assert.ok(type === 1 || type === 0x6c, `Unsupported native heap type ${type}`);
+                instructions.push(`ref.test (ref ${type === 1 ? '$obj' : 'i31'})`);
+              }
               else if (gc === 0x16) {
                 const type = unsigned();
                 assert.ok(type === 1 || type === 0x6c, `Unsupported native heap type ${type}`);

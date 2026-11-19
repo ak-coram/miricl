@@ -22,9 +22,23 @@ try {
           (unless (and source (not captured))
             (error "Native runtime image function has no closed source: ~S" name))
           (list name source))) *native-runtime-image-functions*))
-    (multiple-value-bind (installed unsupported) (compile-compiler)
-      (unless (and (= (length installed) (length *image-sources*)) (null unsupported))
-        (error "Compiler bootstrap failed: ~S" unsupported)))
+    ;; The first native compiler is disposable. Favor its execution speed,
+    ;; then restore the original policy before emitting the saved source corpus
+    ;; for shipping. SAFETY, DEBUG and COMPILATION-SPEED keep their contracts.
+    (let ((policy (compiler-primitive 52 nil))
+          ;; Cold helpers stay interpreted in the shipped compiler, while the
+          ;; disposable bootstrap can use them natively for speed-oriented work.
+          (*native-compiler-seeds* (append *native-compiler-seeds* *native-compiler-cold-functions*)))
+      (unwind-protect
+          (progn
+            (proclaim '(optimize (speed 3) (space 1)))
+            (multiple-value-bind (installed unsupported) (compile-compiler)
+              (unless (and (= (length installed) (length *native-compiler-seeds*)) (null unsupported))
+                (error "Compiler bootstrap failed: ~S" unsupported))))
+        (proclaim (list 'optimize (list 'speed (logand policy 3))
+                                  (list 'space (logand 3 (ash policy -2))))))
+      (unless (= policy (compiler-primitive 52 nil))
+        (error "Compiler bootstrap changed the final optimization policy.")))
     (values)`, {eof: true}));
   const interpretedBootstrapMs = performance.now() - bootstrapStarted;
   const moduleStarted = performance.now();

@@ -50,6 +50,64 @@ const check = bytes => {
   assert.equal(module.exports.entry(original, original), after, 'A caught call still works after propagation.');
 };
 
+// The counter emitter uses immediate references, i32 steps and i64-valued
+// branches. Exercise those together through the production linker, including
+// promotion and a general fallback whose effects must not be speculated.
+const counterImports = `
+  (import "m" "wide" (func $native-wide (param i64) (result externref)))
+  (import "m" "step" (func $native-step (param externref i32) (result externref)))`;
+const counterFixture = `(module ${counterImports}
+  (func (export "entry") (param externref externref) (result externref)
+    (local $small i31ref) (local $value i32) (local $step i32) (local $result i64)
+    local.get 1 any.convert_extern ref.cast (ref i31) i31.get_s local.set $step
+    local.get 0 any.convert_extern ref.test (ref i31)
+    if (result externref)
+      local.get 0 any.convert_extern ref.cast (ref i31) local.tee $small
+      i31.get_s local.set $value
+      local.get $step i32.const 1 i32.eq
+      if (result i64)
+        local.get $value i32.const 1 i32.add i64.extend_i32_s
+      else
+        local.get $value i32.const 1 i32.sub i64.extend_i32_s
+      end
+      local.set $result
+      local.get $value
+      local.get $step i32.const 1 i32.eq
+      if (result i32) i32.const 1073741823 else i32.const -1073741824 end
+      i32.eq
+      if (result externref)
+        local.get $result call $native-wide
+      else
+        local.get $result i32.wrap_i64 ref.i31 extern.convert_any
+      end
+    else
+      local.get 0 local.get $step call $native-step
+    end))`;
+const checkCounters = bytes => {
+  const events = [], failure = new Error('step callback');
+  const entry = new WebAssembly.Instance(new WebAssembly.Module(bytes), {m: {
+    wide(value) {events.push(['wide', value]); return value;},
+    step(value, direction) {
+      events.push(['step', value, direction]);
+      if (value === failure) throw failure;
+      return value + BigInt(direction);
+    },
+  }}).exports.entry;
+  for (const [input, direction, expected] of [[0, 1, 1], [0, -1, -1],
+    [1073741823, 1, 1073741824n], [-1073741824, -1, -1073741825n]]) {
+    events.length = 0;
+    assert.equal(entry(input, direction), expected);
+    assert.deepEqual(events, typeof expected === 'bigint' ? [['wide', expected]] : []);
+  }
+  for (const input of [1n << 40n, 1n << 100n]) {
+    events.length = 0;
+    assert.equal(entry(input, 1), input + 1n);
+    assert.deepEqual(events, [['step', input, 1]]);
+  }
+  assert.throws(() => entry(failure, 1), error => error === failure);
+  assert.equal(entry(40, 1), 41, 'A failed generic step leaves immediate arithmetic usable.');
+};
+
 // Exercise the shared body optimizer through real module decoding and writing.
 // Copies have repeated consumers, so keeping a value on the stack alone cannot
 // remove their traffic. Joins retain locals used after the first load; other
@@ -307,6 +365,17 @@ if (mode === 'prepare') {
 } else if (mode === 'verify') {
   check(await fs.readFile(pathname));
   console.log('Native module linker: linked catches, propagation, function calls and recovery pass.');
+} else if (mode === 'prepare-counters') {
+  await fs.writeFile(pathname, counterFixture);
+} else if (mode === 'link-counters') {
+  const bytes = await fs.readFile(pathname);
+  checkCounters(bytes);
+  const {wat, entries} = linkNativeModules([bytes]);
+  await fs.writeFile(optimizedPath, `(module ${counterImports} ${wat}
+    (export "entry" (func ${entries[0]})))`);
+} else if (mode === 'verify-counters') {
+  checkCounters(await fs.readFile(pathname));
+  console.log('Native module linker: linked immediate counter steps, promotion, generic effects and recovery pass.');
 } else if (mode === 'prepare-optimizer') {
   await fs.writeFile(pathname, optimizerFixture);
 } else if (mode === 'verify-optimizer') {

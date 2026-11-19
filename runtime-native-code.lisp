@@ -2224,9 +2224,9 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
       (i32.le_u (i32.sub (local.get $tag) (i32.const 3)) (i32.const 1))))))
     ((1+ 1-)
       #@(if (i32.le_u (i32.sub (local.get $tag) (i32.const 1)) (i32.const 4))
-        (then (return (extern.convert_any (call $op (i32.const 0) (local.get $a)
-          (call $int (select (i32.const 1) (i32.const -1)
-            (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '1+)))))))))))
+        (then (return (extern.convert_any (call $number-step (local.get $a)
+          (select (i32.const 1) (i32.const -1)
+            (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id '1+))))))))))
     (length
       #@(if (call $vectorp-native (local.get $a))
         (then (return (extern.convert_any (call $int (call $array-sequence-length (local.get $a)))))))))
@@ -2476,21 +2476,20 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
 (define-runtime-function $native-standard-call1 (($code i32) ($value externref)) (externref)
   (:export-raw "native-standard-call1")
   (:locals ($function :nullable-object) ($a :nullable-object) ($id i32) ($result :nullable-object))
-  ;; Actual immediate input proves the checked standard successor/predecessor
-  ;; path. Widen before arithmetic so crossing the i31 boundary promotes.
+  ;; Actual scalar storage proves this checked successor/predecessor path.
+  ;; The shared worker promotes at both immediate and signed-i64 endpoints.
   #@(if (i32.and
       (i32.or
         (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id '1+))))
         (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id '1-)))))
-      (ref.test (ref i31) (any.convert_extern (local.get $value))))
+      (i32.or (ref.test (ref i31) (any.convert_extern (local.get $value)))
+        (ref.test (ref $fixnum) (any.convert_extern (local.get $value)))))
     (then
       (if (global.get $thread-active) (then (call $thread-checkpoint)))
-      (return (extern.convert_any (call $int64
-        (i64.add
-          (i64.extend_i32_s (i31.get_s (ref.cast (ref i31)
-            (any.convert_extern (local.get $value)))))
-          (select (i64.const 1) (i64.const -1)
-            (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id '1+)))))))))))
+      (return (extern.convert_any (call $number-step
+        (ref.cast (ref eq) (any.convert_extern (local.get $value)))
+        (select (i32.const 1) (i32.const -1)
+          (i32.eq (local.get $code) (i32.const ,(1+ (runtime-symbol-id '1+))))))))))
   #@(local.set $function (call $standard-function-code (local.get $code)))
   #@(local.set $a (call $native-checked-value (local.get $value)))
   #@(local.set $id (i32.sub (local.get $code) (i32.const 1)))
