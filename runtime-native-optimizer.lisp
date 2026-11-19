@@ -308,19 +308,56 @@
 ;; its context and signals COMPILER-INPUT-ERROR. Floyd's algorithm allocates
 ;; nothing while traversing and never follows an unchecked dotted tail.
 (define-runtime-function $compiler-list-length (($fast :nullable-object)) (:nullable-object)
-  (:locals ($slow :nullable-object) ($count i64))
+  #@(return_call $checked-list-length (local.get $fast) (i32.const 0)))
+
+;; A shared representation boundary counts the complete spine without polling.
+;; Public APPLY also admits every argument value; compiler structure queries
+;; inspect only the spine. Bit one admits an ordinary terminal atom for private
+;; REST binding. Ordinary LIST-LENGTH remains a portable CL kernel.
+(define-runtime-function $checked-list-length (($fast :nullable-object) ($elements i32)) (:nullable-object)
+  (:locals ($slow :nullable-object) ($item :nullable-object) ($count i64))
   #@(local.set $slow (local.get $fast))
   #@(loop $next
     (if (ref.is_null (local.get $fast)) (then (return (call $int64 (local.get $count)))))
-    (if (i32.ne (call $tag (local.get $fast)) (i32.const 7))
-      (then (return (call $int (i32.const -1)))))
-    (local.set $fast (call $cdr (local.get $fast)))
+    (if (i32.eqz (ref.test (ref $obj) (local.get $fast)))
+      (then
+        (if (i32.and (i32.ne (i32.and (local.get $elements) (i32.const 2)) (i32.const 0))
+              (ref.test (ref i31) (local.get $fast)))
+          (then (return (call $int64 (local.get $count)))))
+        (return (call $int (i32.const -1)))))
+    (if (i32.ne (i32.and (struct.get $obj $tag (ref.cast (ref $obj) (local.get $fast))) (i32.const 63)) (i32.const 7))
+      (then
+        (if (i32.and (local.get $elements) (i32.const 2))
+          (then (return (call $int64 (local.get $count)))))
+        (return (call $int (i32.const -1)))))
+    (if (i32.and (local.get $elements) (i32.const 1))
+      (then
+        (local.set $item (struct.get $obj $a (ref.cast (ref $obj) (local.get $fast))))
+        (if (i32.eqz (i32.or (ref.is_null (local.get $item))
+          (i32.or (ref.test (ref i31) (local.get $item)) (ref.test (ref $obj) (local.get $item)))))
+          (then (return (call $int (i32.const -1)))))))
+    (local.set $fast (struct.get $obj $b (ref.cast (ref $obj) (local.get $fast))))
     (local.set $count (i64.add (local.get $count) (i64.const 1)))
     (if (ref.is_null (local.get $fast)) (then (return (call $int64 (local.get $count)))))
-    (if (i32.ne (call $tag (local.get $fast)) (i32.const 7))
-      (then (return (call $int (i32.const -1)))))
-    (local.set $fast (call $cdr (local.get $fast)))
-    (local.set $slow (call $cdr (local.get $slow)))
+    (if (i32.eqz (ref.test (ref $obj) (local.get $fast)))
+      (then
+        (if (i32.and (i32.ne (i32.and (local.get $elements) (i32.const 2)) (i32.const 0))
+              (ref.test (ref i31) (local.get $fast)))
+          (then (return (call $int64 (local.get $count)))))
+        (return (call $int (i32.const -1)))))
+    (if (i32.ne (i32.and (struct.get $obj $tag (ref.cast (ref $obj) (local.get $fast))) (i32.const 63)) (i32.const 7))
+      (then
+        (if (i32.and (local.get $elements) (i32.const 2))
+          (then (return (call $int64 (local.get $count)))))
+        (return (call $int (i32.const -1)))))
+    (if (i32.and (local.get $elements) (i32.const 1))
+      (then
+        (local.set $item (struct.get $obj $a (ref.cast (ref $obj) (local.get $fast))))
+        (if (i32.eqz (i32.or (ref.is_null (local.get $item))
+          (i32.or (ref.test (ref i31) (local.get $item)) (ref.test (ref $obj) (local.get $item)))))
+          (then (return (call $int (i32.const -1)))))))
+    (local.set $fast (struct.get $obj $b (ref.cast (ref $obj) (local.get $fast))))
+    (local.set $slow (struct.get $obj $b (ref.cast (ref $obj) (local.get $slow))))
     (local.set $count (i64.add (local.get $count) (i64.const 1)))
     (if (ref.eq (local.get $fast) (local.get $slow))
       (then (return (call $int (i32.const -2)))))
@@ -680,6 +717,7 @@
     (i32.or (i32.shl (local.get $clean) (i32.const 1)) (i32.shl (local.get $void) (i32.const 2))))))
 
 (define-runtime-section native-optimizer-runtime-wat ()
+  ($checked-list-length)
   (if *include-compiler*
       (runtime-wat-sequence
         ($native-op-operand) ($native-read-ops) ($native-stackify-ops) ($compiler-list-length)

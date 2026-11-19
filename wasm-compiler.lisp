@@ -242,6 +242,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-call1" (:object :object) :object)
     ("native-call-values1" (:object :object) (:object :object :object :object :i32))
     ("native-call2" (:object :object :object) :object)
+    ("native-apply-list" (:object :object :i32) :object)
     ("native-call3" (:object :object :object :object) :object)
     ("native-call4" (:object :object :object :object :object) :object)
     ("native-standard-call0" (:i32) :object)
@@ -1423,6 +1424,15 @@ exhausted work budgets keep every incoming value group."
                   (and (eq (hir-instruction-opcode instruction) :call)
                        (or (eql (standard-function-result-count (hir-inline-primitive instruction)
                                    (- (length (hir-instruction-inputs instruction)) 2)) 1)
+                           ;; Current executable callee facts also describe
+                           ;; exact cardinality across retained out-of-line
+                           ;; calls. Primary demand is not this proof.
+                           (and *wasm-result-arities*
+                                (let* ((inputs (hir-instruction-inputs instruction))
+                                       (target (hir-result-callee (second inputs) *wasm-result-callees*)))
+                                  (and target
+                                       (eql (- (length inputs) 2) (native-fixed-arity target))
+                                       (eql (gethash target *wasm-result-arities*) 1))))
                            (gethash instruction *wasm-inline-vector-calls*)
                            (let ((kind (gethash instruction *wasm-inline-simple-calls*)))
                              ;; Canonical inline operations have known value
@@ -2730,7 +2740,15 @@ exhausted work budgets keep every incoming value group."
         (dolist (entry list-accesses)
           (let* ((instruction (car entry)) (name (cdr entry))
                  (type (gethash (third (hir-instruction-inputs instruction)) proven t)))
-            (when (hir-type-proves-p type 'list)
+            (when (and (hir-standard-property-negative-p name
+                         (cddr (hir-instruction-inputs instruction)) :may-signal proven)
+                       ;; ENDP's discarded body is removable only when the
+                       ;; independent effect/allocation obligations hold too.
+                       (or (not (eq name 'endp))
+                           (every (lambda (property)
+                                    (hir-standard-property-negative-p name
+                                      (cddr (hir-instruction-inputs instruction)) property proven))
+                             '(:reads :writes :callbacks :allocation))))
               (compiler-statistic :proof/list-access name)
               (setf (gethash instruction *wasm-inline-simple-calls*)
                 (cond ((eq name 'endp) :endp-list)
@@ -2788,11 +2806,13 @@ exhausted work budgets keep every incoming value group."
   (dolist (instruction pending)
     ;; Executed checks and flow establish logical scalar integers. Declared
     ;; ranges and a producer's historical opcode alone supply no authority.
-    (when (every (lambda (operand)
+    (when (and (hir-standard-property-negative-p (hir-inline-primitive instruction)
+                  (cddr (hir-instruction-inputs instruction)) :may-signal proven)
+                (every (lambda (operand)
                          (multiple-value-bind (low high bounded)
                              (hir-integer-bounds (gethash operand proven t))
                            (and bounded (<= -9223372036854775808 low high 9223372036854775807))))
-                  (cddr (hir-instruction-inputs instruction)))
+                  (cddr (hir-instruction-inputs instruction))))
       (let ((kind (case (gethash instruction *wasm-inline-simple-calls*)
                     (:less-real :proven-less-int64) (:greater-real :proven-greater-int64)
                     (:not-greater-real :proven-not-greater-int64)
@@ -3292,6 +3312,11 @@ exhausted work budgets keep every incoming value group."
               ;; The checked standard call polls after operand evaluation.
               ;; Keep that checkpoint even when its result is unused.
               (wasm-call "native-poll")
+              ;; Admission proved the operation body separately. All operand
+              ;; producers stay live at their original positions. A dead result
+              ;; needs no boolean or value packet, while the poll stays here.
+              (unless (native-value-slot *wasm-live-values* output)
+                (return-from emit-native-instruction nil))
               (wasm-get (third inputs)) (wasm-byte #xd1) (wasm-call "native-boolean"))
              ((eq kind :list) (wasm-list (cddr inputs) nil))
              ((eq kind :list-star) (wasm-list (cddr inputs) t))
@@ -3436,6 +3461,24 @@ exhausted work budgets keep every incoming value group."
          (return-from emit-native-instruction nil))
        (when (member instruction *wasm-tail-calls* :test #'eq)
          (emit-native-tail-call inputs (hir-instruction-safety-level instruction))
+         (return-from emit-native-instruction nil))
+       (when (and (= (length inputs) 4)
+                  (< (hir-function-debug-level *wasm-current-function*) 2)
+                  (null *wasm-fixed-call-emitter*)
+                  (eq (native-standard-operation (second inputs)) 'apply)
+                  (let ((producer (hir-value-producer (second inputs))))
+                    (and (%hir-instruction-p producer)
+                         (eq (hir-instruction-opcode producer) :function-reference)
+                         (eq (first (hir-instruction-attributes producer)) 'apply)
+                         (not (eq (second (hir-instruction-attributes producer)) 'notinline)))))
+         ;; Demand and the original transport ABI are independent: discarded
+         ;; generic calls still snapshot the public list before callee entry.
+         (wasm-get (third inputs)) (wasm-get (fourth inputs))
+         (wasm-integer (+ (if (or (native-value-slot *wasm-scalar-groups* output)
+                                  (not (native-value-slot *wasm-live-values* output))) 1 0)
+                           (if (native-value-slot *wasm-single-calls* output) 2 0)))
+         (wasm-call "native-apply-list")
+         (wasm-set output)
          (return-from emit-native-instruction nil))
        (if (native-value-slot *wasm-single-calls* output)
            ;; Keep argument checks in shared native primitives rather than
@@ -5734,7 +5777,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                          (not (eq (second (hir-instruction-attributes producer)) 'notinline))
                          (or (native-generic-candidate (first (hir-instruction-attributes producer)))
                              (member (first (hir-instruction-attributes producer))
-                           '(1+ 1- + - * logand logior logxor lognot ash < > <= >= = /= eq eql zerop minusp plusp evenp oddp car first cdr rest rplaca rplacd length svref aref row-major-aref make-array make-string
+                           '(1+ 1- + - * logand logior logxor lognot ash < > <= >= = /= eq eql zerop minusp plusp evenp oddp car first cdr rest endp rplaca rplacd length svref aref row-major-aref make-array make-string
                              (setf svref) (setf aref) (setf row-major-aref) (setf char)) :test #'equal)
                              (and (zerop (hir-instruction-safety-level instruction))
                                   (member (first (hir-instruction-attributes producer))
@@ -6192,7 +6235,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-capture hir-cell-for-binding
                    hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-widen-integer-interval hir-type-restrict hir-constant-type hir-type-cell
                    hir-type-without-null hir-copy-source hir-type-truth-premise hir-type-branch-guards
-                   hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-literal-list-cells hir-literal-counter-cells hir-symbolic-target-type-p hir-type-query-result-type hir-integer-identity hir-integer-branch-type hir-integer-comparison-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
+                   hir-standard-property-negative-p hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-literal-list-cells hir-literal-counter-cells hir-symbolic-target-type-p hir-type-query-result-type hir-integer-identity hir-integer-branch-type hir-integer-comparison-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
                    hir-dispatch-candidate
                    hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells
                    hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-tail-pair-p hir-share-branch-tails hir-refresh-predecessors hir-proper-list-checks optimize-hir-checked optimize-hir

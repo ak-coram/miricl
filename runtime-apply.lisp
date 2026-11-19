@@ -5,17 +5,24 @@
 (define-runtime-function $apply0
     (($name :nullable-object) ($args :nullable-object))
     (:nullable-object)
+  ;; Internal APPLY owns raw slot storage. Exported native/JS call adapters
+  ;; snapshot foreign raw arrays before arriving here or reaching a checkpoint.
+  #@(if (ref.test (ref $objects) (local.get $args))
+    (then (call $native-validate-packet (ref.cast (ref $objects) (local.get $args)))))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(return_call $apply0-ready (local.get $name) (local.get $args)))
+
+;; Only checked internal callers enter after raw admission and the application
+;; checkpoint. Keeping the ordinary owner here also serves speculative misses.
+(define-runtime-function $apply0-ready
+    (($name :nullable-object) ($args :nullable-object))
+    (:nullable-object)
   (:locals ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
            ($handlers :nullable-object) ($restarts :nullable-object)
            ($restart-associations :nullable-object) ($catches :nullable-object) ($targets :nullable-object)
            ($thrown i32) ($direct-arity i32) ($direct-usage i32)
            ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object)
            ($result :nullable-object))
-  ;; Internal APPLY owns raw slot storage. Exported native/JS call adapters
-  ;; snapshot foreign raw arrays before arriving here or reaching a checkpoint.
-  #@(if (ref.test (ref $objects) (local.get $args))
-    (then (call $native-validate-packet (ref.cast (ref $objects) (local.get $args)))))
-  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   ;; Reuse a bounded ring, restoring overwritten entries on return as well as
   ;; nonlocal exits. No frame objects or argument lists are allocated here.
   #@(local.set $backtrace-depth (global.get $backtrace-depth))
@@ -76,24 +83,26 @@
 ;; Physical APPLY adaptation copies a validated public final spine into owned
 ;; storage. Its prefix may already be raw; no temporary Lisp wrapper is used.
 (define-runtime-function $native-spread-arguments (($args :nullable-object)) (:nullable-object)
-  (:locals ($data (ref null $objects)) ($source (ref null $objects))
-           ($tail :nullable-object) ($tail-count :nullable-object)
-           ($count i32) ($prefix i32) ($index i32) ($total i32))
+  (:locals ($source (ref null $objects)) ($count i32))
   #@(if (i32.eqz (ref.test (ref $objects) (local.get $args)))
     (then (return (call $spread-arguments (local.get $args)))))
   #@(local.set $source (ref.cast (ref $objects) (local.get $args)))
   #@(call $native-validate-packet (ref.as_non_null (local.get $source)))
   #@(local.set $count (array.len (local.get $source)))
   (wat-fail-when #@(i32.lt_u (local.get $count) (i32.const 2)) :wrong-arity)
-  #@(local.set $prefix (i32.sub (local.get $count) (i32.const 2)))
-  #@(local.set $tail (array.get $objects (local.get $source) (i32.sub (local.get $count) (i32.const 1))))
+  #@(return_call $native-spread-list (local.get $source)
+    (i32.sub (local.get $count) (i32.const 2))
+    (array.get $objects (local.get $source) (i32.sub (local.get $count) (i32.const 1)))))
+
+;; SOURCE is an owned checked packet, or NIL when PREFIX is zero. Validate and
+;; copy the public tail in one nonpolling interval, before the selected call.
+(define-runtime-function $native-spread-list
+    (($source (ref null $objects)) ($prefix i32) ($tail :nullable-object)) (:nullable-object)
+  (:locals ($data (ref null $objects)) ($tail-count :nullable-object) ($index i32) ($total i32))
   ;; Reuse the proper-list walk's count immediately, before any callback or
   ;; checkpoint can mutate the public final spine. A cycle keeps the same
   ;; CHECK-APPLY-LIST condition; dotted tails fail inside the checked walker.
-  #@(local.set $tail-count (call $list-length-native (local.get $tail)))
-  #@(if (ref.is_null (local.get $tail-count))
-    (then (call $type-fail (local.get $tail) (call $symbol-value ,(clos-library-reference '%proper-list-type))
-      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(local.set $tail-count (call $checked-apply-list-length (local.get $tail)))
   #@(local.set $total (i32.add (local.get $prefix) (call $natural-count (local.get $tail-count))))
   (wat-fail-when #@(i32.ge_u (local.get $total) (i32.const 65536)) :malformed-form)
   #@(local.set $data (array.new_default $objects (local.get $total)))
@@ -108,6 +117,120 @@
     (local.set $tail (call $cdr (local.get $tail)))
     (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy-tail)))
   #@(local.get $data))
+
+;; Select only after P3: a public list may have changed since validation, while
+;; a packet snapshot is privately owned. Failed bounded extraction keeps the
+;; original arguments and ordinary postcheckpoint binder, including its errors.
+(define-runtime-function $native-apply-list-selected
+    (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
+  (:locals ($function (ref $native-function)) ($data (ref null $objects))
+           ($scan :nullable-object) ($item :nullable-object) ($count :nullable-object) ($index i32) ($size i32)
+           ($a :nullable-object) ($b :nullable-object) ($c :nullable-object) ($d :nullable-object))
+  #@(if (global.get $debug-evaluating)
+    (then (return_call $apply (local.get $name) (local.get $args))))
+  #@(if (ref.test (ref $objects) (local.get $args))
+    (then (call $native-validate-packet (ref.cast (ref $objects) (local.get $args)))))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(block $ordinary
+    (br_if $ordinary (global.get $debug-evaluating))
+    (br_if $ordinary (i32.eqz (ref.test (ref $native-function) (local.get $name))))
+    (br_if $ordinary (ref.test (ref $native-debug-function) (local.get $name)))
+    (local.set $function (ref.cast (ref $native-function) (local.get $name)))
+    (br_if $ordinary (ref.is_null (struct.get $native-function $direct (local.get $function))))
+    (if (ref.test (ref $objects) (local.get $args))
+      (then
+        (local.set $data (ref.cast (ref $objects) (local.get $args)))
+        (local.set $size (array.len (local.get $data)))
+        (br_if $ordinary (i32.gt_u (local.get $size) (i32.const 4))))
+      (else (local.set $scan (local.get $args))))
+    (block $done (loop $extract
+      (if (ref.is_null (local.get $data))
+        (then
+          (br_if $done (ref.is_null (local.get $scan)))
+          (br_if $ordinary (i32.eq (local.get $index) (i32.const 4)))
+          (br_if $ordinary (i32.eqz (ref.test (ref $obj) (local.get $scan))))
+          (br_if $ordinary (i32.ne (i32.and
+            (struct.get $obj $tag (ref.cast (ref $obj) (local.get $scan))) (i32.const 63)) (i32.const 7)))
+          (local.set $item (struct.get $obj $a (ref.cast (ref $obj) (local.get $scan))))
+          (local.set $scan (struct.get $obj $b (ref.cast (ref $obj) (local.get $scan)))))
+        (else
+          (br_if $done (i32.eq (local.get $index) (local.get $size)))
+          (local.set $item (array.get $objects (local.get $data) (local.get $index)))))
+      (br_if $ordinary (i32.eqz (i32.or (ref.is_null (local.get $item))
+        (i32.or (ref.test (ref i31) (local.get $item)) (ref.test (ref $obj) (local.get $item))))))
+      (if (i32.eqz (local.get $index)) (then (local.set $a (local.get $item)))
+        (else (if (i32.eq (local.get $index) (i32.const 1)) (then (local.set $b (local.get $item)))
+          (else (if (i32.eq (local.get $index) (i32.const 2)) (then (local.set $c (local.get $item)))
+            (else (local.set $d (local.get $item))))))))
+      (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $extract)))
+    (br_if $ordinary (f64.ne (struct.get $obj $f (local.get $function))
+      (f64.convert_i32_u (i32.add (local.get $index) (i32.const 2)))))
+    ;; No callback or poll separates extraction, current-entry admission and
+    ;; the shared executor's independently authenticated leaf permission.
+    (return (ref.cast (ref null eq) (any.convert_extern
+      (call $native-direct-apply-ready (local.get $function)
+        (local.get $a) (local.get $b) (local.get $c) (local.get $d) (i32.const 0))))))
+  ;; Successful extraction admitted every value after the poll. All other
+  ;; shared-list paths need the same representation boundary before ordinary
+  ;; binders, even when their selected function never reads an argument. Keep
+  ;; finite dotted private REST tails; this is not another public proper check.
+  #@(if (i32.eqz (ref.test (ref $objects) (local.get $args)))
+    (then
+      (local.set $count (call $checked-list-length (local.get $args) (i32.const 3)))
+      (if (i64.lt_s (call $scalar-integer-value (ref.as_non_null (local.get $count))) (i64.const 0))
+        (then (call $type-fail (local.get $args) (call $symbol-value ,(clos-library-reference '%proper-list-type))
+          (i32.const ,(runtime-error-code :expected-designator)))))))
+  #@(return_call $apply0-ready (local.get $name) (local.get $args)))
+
+;; No-prefix APPLY has two existing transport observations: fixed CALL2 shares
+;; its public tail and supplies P1; generic packet calls snapshot it without P1.
+;; MODE bit zero selects primary demand; bit one preserves that fixed ABI.
+(define-runtime-function $native-apply-list
+    (($function externref) ($arguments externref) ($mode i32)) (externref)
+  (:export-raw "native-apply-list")
+  (:locals ($name :nullable-object) ($args :nullable-object) ($outer :nullable-object)
+           ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
+           ($handlers :nullable-object) ($restarts :nullable-object)
+           ($restart-associations :nullable-object) ($catches :nullable-object) ($targets :nullable-object)
+           ($thrown i32) ($backtrace-depth i32) ($backtrace-slot i32)
+           ($backtrace-frame :nullable-object) ($result :nullable-object))
+  (wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 3)) :malformed-form)
+  #@(local.set $name (call $native-checked-value (local.get $function)))
+  #@(local.set $args (call $native-checked-value (local.get $arguments)))
+  #@(local.set $outer (call $canonical-builtin-function (i32.const ,(runtime-symbol-id 'apply)) (i32.const 0)))
+  ;; P1 belongs only to the original fixed CALL2 route.
+  #@(if (i32.and (local.get $mode) (i32.const 2))
+    (then (if (global.get $thread-active) (then (call $thread-checkpoint)))))
+  #@(if (global.get $debug-evaluating)
+    (then
+      ;; Debugger evaluation retains the ordinary adapter and its entry owner.
+      (local.set $result (call $apply (local.get $outer)
+        (if (result (ref null eq)) (i32.and (local.get $mode) (i32.const 2))
+          (then (call $cons (local.get $name) (call $cons (local.get $args) (ref.null eq))))
+          (else (array.new_fixed $objects 2 (local.get $name) (local.get $args)))))))
+    (else
+      ;; P2 precedes installation of the outer APPLY frame, as in APPLY0.
+      (if (global.get $thread-active) (then (call $thread-checkpoint)))
+      (local.set $backtrace-depth (global.get $backtrace-depth))
+      (local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
+      (local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
+      (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $outer))
+      (global.set $backtrace-depth (i32.add (local.get $backtrace-depth) (i32.const 1)))
+      (call $clear-values)
+      ,(wat-dynamic-call
+        #@(block (result (ref null eq))
+          (if (i32.and (local.get $mode) (i32.const 2))
+            (then (call $check-apply-list (local.get $args)))
+            (else (local.set $args (call $native-spread-list (ref.null $objects) (i32.const 0) (local.get $args)))))
+          (call $native-apply-list-selected (local.get $name) (local.get $args)))
+        :cleanup #@(block
+          (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
+          (global.set $backtrace-depth (local.get $backtrace-depth))))
+      (drop)))
+  #@(if (i32.eqz (i32.and (local.get $mode) (i32.const 1)))
+    (then (local.set $result (call $value-list (local.get $result)))))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
 
 (define-runtime-function $apply-source (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
   (:locals ($params :nullable-object) ($param :nullable-object) ($env :nullable-object) ($stop :nullable-object))
@@ -472,7 +595,7 @@
   #@(ref.null eq))
 
 (define-runtime-section apply-runtime-wat ()
-  ($apply0)
+  ($apply0) ($apply0-ready)
   (if *source-bootstrap-p* ($apply-source) "")
-  ($spread-arguments) ($native-spread-arguments)
+  ($spread-arguments) ($native-spread-arguments) ($native-spread-list) ($native-apply-list-selected) ($native-apply-list)
   ($apply1))

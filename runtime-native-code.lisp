@@ -251,13 +251,10 @@
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $copy)))
   #@(global.get $cursor) #@(local.get $size))
 
-(defun native-literal-object (function index)
-  `(array.get $objects
-    (call $vector-data (struct.get $obj $a (ref.cast (ref $obj) ,(native-object function)))) ,index))
-
 (define-runtime-function $native-literal (($function externref) ($index i32)) (externref)
   (:export-raw "native-literal")
-  #@(extern.convert_any ,(native-literal-object '(local.get $function) '(local.get $index))))
+  #@(extern.convert_any (array.get $objects
+    (call $vector-data (struct.get $obj $a (ref.cast (ref $obj) ,(native-object '(local.get $function))))) (local.get $index))))
 
 (define-runtime-function $native-two-arguments
     (($function :nullable-object) ($a :nullable-object) ($b :nullable-object)) (:nullable-object)
@@ -604,14 +601,13 @@
   (:export-raw "native-global-write")
   #@(extern.convert_any (call $set-symbol-value ,(native-object '(local.get $name)) ,(native-object '(local.get $value)))))
 
-(define-runtime-function $native-name-function-reference (($name (ref null any))) (externref)
+(define-runtime-function $native-function-reference (($name externref)) (externref)
+  (:export-raw "native-function-reference")
   (:locals ($symbol :nullable-object) ($binding :nullable-object)
            ($value :nullable-object) ($id i32))
   ;; Compiled global calls overwhelmingly name symbols. Read the current
   ;; binding directly; retain FDEFINITION for SETF names and undefined calls.
-  #@(local.set $symbol (if (result (ref null eq)) (ref.test (ref null $obj) (local.get $name))
-    (then (ref.cast (ref null $obj) (local.get $name)))
-    (else (call $native-checked-value (extern.convert_any (local.get $name))))))
+  #@(local.set $symbol (call $native-checked-value (local.get $name)))
   #@(if (call $symbolp (local.get $symbol))
     (then
       ;; SYMBOLP has established the representation. Read a non-NIL symbol's
@@ -626,10 +622,6 @@
             (then (return (extern.convert_any (local.get $value)))))))))
   #@(extern.convert_any (call $fdefinition (local.get $symbol))))
 
-(define-runtime-function $native-function-reference (($name externref)) (externref)
-  (:export-raw "native-function-reference")
-  #@(return_call $native-name-function-reference (any.convert_extern (local.get $name))))
-
 (define-runtime-function $native-standard-function-reference (($name externref)) (externref)
   (:export-raw "native-standard-function-reference")
   #@(extern.convert_any (call $standard-function-reference
@@ -638,8 +630,8 @@
 (define-runtime-function $native-literal-function (($function externref) ($index i32)) (externref)
   (:export-raw "native-literal-function")
   ;; Resolve the live function binding at the same point as the unfused pair.
-  #@(return_call $native-name-function-reference
-    ,(native-literal-object '(local.get $function) '(local.get $index))))
+  #@(return_call $native-function-reference
+    (call $native-literal (local.get $function) (local.get $index))))
 
 (define-runtime-function $native-entry-valid (($entry funcref) ($direct i32)) (i32)
   (:export-raw "native-entry-valid")
@@ -1391,12 +1383,12 @@
 
 (define-runtime-function $native-consp-inline (($value externref)) (externref)
   (:export-raw "native-consp-inline")
-  #@(extern.convert_any (call $bool (i32.eq
-    (call $tag ,(native-object '(local.get $value))) (i32.const 7)))))
+  #@(extern.convert_any (call $bool (call $checked-consp
+    (call $native-checked-value (local.get $value))))))
 
 (define-runtime-function $native-consp-test (($value externref)) (i32)
   (:export-raw "native-consp-test")
-  #@(i32.eq (call $tag ,(native-object '(local.get $value))) (i32.const 7)))
+  #@(call $checked-consp (call $native-checked-value (local.get $value))))
 
 (define-runtime-function $native-simple-vector-p-inline (($value externref)) (externref)
   (:export-raw "native-simple-vector-p-inline")
@@ -2726,7 +2718,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-restore-environment) ($native-bind)
   ($native-block-enter) ($native-block-environment) ($native-block-return) ($native-block-match) ($native-block-values)
   ($native-control) ($native-restart-signal) ($native-throw)
-  ($native-global-read) ($native-global-write) ($native-name-function-reference) ($native-function-reference) ($native-standard-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
+  ($native-global-read) ($native-global-write) ($native-function-reference) ($native-standard-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
   ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-write)
   ($native-call) ($native-primary-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1) ($native-return2) ($native-return3)

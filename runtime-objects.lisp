@@ -15,6 +15,14 @@
   #@(if (result i32) (ref.is_null (local.get $x)) (then (i32.const 0))
       (else (i32.and (struct.get $obj $tag (ref.cast (ref $obj) (local.get $x))) (i32.const 63)))))
 
+;; Portable checked spine walkers must distinguish ordinary terminal atoms
+;; from foreign canonical GC values before using an unchecked object tag.
+(define-runtime-function $checked-consp (($x :nullable-object)) (i32)
+  #@(if (i32.or (ref.is_null (local.get $x)) (ref.test (ref i31) (local.get $x)))
+    (then (return (i32.const 0))))
+  (wat-fail-when #@(i32.eqz (ref.test (ref $obj) (local.get $x))) :malformed-form)
+  #@(i32.eq (i32.and (struct.get $obj $tag (ref.cast (ref $obj) (local.get $x))) (i32.const 63)) (i32.const 7)))
+
 ;; The N header field denotes sign for integers and metadata for heap objects.
 ;; Immediate integers have no header; obtain their sign with native comparisons.
 (define-runtime-function $value-n (($x :nullable-object)) (i32)
@@ -205,6 +213,7 @@
       ,(if wasi '(throw $guest-error) '(unreachable)))
   ($error-code)
   ($tag)
+  ($checked-consp)
   ($value-n)
   ($allocate-object-tag)
   ($node)

@@ -908,7 +908,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                     (+ call-base 2) (1+ call-base) call-base
                     (1+ call-base) (+ call-base 2) call-base))
                  ((member target '("native-consp-inline" "native-consp-test") :test #'equal)
-                  (write-line "call $tag i32.const 7 i32.eq" out)
+                  (write-line "call $checked-consp" out)
                   (when (string= target "native-consp-inline") (write-line "call $bool" out)))
                  ((string= target "native-simple-vector-p-inline")
                   (write-line "call $tag i32.const 34 i32.eq call $bool" out))

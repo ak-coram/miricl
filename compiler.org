@@ -328,6 +328,32 @@ Fixed-call primitive dispatchers tail-call a small primary-result adapter when t
 a native worker. The adapter retains the ordinary Lisp frame and dynamic cleanup while
 allowing the dispatcher's larger physical frame to leave the stack before reentrant calls.
 
+Canonical no-prefix APPLY calls with expansion permission use a shared list
+adapter outside tail position. Result demand and argument transport are separate:
+the original fixed-call route shares the public final spine, while the general
+packet route validates and snapshots it before selected-callee entry. The adapter
+retains the fixed-call, outer-application and selected-entry checkpoints, with
+the outer APPLY frame and dynamic cleanup around argument adaptation. Public
+validation and packet capture form a non-suspending interval; internal counting
+helpers introduce no scheduling observation within it. The fixed route instead
+shares its validated public spine across selected entry. After that checkpoint,
+bounded extraction of up to
+four arguments can enter the existing direct executor with the actual current
+native function and matching arity. Unknown shapes, callees and arities retain the
+ordinary postcheckpoint application owner; no public-list proof survives a poll.
+Full consumers capture every value after cleanup, while primary consumers discard
+secondary values. NOTINLINE, tail APPLY and debugger entry retain ordinary paths.
+
+Native function-name lookup checks external representations before reading tags.
+The shared function-name validator admits only a symbol or the bounded
+(SETF symbol) shape, checking each inspected child before its tag is used. A
+canonical cons layout does not authenticate its children or function binding.
+Public APPLY and compiler structure queries share a representation-checked
+spine counter; APPLY additionally admits each argument value. Portable private
+spine kernels use a checked physical CONSP predicate, so a newly observed
+foreign GC tail signals a Lisp condition while finite dotted REST tails retain
+their private binder semantics.
+
 Integers use i31 immediates, boxed signed-i64 values or larger sign/magnitude
 integers; target FIXNUM spans signed i64 independently of immediate or boxed storage.
 Fresh literals and checked object-arithmetic paths on actual i31 operands retain
@@ -661,13 +687,32 @@ NOTINLINE preserves semantic facts while prohibiting expansion. Integer predicat
 supports unbounded and bignum intervals; declaration-derived unchecked facts retain their
 separate SAFETY restrictions. Native scalar result planning and eligible tail-result cleanup
 also consume shared count facts, independently of effects and argument checks.
+Current executable-callee provenance and matching fixed arity allow a proved
+one-value helper result to use scalar transport in a full-value consumer too.
+This seed propagates through the existing value-group joins. Zero, many and
+unknown counts retain their ordinary representations; NOTINLINE retains the
+out-of-line call, its checks, polling and cleanup.
 
-The shared executable-fact query also admits canonical CAR/CDR and FIRST/REST
-accesses at SAFETY 1 when their operands are proved LIST, selecting direct field
-reads for CONS and the NIL-aware helpers otherwise. Proven LIST operands allow
-ENDP to use a null test while retaining its original scheduling checkpoint, even
-when the result is discarded. Mixed declaration facts only select query roots;
-the final proof ignores declarations. NOTINLINE still vetoes expansion.
+=hir-standard-property-negative-p= checks accepted arity and independently queries
+reads, writes, callbacks, signaling and allocation. An explicit negative descriptor
+fact proves that operation property. Audited =:non-signaling-arguments= domains
+add conditional signaling proofs for LIST access and integer comparisons, using
+the existing bounded target subtype engine and current executable operand facts.
+Ordinary argument signatures alone supply no signaling proof. Unknown properties,
+opaque types and exhausted work retain ordinary lowering. Domain proofs return
+their SSA operands; their maps belong to unchanged, validated HIR.
+
+The shared executable-fact query admits canonical CAR/CDR and FIRST/REST accesses
+at SAFETY 1 when their operands are proved LIST, selecting direct field reads for
+CONS and NIL-aware helpers otherwise. ENDP uses the same signaling query and
+separately proves its read, write, callback and allocation obligations. A used
+result lowers to a null test; a discarded result retains the original scheduling
+checkpoint without constructing a boolean or value packet. Operand producers
+stay live in their original order. Integer comparison uses the shared signaling
+query alongside its existing independent bounded-integer extraction proof. Mixed
+declaration facts only select query roots; final proofs ignore declarations.
+NOTINLINE still vetoes expansion. These operation facts grant no permission to
+remove polling, frame ownership or exception cleanup.
 
 =hir-standard-operations= computes fresh semantic provenance through bounded primary-value
 flow, copies, compatible joins and certified private-cell reads. It shares primary-flow and

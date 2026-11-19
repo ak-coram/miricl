@@ -922,6 +922,63 @@ try {
     vm.vm['native-call1'](lookupUnset, lookupAbsent);
   }
   console.log('Soundness: native name lookup observes warmed cell mutation and rejects malformed names with recovery.');
+  // Canonical cons layouts do not authenticate their children. Function-name
+  // admission checks the bounded (SETF symbol) grammar before reading tags.
+  const setterName = vm.vm['native-call0'](packetFunction("(lambda () '(setf soundness-shaped-lookup))"));
+  const setfSymbol = vm.vm['native-argument'](setterName, 0);
+  const targetSymbol = vm.vm['native-argument'](setterName, 1);
+  const digits = coreFields(elements[0]).values[3];
+  assert.ok(digits);
+  try {
+    installLookup(setterName, lookupFunctions[0]);
+    for (const invalid of [packets.empty(), digits]) {
+      for (const malformed of [
+        vm.vm['native-cons'](invalid, vm.vm['native-cons'](targetSymbol, null)),
+        vm.vm['native-cons'](setfSymbol, invalid),
+        vm.vm['native-cons'](setfSymbol, vm.vm['native-cons'](invalid, null)),
+        vm.vm['native-cons'](setfSymbol, vm.vm['native-cons'](targetSymbol, invalid)),
+      ]) {
+        rejectPacketOperation(() => lookup(malformed));
+        assert.equal(lookup(setterName), lookupFunctions[0]);
+      }
+    }
+  } finally {vm.vm['native-call1'](lookupUnset, setterName);}
+  console.log('Soundness: forged function-name children signal conditions and preserve subsequent SETF lookup.');
+  const applyArguments = vm.vm['native-cons'](elements[0], null);
+  for (const mode of [0, 1, 2, 3]) {
+    const result = vm.vm['native-apply-list'](provedRoot, applyArguments, mode);
+    if (mode & 1) assert.equal(result, elements[0]);
+    else assert.deepEqual(vm.javascript.list(result, value => value), [elements[0]]);
+    for (const invalid of [foreign, packets.empty()]) {
+      rejectPacketOperation(() => vm.vm['native-apply-list'](invalid, applyArguments, mode));
+      rejectPacketOperation(() => vm.vm['native-apply-list'](provedRoot, invalid, mode));
+    }
+    rejectPacketOperation(() => vm.vm['native-apply-list'](provedRoot,
+      vm.vm['native-cons'](elements[0], elements[0]), mode));
+    assert.equal(vm.vm['native-apply-list'](provedRoot, applyArguments, mode | 1), elements[0]);
+  }
+  for (const mode of [-1, 4])
+    rejectPacketOperation(() => vm.vm['native-apply-list'](provedRoot, applyArguments, mode));
+  for (const invalid of [packets.empty(), digits]) {
+    const badTail = vm.vm['native-cons'](elements[0], invalid);
+    const badElement = vm.vm['native-cons'](invalid, null);
+    for (const mode of [0, 1, 2, 3]) {
+      rejectPacketOperation(() => vm.vm['native-apply-list'](provedRoot, badTail, mode));
+      rejectPacketOperation(() => vm.vm['native-apply-list'](provedRoot, badElement, mode));
+      assert.equal(vm.vm['native-apply-list'](provedRoot, applyArguments, mode | 1), elements[0]);
+    }
+    rejectPacketOperation(() => vm.vm['native-argument'](badTail, 0));
+    rejectPacketOperation(() => vm.vm['native-check-arguments'](badTail, 1, 1));
+  }
+  console.log('Soundness: APPLY list transport validates raw ingress and recovers in full and primary modes.');
+  for (const terminal of [integerOne, elements[0]]) {
+    const dotted = vm.vm['native-cons'](elements[0], terminal);
+    vm.vm['native-check-arguments'](dotted, 1, -1);
+    assert.equal(vm.vm['native-rest-argument'](dotted, 1), terminal);
+    rejectPacketOperation(() => vm.vm['native-check-arguments'](dotted, 1, 1));
+    vm.vm['native-check-arguments'](dotted, 1, -1);
+    assert.equal(vm.vm['native-rest-argument'](dotted, 1), terminal);
+  }
   // Private binder packets admit finite dotted spines, but cycles must fail
   // even when the requested slot occurs before the cycle. Repair the same
   // object to check that rejection leaves its storage and the runtime usable.
@@ -3361,6 +3418,59 @@ try {
   // live user dispatch, complete values and captured function identities.
   evaluate(`(defpackage :soundness-shadow (:use :cl)
     (:shadow :consp :eq :evenp :svref :list :abs :class-name)) (values)`);
+  // Conditional operation facts need explicit domains and independent
+  // obligations. An opaque type query must never execute user code.
+  evaluate(`(deftype soundness-query-opaque ()
+    (error "Proof query expanded an opaque type")) (values)`);
+  check(`(let* ((unit (compile-to-hir '(lambda (x y) (< x y))))
+        (function (first (hir-unit-functions unit)))
+        (call (loop for block in (hir-function-blocks function) thereis
+          (find-if (lambda (instruction) (eq (hir-instruction-opcode instruction) :call))
+            (hir-block-instructions block))))
+        (operands (cddr (hir-instruction-inputs call)))
+        (left (first operands)) (right (second operands))
+        (facts (make-hash-table :test 'eq)))
+    (setf (gethash left facts) 'list (gethash right facts) 'integer)
+    (and (hir-standard-property-negative-p 'endp (list left) :may-signal facts)
+      (not (hir-standard-property-negative-p 'endp operands :may-signal facts))
+      (not (hir-standard-property-negative-p 'endp (list right) :may-signal facts))
+      (not (hir-standard-property-negative-p 'endp (list left) :poll-free facts))
+      (not (hir-standard-property-negative-p 'identity (list left) :allocation facts))
+      (not (hir-standard-property-negative-p 'funcall operands :callbacks facts))
+      (not (hir-standard-property-negative-p (make-symbol "ENDP") (list left) :may-signal facts))
+      (not (hir-standard-property-negative-p 'endp (list left) :may-signal facts (list 0)))
+      (progn (setf (gethash left facts) 'integer)
+        (multiple-value-bind (answer dependencies)
+            (hir-standard-property-negative-p '< operands :may-signal facts)
+          (and answer (equal dependencies operands))))
+      (progn (setf (gethash right facts) t)
+        (not (hir-standard-property-negative-p '< operands :may-signal facts)))
+      (every (lambda (type)
+        (setf (gethash left facts) type)
+        (not (hir-standard-property-negative-p 'endp (list left) :may-signal facts)))
+        '(soundness-query-opaque (satisfies soundness-query-never-run)))))`);
+  // A retained helper's return type supplies the domain while its callback
+  // and errors remain observable before the discarded operation checkpoint.
+  check(`(let ((events nil)
+      (function (compile-native '(lambda (effect)
+        (declare (optimize (space 3) (speed 1) (safety 1) (debug 0)))
+        (labels ((empty (callback) (funcall callback :operand) nil))
+          (declare (notinline empty))
+          (endp (empty effect)) (values :after nil :tail))))))
+    (and (equal (multiple-value-list
+        (funcall function (lambda (event) (push event events)))) '(:after nil :tail))
+      (equal events '(:operand))
+      (handler-case (progn (funcall function (lambda (event)
+        (declare (ignore event)) (error "Operand callback"))) nil) (simple-error () t))
+      (equal (multiple-value-list (funcall function
+        (lambda (event) (declare (ignore event))))) '(:after nil :tail))))`);
+  check(`(let ((function (compile-native '(lambda (replacement)
+      (declare (optimize (space 3) (speed 1) (safety 1) (debug 0)))
+      (let ((object nil))
+        (when (listp object)
+          (funcall (lambda () (setq object replacement))) (endp object)) :after)))))
+    (and (handler-case (progn (funcall function :atom) nil) (type-error () t))
+      (eq (funcall function nil) :after))))`);
   // Inventory membership alone supplies no generic-method result proof.
   // Exact standardized function identity excludes other CL symbols and
   // same-name user functions; malformed function-name shapes stay bounded.

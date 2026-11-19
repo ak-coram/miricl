@@ -23,6 +23,85 @@ for (const [name, source] of threadCases) {
   assert.equal(result.output, 'T\n', name);
   console.log(`PASS ${name}`);
 }
+
+// A discarded proved ENDP keeps its checkpoint. Snapshot the captured cell
+// directly after it: a following callback would introduce another poll and
+// conceal removal of the operation's original checkpoint.
+assert.equal((await vm.evaluateAsync(`
+  (multiple-value-bind (worker mark)
+      (funcall (miricl-compiler:compile-native
+        '(lambda ()
+           (declare (optimize (space 3) (speed 1) (safety 1) (debug 0)))
+           (let ((delivered nil))
+             (values
+               (lambda (arm)
+                 (labels ((empty (callback) (funcall callback) nil))
+                   (declare (notinline empty))
+                   (endp (empty arm)) (values delivered nil :tail)))
+               (lambda () (setq delivered t) (values :clobber :extra)))))))
+    (equal (multiple-value-list
+      (funcall worker (lambda ()
+        (miricl-threads:without-interrupts
+          (miricl-threads:interrupt-thread (miricl-threads:current-thread) mark)))))
+      '(t nil :tail)))`, {eof: true})).output, 'T\n',
+  'Discarded proved ENDP retains queued delivery and complete values.');
+console.log('PASS discarded proved ENDP checkpoint');
+
+// APPLY's fixed route shares its final spine; packet calls capture its values
+// before selected-callee scheduling. Queue while synchronous delivery is off,
+// then enter only the observed application with the scheduler active.
+const captureApplyObject = expression => {
+  const previous = vm.javascript.callback;
+  let object;
+  vm.javascript.callback = function (value) {object = value; return previous.call(this, value);};
+  try {vm.evaluate(`(js:callback ${expression}) (values)`, {eof: true});}
+  finally {vm.javascript.callback = previous;}
+  assert.ok(object);
+  return object;
+};
+const applyObject = expression => vm.vm['native-call0'](captureApplyObject(`(lambda () ${expression})`));
+const applySelected = captureApplyObject("(miricl-compiler:compile-native '(lambda (x) x))");
+const applyBuiltin = applyObject("#'apply"), applyBefore = applyObject(':before'), applyAfter = applyObject(':after');
+vm.evaluate(`(defparameter *thread-apply-queue*
+  (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%THREAD"))) (values)`, {eof: true});
+for (const fixed of [true, false]) for (const repair of [false, true]) {
+  vm.evaluate(`(defparameter *thread-apply-arguments* (cons :before ${repair ? ':dotted' : 'nil'}))
+    (defparameter *thread-apply-mutate* (miricl-compiler:compile-native '(lambda ()
+      ${repair ? '(setf (cdr *thread-apply-arguments*) nil)' : '(setf (car *thread-apply-arguments*) :after)'})))
+    (defparameter *thread-apply-noop* (miricl-compiler:compile-native '(lambda ()))) (values)`, {eof: true});
+  const arguments_ = applyObject('*thread-apply-arguments*');
+  const packet = vm.vm['native-arguments'](2);
+  vm.vm['native-argument-set'](packet, 0, applySelected);
+  vm.vm['native-argument-set'](packet, 1, arguments_);
+  for (const ordinary of [true, false]) {
+    // Restore the same input before each route. Prevalidation repair follows
+    // the fixed route's first observation; CAR mutation follows validation.
+    vm.evaluate(`(setf (car *thread-apply-arguments*) :before
+      (cdr *thread-apply-arguments*) ${repair ? ':dotted' : 'nil'})
+      (funcall *thread-apply-queue* 16 nil nil)
+      (funcall *thread-apply-queue* 12 (funcall *thread-apply-queue* 0 nil nil) *thread-apply-mutate*)
+      ${Array(repair ? (fixed ? 1 : 0) : (fixed ? 2 : 1)).fill(`(funcall *thread-apply-queue* 12
+        (funcall *thread-apply-queue* 0 nil nil) *thread-apply-noop*)`).join('\n')}
+      (funcall *thread-apply-queue* 13 0 nil) (values)`, {eof: true});
+    vm.vm['thread-enter'](0); vm.vm['thread-main-state'](0);
+    vm.vm['thread-active'].value = 1;
+    let result;
+    try {
+      result = ordinary ? (fixed ? vm.vm['native-call2'](applyBuiltin, applySelected, arguments_)
+        : vm.vm['native-call'](null, applyBuiltin, packet))
+        : vm.vm['native-apply-list'](applySelected, arguments_, fixed ? 3 : 0);
+    } finally {
+      vm.vm['thread-active'].value = 0;
+      vm.vm['thread-save'](); vm.vm['thread-main-state'](1);
+    }
+    if (!fixed) result = vm.javascript.link(0, result);
+    assert.equal(result, !repair && fixed ? applyAfter : applyBefore,
+      'Queued work repairs before validation and distinguishes shared values from captured packet values.');
+    assert.equal(vm.vm['native-argument'](arguments_, 0), repair ? applyBefore : applyAfter,
+      'The queued mutation ran during the observed application.');
+  }
+}
+console.log('PASS APPLY queued list validation, shared selection and packet snapshots');
 assert.equal(vm.evaluate('(+ 20 22)').output, '42\n', 'Synchronous evaluation remains usable.');
 await vm.evaluateAsync('(defparameter *background-worker* (miricl-threads:make-thread (lambda () (sleep 0.01) 17)))');
 assert.equal(vm.evaluate('(+ 20 22)').output, '42\n');

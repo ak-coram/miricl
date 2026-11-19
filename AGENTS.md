@@ -92,10 +92,22 @@ where ANSI specifies undefined consequences need not be supported or guarded.
 Use standardized operation identity rather than package membership alone.
 Fixed standard operators do not make user callbacks, permitted method extensions
 or documented runtime hooks immutable. This does not relax
-redefinition and identity requirements for ordinary user functions, or the
+the redefinition and identity requirements ANSI actually imposes on ordinary
+user functions, or the
 contracts of explicit MIRICL extensions such as scheduling and debugging.
 Tests must follow this distinction rather than constrain optimizations to
 undefined behavior of the current implementation.
+
+Optimizations may use every compile-time and runtime consistency assumption
+ANSI permits, including the applicable INLINE, same-file, recursive-call and
+declaration rules. Do not impose stronger redefinition guarantees, add
+redefinition guards ANSI does not require, or restrict proof propagation
+categorically to local, sealed or inlined functions. Outside those ANSI
+permissions, preserve the prevailing runtime definition. Honor NOTINLINE exactly
+as ANSI specifies, including its required out-of-line calls. Reachability alone
+does not establish an ANSI permission. Tests must not make undefined or
+unspecified redefinition behavior an optimization constraint. Preserve
+explicitly documented MIRICL extension contracts separately.
 
 Consult the [Common Lisp HyperSpec](https://www.lispworks.com/documentation/HyperSpec/Front/index.htm)
 when implementing Common Lisp functions. Check the relevant entries

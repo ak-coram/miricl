@@ -459,8 +459,13 @@
              :callbacks nil :may-signal t
              :requirements (:first-proper-or-circular-list)) list-length)
            ((:result-count 1 :arity (1 . 1) :keywords nil :argument-types (list)
-             :truth-result t :reads nil :writes nil :callbacks nil :may-signal t)
-            endp)
+             :truth-result t :reads nil :writes nil :callbacks nil :may-signal t
+             :allocation nil) endp)
+           ;; Audited operation domains, independent of dispatch/polling and
+           ;; stronger than ordinary argument signatures. Integer comparison
+           ;; needs no floating contagion or floating exception assumption.
+           ((:non-signaling-arguments (list)) car first cdr rest endp)
+           ((:non-signaling-arguments (integer integer)) < > <= >= = /=)
            ((:result-count 1 :result-type cons :result-argument 0 :arity (2 . 2)
              :keywords nil :argument-types (cons t) :writes t :callbacks nil
              :may-signal t :sharing :argument) rplaca rplacd)

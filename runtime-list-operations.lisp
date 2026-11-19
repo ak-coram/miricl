@@ -4,9 +4,15 @@
 
 (define-runtime-function $check-apply-list (($args :nullable-object)) ()
   ;; Match APPLY's proper-list validation before checking the lambda's arity.
-  #@(if (ref.is_null (call $list-length-native (local.get $args)))
+  #@(drop (call $checked-apply-list-length (local.get $args))))
+
+(define-runtime-function $checked-apply-list-length (($args :nullable-object)) (:nullable-object)
+  (:locals ($count :nullable-object))
+  #@(local.set $count (call $checked-list-length (local.get $args) (i32.const 1)))
+  #@(if (i64.lt_s (call $scalar-integer-value (ref.as_non_null (local.get $count))) (i64.const 0))
     (then (call $type-fail (local.get $args) (call $symbol-value ,(clos-library-reference '%proper-list-type))
-      (i32.const ,(runtime-error-code :expected-designator))))))
+      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(local.get $count))
 
 (define-runtime-function $check-apply-arguments (($args :nullable-object) ($count i32)) (:nullable-object)
   ;; ARITY counts through the checked proper-list walker before comparing.
@@ -804,7 +810,7 @@
   #@(ref.null eq))
 
 (define-runtime-section list-operations-runtime-wat ()
-  ($check-apply-list) ($check-apply-arguments) ($list-star-cl) ($list-star-native) ($pop-argument-cl) ($pop-argument) ($list-eq) ($find-method-list)
+  ($check-apply-list) ($checked-apply-list-length) ($check-apply-arguments) ($list-star-cl) ($list-star-native) ($pop-argument-cl) ($pop-argument) ($list-eq) ($find-method-list)
   ($check-generic-arguments) ($check-generic-arity)
   ($check-keyword-pairs) ($check-keywords-native)
   ($list-type-error) ($require-list-cl) ($require-list) ($natural-count-cl) ($natural-count) ($copy-list-spine) ($copy-alist-spine) ($copy-tree-value-cl) ($copy-spine)

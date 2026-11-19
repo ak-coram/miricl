@@ -1,6 +1,37 @@
 ;;;; Flow of primary-value types through HIR, independent of Wasm lowering.
 (in-package :miricl-compiler)
 
+(defun hir-standard-property-negative-p (name operands property proven &optional fuel)
+  "Internal conditional operation query for current validated HIR.
+PROVEN contains executable primary-type facts for this unchanged HIR. Return a
+negative property proof and every SSA operand on which its domain depends.
+NIL means unknown. This does not describe entry dispatch, polling or cleanup."
+  (unless (member property '(:reads :writes :callbacks :may-signal :allocation))
+    (return-from hir-standard-property-negative-p nil))
+  (unless fuel (setq fuel (list 128)))
+  (when (<= (car fuel) 0) (return-from hir-standard-property-negative-p nil))
+  (let ((limits (standard-function-property name :arity)) (arity 0))
+    ;; Complete the bounded arity check before granting unconditional facts.
+    (dolist (operand operands)
+      (declare (ignore operand))
+      (when (<= (car fuel) 0) (return-from hir-standard-property-negative-p nil))
+      (decf (car fuel)) (incf arity))
+    (unless (and limits (<= (car limits) arity)
+                 (or (null (cdr limits)) (<= arity (cdr limits))))
+      (return-from hir-standard-property-negative-p nil))
+    (multiple-value-bind (value known) (standard-function-property name property)
+      (when (and known (null value))
+        (return-from hir-standard-property-negative-p (values t nil))))
+    (when (eq property :may-signal)
+      (let ((domains (standard-function-property name :non-signaling-arguments)))
+        ;; This audited contract is deliberately stronger than an ordinary
+        ;; argument signature; signatures alone do not exclude other errors.
+        (when (and domains (= arity (length domains))
+                   (loop for operand in operands for domain in domains always
+                     (and (> (car fuel) 0)
+                          (hir-type-proves-p (gethash operand proven t) domain 32 fuel))))
+          (values t operands))))))
+
 (defun hir-result-callee (value &optional callees)
   "Executable code provenance, without asserting closure object identity."
   (or (and callees (gethash value callees))
