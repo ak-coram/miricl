@@ -124,6 +124,19 @@
         ((:class :structure) :class) ((:variable :constant) :variable)
         (otherwise kind)))
 
+(defun reachability-case-clauses (form)
+  (declare (optimize (safety 3)))
+  ;; Validate only the syntax spines: objects inside clause keys are literal
+  ;; data, including shared or cyclic objects, rather than executable forms.
+  (unless (>= (compiler-list-length form "reachability CASE form") 3)
+    (compiler-input-fail "reachability CASE form" form "expected a mode and key form"))
+  (unless (and (integerp (second form)) (<= 0 (second form) 5))
+    (compiler-input-fail "reachability CASE form" form "expected a mode from 0 through 5"))
+  (dolist (clause (cdddr form))
+    (when (zerop (compiler-list-length clause "reachability CASE clause"))
+      (compiler-input-fail "reachability CASE clause" clause "expected a key and optional body")))
+  (cdddr form))
+
 (defun form-written-variables (form)
   ;; A coarse, bounded proof for lexical function values. Shadowed writes may
   ;; invalidate extra candidates; uncertainty must never erase a call barrier.
@@ -148,6 +161,14 @@
              ;; Its variable list is syntax; the value form and body execute.
              (compiler-source-form value)
              (dolist (child (cddr value)) (push child work)))
+            (miricl::%%case-form
+             (let ((clauses (reachability-case-clauses value)))
+               ;; Type predicates can call user code, and correctable cases
+               ;; can assign their key place through STORE-VALUE.
+               (unless (member (second value) '(0 2)) (setq unknown t))
+               (push (third value) work)
+               (dolist (clause clauses)
+                 (dolist (child (cdr clause)) (push child work)))))
             (otherwise
              (cond
                ((or (member (car value) '(macrolet symbol-macrolet))
@@ -247,9 +268,10 @@
                          ((block return-from) (body (cdr args)))
                          (the (literal (car args)) (body (cdr args)))
                          (miricl::%%case-form
-                          (queue (second args) :code)
-                          (dolist (clause (cddr args))
-                            (literal (car clause)) (body (cdr clause))))
+                          (let ((clauses (reachability-case-clauses value)))
+                            (queue (second args) :code)
+                            (dolist (clause clauses)
+                              (literal (car clause)) (body (cdr clause)))))
                          (miricl::%%condition-form
                           (let ((kind (car args)) (forms (cdr args)))
                             (case kind

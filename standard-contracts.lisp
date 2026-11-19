@@ -160,7 +160,7 @@
             arrayp atom bit-vector-p characterp compiled-function-p complexp consp
             floatp functionp hash-table-p integerp keywordp listp null not numberp
             packagep pathnamep random-state-p rationalp readtablep realp
-            simple-bit-vector-p simple-string-p simple-vector-p streamp stringp
+            simple-bit-vector-p simple-string-p simple-vector-p stringp
             symbolp vectorp)
            ((:result-type boolean) null not)
            ((:predicate-type array) arrayp)
@@ -190,6 +190,8 @@
            ((:predicate-type simple-bit-vector) simple-bit-vector-p)
            ((:predicate-type simple-string) simple-string-p)
            ((:predicate-type simple-vector) simple-vector-p)
+           ((:result-count 1 :arity (1 . 1) :truth-result t
+             :reads t :writes t :callbacks t :may-signal t) streamp)
            ((:predicate-type stream) streamp)
            ((:predicate-type string) stringp)
            ((:predicate-type symbol) symbolp)
@@ -1012,10 +1014,12 @@
            ;; composite streams observe mutable component state. IO operations
            ;; may signal and change stream state even when no value is wanted.
            ((:result-count 1 :arity (1 . 1) :keywords nil :argument-types (stream)
-             :truth-result t :reads t :writes nil :may-signal t)
-            input-stream-p output-stream-p interactive-stream-p open-stream-p)
-           ((:result-count 1 :arity (1 . 1) :keywords nil :argument-types (stream)
-             :reads t :writes nil :may-signal t) stream-element-type)
+             :truth-result t :reads t :writes t :may-signal t)
+            input-stream-p output-stream-p interactive-stream-p)
+           ((:result-count nil :arity (1 . 1) :keywords nil :argument-types (stream)
+             :reads t :writes t :callbacks t :may-signal t) open-stream-p)
+           ((:result-count nil :arity (1 . 1) :keywords nil :argument-types (stream)
+             :reads t :writes t :callbacks t :may-signal t) stream-element-type)
            ((:result-count 1 :arity (1 . 1) :keywords nil :argument-types (file-stream)
              :reads t :writes nil :may-signal t) stream-external-format)
            ((:result-count 1 :arity (1 . 3) :keywords nil
@@ -1071,8 +1075,8 @@
                :if-does-not-exist :external-format)
              :requirements (:pathname-designator :open-keyword-values)
              :reads t :writes t :may-signal t) open)
-           ((:result-count 1 :arity (1 . nil) :argument-types (stream)
-             :keywords (:abort) :reads t :writes t :may-signal t) close)
+           ((:result-count nil :arity (1 . nil) :argument-types (stream)
+             :keywords (:abort) :reads t :writes t :callbacks t :may-signal t) close)
            ((:result-count 1 :arity (0 . 1) :keywords nil
              :argument-types ((or stream boolean))
              :requirements (:character-input-stream-designator)

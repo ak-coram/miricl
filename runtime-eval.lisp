@@ -12,6 +12,11 @@
     (($body :nullable-object) ($env :nullable-object) ($stop :nullable-object))
     (:nullable-object)
   (:locals ($value :nullable-object) ($debug i32))
+  ;; All adjacent declarations share the incoming contour for callbacks.
+  #@(if (call $custom-body-declarations-p (local.get $body))
+    (then (local.set $env (call $apply ,(clos-library-reference '%body-declaration-environment)
+      (call $cons (local.get $body) (call $cons (local.get $env) (ref.null eq)))))
+      (local.set $body (call $secondary-value))))
   #@(local.set $debug (i32.const -1))
   #@(call $clear-values)
   #@(block $declarations-done (loop $declarations

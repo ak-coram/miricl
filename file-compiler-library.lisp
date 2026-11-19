@@ -433,9 +433,11 @@
 
 (defun %compile-top-body (body environment compile-time-too)
   (let ((declarations nil))
+    (multiple-value-setq (environment body) (%body-declaration-environment body environment))
     (loop while (and (consp (car body)) (eq (caar body) 'declare)) do
       (let ((declaration (pop body)))
-        (push declaration declarations)
+        (push (cons 'declare (remove-if (lambda (spec)
+          (and (symbolp (car spec)) (get (car spec) '%declaration-handler))) (cdr declaration))) declarations)
         (dolist (spec (cdr declaration))
           (when (member (car spec) '(miricl-compiler:start-block miricl-compiler:end-block))
             (miricl-compiler::compiler-input-fail "block declaration" spec "only valid as a global proclamation"))

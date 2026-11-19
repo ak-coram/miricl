@@ -563,7 +563,7 @@
 
 (define-runtime-function $format-run
     (($digits :digits) ($i i32) ($end i32) ($args :nullable-object) ($outer :nullable-object) ($origin :nullable-object)) (:nullable-object i32)
-  (:locals ($before :nullable-object) ($subargs :nullable-object)
+  (:locals ($before :nullable-object) ($subargs :nullable-object) ($scratch-stream :nullable-object)
            ($before-pop-count :nullable-object)
            ($x :nullable-object) ($text :nullable-object) ($params (ref $objects)) ($parameter-count i32)
            ($c i32) ($colon i32) ($at i32) ($n i32) ($j i32) ($start i32)
@@ -616,6 +616,10 @@
                 (i32.add (i32.const 7) (i32.add (local.get $colon) (i32.mul (local.get $at) (i32.const 2))))
                 (call $int (local.get $n)) (call $int (local.get $increment)))))) (br $next)))
         (local.set $j (call $format-line-column))
+        (if (i32.lt_s (local.get $j) (i32.const 0))
+          (then
+            (call $format-repeat (i32.const 32) (select (local.get $n) (i32.const 2) (local.get $at)))
+            (br $next)))
         (if (local.get $at)
           (then (if (local.get $increment)
             (then (local.set $n (i32.add (local.get $n)
@@ -751,9 +755,19 @@
       (then
         (call $format-close (local.get $digits) (local.get $i) (local.get $end) (i32.const 41) (i32.const 0))
         (drop) (drop) (local.set $after) (local.set $close)
+        (block $case-done
         (local.set $start (global.get $cursor))
-        (call $format-run (local.get $digits) (local.get $i) (local.get $close) (local.get $args) (local.get $outer) (local.get $origin))
-        (local.set $escape) (local.set $args)
+        ;; Case conversion captures text before emitting it. Callback output in
+        ;; this scope must use the capture stream rather than flush its parent.
+        (local.set $scratch-stream (global.get $format-stream))
+        (global.set $format-stream (ref.null eq))
+        (block $case-failed (try_table (catch $transfer $case-failed)
+          (call $format-run (local.get $digits) (local.get $i) (local.get $close) (local.get $args) (local.get $outer) (local.get $origin))
+          (local.set $escape) (local.set $args)
+          (global.set $format-stream (local.get $scratch-stream))
+          (br $case-done)))
+        (global.set $format-stream (local.get $scratch-stream))
+        (throw $transfer))
         (local.set $text (call $decode-text (local.get $start) (i32.sub (global.get $cursor) (local.get $start))))
         (global.set $cursor (local.get $start)) (local.set $j (i32.const 0)) (local.set $word (i32.const 0))
         (block $converted (loop $convert
@@ -810,7 +824,16 @@
         (if (local.get $at) (then (local.set $args (local.get $subargs)))) (br $next)))
     (if (i32.or (i32.eq (local.get $c) (i32.const 65)) (i32.or (i32.eq (local.get $c) (i32.const 83)) (i32.eq (local.get $c) (i32.const 87))))
       (then
+        ;; Plain object directives emit to the real destination. Flush before
+        ;; recording a scratch offset: a user printer can flush that prefix.
+        ;; Explicit padding captures text before choosing its surrounding pads.
+        (local.set $scratch-stream (global.get $format-stream))
+        (if (local.get $parameter-count)
+          (then (global.set $format-stream (ref.null eq)))
+          (else (call $format-flush)))
         (local.set $start (global.get $cursor))
+        (block $object-captured
+          (block $object-capture-failed (try_table (catch $transfer $object-capture-failed)
         (if (i32.and (local.get $colon) (ref.is_null (local.get $x))) (then ,(emit-text "()"))
           (else (if (i32.or (i32.eq (local.get $c) (i32.const 65))
               (i32.and (i32.eq (local.get $c) (i32.const 87))
@@ -818,6 +841,10 @@
                   (ref.is_null (call $symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*print-readably*))))))))
             (then (call $print-aesthetic (local.get $x)))
             (else (call $print-object (local.get $x) (i32.const 0))))))
+            (global.set $format-stream (local.get $scratch-stream))
+            (br $object-captured)))
+          (global.set $format-stream (local.get $scratch-stream))
+          (throw $transfer))
         (local.set $text (call $decode-text (local.get $start) (i32.sub (global.get $cursor) (local.get $start))))
         (global.set $cursor (local.get $start))
         (local.set $width (call $format-mincol (local.get $params) (i32.const 0)))
@@ -918,7 +945,7 @@
   #@(block $parameters (loop $parameter (br_if $parameters (i32.eqz (local.get $count)))
     (local.set $count (i32.sub (local.get $count) (i32.const 1)))
     (local.set $arguments (call $cons (array.get $objects (local.get $params) (local.get $count)) (local.get $arguments))) (br $parameter)))
-  #@(local.set $parent (i32.eqz (ref.is_null (call $pretty-context (global.get $format-stream)))))
+  #@(local.set $parent (i32.eqz (ref.is_null (global.get $format-stream))))
   #@(if (local.get $parent) (then (call $format-flush) (local.set $stream (global.get $format-stream)))
     (else (local.set $stream (call $report-stream)) (struct.set $obj $n (ref.cast (ref $obj) (local.get $stream)) (call $format-line-column))))
   #@(drop (call $apply (local.get $function)
@@ -930,7 +957,7 @@
 
 (define-runtime-function $format-flush () ()
   (:locals ($text :nullable-object))
-  #@(if (ref.is_null (call $pretty-context (global.get $format-stream))) (then (return)))
+  #@(if (ref.is_null (global.get $format-stream)) (then (return)))
   #@(local.set $text (call $decode-text (global.get $format-base)
     (i32.sub (global.get $cursor) (global.get $format-base))))
   #@(global.set $cursor (global.get $format-base))
@@ -1160,7 +1187,7 @@
   #@(call $format-constant (local.get $prefix)) #@(call $format-constant (local.get $suffix))
   #@(local.set $body (call $slice (local.get $digits) (local.get $start) (i32.sub (local.get $body-end) (local.get $start))))
   #@(if (local.get $fill) (then (local.set $body (call $format-fill-body (local.get $body)))))
-  #@(local.set $parent (i32.eqz (ref.is_null (call $pretty-context (global.get $format-stream)))))
+  #@(local.set $parent (i32.eqz (ref.is_null (global.get $format-stream))))
   #@(if (local.get $parent) (then (call $format-flush) (local.set $stream (global.get $format-stream)))
     (else (local.set $stream (call $report-stream))
       (struct.set $obj $n (ref.cast (ref $obj) (local.get $stream)) (call $format-line-column))))
@@ -1168,7 +1195,9 @@
     (call $cons (local.get $stream) (call $cons (local.get $args) (call $cons (local.get $body)
       (call $cons (local.get $prefix) (call $cons (local.get $suffix)
         (call $cons (call $bool (local.get $perline)) (ref.null eq)))))))))
-  #@(if (i32.eqz (local.get $parent)) (then (call $print-text (call $report-text (local.get $stream))))))
+  #@(if (local.get $parent)
+    (then (global.set $format-column (call $output-stream-column (local.get $stream))))
+    (else (call $print-text (call $report-text (local.get $stream))))))
 
 ;; Character column, counting Unicode scalar values instead of UTF-8 bytes.
 (define-runtime-function $format-line-column () (i32)
@@ -1180,7 +1209,8 @@
     (if (i32.eq (local.get $c) (i32.const 10)) (then (return (local.get $n))))
     (if (i32.ne (i32.and (local.get $c) (i32.const 192)) (i32.const 128))
       (then (local.set $n (i32.add (local.get $n) (i32.const 1))))) (br $next)))
-  #@(i32.add (local.get $n) (global.get $format-column)))
+  #@(if (result i32) (i32.lt_s (global.get $format-column) (i32.const 0))
+    (then (i32.const -1)) (else (i32.add (local.get $n) (global.get $format-column)))))
 
 (define-runtime-section format-runtime-wat ()
   ($format-small) ($format-index) ($format-param) ($format-comparison-param) ($format-escape-p) ($format-mincol) ($format-parse-raw) ($format-parse) ($format-close-raw) ($format-close)

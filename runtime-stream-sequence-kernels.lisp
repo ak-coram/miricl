@@ -125,7 +125,9 @@ OPERATIONS captures READ-BYTE, READ-CHAR, WRITE-BYTE and WRITE-CHAR."
           (if (= index stop) (return-from done index))
           (if (if (= mode 1) t (= mode 3))
               (funcall write
-                       (if indexed (row-major-aref sequence index) (checked-path-car scan)) peer)
+                       (if indexed (locally (declare (optimize (safety 3)))
+                                     (row-major-aref sequence index))
+                           (checked-path-car scan)) peer)
               (let ((value (if (= mode 2) (row-major-aref peer from)
                                (funcall read peer nil nil))))
                 (if (= mode 0) (if value nil (return-from done index)))

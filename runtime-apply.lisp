@@ -396,8 +396,7 @@
       #@(return (call $fresh-line-native (call $car (local.get $args)))))
     (terpri
       (wat-arity 0 1)
-      #@(call $write-destination (call $output-stream-designator (call $car (local.get $args)))
-        ,(wat-text-literal (string #\Newline)))
+      #@(call $terpri-native (call $car (local.get $args)))
       #@(return (ref.null eq))))
   #@(if (i32.and (i32.ge_s (local.get $id) (i32.const ,(runtime-symbol-id 'eval)))
                 (i32.le_s (local.get $id) (i32.const ,(runtime-symbol-id 'sxhash))))

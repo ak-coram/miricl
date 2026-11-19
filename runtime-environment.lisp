@@ -110,6 +110,37 @@
     (local.set $names (call $cdr (local.get $names))) (br $next)))
   #@(local.get $env))
 
+;; Do not enter interpreted extension code for standard-only declarations:
+;; compiler helpers themselves carry standard declarations during bootstrap.
+(define-runtime-function $custom-body-declarations-p (($body :nullable-object)) (i32)
+  (:locals ($form :nullable-object) ($specs :nullable-object) ($spec :nullable-object) ($name :nullable-object))
+  ;; Startup evaluates package definitions before private library symbols exist.
+  ;; No optional processor can be installed in that phase.
+  #@(if (i32.eqz (array.len (global.get $clos-library-symbols)))
+    (then (return (i32.const 0))))
+  #@(if (ref.is_null (call $property-value
+        (call $symbol-plist ,(clos-library-reference '%declaration-name))
+        ,(clos-library-reference '%declaration-processor) (ref.null eq)))
+    (then (return (i32.const 0))))
+  #@(call $check-apply-list (local.get $body))
+  #@(block $done (loop $next
+    (local.set $form (call $car (local.get $body)))
+    (br_if $done (i32.ne (call $operator (local.get $form)) (i32.const ,(runtime-symbol-id 'declare))))
+    (call $check-apply-list (local.get $form))
+    (local.set $specs (call $cdr (local.get $form)))
+    (block $specs-done (loop $specifier
+      (br_if $specs-done (ref.is_null (local.get $specs)))
+      (local.set $spec (call $car (local.get $specs)))
+      (call $check-apply-list (local.get $spec))
+      (local.set $name (call $car (local.get $spec)))
+      (if (call $symbolp (local.get $name))
+        (then (if (i32.eqz (ref.is_null (call $property-value (call $symbol-plist (local.get $name))
+                    ,(clos-library-reference '%declaration-handler) (ref.null eq))))
+          (then (return (i32.const 1))))))
+      (local.set $specs (call $cdr (local.get $specs))) (br $specifier)))
+    (local.set $body (call $cdr (local.get $body))) (br $next)))
+  #@(i32.const 0))
+
 (define-runtime-function $declare
     (($specs :nullable-object) ($env :nullable-object) ($stop :nullable-object))
     (:nullable-object)
@@ -182,4 +213,5 @@
   ($lookup)
   ($assign)
   ($declare-special)
+  ($custom-body-declarations-p)
   ($declare))

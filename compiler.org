@@ -76,6 +76,19 @@ on every entry; no certificate survives external mutation. Admitted declaration/
 snapshotted before callbacks can mutate shared source; literal identities and opaque type
 arguments retain their intended sharing.
 
+The optional =miricl-environment= service registers custom free declarations and exposes
+=DEFINE-DECLARATION=, =DECLARATION-INFORMATION= and =AUGMENT-ENVIRONMENT= with =:DECLARE=.
+Binding-specific handler categories and other augmentation keywords signal unsupported
+operations. Registered names use the existing declaration-name authority; returned keys
+and opaque values occupy a separate lexical metadata namespace. All handlers in a body
+receive its incoming environment, and a present NIL value shadows outer metadata. The
+source frontend owns preparation callbacks and removes processed specifiers; direct HIR
+retains them until body entry, after initializers. Handler output is validated before
+publication and supplies no optimization proof. Live environment compilation retains
+the checked source contour. Debugger scope packets omit free declaration metadata, so
+frame evaluation cannot query it. Image snapshots retain the existing environment-binding
+record and its ordinary object graph without introducing another physical layout.
+
 SAFETY and DEBUG retain lexical scope through deferred work and inlining. SAFETY 0 permits
 declaration-based unchecked lowering without bypassing public validation. DEBUG 0 permits
 eligible out-of-line frame omission. DEBUG 1 permits bounded inlining and reuse of
@@ -586,6 +599,13 @@ graph compaction. =:strip nil= retains supplied definitions; it does not disable
 representation compaction. =compile-native-bundle= emits initializers/closures, and =:load t=
 executes each initializer before decoding the next dependent unit.
 
+The bounded lexical-write prepass distinguishes executable selection key forms and
+clause bodies from literal keys. Both reachability scans validate the finite private
+selection and clause spines without interpreting key objects as code. Type selections
+and correctable selections supply no absence-of-write proof, because type predicates
+can call user code and correction can assign the key place. Incomplete write scans
+also supply no proof for lexical function-value calls.
+
 =fasl-format.lisp= writes indexed units in =miricl.fasl= custom sections with =MIRF= headers,
 roots, object blocks and optional analysis/definition indexes. Unit-local references preserve
 sharing/cycles. Checked directories, extents, counts, tags and references precede use.
@@ -617,6 +637,39 @@ unchecked traversal. Fixed-callback proofs require immutable private ingress and
 replacement, capture, escape or unknown provenance. List/sequence/stream/package/metadata
 kernels share compiler sources; remaining representation adapters stay native until equivalent
 lowering is suitable. Host tooling is not a shipped runtime dependency.
+
+The optional =compatibility/gray-streams/miricl-gray.lisp= module supplies extensible
+streams above small native leaf hooks. Its fundamental classes inherit the actual
+=STREAM= and =STANDARD-OBJECT= classes. =CLOSE=, =OPEN-STREAM-P= and
+=STREAM-ELEMENT-TYPE= are genuine generics at their canonical Common Lisp identities;
+native default methods preserve the original callable and bypass only their own
+operation and receiver. Direction classifiers use the registered fundamental hierarchy.
+Additional arbitrary stream-claim mechanisms and generic classifier extensions are not
+provided. Direction-only subclasses default to character elements; concrete binary
+subclasses supply their own element type. A =CLOSE= around method records closed state
+after a successful user primary method, including primaries that do not call the next method.
+
+Logical stream membership is distinct from native storage classification. A CLOS
+stream never authorizes native text/file storage extraction. The optional dispatch
+boundary checks direction, open state, callback character/byte/line/column values,
+sequence structure and bounds, and sequence result indexes before native consumers.
+Callbacks retain their signaling and mutation behavior. Public I/O results are
+normalized independently of callback results, while canonical extensible queries have
+conservative effect and result-count contracts. Sequence workers recheck array access
+after callbacks that can change reachable arrays.
+
+Reader lookahead belongs to each stream, rather than the current reader invocation.
+Protocol input and ordinary Common Lisp input consume the same checked pending
+characters, preserving recursive stream switches. Direct =READ= on a Gray stream
+passes that original stream to reader macros; native composite designators retain
+the runtime's existing leaf-resolution behavior. Buffered line and sequence prefixes
+precede the remaining specialized primary operation. Unread delegates to the user's physical protocol when
+no later lookahead remains. File position is unknown when buffered character positions
+cannot be translated to physical byte positions. Formatter callbacks and user printers
+receive the actual destination after buffered prefix output is flushed; explicit text
+capture scopes retain private destinations. Protocol classes, pending input and hook
+bindings use the ordinary current-image object graph. The real Trivial Gray Streams
+system imports this protocol and adapts its separate sequence/file-position generics.
 
 Source DEBUG declaration scanning calls the live =%optimize-debug-level= binding through
 ordinary APPLY, retaining its entry scheduling checkpoint and redefinition behavior. Its

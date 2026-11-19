@@ -248,7 +248,7 @@
 
 (defun hir-declarations (body &optional documentation)
   (declare (type list body))
-  (let ((specials nil) (types nil) (policy nil))
+  (let ((specials nil) (types nil) (policy nil) (custom nil))
     (loop while body do
       (cond
         ((and documentation (stringp (first body)) (cdr body))
@@ -270,15 +270,19 @@
              (otherwise
               ;; Proclaimed declaration names are not shorthand type names.
               ;; Share the runtime's metadata without consulting host types.
-              (unless (and (symbolp (car declaration))
-                           (multiple-value-bind (key native)
-                               (compiler-primitive 10 1 "%DECLARATION-NAME")
-                             (and native key (get (car declaration) key))))
-                (let ((type (copy-hir-debug-type (car declaration))))
-                  (dolist (name (cdr declaration)) (push (cons name type) types)))))))
+              (if (and (symbolp (car declaration))
+                       (multiple-value-bind (key native)
+                           (compiler-primitive 10 1 "%DECLARATION-NAME")
+                         (and native key (get (car declaration) key))))
+                  (push declaration custom)
+                  (let ((type (copy-hir-debug-type (car declaration))))
+                    (dolist (name (cdr declaration)) (push (cons name type) types)))))))
          (pop body))
         (t (return))))
-    (values body specials (nreverse types) (nreverse policy))))
+    ;; Retain opaque free declarations until the actual body contour begins.
+    ;; Analysis-only callers of this splitter never execute extension handlers.
+    (values (if custom (cons (cons 'declare (nreverse custom)) (copy-list body)) body)
+      specials (nreverse types) (nreverse policy))))
 
 (defun hir-intersect-types (left right)
   (cond ((eq left t) right) ((eq right t) left) ((equal left right) left)
@@ -536,6 +540,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
     (multiple-value-bind (body specials types policy) (hir-declarations (cddr definition) t)
       (loop for name in (second definition) for value in arguments do
         (setq variables (hir-bind-value name value variables specials)))
+      (setq *hir-macro-context* (hir-body-declaration-base body variables functions))
       (setq variables (hir-shadow-specials variables specials))
       (let* ((*hir-types* (hir-type-environment variables types))
              (*hir-inline-policy* (hir-inline-environment functions policy))
@@ -589,9 +594,30 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
           (hir-emit :cell-write (list (hir-cell-for-binding binding) value) :single nil :write))
         (hir-emit :global-write (list *hir-dynamic* value) :single (list name) :write))))
 
+(defun hir-body-declaration-base (forms variables functions)
+  ;; Preserve the incoming contour before free SPECIAL declarations add names.
+  ;; Existing deferred tasks already retain this complete macro context.
+  (if (and (consp (car forms)) (eq (caar forms) 'declare))
+      (list (hir-macro-environment variables functions) variables functions
+        (fourth *hir-macro-context*) t)
+      *hir-macro-context*))
+
+(defun hir-body-macro-context (specifiers variables functions)
+  (let* ((captured (fifth *hir-macro-context*))
+         (environment (if captured (first *hir-macro-context*)
+                          (hir-macro-environment variables functions)))
+         (augmented (compiler-primitive 55 specifiers environment)))
+    (if augmented
+        (list augmented (if captured (second *hir-macro-context*) variables)
+          (if captured (third *hir-macro-context*) functions) (fourth *hir-macro-context*))
+        *hir-macro-context*)))
+
 (defun hir-body (forms variables functions targets)
   (declare (type list forms variables functions targets))
-  (let ((result nil))
+  (let ((result nil)
+        (*hir-macro-context* (if (and (consp (car forms)) (eq (caar forms) 'declare))
+                                (hir-body-macro-context (cdr (pop forms)) variables functions)
+                                *hir-macro-context*)))
     (dolist (form forms)
       (unless (hir-block-terminator *hir-block*)
         (setq result (catch 'hir-path-ended (hir-form form variables functions targets)))))
@@ -1081,7 +1107,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
           (native-debug-level (cddr definition) *hir-debug-level*) nil nil
           (native-safety-level (cddr definition) *hir-safety-level*) *hir-macro-context* *hir-size-policy*)))
     (multiple-value-bind (body specials types policy) (hir-declarations (cddr form))
-      (let* ((variables (hir-shadow-specials variables specials))
+      (let* ((*hir-macro-context* (hir-body-declaration-base body variables local))
+             (variables (hir-shadow-specials variables specials))
              (*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*))
              (*hir-safety-level* (native-safety-level (cddr form) *hir-safety-level*))
              (*hir-size-policy* (native-size-policy (cddr form) *hir-size-policy*))
@@ -1152,10 +1179,12 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   ;; temporary in SETF and allocates a closure on each loop iteration.
   (let ((value (hir-form (third form) variables functions targets)))
     (multiple-value-bind (body specials types policy) (hir-declarations (cdddr form))
-      (let ((*hir-dynamic* *hir-dynamic*) (entry *hir-dynamic*) (local variables) (index 0))
+      (let ((*hir-dynamic* *hir-dynamic*) (entry *hir-dynamic*) (local variables) (index 0)
+            (*hir-macro-context* *hir-macro-context*))
         (dolist (name (second form))
           (setq local (hir-bind-value name (hir-nth-value value index) local specials))
           (incf index))
+        (setq *hir-macro-context* (hir-body-declaration-base body local functions))
         (setq local (hir-shadow-specials local specials))
         (let ((result (let ((*hir-debug-level* (native-debug-level (cdddr form) *hir-debug-level*))
                            (*hir-safety-level* (native-safety-level (cdddr form) *hir-safety-level*))
@@ -1300,6 +1329,9 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                          (+ *hir-safety-level* (* 4 *hir-size-policy*)) *hir-macro-context*)
                        (+ *hir-safety-level* (* 4 *hir-size-policy*))) *hir-source-path*) work))
          (body (forms variables functions targets)
+           (when (and (consp (car forms)) (eq (caar forms) 'declare))
+             (let ((*hir-macro-context* (hir-body-macro-context (cdr (pop forms)) variables functions)))
+               (return-from body (body forms variables functions targets))))
            (if (null forms) (setq result (hir-constant nil))
                (progn
                  (when (cdr forms)
@@ -1353,13 +1385,14 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                    (defer (lambda ()
                             (unless (hir-block-terminator *hir-block*)
                               (hir-emit :environment-restore (list entry) nil nil :control)))))
+                 (let ((*hir-macro-context* (hir-body-declaration-base forms local functions)))
                  (setq local (hir-shadow-specials local specials))
                  (let ((*hir-debug-level* debug-level)
                        (*hir-safety-level* safety-level)
                        (*hir-size-policy* size-policy)
                        (*hir-types* (hir-type-environment local types))
                        (*hir-inline-policy* (hir-inline-environment functions policy)))
-                   (body forms local functions targets)))))
+                   (body forms local functions targets))))))
          (lower (form variables functions targets)
            (compiler-source-form form)
            (when (and (consp form) (member form *hir-source-path* :test #'eq))
@@ -1451,7 +1484,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                           (*hir-safety-level* (native-safety-level (cdr form) *hir-safety-level*))
                           (*hir-size-policy* (native-size-policy (cdr form) *hir-size-policy*)))
                       (multiple-value-bind (forms specials types policy) (hir-declarations (cdr form))
-                        (let* ((variables (hir-shadow-specials variables specials))
+                        (let* ((*hir-macro-context* (hir-body-declaration-base forms variables functions))
+                               (variables (hir-shadow-specials variables specials))
                                (*hir-types* (hir-type-environment variables types))
                                (*hir-inline-policy* (hir-inline-environment functions policy)))
                           (body forms variables functions targets)))))
@@ -1663,7 +1697,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
     (compiler-input-fail "lambda expression" form "expected (LAMBDA lambda-list body...)"))
   (let* ((*hir-debug-level* (native-debug-level (cddr form) *hir-debug-level*))
          (*hir-safety-level* (native-safety-level (cddr form) *hir-safety-level*))
-         (*hir-types* *hir-types*)
+         (*hir-types* *hir-types*) (*hir-macro-context* *hir-macro-context*)
          (*hir-function* (make-hir-function-record name parent (second form)
                            nil nil nil nil nil nil 0 0 *hir-debug-level*
                            (native-size-policy (cddr form) *hir-size-policy*)))
@@ -1761,6 +1795,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
         ;; Match the existing source binder's detection point: initializers,
         ;; including AUX forms, precede keyword validation and the body.
         (when key-start (hir-emit :check-keywords nil nil (list key-start (nreverse keys) allow) :check))
+        (setq *hir-macro-context* (hir-body-declaration-base body local functions))
         (when implicit-block (setq body (list (list* 'block (first implicit-block) body))))
         (setq local (hir-shadow-specials local specials))
         (let* ((*hir-types* (hir-type-environment local types))

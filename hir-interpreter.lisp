@@ -322,7 +322,7 @@
   (unless (typep value type) (error 'type-error :datum value :expected-type type))
   value)
 
-(defun compile-hir-in-scope (source scope registers captures &optional name debugger-p)
+(defun compile-hir-in-scope (source scope registers captures &optional name debugger-p source-environment)
   ;; The factory's parameters hold existing cells and target tokens, rather
   ;; than their values. Escaping closures therefore retain the original cell.
   (let ((miricl-compiler::*compiling-evaluation* t))
@@ -330,6 +330,7 @@
     (unless (and (consp source) (eq (car source) 'lambda))
       (compiler-input-fail "lambda expression" source "expected a lambda expression"))
     (compiler-function-name name "function name")
+    (when source-environment (compiler-primitive 48 source-environment))
     (unless (and (simple-vector-p registers) (simple-vector-p captures))
       (hir-code-error scope "invalid live debug registers"))
     (let* ((scope (svref (svref (copy-hir-debug-sites
@@ -338,7 +339,7 @@
            (*hir-unit* (make-hir-unit-record)) (*hir-specials* nil)
            (*hir-debug-level* (if debugger-p 2 (or (compiler-primitive 33 nil) 1)))
            (*hir-size-policy* (or (compiler-primitive 52 nil) 29))
-           (*hir-macro-context* nil) (*hir-debug-write-types* t)
+           (*hir-macro-context* (hir-import-macro-context source-environment nil nil)) (*hir-debug-write-types* t)
            (*hir-safety-level* 3) (*hir-types* nil) (*hir-inline-policy* nil) (*hir-inlining* nil)
            (*hir-function-index* nil)
            (*hir-inline-small-functions* nil) (*hir-debug-info-enabled* (not debugger-p)) (*hir-debug-sites* nil)
@@ -372,7 +373,7 @@
                  (push (cons (if (<= kind 6) name (list :tag name)) target) targets))))))
       (setq variables (nreverse variables) functions (nreverse functions) targets (nreverse targets))
       (when macros
-        (let ((environment nil))
+        (let ((environment source-environment))
           (dolist (entry (reverse variables))
             (setq environment (compiler-primitive (if (hir-binding-special-p (cdr entry)) 11 3) environment (car entry))))
           (dolist (entry (reverse functions))
@@ -417,7 +418,7 @@
         (let ((packet (compiler-primitive 48 environment)))
           (unless (and (simple-vector-p packet) (= (length packet) 3))
             (hir-code-error environment "invalid lexical environment snapshot"))
-          (compile-hir-in-scope source (svref packet 0) (svref packet 1) (svref packet 2) name)))))
+          (compile-hir-in-scope source (svref packet 0) (svref packet 1) (svref packet 2) name nil environment)))))
 
 (defun eval-hir-in-environment (form environment)
   "Evaluate FORM in a checked runtime lexical environment, preserving all values."

@@ -6255,14 +6255,15 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-multiple-value-bind-form hir-block-form hir-simple-restart-form
                    hir-restart-signal-form hir-symbol-iterate-form hir-while-form
                    hir-multiple-value-call-form hir-return-from-form
-                   hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-to-hir compile-module-to-hir compile-native-module
+                   hir-body-declaration-base hir-body-macro-context hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-to-hir compile-module-to-hir compile-native-module
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-scalar-call-effects native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-forward-locals native-result-blocks native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
                    native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module native-outline-result native-outline-match-region native-outline-region native-outline-site native-outline-code native-outline-bodies
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
-                   definition-info namespace form-written-variables form-references
+                   definition-info namespace reachability-case-clauses form-written-variables form-references
                    miricl::%normalize-lambda-1 miricl::%normalize-lambda
                    miricl::%compile-place-form miricl::%compile-parallel-places miricl::%compile-loop-collector
+                   miricl::%body-declaration-environment miricl::%declaration-environment
                    miricl::%compile-forms miricl::%compile-body miricl::%compile-lambda-parts
                    miricl::%compile-lambda-form miricl::%compile-closure miricl::%compile-bindings
                    miricl::%compile-local-functions miricl::%expand-backquote miricl::%compile-backquote

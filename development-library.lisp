@@ -294,7 +294,8 @@
   (%%string-stream 5 (or stream *standard-output*) nil) nil)
 (defun finish-output (&optional (stream *standard-output*))
   (%%string-stream 6 (or stream *standard-output*) nil) nil)
-(defun force-output (&optional (stream *standard-output*)) (finish-output stream))
+(defun force-output (&optional (stream *standard-output*))
+  (%%string-stream 7 (or stream *standard-output*) nil) nil)
 (defun prin1 (object &optional (stream *standard-output*))
   (let ((*print-escape* t)) (%%write-object object (or stream *standard-output*) nil)))
 (defun princ (object &optional (stream *standard-output*))
@@ -920,6 +921,16 @@
                 (push (car object) work) (setq object (cdr object)))))))
       nil)))
 
+;; Optional syntactic services use ordinary callbacks, never proof metadata.
+(defun %declaration-environment (specifiers environment &optional globalp)
+  (let ((processor (get '%declaration-name '%declaration-processor)))
+    (if processor (funcall processor specifiers environment globalp) environment)))
+
+(defun %body-declaration-environment (body environment)
+  (let ((processor (get '%declaration-name '%declaration-processor)))
+    ;; The optional processor validates the body and declaration shells first.
+    (if processor (funcall processor body environment nil t) (values environment body))))
+
 (defun %proclaim-all (specs)
   (%%while specs
     (let ((spec (pop specs)))
@@ -944,7 +955,8 @@
           (dolist (name (cdr spec))
             (unless (symbolp name) (error 'type-error :datum name :expected-type 'symbol))
             (when (%declaration-type-name-p name) (error 'program-error))
-            (setf (get name '%declaration-name) t)))))) nil)
+            (setf (get name '%declaration-name) t)))
+        (otherwise (%declaration-environment (list spec) nil t))))) nil)
 
 (defun %declaration-type-name-p (name)
   (or (%%derived-type 0 name nil nil) (find-class name nil)

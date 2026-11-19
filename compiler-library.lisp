@@ -181,8 +181,10 @@
                       (mapcar (lambda (name) (%file-lexical-reference name functions)) (cddr declaration))))
              (type (list* 'type (second declaration)
                      (mapcar (lambda (name) (%file-lexical-reference name variables)) (cddr declaration))))
-             (otherwise (cons (car declaration)
-                          (mapcar (lambda (name) (%file-lexical-reference name variables)) (cdr declaration)))))) args)))
+             (otherwise (if (and (symbolp (car declaration)) (get (car declaration) '%declaration-name))
+                            declaration
+                            (cons (car declaration)
+                              (mapcar (lambda (name) (%file-lexical-reference name variables)) (cdr declaration))))))) args)))
       (%%case-form
        (%file-code-cons form operator
          (list* (car args) (%file-lexical-form (second args) variables functions blocks tags)
@@ -327,13 +329,15 @@
 (defun %compile-body (body environment)
   (declare (type list environment))
   (let ((declarations nil))
+    (multiple-value-setq (environment body) (%body-declaration-environment body environment))
     (when (and (stringp (car body)) (cdr body)) (push (pop body) declarations))
     (loop while (and (consp (car body)) (eq (caar body) 'declare)) do
       (let ((form (pop body)))
         (dolist (spec (cdr form))
           (when (eq (car spec) 'special)
             (dolist (name (cdr spec)) (setq environment (%%compile 3 environment name)))))
-        (push form declarations)))
+        ;; Preparation owns these callbacks; HIR must not execute them again.
+        (push (cons 'declare (remove-if (lambda (spec) (and (symbolp (car spec)) (get (car spec) '%declaration-handler))) (cdr form))) declarations)))
     (append (nreverse declarations) (%compile-forms body environment))))
 (defun %compile-lambda-parts (params body environment)
   (declare (type list environment))
@@ -549,13 +553,14 @@
              slots))
          (body (items environment)
            (let ((declarations nil))
+             (multiple-value-setq (environment items) (%body-declaration-environment items environment))
              (when (and (stringp (car items)) (cdr items)) (push (pop items) declarations))
              (loop while (and (consp (car items)) (eq (caar items) 'declare)) do
                (let ((declaration (pop items)))
                  (dolist (spec (cdr declaration))
                    (when (eq (car spec) 'special)
                      (dolist (name (cdr spec)) (setq environment (%%compile 3 environment name)))))
-                 (push declaration declarations)))
+                 (push (cons 'declare (remove-if (lambda (spec) (and (symbolp (car spec)) (get (car spec) '%declaration-handler))) (cdr declaration))) declarations)))
              (append (nreverse declarations) (forms items environment))))
          (bindings (remaining operator outer local compiled specials items destination)
            (if (null remaining)

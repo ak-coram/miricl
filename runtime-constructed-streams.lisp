@@ -7,13 +7,48 @@
     (i32.or (i32.le_u (i32.sub (call $tag (local.get $stream)) (i32.const 43)) (i32.const 3))
       (i32.le_u (i32.sub (call $tag (local.get $stream)) (i32.const 39)) (i32.const 2)))))
 
+
+;; The native predicate above describes storage. Logical STREAM additionally
+;; admits instances recognized by the optional protocol's actual class identity.
+(define-runtime-function $gray-function () (:nullable-object)
+  #@(if (i32.eqz (array.len (global.get $clos-library-symbols))) (then (return (ref.null eq))))
+  #@(if (i32.eqz (call $boundp ,(clos-library-reference '%gray-dispatch))) (then (return (ref.null eq))))
+  #@(call $symbol-value ,(clos-library-reference '%gray-dispatch)))
+
+(define-runtime-function $gray-call
+    (($operation i32) ($stream :nullable-object) ($a :nullable-object) ($b :nullable-object)) (:nullable-object)
+  #@(call $apply (call $gray-function)
+    (call $cons (call $int (local.get $operation))
+      (call $cons (local.get $stream) (call $cons (local.get $a) (call $cons (local.get $b) (ref.null eq)))))))
+
+(define-runtime-function $gray-p (($stream :nullable-object)) (i32)
+  #@(if (i32.ne (call $tag (local.get $stream)) (i32.const 23)) (then (return (i32.const 0))))
+  #@(if (ref.is_null (call $gray-function)) (then (return (i32.const 0))))
+  #@(i32.eqz (ref.is_null (call $gray-call (i32.const 0) (local.get $stream) (ref.null eq) (ref.null eq)))))
+
+(define-runtime-function $streamp (($stream :nullable-object)) (i32)
+  #@(if (call $streamp-native (local.get $stream)) (then (return (i32.const 1))))
+  #@(call $gray-p (local.get $stream)))
+
+;; Native default methods bypass only their own operation and receiver. A
+;; callback or Gray component reached while executing them still dispatches.
+(define-runtime-function $gray-query-p (($operation i32) ($stream :nullable-object)) (i32)
+  (:locals ($entry :nullable-object))
+  #@(if (ref.is_null (call $gray-function)) (then (return (i32.const 0))))
+  #@(local.set $entry (call $symbol-value ,(clos-library-reference '%gray-native-call)))
+  #@(if (i32.eq (call $tag (local.get $entry)) (i32.const 7))
+    (then (if (i32.and (call $eql (call $car (local.get $entry)) (call $int (local.get $operation)))
+                       (ref.eq (call $cdr (local.get $entry)) (local.get $stream)))
+      (then (return (i32.const 0))))))
+  #@(i32.const 1))
+
 (defun $require-stream-cl ()
   (runtime-function-definition '$require-stream-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$require-stream-cl 'miricl-runtime:checked-stream-value))))
 
 (define-runtime-function $require-stream (($stream :nullable-object)) ()
   #@(if (global.get $cl-kernel-functions-ready) (then (drop (call $require-stream-cl (local.get $stream))) (return)))
-  #@(if (i32.eqz (call $streamp-native (local.get $stream)))
+  #@(if (i32.eqz (call $streamp (local.get $stream)))
     (then (call $list-type-error (local.get $stream) (i32.const ,(runtime-symbol-id 'stream))))))
 
 (define-runtime-function $stream-direction (($stream :nullable-object) ($input i32)) (i32)
@@ -21,6 +56,9 @@
     (call $require-stream (local.get $stream))
     (if (i32.eq (call $tag (local.get $stream)) (i32.const 41))
       (then (local.set $stream (call $symbol-value (struct.get $obj $a (ref.cast (ref $obj) (local.get $stream))))) (br $resolve))))
+  #@(if (call $gray-p (local.get $stream))
+    (then (return (i32.eqz (ref.is_null (call $gray-call
+      (select (i32.const 1) (i32.const 2) (local.get $input)) (local.get $stream) (ref.null eq) (ref.null eq)))))))
   #@(if (i32.or (i32.eq (call $tag (local.get $stream)) (i32.const 40))
                   (i32.eq (call $tag (local.get $stream)) (i32.const 46))) (then (return (i32.const 1))))
   #@(if (i32.eq (call $tag (local.get $stream)) (i32.const 43)) (then (return (i32.eqz (local.get $input)))))
@@ -32,6 +70,8 @@
     (select (i32.const 39) (i32.const 22) (local.get $input))))
 
 (define-runtime-function $stream-open-p (($stream :nullable-object)) (i32)
+  #@(if (call $gray-query-p (i32.const 3) (local.get $stream))
+    (then (return (i32.eqz (ref.is_null (call $gray-call (i32.const 3) (local.get $stream) (ref.null eq) (ref.null eq)))))))
   #@(call $require-stream (local.get $stream))
   #@(if (i32.eq (call $tag (local.get $stream)) (i32.const 22))
     (then (return (i32.eqz (struct.get $text-stream $closed (ref.cast (ref $text-stream) (local.get $stream)))))))
@@ -49,6 +89,12 @@
   (:locals ($tag i32))
   #@(loop $resolve
     (local.set $tag (call $tag (local.get $stream)))
+    (if (call $gray-p (local.get $stream))
+      (then
+        (call $require-stream-direction (local.get $stream) (local.get $input))
+        (if (i32.eqz (call $stream-open-p (local.get $stream)))
+          (then (call $input-stream-error (local.get $stream) (i32.const ,(runtime-symbol-id 'stream-error)))))
+        (return (ref.as_non_null (local.get $stream)))))
     ;; Ordinary string I/O takes this short path without generic query calls.
     (if (i32.eq (local.get $tag) (select (i32.const 39) (i32.const 22) (local.get $input)))
       (then
@@ -84,10 +130,14 @@
 
 (define-runtime-function $stream-element-type-native (($stream :nullable-object)) (:nullable-object)
   (:locals ($a :nullable-object) ($b :nullable-object))
+  #@(if (call $gray-query-p (i32.const 4) (local.get $stream))
+    (then (return (call $gray-call (i32.const 4) (local.get $stream) (ref.null eq) (ref.null eq)))))
   #@(loop $resolve
     (call $require-stream (local.get $stream))
     (if (i32.eq (call $tag (local.get $stream)) (i32.const 41))
       (then (local.set $stream (call $symbol-value (struct.get $obj $a (ref.cast (ref $obj) (local.get $stream))))) (br $resolve))))
+  #@(if (call $gray-p (local.get $stream))
+    (then (return (call $gray-call (i32.const 4) (local.get $stream) (ref.null eq) (ref.null eq)))))
   #@(if (i32.or (i32.eq (call $tag (local.get $stream)) (i32.const 40))
                   (i32.eq (call $tag (local.get $stream)) (i32.const 46)))
     (then
@@ -116,20 +166,31 @@
     (if (i32.or (i32.eq (call $tag (local.get $stream)) (i32.const 40))
                 (i32.eq (call $tag (local.get $stream)) (i32.const 46)))
       (then (local.set $stream (struct.get $obj $a (ref.cast (ref $obj) (local.get $stream)))) (br $resolve))))
+  #@(if (call $gray-p (local.get $stream))
+    (then (return (i32.eqz (ref.is_null (call $gray-call (i32.const 6) (local.get $stream) (ref.null eq) (ref.null eq)))))))
   #@(call $console-stream-p (local.get $stream)))
 
 (define-runtime-function $output-stream-column (($stream :nullable-object)) (i32)
+  (:locals ($column :nullable-object))
   #@(if (ref.is_null (local.get $stream)) (then (return (i32.const 0))))
   #@(local.set $stream (call $stream-component (local.get $stream) (i32.const 0)))
   #@(if (i32.eq (call $tag (local.get $stream)) (i32.const 43))
     (then (return (call $output-stream-column (struct.get $obj $b (ref.cast (ref $obj) (local.get $stream)))))))
   #@(if (i32.eq (call $tag (local.get $stream)) (i32.const 44))
     (then (return (call $file-column (local.get $stream)))))
+  #@(if (call $gray-p (local.get $stream))
+    (then
+      (local.set $column (call $gray-call (i32.const 9) (local.get $stream) (ref.null eq) (ref.null eq)))
+      (if (ref.is_null (local.get $column)) (then (return (i32.const -1))))
+      (return (call $natural-count (local.get $column)))))
   #@(call $value-n (local.get $stream)))
 
 (define-runtime-function $write-byte-stream (($byte :nullable-object) ($stream :nullable-object)) ()
   (:locals ($scan :nullable-object))
   #@(local.set $stream (call $stream-component (local.get $stream) (i32.const 0)))
+  #@(if (call $gray-p (local.get $stream))
+    (then (drop (call $gray-call (i32.const 21) (local.get $stream) (local.get $byte) (ref.null eq)))
+      (call $clear-values) (return)))
   #@(if (i32.eq (call $tag (local.get $stream)) (i32.const 43))
     (then
       (local.set $scan (struct.get $obj $a (ref.cast (ref $obj) (local.get $stream))))
@@ -151,6 +212,12 @@
       (then (call $input-stream-error (local.get $stream) (i32.const ,(runtime-symbol-id 'stream-error)))))
     (if (i32.eq (call $tag (local.get $stream)) (i32.const 41))
       (then (local.set $stream (call $symbol-value (struct.get $obj $a (ref.cast (ref $obj) (local.get $stream))))) (br $resolve))))
+  #@(if (call $gray-p (local.get $stream))
+    (then
+      (if (i32.ne (local.get $id) (i32.const ,(runtime-symbol-id 'file-position)))
+        (then (call $list-type-error (local.get $stream) (i32.const ,(runtime-symbol-id 'file-stream)))))
+      (local.set $result (call $gray-call (i32.const 18) (local.get $stream) (local.get $argument) (call $bool (local.get $supplied))))
+      (call $clear-values) (return (local.get $result))))
   #@(if (i32.and (i32.ge_u (call $tag (local.get $stream)) (i32.const 45))
       (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'file-position)))) (then (return (ref.null eq))))
   #@(if (i32.eq (call $tag (local.get $stream)) (i32.const 43))
@@ -300,7 +367,7 @@
       #@(if (i32.ne (call $tag (local.get $stream)) (i32.const 43))
         (then (call $list-type-error (local.get $stream) (i32.const ,(runtime-symbol-id 'broadcast-stream)))))
       #@(return (call $copy-spine (struct.get $obj $a (ref.cast (ref $obj) (local.get $stream))) (i32.const 0))))
-    (streamp #@(return (call $bool (call $streamp-native (local.get $stream)))))
+    (streamp #@(return (call $bool (call $streamp (local.get $stream)))))
     (input-stream-p #@(return (call $bool (call $stream-direction (local.get $stream) (i32.const 1)))))
     (output-stream-p #@(return (call $bool (call $stream-direction (local.get $stream) (i32.const 0)))))
     (open-stream-p #@(return (call $bool (call $stream-open-p (local.get $stream)))))
@@ -316,6 +383,6 @@
     (then (struct.get $obj $a (ref.cast (ref $obj) (local.get $stream)))) (else (struct.get $obj $b (ref.cast (ref $obj) (local.get $stream))))))
 
 (define-runtime-section constructed-stream-runtime-wat ()
-  ($streamp-native) ($require-stream-cl) ($require-stream) ($stream-direction) ($stream-open-p) ($require-stream-direction)
+  ($streamp-native) ($gray-function) ($gray-call) ($gray-p) ($streamp) ($gray-query-p) ($require-stream-cl) ($require-stream) ($stream-direction) ($stream-open-p) ($require-stream-direction)
   ($stream-component) ($stream-element-type-native) ($stream-interactive-p)
   ($output-stream-column) ($write-byte-stream) ($stream-file-query) ($constructed-stream-apply))

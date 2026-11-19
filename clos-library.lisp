@@ -1,6 +1,10 @@
 ;;;; Guest Lisp, embedded as object literals; never evaluated by the host.
 ;;;; Private names are uninterned in the guest. Public MOP names use MIRICL-MOP.
 (defparameter %unbound (gensym))
+;; Optional Gray stream dispatcher and native generic-method recursion boundary.
+(defparameter %gray-dispatch nil)
+(defparameter %gray-native-call nil)
+(defparameter %gray-eof :eof)
 (defparameter %next-context nil)
 (defparameter %booting t)
 (defparameter %classes nil)

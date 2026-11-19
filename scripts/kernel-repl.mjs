@@ -6,6 +6,7 @@ import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
 import {Miricl} from './miricl.mjs';
+import {HostFilesystem} from './host-filesystem.mjs';
 
 const [action, name, ...args] = process.argv.slice(2);
 if (!/^[a-z0-9-]+$/.test(name ?? '')) throw Error('Supply a session name: lowercase letters, digits, hyphens');
@@ -33,38 +34,39 @@ if (action === 'submit') {
   }
 } else if (action === 'start') {
   const [kind, imagePath] = args;
-  let host, vm;
+  let host, vm, filesystem;
   const serverLock = await fs.open(path.join(directory, 'server.lock'), 'wx');
   await serverLock.writeFile(String(process.pid));
   const log = createWriteStream(path.join(directory, 'server.log'), {flags: 'a'});
   const report = data => { process.stdout.write(data); log.write(data); };
   const project = path.resolve(process.env.MIRICL_PROJECT_DIRECTORY ?? '.');
-  if (kind === 'host') {
-    host = spawn(process.env.SBCL ?? 'sbcl', ['--noinform', '--disable-debugger',
-      '--load', process.env.QUICKLISP_SETUP ?? '/home/ak/quicklisp/setup.lisp',
-      '--eval', '(require :asdf)',
-      ...(process.env.MIRICL_PROJECT_DIRECTORY ? ['--eval',
-        `(asdf:initialize-source-registry '(:source-registry (:directory ${quoteLisp(project + path.sep)}) :inherit-configuration))`] : []),
-      '--eval', `(asdf:load-asd (truename ${quoteLisp(path.join(project, 'miricl.asd'))}))`,
-      '--eval', '(ql:quickload :miricl)'], {stdio: ['pipe', 'pipe', 'pipe']});
-    host.stdout.on('data', report);
-    host.stderr.on('data', report);
-    host.on('exit', code => { console.error(`SBCL exited: ${code}`); process.exitCode = code ?? 1; });
-  } else if (kind === 'wasm') {
-    if (!imagePath) throw Error('Supply the interpreter or cold image path');
-    vm = await Miricl.instantiate(await fs.readFile(imagePath), {directory: process.cwd()});
-    vm.evaluate('(setq miricl-compiler:*compile-evaluations* nil miricl-compiler::*compiler-state* :interpreted)');
-    const backendPresent = vm.evaluate("(if (fboundp 'miricl-compiler:emit-native-module) t nil)").output === 'T\n';
-    const sources = backendPresent ? ['wasm-compiler'] : [
-      'whole-program', 'hir-reconstruction', 'compiler-statistics', 'standard-contracts', 'hir-types',
-      'hir-optimize', 'wasm-compiler', 'wasm-optimizer', 'wasm-disassembly',
-    ];
-    for (const source of sources)
-      await vm.evaluateAsync(await fs.readFile(path.join(project, source + '.lisp'), 'utf8'), {eof: true});
-    vm.evaluate('(in-package :cl-user)');
-  } else throw Error('Session kind must be host or wasm');
-  console.log(`Queue REPL ready: ${name} (${kind})`);
   try {
+    if (kind === 'host') {
+      host = spawn(process.env.SBCL ?? 'sbcl', ['--noinform', '--disable-debugger',
+        '--load', process.env.QUICKLISP_SETUP ?? '/home/ak/quicklisp/setup.lisp',
+        '--eval', '(require :asdf)',
+        ...(process.env.MIRICL_PROJECT_DIRECTORY ? ['--eval',
+          `(asdf:initialize-source-registry '(:source-registry (:directory ${quoteLisp(project + path.sep)}) :inherit-configuration))`] : []),
+        '--eval', `(asdf:load-asd (truename ${quoteLisp(path.join(project, 'miricl.asd'))}))`,
+        '--eval', '(ql:quickload :miricl)'], {stdio: ['pipe', 'pipe', 'pipe']});
+      host.stdout.on('data', report);
+      host.stderr.on('data', report);
+      host.on('exit', code => { console.error(`SBCL exited: ${code}`); process.exitCode = code ?? 1; });
+    } else if (kind === 'wasm') {
+      if (!imagePath) throw Error('Supply the interpreter or cold image path');
+      vm = await Miricl.instantiate(await fs.readFile(imagePath));
+      filesystem = new HostFilesystem(vm, project);
+      vm.evaluate('(setq miricl-compiler:*compile-evaluations* nil miricl-compiler::*compiler-state* :interpreted)');
+      const backendPresent = vm.evaluate("(if (fboundp 'miricl-compiler:emit-native-module) t nil)").output === 'T\n';
+      const sources = backendPresent ? ['wasm-compiler'] : [
+        'whole-program', 'hir-reconstruction', 'compiler-statistics', 'standard-contracts', 'hir-types',
+        'hir-optimize', 'wasm-compiler', 'wasm-optimizer', 'wasm-disassembly',
+      ];
+      for (const source of sources)
+        await vm.evaluateAsync(await fs.readFile(path.join(project, source + '.lisp'), 'utf8'), {eof: true});
+      vm.evaluate('(in-package :cl-user)');
+    } else throw Error('Session kind must be host or wasm');
+    console.log(`Queue REPL ready: ${name} (${kind})`);
     while (!host || host.exitCode === null) {
       const requests = (await fs.readdir(directory)).filter(file => file.endsWith('.lisp')).sort();
       for (const request of requests) {
@@ -80,16 +82,23 @@ if (action === 'submit') {
             await delay(50);
           }
         } else {
+          let answer;
           try {
             const result = await vm.evaluateAsync(await fs.readFile(input, 'utf8'));
-            await fs.writeFile(output, result.output);
-          } catch (error) { await fs.writeFile(output, `REQUEST ERROR: ${error.stack}\n`); }
+            answer = result.output;
+          } catch (error) { answer = `REQUEST ERROR: ${error.stack}\n`; }
+          // Host callbacks cannot reenter an active evaluator. Publish only
+          // after it settles, before declaring this request complete.
+          try { await filesystem.publish(); }
+          catch (error) { answer += `REQUEST ERROR publishing output: ${error.stack}\n`; }
+          await fs.writeFile(output, answer);
         }
         console.log(`Finished ${request}`);
       }
       await delay(100);
     }
   } finally {
+    filesystem?.close();
     vm?.close();
     log.end();
     await serverLock.close();

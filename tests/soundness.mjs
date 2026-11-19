@@ -1402,6 +1402,34 @@ try {
       '(lambda (node) (loop :for (a . b) :in node :collect a))))
     (nth-value 1 (form-references
       '(macrolet ((pattern ((a . b)) (list 'quote a))) (pattern (1 . 2))))) t)`);
+  const caseOperator = "(car (macroexpand '(case nil (otherwise nil))))";
+  // Private selection syntax keeps operator-looking keys opaque while writes
+  // in its executable key form and bodies still invalidate function values.
+  check(`(let ((key (list 'multiple-value-bind)))
+    (setf (cdr key) key)
+    (let ((form (list ${caseOperator} 0 nil
+                  (list (list key) '(values 42)))))
+      (and (not (nth-value 1 (form-written-variables form)))
+        (member (list :literal (symbol-key 'multiple-value-bind))
+          (form-references form) :test #'equal) t)))`);
+  check(`(every (lambda (selection)
+      (member (list :indirect-call (symbol-name 'funcall))
+        (nth-value 1 (form-references
+          (list 'let '((fn (lambda (x) x)))
+            (cons ${caseOperator} selection) '(funcall fn 42))))
+        :test #'equal))
+    '((0 (setq fn (soundness-scanner-producer))
+        (multiple-value-bind (values 42)))
+      (2 nil
+        ((multiple-value-bind setq) (setq fn (soundness-scanner-producer))))))`);
+  check(`(and
+    (every (lambda (mode)
+      (nth-value 1 (form-written-variables
+        (list ${caseOperator} mode 'fn
+          '((satisfies soundness-scanner-syntax) (values 42)))))) '(1 3 4 5))
+    (nth-value 1 (form-written-variables
+      (list ${caseOperator} 0 nil
+        '(otherwise (declare (special fn)) fn)))) t)`);
   // Retained standard MVB syntax is executable binding structure. Its body
   // must mask outer function-value facts before reachability removes roots.
   check(`(let* ((plain '(let ((fn (lambda (x) x)))
@@ -1419,7 +1447,14 @@ try {
     `(form-references '(flet ((soundness-scanner-syntax (x) x))
        (soundness-scanner-syntax (+ 1 . 2))))`,
     `(let ((form (list '+ 1))) (setf (cddr form) form) (form-references form))`,
+    `(form-references (list ${caseOperator} 0 nil
+       '(multiple-value-bind . 42)))`,
+    `(let ((clause (list 'multiple-value-bind))) (setf (cdr clause) clause)
+       (form-references (list ${caseOperator} 0 nil clause)))`,
   ]) reject(source, /dotted tail|circular list/);
+  reject(`(form-references (list ${caseOperator} 0))`, /mode and key form/);
+  reject(`(form-references (list ${caseOperator} :invalid nil))`, /mode from 0 through 5/);
+  reject(`(form-references (list ${caseOperator} 0 nil nil))`, /expected a key/);
   evaluate("(fmakunbound 'soundness-scanner-syntax) (values)");
   evaluate("(defmacro soundness-bad-expansion () '(let ((x 1 2)) x)) (values)");
   reject("(compile-native '(lambda () (soundness-bad-expansion)))", /binding/);
@@ -1437,6 +1472,19 @@ try {
   check(`(and (pathnamep (compile-file "/soundness-mvb.lisp" :verbose nil))
     (load "/soundness-mvb.wasm")
     (equal (multiple-value-list (soundness-file-mvb)) '(42 nil)))`);
+  vm.mountFile('/soundness-case.lisp', `(in-package :miricl-compiler)
+    (defun soundness-file-case (key)
+      (let ((events nil))
+        (case (progn (setq events (cons :key events)) key)
+          (multiple-value-bind
+            (setq events (cons :mvb events)) (values 42 events))
+          ((setq) (setq events (cons :setq events)) (values 43 events))
+          (otherwise (values 44 events)))))`);
+  check(`(and (pathnamep (compile-file "/soundness-case.lisp" :verbose nil))
+    (load "/soundness-case.wasm")
+    (equal (multiple-value-list (soundness-file-case 'multiple-value-bind)) '(42 (:mvb :key)))
+    (equal (multiple-value-list (soundness-file-case 'setq)) '(43 (:setq :key)))
+    (equal (multiple-value-list (soundness-file-case :other)) '(44 (:key))))`);
   for (const [mutation, reason] of [
     ['(setf (hir-function-parent function) function)', /parent chain/],
     ['(setf (hir-block-id block) -1)', /block record or ID/],
@@ -3280,6 +3328,7 @@ try {
     }
     // A successful traversal cannot justify another after aliased mutation,
     // whether the mutator is visible, inline, or an unknown callback.
+    // A useful TYPE-ERROR may identify the whole bad input or its dotted tail.
     for (const mutation of [
       '(rplacd alias :dotted)',
       '(rplacd alias arguments)',
@@ -3296,8 +3345,9 @@ try {
                (progn (funcall function arguments
                  (lambda (alias) (rplacd alias :dotted))) nil)
                (type-error (condition)
-                 (eq (type-error-datum condition)
-                   ${mutation === '(rplacd alias arguments)' ? 'arguments' : ':dotted'})))
+                 (and (type-error-expected-type condition)
+                   (or (eq (type-error-datum condition) arguments)
+                     ${mutation === '(rplacd alias arguments)' ? 'nil' : '(eq (type-error-datum condition) :dotted)'}))))
           (progn (rplacd arguments nil)
             (equal (apply (lambda (&rest result) result) arguments) '(1)))))`);
     }
@@ -3306,7 +3356,10 @@ try {
         (apply (lambda (&rest result) result) arguments)))))
       (let ((arguments (cons 1 :dotted)))
         (handler-case (progn (funcall function arguments) nil)
-          (type-error (condition) (eq (type-error-datum condition) :dotted)))))`);
+          (type-error (condition)
+            (and (type-error-expected-type condition)
+              (or (eq (type-error-datum condition) arguments)
+                  (eq (type-error-datum condition) :dotted)))))))`);
     recover();
   }
   // The primary value's proof cannot flow to another value or across a join.
@@ -3470,7 +3523,7 @@ try {
         (when (listp object)
           (funcall (lambda () (setq object replacement))) (endp object)) :after)))))
     (and (handler-case (progn (funcall function :atom) nil) (type-error () t))
-      (eq (funcall function nil) :after))))`);
+      (eq (funcall function nil) :after)))`);
   // Inventory membership alone supplies no generic-method result proof.
   // Exact standardized function identity excludes other CL symbols and
   // same-name user functions; malformed function-name shapes stay bounded.
@@ -3958,4 +4011,145 @@ check(`(let ((saved-policy (compiler-primitive 52 nil))
     recover();
   }
   console.log('Soundness: current FASLs preserve shared/cyclic literals and reject corruption without poisoning later loads.');
+  // The optional declaration service shares real lexical contours with the
+  // evaluator/compiler; opaque data and explicit NIL must survive both paths.
+  evaluate(await fs.readFile(new URL('../compatibility/environments/environments.lisp', import.meta.url), 'utf8'));
+  evaluate(`(in-package :miricl-compiler)
+    (miricl-environment:define-declaration soundness-free (specifier environment)
+      (if (eq (second specifier) :invalid)
+          (values :declare :invalid-shell)
+          (values :declare (cons 'soundness-free-key (second specifier)))))
+    (defmacro soundness-free-value (&environment environment)
+      (list 'quote (miricl-environment:declaration-information 'soundness-free-key environment)))
+    (proclaim '(soundness-free :global)) (values)`);
+  check(`(let* ((source '(lambda ()
+                  (locally (declare (soundness-free :outer))
+                    (list (soundness-free-value)
+                      (locally (declare (soundness-free nil)) (soundness-free-value))
+                      (soundness-free-value)
+                      (let ((soundness-opaque :runtime-value))
+                        (declare (ignorable soundness-opaque) (soundness-free soundness-opaque))
+                        (soundness-free-value))))))
+                (expected '(:outer nil :outer soundness-opaque)))
+      (and (equal (funcall (eval source)) expected)
+           (equal (funcall (compile-native source)) expected)
+           (eq :global (miricl-environment:declaration-information 'soundness-free-key))))`);
+  check(`(let* ((payload (list :opaque))
+                 (base (miricl-environment:augment-environment nil :declare '((soundness-free :base))))
+                 (inner (miricl-environment:augment-environment base :declare '((soundness-free nil)))))
+      (setf (cdr payload) payload)
+      (and (= 1 (length (multiple-value-list (miricl-environment:augment-environment base))))
+           (eq :base (miricl-environment:declaration-information 'soundness-free-key base))
+           (null (miricl-environment:declaration-information 'soundness-free-key inner))
+           (eq payload (miricl-environment:declaration-information 'soundness-free-key
+             (miricl-environment:augment-environment nil :declare (list (list 'soundness-free payload)))))
+           (handler-case (progn (proclaim '(soundness-free :invalid)) nil)
+             (error (condition) (plusp (length (princ-to-string condition)))))
+           (handler-case (progn (miricl-environment:declaration-information 'soundness-free-key '(invalid)) nil)
+             (type-error () t))
+           (eq :global (miricl-environment:declaration-information 'soundness-free-key))
+           (= 4 (funcall (compile-native '(lambda (x) (declare ((integer 0 10) x)) (+ x 1))) 3))))`);
+  recover();
+  console.log('Soundness: optional free declarations preserve lexical NIL and opaque data, with checked rejection and recovery.');
+  // Gray extensions must reach ordinary CL entry points and checked callback
+  // boundaries. Native string streams retain their canonical generic methods.
+  evaluate(await fs.readFile(new URL('../compatibility/gray-streams/miricl-gray.lisp', import.meta.url), 'utf8'));
+  evaluate(`(in-package :miricl-compiler)
+    (defclass soundness-gray (miricl-gray:fundamental-input-stream miricl-gray:fundamental-output-stream)
+      ((input :initform "" :initarg :input :reader soundness-gray-input)
+       (position :initform 0 :accessor soundness-gray-position)
+       (output :initform nil :accessor soundness-gray-output)
+       (bad :initform nil :initarg :bad :reader soundness-gray-bad)
+       (closed :initform nil :accessor soundness-gray-closed)))
+    (defmethod miricl-gray:stream-read-char ((stream soundness-gray))
+      (if (eq (soundness-gray-bad stream) :character) 42
+          (let ((position (soundness-gray-position stream)))
+            (if (= position (length (soundness-gray-input stream))) :eof
+                (prog1 (char (soundness-gray-input stream) position)
+                  (incf (soundness-gray-position stream)))))))
+    (defmethod miricl-gray:stream-unread-char ((stream soundness-gray) character)
+      (declare (ignore character)) (decf (soundness-gray-position stream)) nil)
+    (defmethod miricl-gray:stream-write-char ((stream soundness-gray) character)
+      (push character (soundness-gray-output stream)) :ignored)
+    (defmethod miricl-gray:stream-line-column ((stream soundness-gray))
+      (if (eq (soundness-gray-bad stream) :column) -1
+          (loop for character in (soundness-gray-output stream)
+                until (char= character #\\Newline) count 1)))
+    (defmethod close ((stream soundness-gray) &key abort)
+      (declare (ignore abort)) (setf (soundness-gray-closed stream) t) t)
+    (defclass soundness-gray-index (soundness-gray) ())
+    (defmethod miricl-gray:stream-read-sequence
+        ((stream soundness-gray-index) sequence start end &key)
+      (declare (ignore sequence start)) (1+ end))
+    (defclass soundness-gray-byte (miricl-gray:fundamental-binary-input-stream
+                                  miricl-gray:fundamental-binary-output-stream) ())
+    (defmethod stream-element-type ((stream soundness-gray-byte)) '(unsigned-byte 4))
+    (defmethod miricl-gray:stream-read-byte ((stream soundness-gray-byte)) 42)
+    (defmethod miricl-gray:stream-write-byte ((stream soundness-gray-byte) byte)
+      (error "Invalid bytes must be rejected before this callback."))
+    (defmethod open-stream-p ((stream soundness-gray))
+      (unless (soundness-gray-closed stream) (values :open :secondary)))
+    (defclass soundness-gray-printable () ())
+    (defmethod print-object ((object soundness-gray-printable) stream)
+      (write-string "PRINTED" stream) object)
+    (defvar *soundness-gray-native-query* nil)
+    (defmethod stream-element-type :around ((stream string-stream))
+      (when *soundness-gray-native-query* (incf *soundness-gray-native-query*))
+      (call-next-method)) (values)`);
+  check(`(let* ((stream (make-instance 'soundness-gray :input "#| comment |# (1 2)Q"))
+                 (marker (list :eof)))
+      (and (streamp stream) (typep stream 'stream)
+           (equal (read stream) '(1 2)) (char= #\\Q (read-char stream))
+           (null (unread-char #\\Q stream)) (char= #\\Q (read-char stream))
+           (eq marker (read-char stream nil marker))
+           (null (format stream (lambda (destination &rest arguments)
+              (declare (ignore arguments)) (assert (eq destination stream))
+              (write-char #\\A destination) (format destination "~D" 42))))
+           (string= "A42" (coerce (reverse (soundness-gray-output stream)) 'string))
+           (close stream) (soundness-gray-closed stream) (not (open-stream-p stream))
+           (handler-case (progn (write-char #\\X stream) nil) (stream-error () t))))`);
+  check(`(let ((caller (compile-native '(lambda (stream) (stream-element-type stream))))
+               (stream (make-string-output-stream)))
+      (let ((*soundness-gray-native-query* 0))
+        (and (eq 'character (funcall caller stream)) (plusp *soundness-gray-native-query*))))`);
+  check(`(and
+      (handler-case (progn (read-char (make-instance 'soundness-gray :bad :character)) nil)
+        (type-error (condition) (eql 42 (type-error-datum condition))))
+      (handler-case (progn (fresh-line (make-instance 'soundness-gray :bad :column)) nil)
+        (type-error (condition) (eql -1 (type-error-datum condition))))
+      (handler-case (progn (read-byte (make-instance 'soundness-gray-byte)) nil)
+        (type-error (condition) (eql 42 (type-error-datum condition))))
+      (handler-case (progn (write-sequence #(:eof) (make-instance 'soundness-gray-byte)) nil)
+        (type-error (condition) (eq :eof (type-error-datum condition))))
+      (handler-case (progn (read-sequence (make-string 1) (make-instance 'soundness-gray-index)) nil)
+        (type-error (condition) (= 2 (type-error-datum condition))))
+      (char= #\\R (read-char (make-instance 'soundness-gray :input "R"))))`);
+  recover();
+  check(`(let* ((stream (make-instance 'soundness-gray))
+                 (caller (compile-native '(lambda (stream) (open-stream-p stream))))
+                 (expected '(:open :secondary)))
+      (and (equal expected (multiple-value-list (open-stream-p stream)))
+           (equal expected (multiple-value-list (funcall (fdefinition 'open-stream-p) stream)))
+           (equal expected (multiple-value-list (funcall caller stream)))))`);
+  check(`(let ((*print-circle* t) (object (make-instance 'soundness-gray-printable))
+                (condition (make-condition 'simple-error :format-control "condition ~D"
+                                           :format-arguments '(7))))
+      (and (every (lambda (control)
+                    (let ((stream (make-string-output-stream)))
+                      (format stream control object)
+                      (string= "pre PRINTED post" (get-output-stream-string stream))))
+                  '("pre ~A post" "pre ~S post" "pre ~W post"))
+           (let ((stream (make-string-output-stream)))
+             (format stream "pre ~A post" condition)
+             (string= "pre condition 7 post" (get-output-stream-string stream)))
+           (let ((stream (make-instance 'soundness-gray)))
+             (format stream "pre ~A post" object)
+             (string= "pre PRINTED post"
+                      (coerce (reverse (soundness-gray-output stream)) 'string)))
+           (let ((stream (make-string-output-stream)) (width 12))
+             (format stream "pre ~vA post" width object)
+             (string= (concatenate 'string "pre PRINTED"
+                         (make-string (- width (length "PRINTED")) :initial-element #\\Space) " post")
+                      (get-output-stream-string stream)))))`);
+  console.log('Soundness: ordinary Gray I/O preserves generic dispatch and rejects malformed callback results.');
 } finally {vm.close();}

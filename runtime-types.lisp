@@ -184,7 +184,7 @@
       #@(return (if (result i32) (i32.eq (local.get $tag) (i32.const 28))
         (then (call $value-n (local.get $x))) (else (i32.const 0)))))
     (stream
-      #@(return (call $streamp-native (local.get $x))))
+      #@(return (call $streamp (local.get $x))))
     (two-way-stream #@(return (i32.eq (local.get $tag) (i32.const 40))))
     (synonym-stream #@(return (i32.eq (local.get $tag) (i32.const 41))))
     (broadcast-stream #@(return (i32.eq (local.get $tag) (i32.const 43))))

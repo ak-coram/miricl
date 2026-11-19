@@ -1,0 +1,17 @@
+;;;; Wasm32 atomics keep native validation, wrapping and boolean CAS results.
+(in-package #:bordeaux-threads-2)
+
+(deftype atomic-integer () 'miricl-threads:atomic-integer)
+(deftype %atomic-integer-value () '(unsigned-byte 32))
+(defun make-atomic-integer (&key (value 0))
+  (miricl-threads:make-atomic-integer :value value))
+(defun atomic-integer-value (integer)
+  (miricl-threads:atomic-integer-value integer))
+(defun (setf atomic-integer-value) (value integer)
+  (setf (miricl-threads:atomic-integer-value integer) value))
+(defun atomic-integer-compare-and-swap (integer old new)
+  (miricl-threads:atomic-integer-compare-and-swap integer old new))
+(defun atomic-integer-incf (integer &optional (delta 1))
+  (miricl-threads:atomic-integer-incf integer delta))
+(defun atomic-integer-decf (integer &optional (delta 1))
+  (miricl-threads:atomic-integer-decf integer delta))
