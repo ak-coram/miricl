@@ -169,6 +169,13 @@ with SBCL DISASSEMBLE on the equivalent CL. This loop needs no guest compiler
 bootstrap or image rebuild. Supply target macro/load-time adapters explicitly;
 an accepted host expansion is not evidence that its dependencies exist in Wasm.
 
+In multi-agent work, the coordinator must launch and own persistent SBCL and
+Wasm REPL tool processes. Workers must attach through shared clients and hand
+off connection endpoints and loaded session state. Worker interruption or
+restart must not terminate these REPLs; a shared mailbox or socket does not
+detach a process's lifetime from its owning agent. Verify that a restarted
+worker can reuse the existing sessions without rebuilding or reloading them.
+
 For compiler and Lisp runtime experiments, prefer a persistent Wasm REPL with
 the source compiler over rebuilding images for each edit. Start the ordinary
 cold compiler image with `node scripts/repl.mjs miricl-cold.wasm --directory .`, set

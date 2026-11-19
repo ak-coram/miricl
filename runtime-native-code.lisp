@@ -1807,12 +1807,20 @@
 (define-runtime-function $native-direct-apply
     (($name (ref $native-function)) ($a :nullable-object) ($b :nullable-object)
      ($c :nullable-object) ($d :nullable-object)) (:nullable-object)
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(return_call $native-direct-apply-ready
+    (local.get $name) (local.get $a) (local.get $b) (local.get $c) (local.get $d)))
+
+;; The caller owns the checkpoint and has not called Lisp or polled since
+;; checking the selected entry. Keep frame and dynamic cleanup in one body.
+(define-runtime-function $native-direct-apply-ready
+    (($name (ref $native-function)) ($a :nullable-object) ($b :nullable-object)
+     ($c :nullable-object) ($d :nullable-object)) (:nullable-object)
   (:locals ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
            ($handlers :nullable-object) ($restarts :nullable-object) ($restart-associations :nullable-object)
            ($catches :nullable-object) ($targets :nullable-object) ($thrown i32)
            ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object)
            ($result :nullable-object))
-  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(local.set $backtrace-depth (global.get $backtrace-depth))
   #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
   #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
@@ -1833,11 +1841,21 @@
     (($name (ref $native-function)) ($a :nullable-object) ($b :nullable-object)
      ($c :nullable-object) ($d :nullable-object)) (externref)
   (:locals ($result :nullable-object))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(local.set $result (call $native-direct-apply-ready
+    (local.get $name) (local.get $a) (local.get $b) (local.get $c) (local.get $d)))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
+(define-runtime-function $native-direct-primary-apply-ready
+    (($name (ref $native-function)) ($a :nullable-object) ($b :nullable-object)
+     ($c :nullable-object) ($d :nullable-object)) (externref)
+  (:locals ($result :nullable-object))
   ;; Fixed-call dispatchers have large primitive fallback arms. Do not retain
   ;; their physical frames while a selected native worker calls back into Lisp.
-  ;; DIRECT-APPLY still owns the Lisp frame, checkpoint and dynamic cleanup;
-  ;; this small primary-only adapter clears secondary values after success.
-  #@(local.set $result (call $native-direct-apply
+  ;; DIRECT-APPLY-READY owns the Lisp frame and dynamic cleanup; the caller
+  ;; owns the checkpoint. Clear secondary values only after success.
+  #@(local.set $result (call $native-direct-apply-ready
     (local.get $name) (local.get $a) (local.get $b) (local.get $c) (local.get $d)))
   #@(call $clear-values)
   #@(extern.convert_any (local.get $result)))
@@ -1880,7 +1898,7 @@
   #@(return_call $native-set-argument-usage
     (call $native-attach-direct (local.get $function) (local.get $entry)) (local.get $usage)))
 
-(defun native-direct-call-wat (arity &optional checked function arguments typed-function)
+(defun native-direct-call-wat (arity &optional checked function arguments typed-function ready)
   ;; Reuse the caller's native-function and fixed-arity checks when present.
   ;; Callers may also reuse object conversions and a proven native-function cast.
   (let* ((names (case arity (0 nil) (1 '($value)) (2 '($left $right))
@@ -1890,7 +1908,7 @@
          (direct (wat-fragment #@(if (i32.eqz (ref.is_null
                        (struct.get $native-function $direct ,native-fn)))
                      (then
-                       (return_call $native-direct-primary-apply ,native-fn
+                       (return_call ,(if ready '$native-direct-primary-apply-ready '$native-direct-primary-apply) ,native-fn
                          ,@(loop for index below 4 collect (if (< index arity)
                            (if arguments (nth index arguments)
                              (native-object (list 'local.get (nth index names)))) '(ref.null eq)))))))))
@@ -1899,13 +1917,14 @@
         (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,fn)) (f64.const ,(+ arity 2)))
           (then ,direct))))))))
 
-(defun native-generic-fast-call-wat (arity)
+(defun native-generic-fast-call-wat (arity &optional ready)
   (let* ((names (case arity (0 nil) (1 '($value)) (2 '($left $right)) (3 '($a $b $c))))
          (id (if (zerop arity) `(call $native-builtin-id ,(native-object '(local.get $function))) '(local.get $id)))
          (expected (if (= arity 3) -2147483646 2147483644)))
     (wat-fragment #@(if (i32.eq ,id (i32.const ,expected))
       (then
-        (call $generic-recent-call ,(native-object '(local.get $function)) (i32.const ,arity)
+        (call ,(if ready '$generic-recent-call-ready '$generic-recent-call)
+          ,(native-object '(local.get $function)) (i32.const ,arity)
           ,@(loop for index below 4 collect (if (< index arity)
                (native-object (list 'local.get (nth index names))) '(ref.null eq))))
         (local.set $hit) (local.set $direct-result)
@@ -2123,7 +2142,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
             (if (ref.is_null (struct.get $native-function $direct (local.get $native-function)))
               (then (local.set $result (call $apply (local.get $function-object)
                 (array.new_fixed $objects 1 (local.get $a)))))
-              (else (local.set $result (call $native-direct-apply (local.get $native-function)
+              (else (local.set $result (call $native-direct-apply-ready (local.get $native-function)
                 (local.get $a) (ref.null eq) (ref.null eq) (ref.null eq)))))
             (br $called)))))
     (local.set $id (call $native-builtin-id (local.get $function-object)))
@@ -2148,7 +2167,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   #@(if (ref.test (ref $native-function) (local.get $function-object))
     (then (if (f64.eq (struct.get $obj $f
         (local.tee $native-function (ref.cast (ref $native-function) (local.get $function-object)))) (f64.const 3))
-      (then ,(native-direct-call-wat 1 t '(local.get $function-object) '((local.get $a)) '(local.get $native-function))
+      (then ,(native-direct-call-wat 1 t '(local.get $function-object) '((local.get $a)) '(local.get $native-function) t)
         (return (extern.convert_any (call $native-primary-apply
         (local.get $function-object) (array.new_fixed $objects 1 (local.get $a)))))))))
   #@(local.set $id (call $native-builtin-id (local.get $function-object)))
@@ -2248,7 +2267,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ;; Uncommon functions and exceptional arguments share the complete call
   ;; path, including its backtrace, arity checks and dynamic cleanup.
   (native-fixed-primitive-call-wat 1)
-  (native-generic-fast-call-wat 1)
+  (native-generic-fast-call-wat 1 t)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     ,(native-fixed-fallback-arguments-wat 1))))
 
@@ -2288,7 +2307,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
     (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 4))
-      (then ,(native-direct-call-wat 2 t)
+      (then ,(native-direct-call-wat 2 t nil nil nil t)
         (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (array.new_fixed $objects 2 (local.get $a) (local.get $b)))))))))
   (native-fixed-vector-call-wat 2)
@@ -2389,7 +2408,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
         (struct.get $direct-function $slot (ref.cast (ref $direct-function) ,(native-object '(local.get $function))))
         (local.get $a) (i32.const 1))))))))
   (native-fixed-primitive-call-wat 2)
-  (native-generic-fast-call-wat 2)
+  (native-generic-fast-call-wat 2 t)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     ,(native-fixed-fallback-arguments-wat 2))))
 
@@ -2404,7 +2423,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
     (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 5))
-      (then ,(native-direct-call-wat 3 t)
+      (then ,(native-direct-call-wat 3 t nil nil nil t)
         (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (array.new_fixed $objects 3
           ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) ,(native-object '(local.get $c))))))))))
@@ -2435,7 +2454,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
                   ,(native-object '(local.get $a)))
                   (return (local.get $a))))))))))
   (native-fixed-primitive-call-wat 3)
-  (native-generic-fast-call-wat 3)
+  (native-generic-fast-call-wat 3 t)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     ,(native-fixed-fallback-arguments-wat 3))))
 
@@ -2446,7 +2465,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
     (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 6))
-      (then ,(native-direct-call-wat 4 t)
+      (then ,(native-direct-call-wat 4 t nil nil nil t)
         (return (extern.convert_any (call $native-primary-apply
         ,(native-object '(local.get $function)) (array.new_fixed $objects 4
           ,(native-object '(local.get $a)) ,(native-object '(local.get $b))
@@ -2618,7 +2637,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($compiler-image-function)
   ($native-install) ($native-function) ($native-function-with-code) ($native-close-with-arity) ($native-close) ($native-close-fixed) ($native-close-cached) ($native-close-static) ($native-with-arity) ($native-code-size) ($native-capture) ($native-code-storage) ($native-code-entry) ($native-code-bytes) ($native-literal)
   ($native-debug-wrap) ($native-debug-attach) ($native-debug-close) ($native-debug-info)
-  ($native-attach-direct) ($native-attach-direct-root) ($native-set-argument-usage) ($native-attach-direct-usage) ($native-direct-apply) ($native-direct-primary-apply) ($native-shared-entry)
+  ($native-attach-direct) ($native-attach-direct-root) ($native-set-argument-usage) ($native-attach-direct-usage) ($native-direct-apply) ($native-direct-apply-ready) ($native-direct-primary-apply) ($native-direct-primary-apply-ready) ($native-shared-entry)
   #@(global $native-argument-empty (mut (ref null eq)) (ref.null eq))
   ($native-checked-object) ($native-checked-value) ($native-arguments) ($native-argument-set) ($native-validate-packet) ($native-ingress-arguments) ($native-prepend-argument) ($native-packet-tail)
   ($native-packet-length-cl) ($native-packet-ref-cl) ($native-arguments-list)
