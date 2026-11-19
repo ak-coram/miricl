@@ -1253,7 +1253,7 @@
                  (not (%member name '(compute-applicable-methods compute-effective-method compute-discriminating-function))))
         (%%generic-call-plan function nil nil nil)))))
 
-(defun %plan-generic-call (gf candidates)
+(defun %plan-generic-call (gf candidates &optional fixed-primary-p)
   ;; CANDIDATES comes from verified HIR and bounded type queries. Resolve
   ;; nominal names against target metadata, never host classes or DEFTYPE.
   (let ((%planning-generic-call t)
@@ -1296,6 +1296,14 @@
                                   (and (null (cdr qualifiers))
                                        (%member (car qualifiers) '(:before :after :around))))))
                           methods))
+        (return-from %plan-generic-call nil))
+      ;; Fixed primary calls can use the recent selector without constructing
+      ;; an argument list for a single primary method. Retain the guarded
+      ;; effective plan for next-method chains and auxiliary methods rather
+      ;; than adding their context assembly to the recent selector's work.
+      ;; This is a transport cost choice, not an applicability assumption.
+      (when (and fixed-primary-p (null (cdr methods))
+                 (null (%get (car methods) :qualifiers)))
         (return-from %plan-generic-call nil))
       (let ((function (%make-effective-function gf methods args)))
         (when (and (= version %dispatch-version) (eq token (%get gf :cache-token))

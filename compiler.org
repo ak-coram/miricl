@@ -78,7 +78,9 @@ arguments retain their intended sharing.
 
 SAFETY and DEBUG retain lexical scope through deferred work and inlining. SAFETY 0 permits
 declaration-based unchecked lowering without bypassing public validation. DEBUG 0 permits
-eligible frame omission; DEBUG 2 retains native listings; DEBUG 3 selects interactive HIR.
+eligible out-of-line frame omission. DEBUG 1 permits bounded inlining and reuse of
+the caller's owned frame at proven tail sites; ordinary non-tail entries retain
+their frames. DEBUG 2 retains native listings; DEBUG 3 selects interactive HIR.
 SPEED, SPACE and COMPILATION-SPEED are retained separately from those contracts.
 Whole-function policy summaries let local speed-oriented regions veto outlining. The compact
 deployment policy is =(optimize (space 3) (speed 1))= ; STRIP and visibility remain explicit.
@@ -201,6 +203,41 @@ component locals where their actual lowering supplies tuples; ordinary calls ret
 adapters. Failed signature-preserving rewriting falls back for the whole emission. General
 primary/discard calls use =native-primary-call= and clear secondary state after
 success; full consumers retain =native-call= .
+
+Generic-call planning accounts for the transport supported by the runtime entries.
+Class-only calls with at most three operands, primary or discarded results and
+one applicable primary method use the ordinary fixed entry and its recent-method
+selector, without constructing a proper argument list before selection. This is
+a transport choice rather than a weaker applicability proof: the
+selector checks live generic identity, dispatch epochs, protocol eligibility and
+argument classes, and falls back to ordinary dispatch when its plan is unavailable.
+Static guarded effective-method plans remain available for next-method chains, auxiliary methods,
+EQL candidates, wider calls and complete value groups. Their current entry transports a proper argument
+list and preserves effective-method context and all returned values.
+
+Scalar DEBUG 0 frame-omission certificates grow from eligible leaves through
+closed fixed-arity calls whose results have only primary or discarded demand.
+Each dependency has proved callee identity and an existing scalar certificate;
+the caller's ordinary lowering plan supplies result demand. Such calls use the
+fixed scalar entry and are excluded from tail-frame setup, preserving retained
+ancestor frames. The proof keeps the existing operation whitelist and does not
+supply a general dynamic-state invariance proof. Full return groups, unknown or recursive
+dependencies and exhausted work retain ordinary lowering. Per-body limits and an
+aggregate budget bound new scalar proof propagation, including its metadata and
+operand scans; certificates are rebuilt for each emission. Existing host-linked
+seeds retain their explicit closed-worker contract and do not use this propagation.
+
+The DEBUG 0 restriction belongs to this out-of-line, non-tail scalar certificate.
+DEBUG 1 already permits frame removal through inlining and owned tail-frame reuse.
+Broader DEBUG 1 direct-call omission requires a stronger proof that the omitted
+frame cannot become observable through signaling, callbacks, cooperative polls or
+nonlocal transfers, together with preservation of retained ancestor frames and
+their dynamic-state restoration. The current body certificate admits checked
+operations that can signal and supplies no such observability proof. Condition
+and debugger paths can change handler or dynamic-binding state before transferring;
+absence of explicit binding forms alone does not justify removing cleanup.
+Ordinary checked callee entries therefore retain the frame and restoration owners
+required by the existing error, scheduling and debugger contracts.
 
 Separate DEBUG 0 frame-omission certificates for exact two-to-four-value workers grow from eligible leaves
 through closed forwarding calls. Each nonprimitive call must have proved callee identity and

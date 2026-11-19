@@ -541,9 +541,13 @@ try {
     (funcall (compile-native '(lambda ()
       (defmethod soundness-dispatch-protocol ((x integer))
         (declare (optimize (space 3) (speed 1) (debug 0) (safety 1))) x)))) (values)`);
-  check(`(let ((driver (compile-native '(lambda (x)
-      (declare (optimize (space 3) (speed 1) (debug 0) (safety 1)))
-      (soundness-dispatch-protocol x))))
+  for (const body of [
+    `(declare (optimize (space 3) (speed 1) (debug 0) (safety 1)))
+      (soundness-dispatch-protocol x)`,
+    `(declare (type integer x)
+        (optimize (space 3) (speed 1) (debug 0) (safety 1)))
+      (values (soundness-dispatch-protocol x) :extra)`,
+  ]) check(`(let ((driver (compile-native '(lambda (x) ${body})))
     (replacement (compile-native '(lambda (arguments)
       (declare (ignore arguments)) :borrowed))))
     (dotimes (i 8) (funcall driver i))
@@ -571,6 +575,51 @@ try {
               (setf (getf slots :discriminating-function) old))
             (= (funcall driver 32) 32))))))`);
   console.log('Soundness: warmed generic dispatch observes applicability hooks and borrowed canonical metadata.');
+  // Typed fixed calls select primary/discard transport independently of full
+  // value demand. Warming must not freeze methods or an ordinary user binding.
+  evaluate(`(defgeneric soundness-typed-transport (x))
+    (funcall (compile-native '(lambda ()
+      (defmethod soundness-typed-transport ((x integer))
+        (when (minusp x) (error "Rejected transport input ~S" x))
+        (case x (0 (values)) (1 (values nil))
+          (otherwise (values x :secondary))))))) (values)`);
+  check(`(let ((primary (compile-native '(lambda (x)
+        (declare (type integer x) (optimize (safety 3) (debug 1)))
+        (list (soundness-typed-transport x) :done))))
+      (full (compile-native '(lambda (x)
+        (declare (type integer x) (optimize (safety 3) (debug 1)))
+        (multiple-value-list (soundness-typed-transport x)))))
+      (discard (compile-native '(lambda (x)
+        (declare (type integer x) (optimize (safety 3) (debug 1)))
+        (soundness-typed-transport x) :done)))
+      (generic #'soundness-typed-transport))
+    (dotimes (i 8) (funcall primary i) (funcall full i) (funcall discard i))
+    (and (equal (funcall primary 0) '(nil :done))
+      (equal (funcall primary 1) '(nil :done))
+      (equal (funcall primary 2) '(2 :done))
+      (null (funcall full 0)) (equal (funcall full 1) '(nil))
+      (equal (funcall full 2) '(2 :secondary))
+      (equal (multiple-value-list (funcall discard 2)) '(:done))
+      (handler-case (progn (funcall primary -1) nil)
+        (error (condition) (plusp (length (princ-to-string condition)))))
+      (equal (funcall primary 3) '(3 :done))
+      (progn
+        (funcall (compile-native '(lambda ()
+          (defmethod soundness-typed-transport ((x integer))
+            (declare (ignore x)) (values :new :secondary)))))
+        (and (equal (funcall primary 2) '(:new :done))
+          (equal (funcall full 2) '(:new :secondary))
+          (eq (funcall discard 2) :done)))
+      (unwind-protect
+        (progn
+          (setf (symbol-function 'soundness-typed-transport)
+            (compile-native '(lambda (x) (values x :rebound))))
+          (and (equal (funcall primary 4) '(4 :done))
+            (equal (funcall full 4) '(4 :rebound))
+            (eq (funcall discard 4) :done)))
+        (setf (symbol-function 'soundness-typed-transport) generic))
+      (equal (funcall primary 5) '(:new :done))))`);
+  console.log('Soundness: typed generic transports preserve value demand, recovery and live method/function replacement.');
   // Reusing a checked owned spine must not bless borrowed or replaced metadata.
   evaluate(`(defgeneric soundness-metadata-shape (x))
     (defmethod soundness-metadata-shape ((x t)) x) (values)`);
@@ -1903,6 +1952,71 @@ try {
     evaluate("(fmakunbound 'soundness-normal-checked) (fmakunbound 'soundness-normal-cleanup-call) (values)");
   }
   console.log('Soundness: ordinary tuple entries retain complete values, live bindings, checked leaf frames and dynamic cleanup.');
+
+  // Scalar forwarders keep each closure's capture and the primary-value
+  // boundary, including checked effects in a discarded secondary value.
+  check(`(let* ((factory (compile-native '(lambda (capture)
+        (declare (optimize (debug 1)))
+        (labels ((leaf (choose input)
+                   (declare (inline car) (optimize (debug 0) (safety 1)))
+                   (if choose (values capture (car input)) (values)))
+                 (forward (choose input)
+                   (declare (optimize (debug 0))) (values (leaf choose input)))
+                 (forward2 (choose input)
+                   (declare (optimize (debug 0))) (values (forward choose input))))
+          (declare (notinline leaf forward forward2))
+          (lambda (choose input observe)
+            (multiple-value-prog1 (values (forward2 choose input)) (funcall observe)))))))
+      (object (list :identity)) (left (funcall factory object)) (right (funcall factory nil))
+      (events nil))
+    (flet ((observe () (push :effect events) (values :noise :secondary :third)))
+      (and
+        (let ((result (multiple-value-list (funcall left t '(17) #'observe))))
+          (and (null (cdr result)) (eq (car result) object)))
+        (equal (multiple-value-list (funcall right t '(19) #'observe)) '(nil))
+        (equal (multiple-value-list (funcall left nil :unused #'observe)) '(nil))
+        (equal events '(:effect :effect :effect))
+        (handler-case (progn (funcall left t :invalid #'observe) nil)
+          (type-error (condition) (eq (type-error-datum condition) :invalid)))
+        (equal events '(:effect :effect :effect))
+        (eq (funcall left t '(23) #'observe) object))))`);
+  evaluate(`(defvar *soundness-scalar-scope* :outside)
+    (defvar *soundness-scalar-cleanup* nil)
+    (setf (symbol-function 'soundness-scalar-root)
+      (compile-native '(lambda (input)
+        (declare (optimize (debug 1)))
+        (labels ((leaf (x) (declare (inline car) (optimize (debug 0) (safety 1))) (car x))
+                 (forward (x) (declare (optimize (debug 0))) (values (leaf x)))
+                 (forward2 (x) (declare (optimize (debug 0))) (values (forward x))))
+          (declare (notinline leaf forward forward2))
+          (let ((*soundness-scalar-scope* :inside))
+            (unwind-protect (list (forward2 input) :done)
+              (push *soundness-scalar-scope* *soundness-scalar-cleanup*)))))
+        :name 'soundness-scalar-root)) (values)`);
+  try {
+    assert.throws(() => evaluate('(soundness-scalar-root :invalid)'), error =>
+      /SOUNDNESS-SCALAR-ROOT/.test(error.backtrace ?? ''));
+    check(`(and (eq *soundness-scalar-scope* :outside)
+      (equal *soundness-scalar-cleanup* '(:inside))
+      (equal (soundness-scalar-root '(17)) '(17 :done))
+      (equal *soundness-scalar-cleanup* '(:inside :inside))
+      (eq *soundness-scalar-scope* :outside))`);
+  } finally {
+    evaluate("(fmakunbound 'soundness-scalar-root) (values)");
+  }
+  console.log('Soundness: scalar closed chains retain captures, primary boundaries, checked effects and ancestor cleanup/frame.');
+  // A wide valid call to a known small callee keeps its runtime arity error;
+  // rejecting its private-call proof must leave other invocations reusable.
+  check(`(let ((function (compile-native '(lambda (bad)
+      (declare (optimize (debug 0)))
+      (labels ((leaf (x) x)
+               (wide () (values (leaf ${Array.from({length: 128}, (_, index) => index).join(' ')}))))
+        (declare (notinline leaf wide))
+        (if bad (wide) (leaf :ok)))))))
+    (and (eq (funcall function nil) :ok)
+      (handler-case (progn (funcall function t) nil)
+        (program-error (condition) (plusp (length (princ-to-string condition)))))
+      (eq (funcall function nil) :ok)))`);
 
   // Mixed targets, unknown ingress and a captured mutable function variable
   // must retain general dispatch and the replacement's complete return group.

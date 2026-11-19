@@ -1454,10 +1454,10 @@ exhausted work budgets keep every incoming value group."
           (setf (native-value-slot scalar value) t))))
     scalar))
 
-(defun native-simple-body-p (function &optional multiple-callees)
+(defun native-simple-body-p (function &optional multiple-callees scalar-callees)
   ;; Bound tuple body lowering independently of permission to omit a frame.
   ;; These bodies neither establish dynamic scope nor use scalar tail paths.
-  (let ((budget 2048))
+  (let ((budget 2048) (scalar nil))
     (dolist (block (hir-function-blocks function) t)
       (dolist (instruction (hir-block-instructions block))
         (when (minusp (decf budget)) (return-from native-simple-body-p nil))
@@ -1480,14 +1480,31 @@ exhausted work budgets keep every incoming value group."
                                         :left :right :cons :list :list-star :car :cdr :car-cons :cdr-cons
                                         :checked-car :checked-cdr :length :vector-length :evenp :oddp))
                          (let* ((inputs (hir-instruction-inputs instruction))
-                                (target (and multiple-callees
-                                             (hir-result-callee (second inputs) *wasm-result-callees*))))
-                           (and target (gethash target multiple-callees)
+                                (target (and (or multiple-callees scalar-callees)
+                                             (hir-result-callee (second inputs) *wasm-result-callees*)))
+                                (tuple (and target multiple-callees (gethash target multiple-callees)))
+                                (mode (and target scalar-callees (gethash target scalar-callees))))
+                           (and target (or tuple (member mode '(:single :primary)))
                                 ;; A frameless body must not reach a framed
                                 ;; scalar tail adapter. DEBUG 1 dependencies
                                 ;; need call-site permission and an owned frame.
                                 (zerop (hir-function-debug-level target))
-                                (eql (length (cddr inputs)) (native-fixed-arity target)))))
+                                ;; Check certificate membership before scanning
+                                ;; the target's entry, and bound a wide proper
+                                ;; call before forcing any caller lowering plan.
+                                (null (nthcdr 4 (cddr inputs)))
+                                (eql (length (cddr inputs)) (native-fixed-arity target))
+                                (or tuple
+                                    ;; Only primary/discard uses take the fixed
+                                    ;; scalar path before tail setup. :PRIMARY
+                                    ;; supplies no complete return-count proof.
+                                    (native-value-slot
+                                      (or scalar
+                                        (setq scalar
+                                          (svref (or (gethash function *wasm-function-plans*)
+                                                     (setf (gethash function *wasm-function-plans*)
+                                                       (native-function-plan function))) 7)))
+                                      (hir-instruction-output instruction))))))
                (return-from native-simple-body-p nil))))
           (otherwise (return-from native-simple-body-p nil))))
       (let* ((end (hir-block-terminator block)) (opcode (hir-instruction-opcode end)))
@@ -1495,10 +1512,10 @@ exhausted work budgets keep every incoming value group."
                     (and (eq opcode :block-return) (hir-instruction-attributes end)))
           (return-from native-simple-body-p nil))))))
 
-(defun native-simple-callee-p (function &optional multiple-callees)
+(defun native-simple-callee-p (function &optional multiple-callees scalar-callees)
   ;; This certifies the body, not permission to omit its frame at every call.
   (and (< (hir-function-debug-level function) 2)
-       (native-simple-body-p function multiple-callees)))
+       (native-simple-body-p function multiple-callees scalar-callees)))
 
 (defun native-multiple-result-functions (unit used)
   ;; Grow tuple body certificates from leaves. Only previously proved DEBUG 0
@@ -1553,28 +1570,62 @@ exhausted work budgets keep every incoming value group."
 
 (defun native-local-call-functions (unit)
   (unless *wasm-debug*
-    (let ((functions nil))
-      (dolist (function (hir-unit-functions unit) functions)
-        (when (and (gethash function *wasm-direct-workers*)
-                   (or (and *wasm-closed-worker-functions*
-                            (gethash function *wasm-closed-worker-functions*))
-                       (and *wasm-frameless-multiple-functions*
-                            (gethash function *wasm-frameless-multiple-functions*))
-                       (and (not (and *wasm-multiple-result-functions*
-                                      (gethash function *wasm-multiple-result-functions*)))
-                            (zerop (hir-function-debug-level function))
-                            (native-simple-callee-p function))))
-          (unless functions (setq functions (make-hash-table :test 'eq)))
-          (let* ((plan (or (gethash function *wasm-function-plans*)
-                           (setf (gethash function *wasm-function-plans*) (native-function-plan function))))
-                 (scalar (svref plan 7)))
-            (setf (gethash function functions)
-              (or (and *wasm-frameless-multiple-functions* (gethash function *wasm-frameless-multiple-functions*))
-               (if (every (lambda (block)
-                    (let ((end (hir-block-terminator block)))
-                      (or (not (eq (hir-instruction-opcode end) :return))
-                          (native-value-slot scalar (first (hir-instruction-inputs end))))))
-                    (hir-function-blocks function)) :single :primary)))))))))
+    (let ((functions nil) (pending nil) (fuel 65536))
+      (labels ((record (function)
+                 (unless functions (setq functions (make-hash-table :test 'eq)))
+                 (setf (gethash function functions)
+                   (or (and *wasm-frameless-multiple-functions* (gethash function *wasm-frameless-multiple-functions*))
+                       (let* ((plan (or (gethash function *wasm-function-plans*)
+                                      (setf (gethash function *wasm-function-plans*) (native-function-plan function))))
+                              (scalar (svref plan 7)))
+                         (if (every (lambda (block)
+                               (let ((end (hir-block-terminator block)))
+                                 (or (not (eq (hir-instruction-opcode end) :return))
+                                     (native-value-slot scalar (first (hir-instruction-inputs end))))))
+                               (hir-function-blocks function)) :single :primary))))))
+        (dolist (function (hir-unit-functions unit))
+          (when (minusp (decf fuel)) (return-from native-local-call-functions functions))
+          (when (gethash function *wasm-direct-workers*)
+            (cond ((or (and *wasm-closed-worker-functions* (gethash function *wasm-closed-worker-functions*))
+                       (and *wasm-frameless-multiple-functions* (gethash function *wasm-frameless-multiple-functions*)))
+                   ;; Existing trusted host/tuple seeds retain their contract.
+                   ;; The work budget below bounds new scalar proof propagation.
+                   (record function))
+                  ((and (not (and *wasm-multiple-result-functions* (gethash function *wasm-multiple-result-functions*)))
+                        (zerop (hir-function-debug-level function)))
+                   (push function pending)))))
+        (loop while pending do
+          (let ((next nil) (changed nil))
+            (dolist (function pending)
+              ;; Validated counts price dense tables before a lowering plan is
+              ;; forced. Charge descriptors absent from instruction operands too.
+              (when (minusp (decf fuel (+ 1 (hir-function-value-count function)
+                                           (hir-function-block-count function))))
+                (return-from native-local-call-functions functions))
+              (dolist (binding (hir-function-bindings function))
+                (declare (ignore binding))
+                (when (minusp (decf fuel)) (return-from native-local-call-functions functions)))
+              (dolist (capture (hir-function-captures function))
+                (declare (ignore capture))
+                (when (minusp (decf fuel)) (return-from native-local-call-functions functions)))
+              ;; Repeated failed scans consume the same aggregate budget as
+              ;; successful ones; recursive dependencies cannot seed a proof.
+              (dolist (block (hir-function-blocks function))
+                (when (minusp (decf fuel)) (return-from native-local-call-functions functions))
+                (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+                  (when (minusp (decf fuel)) (return-from native-local-call-functions functions))
+                  ;; A single valid VALUES/LIST/CALL can have a wide operand
+                  ;; spine. Charge it before forcing the caller's scalar plan.
+                  (dolist (input (hir-instruction-inputs instruction))
+                    (declare (ignore input))
+                    (when (minusp (decf fuel)) (return-from native-local-call-functions functions)))))
+              (if (native-simple-callee-p function nil
+                    (unless (or *wasm-fixed-call-emitter* *wasm-closed-worker-functions*) functions))
+                  (progn (record function) (setq changed t))
+                  (push function next)))
+            (unless changed (return))
+            (setq pending next)))
+        functions))))
 
 (defun native-result-signature (function)
   (let* ((source (and *wasm-worker-origins* (gethash function *wasm-worker-origins*)))
@@ -1853,7 +1904,17 @@ exhausted work budgets keep every incoming value group."
                                        (list :eql (first (hir-instruction-attributes origin)))
                                        (hir-dispatch-candidate (gethash value *wasm-inferred-types* t)))))
                                  (cddr inputs)))
-                             (plan (funcall *wasm-generic-planner* gf candidates)))
+                             ;; Tell the target planner when the existing fixed
+                             ;; primary entry avoids the guarded plan's argument
+                             ;; list. It retains static plans for method chains
+                             ;; that the recent selector cannot execute directly.
+                             ;; Live guards and fallback still own dispatch.
+                             (plan (funcall *wasm-generic-planner* gf candidates
+                                     (and (<= (length candidates) 3)
+                                          (native-value-slot (svref call-plan 0)
+                                            (hir-instruction-output instruction))
+                                          (notany (lambda (candidate)
+                                                    (eq (car candidate) :eql)) candidates)))))
                         (when plan
                           (let ((needed nil))
                             (loop for value in (cddr inputs) for candidate in candidates do
