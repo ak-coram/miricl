@@ -815,8 +815,9 @@
   #@(local.set $context (call $generic-recent-context (local.get $gf) (ref.as_non_null (local.get $body))
     (local.get $method) (local.get $rest) (local.get $next) (local.get $count)
     (local.get $a) (local.get $b) (local.get $c)))
-  #@(call $native-direct-apply-ready (ref.as_non_null (local.get $body)) (local.get $context)
-    (local.get $a) (local.get $b) (local.get $c))
+  #@(ref.cast (ref null eq) (any.convert_extern
+    (call $native-direct-apply-ready (ref.as_non_null (local.get $body)) (local.get $context)
+      (local.get $a) (local.get $b) (local.get $c) (i32.const 0))))
   #@(i32.const 1))
 
 ;; This internal helper cannot call Lisp or poll. Allocate the lexical context

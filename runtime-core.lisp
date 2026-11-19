@@ -108,28 +108,35 @@
 
 (defun core-struct-functions (name id fields)
   (let* ((types (mapcar (lambda (field) (car (last field))) fields))
+         ;; Executable proof hints are process-local. Immutable fields are
+         ;; constructor arguments, so merely omitting CORE-SET is insufficient.
+         (transient (loop for field in fields collect
+                      (and (string-equal name '$native-direct-code)
+                           (string-equal (second field) '$call-proof))))
          (value `(ref.cast (ref ,name) (any.convert_extern (local.get $object))))
          (signature (map 'string (lambda (type)
                       (let ((code (core-field-code (core-unmut type))))
                         (if (core-mut-p type) (char-upcase code) code))) types)))
     `((func (export ,(format nil "core-read:~D:~A" id signature))
         (param $object externref) (result ,@(mapcar (lambda (type) (core-external-type (core-unmut type))) types))
-        ,@(loop for field in types for index from 0
-                collect (core-field-read (core-unmut field) `(struct.get ,name ,index ,value))))
+        ,@(loop for field in types for hidden in transient for index from 0
+                collect (if hidden (core-field-default (core-unmut field))
+                            (core-field-read (core-unmut field) `(struct.get ,name ,index ,value)))))
       (func (export ,(format nil "core-new:~D" id))
         ,@(loop for field in types for index from 0 unless (core-mut-p field)
                 collect `(param ,(core-field-variable index) ,(core-external-type field)))
         (result externref)
         (extern.convert_any (struct.new ,name
-          ,@(loop for field in types for index from 0 collect
-              (if (core-mut-p field) (core-field-default (core-unmut field))
+          ,@(loop for field in types for hidden in transient for index from 0 collect
+              (if (or hidden (core-mut-p field)) (core-field-default (core-unmut field))
                   (core-field-write field `(local.get ,(core-field-variable index))))))))
       (func (export ,(format nil "core-set:~D" id)) (param $object externref)
         ,@(loop for field in types for index from 0 when (core-mut-p field)
                 collect `(param ,(core-field-variable index) ,(core-external-type (core-unmut field))))
-        ,@(loop for field in types for index from 0 when (core-mut-p field)
+        ,@(loop for field in types for hidden in transient for index from 0 when (core-mut-p field)
                 collect `(struct.set ,name ,index ,value
-                            ,(core-field-write (core-unmut field) `(local.get ,(core-field-variable index)))))))))
+                            ,(if hidden (core-field-default (core-unmut field))
+                                 (core-field-write (core-unmut field) `(local.get ,(core-field-variable index))))))))))
 
 (defun core-image-runtime-wat ()
   (let ((types (remove-if (lambda (type)

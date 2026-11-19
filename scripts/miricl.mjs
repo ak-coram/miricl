@@ -968,7 +968,134 @@ function compactNativeEntries(module, bytes) {
   return {count, size, descriptors};
 }
 
-function bindCompactNativeEntries(layout, instance, vm) {
+function nativeDirectProofs(bytes, layout) {
+  // This optional audit never rejects an otherwise valid native module.
+  // Its result is executable authority, independent of compiler metadata.
+  try {
+    if (bytes.length > 1048576) return null;
+    let fuel = 16384;
+    const spend = (count = 1) => { if ((fuel -= count) < 0) throw 0; };
+    const read = payload => new CoreReader(payload);
+    const count = input => { const value = input.word(); spend(value); return value; };
+    const text = input => new TextDecoder('utf-8', {fatal: true}).decode(input.take(count(input)));
+    const complete = input => {if (input.position !== input.bytes.length) throw 0;};
+    const types = [], imports = [], functions = [], bodies = [], exports = new Map();
+    let elements = null;
+    for (const {kind, payload} of wasmSections(bytes)) {
+      spend();
+      const input = read(payload);
+      if (kind === 1) {
+        for (let n = count(input); n--; ) {
+          if (input.take(1)[0] !== 0x60) throw 0;
+          const parameters = [...input.take(count(input))];
+          const results = [...input.take(count(input))];
+          if (![...parameters, ...results].every(type => [0x7f, 0x7e, 0x7d, 0x7c, 0x70, 0x6f].includes(type))) throw 0;
+          types.push({parameters, results});
+        }
+        complete(input);
+      } else if (kind === 2) {
+        for (let n = count(input); n--; ) {
+          const module = text(input), name = text(input);
+          if (input.take(1)[0] !== 0) throw 0;
+          imports.push({module, name, type: input.word()});
+        }
+        complete(input);
+      } else if (kind === 3) {
+        for (let n = count(input); n--; ) functions.push(input.word());
+        complete(input);
+      } else if (kind === 7) {
+        for (let n = count(input); n--; ) {
+          const name = text(input), kind = input.take(1)[0], index = input.word();
+          if (kind === 0) exports.set(name, index);
+        }
+        complete(input);
+      } else if (kind === 8) throw 0;
+      else if (kind === 9 && layout) {
+        for (let n = count(input); n--; ) {
+          const flags = input.word();
+          if (flags === 0 && elements === null) {
+            if (input.take(3).some((value, index) => value !== [0x41, 0, 0x0b][index])) throw 0;
+            elements = [];
+            for (let size = count(input); size--; ) elements.push(input.word());
+          } else if (flags === 3) {
+            if (input.take(1)[0] !== 0) throw 0;
+            for (let size = count(input); size--; ) input.word();
+          } else throw 0;
+        }
+        complete(input);
+      } else if (kind === 10) {
+        for (let n = count(input); n--; ) bodies.push(input.take(input.word()));
+        complete(input);
+      }
+    }
+    if (functions.length !== bodies.length || (layout && elements?.length !== layout.size)) return null;
+    const signature = (type, arity) => type && type.parameters.length === arity &&
+      type.parameters.every(type => type === 0x6f) && type.results.length === 1 && type.results[0] === 0x6f;
+    const prove = (index, arity) => {
+      try {
+        if (!Number.isInteger(index) || index < 0 || index >= imports.length + bodies.length) return false;
+        if (index < imports.length || !signature(types[functions[index - imports.length]], 5)) return false;
+        const input = read(bodies[index - imports.length]);
+        if (input.bytes.length > 1024) return false;
+        // An initialized external-reference local contains NIL; arguments are
+        // checked Lisp values. The function/context parameter may never escape.
+        const locals = [false, ...Array.from({length: 4}, (_, index) => index < arity)];
+        for (let groups = count(input); groups--; ) {
+          const size = count(input);
+          if (locals.length + size > 64 || input.take(1)[0] !== 0x6f) return false;
+          locals.push(...Array(size).fill(true));
+        }
+        const stack = [];
+        let normalized = false;
+        for (let ops = 0; ops < 256 && input.position < input.bytes.length; ops++) {
+          spend();
+          const op = input.take(1)[0];
+          if (normalized) {
+            if (op === 0x0f) {if (input.take(1)[0] !== 0x0b) return false;}
+            else if (op !== 0x0b) return false;
+            return input.position === input.bytes.length;
+          }
+          if (op === 0x20) {
+            const local = input.word();
+            if (locals[local] !== true) return false;
+            stack.push(true);
+          } else if (op === 0x21 || op === 0x22) {
+            const local = input.word();
+            if (local === 0 || local >= locals.length || !stack.length) return false;
+            locals[local] = stack.pop();
+            if (op === 0x22) stack.push(locals[local]);
+          } else if (op === 0x1a) {
+            if (!stack.length) return false;
+            stack.pop();
+          } else if (op === 0xd0) {
+            if (input.take(1)[0] !== 0x6f) return false;
+            stack.push(true);
+          } else if (op === 0x10 || op === 0x12) {
+            const target = imports[input.word()];
+            if (stack.length !== 1 || !stack[0] || !target || target.module !== 'm' || target.name !== 'return1' ||
+                !signature(types[target.type], 1)) return false;
+            normalized = true;
+          } else return false;
+        }
+        return false;
+      } catch { return false; }
+    };
+    const named = new Set(), compact = new Set();
+    if (layout) {
+      let slot = layout.count;
+      for (const descriptor of layout.descriptors) if (descriptor) {
+        if (prove(elements[slot], (descriptor & 7) - 1)) compact.add(slot);
+        slot++;
+      }
+    } else for (const [name, index] of exports) {
+      const match = /^direct-entry(?:[0-9]+)?-([0-4])$/.exec(name);
+      if (match && prove(index, Number(match[1]))) named.add(name);
+    }
+    return {named, compact};
+  } catch { return null; }
+}
+
+function bindCompactNativeEntries(layout, instance, vm, proofs) {
   if (!layout) return null;
   const table = instance.exports.entries;
   if (!(table instanceof WebAssembly.Table) || table.length !== layout.size)
@@ -982,7 +1109,8 @@ function bindCompactNativeEntries(layout, instance, vm) {
   }
   let slot = layout.count;
   for (const descriptor of layout.descriptors)
-    direct.push(descriptor ? {entry: functions[slot++], arity: (descriptor & 7) - 1,
+    direct.push(descriptor ? {certified: proofs?.compact.has(slot) ?? false,
+      entry: functions[slot++], arity: (descriptor & 7) - 1,
       usage: (descriptor >>> 3) ? (descriptor >>> 3) - 1 : undefined} : null);
   // Own the references rather than retaining a mutable table as the entry
   // authority. An earlier initializer cannot change a later installation.
@@ -1224,11 +1352,12 @@ export class Miricl {
         let compiled = this.nativeModules.get(storage);
         if (!compiled) {
           const [start, length] = this.vm['native-code-bytes'](code);
-          const bytes = new Uint8Array(this.vm.memory.buffer, start, length);
+          const bytes = new Uint8Array(this.vm.memory.buffer, start, length).slice();
           const module = new WebAssembly.Module(bytes);
           const layout = compactNativeEntries(module, bytes);
+          const proofs = nativeDirectProofs(bytes, layout);
           const instance = new WebAssembly.Instance(module, runtimeImports);
-          compiled = {instance, entries: bindCompactNativeEntries(layout, instance, this.vm), length,
+          compiled = {instance, entries: bindCompactNativeEntries(layout, instance, this.vm, proofs), proofs, length,
             code: this.vm['core-native-code']?.(storage, start, length) ?? null};
           this.nativeModules.set(storage, compiled);
         }
@@ -1243,15 +1372,19 @@ export class Miricl {
         if (compiled.entries) {
           const direct = compiled.entries.direct[index];
           if (direct) {
-            function_ = this.vm['native-attach-direct-root'](function_, direct.entry, direct.arity);
+            const attach = direct.certified ? 'core-native-attach-certified-root' : 'native-attach-direct-root';
+            function_ = this.vm[attach](function_, direct.entry, direct.arity);
             if (direct.usage !== undefined) function_ = this.vm['native-set-argument-usage'](function_, direct.usage);
           }
           return function_;
         }
         for (let arity = 0; arity <= 4; arity++) {
-          const direct = compiled.instance.exports[`direct-${exportName}-${arity}`];
+          const directName = `direct-${exportName}-${arity}`;
+          const direct = compiled.instance.exports[directName];
           if (direct) {
-            function_ = this.vm['native-attach-direct-root'](function_, direct, arity);
+            const attach = compiled.proofs?.named.has(directName) ?
+              'core-native-attach-certified-root' : 'native-attach-direct-root';
+            function_ = this.vm[attach](function_, direct, arity);
             const usage = compiled.instance.exports[`argument-usage-${exportName}`]?.value;
             if (typeof usage === 'number') function_ = this.vm['native-set-argument-usage'](function_, usage);
             break;

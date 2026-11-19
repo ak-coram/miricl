@@ -51,6 +51,22 @@ than assuming the host's type relationships or numeric representation.
 Opaque type specifiers must not trigger arbitrary DEFTYPE expansion or
 SATISFIES execution inside the proof engine.
 
+Reuse the standard-function contract metadata and target type rules. Extend
+conditional proof queries and their lowering consumers before adding another
+fact inventory. Missing facts are unknown. Prove signaling, callbacks,
+allocation, mutable effects and result counts separately. Proving an arithmetic
+or list operation non-signaling does not make its polling path non-signaling
+or unobservable. Primary-value demand does not prove that a callee returns
+exactly one value.
+
+Executable proof seeds must describe checks actually emitted at the relevant
+observation, not stronger declarations. Track every SSA operand on which a
+refinement depends. Discard speculative checks, facts and dependent lowering
+plans together when admission fails. Complete bounded reachability before
+excluding control-flow edges; an incomplete traversal supplies no proof.
+Logical integer range does not establish physical i31 representation, and an
+unchecked extractor is not an input validator.
+
 Apply proven facts under the relevant declaration, safety and redefinition
 contracts. Preserve operand effects and order, multiple values, numeric
 contagion, bignum promotion, and observable errors and traps. Structural input
@@ -72,7 +88,10 @@ implementation. Preserve defined ANSI behavior; do not make accidental current
 behavior or behavior whose consequences ANSI leaves undefined into a compiler
 contract. In particular, optimizations may rely on the standard definitions of
 COMMON-LISP functions: redefining or binding CL:EQL and other standard functions
-where ANSI forbids it need not be supported or guarded. This does not relax
+where ANSI specifies undefined consequences need not be supported or guarded.
+Use standardized operation identity rather than package membership alone.
+Fixed standard operators do not make user callbacks, permitted method extensions
+or documented runtime hooks immutable. This does not relax
 redefinition and identity requirements for ordinary user functions, or the
 contracts of explicit MIRICL extensions such as scheduling and debugging.
 Tests must follow this distinction rather than constrain optimizations to
@@ -97,6 +116,14 @@ offending input and the reason. It must not cause host/Wasm traps,
 hangs from malformed structures, or corrupt subsequent compiler use.
 Add regression coverage for malformed input and recovery after rejection.
 
+Compiler proof metadata is a claim to validate, not authority to skip checks.
+WasmGC types are canonical across modules; a matching layout or immutable flag
+does not authenticate a proof. Bind runtime permissions to the actual validated
+executable entry using runtime-owned identity or equivalent authority. Recheck
+final code after rewriting and outlining, audit wrappers and arity copies, and
+strip transient permissions during serialization unless loading reestablishes
+their authority. Ordinary structural validation remains independent.
+
 # Performance
 
 On shared development machines, preserve ample memory and CPU headroom for
@@ -112,6 +139,12 @@ close them or reload reusable state merely to reduce process counts.
 Keep the default precompiled browser image below 1 MiB (1,048,576 raw bytes). Track raw
 and compressed sizes separately; download compression does not replace this
 size budget. Preserve the compiler-free image for lightweight scripting.
+
+Cold-runtime sizes and standalone helper modules do not certify the default
+precompiled compiler image budget. Measure matching complete artifacts including
+the compiler payload; historical images and estimates remain explicitly labeled.
+Compare compression with identical settings and report JavaScript adapter growth
+separately from Wasm image growth.
 
 Design optimization policy around compact browser deployment by default:
 `(optimize (space 3) (speed 1))`. Give users local control over measured hot
@@ -176,6 +209,23 @@ restart must not terminate these REPLs; a shared mailbox or socket does not
 detach a process's lifetime from its owning agent. Verify that a restarted
 worker can reuse the existing sessions without rebuilding or reloading them.
 
+In multi-agent optimization work, keep the coordinator on coordination and
+workflow, with investigation/implementation, measurement and semantic-review
+roles. For each iteration, initial workers gather evidence and write handoffs;
+rotate every role to fresh context for independent verification before
+implementation, review and validation. Use one source writer per area and an
+explicit serial token for heavy workloads. Waiting roles can investigate future
+questions without launching competing workloads.
+
+Check worker status when handing off work. A message to a completed worker does
+not restart it; use a dispatch operation that starts a turn, such as
+followup_task. Across conversation handoffs, verify advancing REPL heartbeats
+and loaded-state markers before requests; a stale status file can still say
+ready. Root-local process handles and ownership may not transfer. A client
+timeout does not cancel server work, and readiness can lag a completed response:
+wait by request identity rather than blindly resubmitting. The workload token
+remains authoritative when status does not track a host-side operation.
+
 For compiler and Lisp runtime experiments, prefer a persistent Wasm REPL with
 the source compiler over rebuilding images for each edit. Start the ordinary
 cold compiler image with `node scripts/repl.mjs miricl-cold.wasm --directory .`, set
@@ -207,6 +257,19 @@ the affected definitions while preserving the target's existing private symbol
 identities. Successful small emissions do not establish that linker and
 bootstrap registrations were reloaded consistently; check those paths in a
 fresh compiled image before changing their tests.
+
+Send host REPL requests as files LOADed inside HANDLER-CASE, so reader errors
+(including unknown package nicknames) are caught rather than terminating SBCL.
+Preserve baseline callable objects and matching emitted bytes before reloading
+definitions. Existing native workers do not change with a backend reload, and
+recompiling a baseline may require runtime imports absent from its old image.
+
+Verify the actual installed entry, module and reachable hot helpers when
+claiming native performance. Re-emitting an equivalent expression or checking
+COMPILED-FUNCTION-P alone is insufficient. An interpreted compiler frontend can
+emit native workers; native drivers and methods do not establish that generated
+effective methods or fallback helpers are native.
+
 Confirm promising changes with the precompiled compiler and application checks
 before relying on them; interpreter compilation timings are not native compiler
 performance measurements.
@@ -216,6 +279,23 @@ for the same inlining budget; use equivalent separate drivers when that would
 distort the comparison. Alternating sample order alone does not remove warmup
 or feedback bias. Inspect generated code or JIT traces when tiny-case results
 contradict the emitted operations.
+
+Compare equivalent sources and policies, retain complete driver timings, and
+report loop floors separately. Matched unrolled drivers and overhead subtraction
+are diagnostic; neither replaces the original success criterion. Calibrate
+sample duration against clock resolution and retain raw ticks, iterations,
+results and sample variation. Keep builds, compression and profiling out of
+retained timing windows. Measure cache misses, alternating working sets and
+ordinary fallback paths as well as favorable hits; a small hit gain does not
+justify a large common-path regression. Structural simplification is not evidence
+of a speedup without measurement.
+
+Caches over mutable state must distinguish a location from its current value.
+Account for replacement of backing tables or roots, including initialization
+before image restoration. Shallow copying a literal container does not freeze
+its elements or establish ownership for every constructor path. Preserve quoted
+data, sharing and serialization semantics when considering cached references.
+
 Do full compiler builds at meaningful checkpoints and full application rebuilds
 less frequently. Reuse an existing native application bundle for runtime-only
 experiments, and rebuild the application after measured changes justify it.
@@ -270,6 +350,11 @@ compiler loop for focused diagnosis and confirm changes in the matching
 precompiled image. Keep running relevant tests and fix failures without
 weakening their behavioral requirements; distinguish stale artifacts and
 test setup mistakes from implementation defects.
+
+In REPL save/restore tests, keep host callbacks and other unsaveable host values
+out of retained REPL history. Warm the intended state immediately before the
+observation or save, without intervening helpers that invalidate it. Diagnose
+harness and history-retention failures before changing runtime contracts.
 
 Do not add benchmarks or benchmark infrastructure to the repository. The
 applications and their existing benchmarks are sufficient for now. Keep

@@ -1040,7 +1040,7 @@ environment. SUBTYPEP's false and unknown answers are deliberately not inferred.
                     (or (null source) (hir-type-proves-p source required)))
            '(not null)))))))
 
-(defun hir-type-truth-premise (test &optional cells)
+(defun hir-type-truth-premise (test &optional cells reverse-comparison)
   "Recover a truth or canonical type predicate through immutable temporaries.
 The third value is a type established by a positive predicate, an integer
 predicate name, a tagged integer comparison, or NIL for ordinary truth.
@@ -1070,16 +1070,13 @@ CELLS records actual private uses, not client binding flags."
                ;; Keep the call and its operand effects; later inference must
                ;; independently establish integer membership before rounding
                ;; a strict threshold to the next integer.
-               (multiple-value-bind (bound known) (hir-primary-constant (fourth inputs))
-                 (when (and known (integerp bound))
-                   (return-from hir-type-truth-premise
-                     (values (third inputs) inverse (list :integer-comparison name bound)))))
-               (multiple-value-bind (bound known) (hir-primary-constant (third inputs))
-                 (when (and known (integerp bound))
-                   (return-from hir-type-truth-premise
+               (return-from hir-type-truth-premise
+                 (if reverse-comparison
                      (values (fourth inputs) inverse
                        (list :integer-comparison
-                         (case name (< '>) (<= '>=) (> '<) (>= '<=)) bound))))))
+                         (case name (< '>) (<= '>=) (> '<) (>= '<=)) (third inputs)))
+                     (values (third inputs) inverse
+                       (list :integer-comparison name (fourth inputs))))))
              (unless (= (length inputs) 3) (return))
              (let ((type (and name (standard-function-predicate-type name))))
              (cond
@@ -1151,17 +1148,34 @@ A budget limits cost; stopping early only loses optimization opportunities."
         (let* ((count (hir-function-block-count function))
                (epochs (make-array count :initial-element 0))
                (remaining (make-array count :initial-element 0))
+               (reachable (make-array count :initial-element nil))
                (incoming (make-array count :initial-element 0)) (serial 0))
-          (declare (type simple-vector epochs remaining incoming) (type (unsigned-byte 32) serial))
+          (declare (type simple-vector epochs remaining incoming reachable) (type (unsigned-byte 32) serial))
+          ;; Inventory also includes unused lexical landing blocks. They
+          ;; cannot prevent a real predecessor from establishing a premise.
+          ;; Captured landings remain independent roots and proof barriers.
+          (let ((pending (cons (hir-function-entry function)
+                           (remove-if-not (lambda (block) (gethash block barriers))
+                             (hir-function-blocks function)))))
+            (loop while pending do
+              (when (minusp (decf budget)) (return-from hir-type-branch-guards guards))
+              (let* ((block (pop pending)) (id (hir-block-id block)))
+                (unless (svref reachable id)
+                  (setf (svref reachable id) t)
+                  (dolist (successor (hir-instruction-attributes (hir-block-terminator block)))
+                    (push successor pending))))))
           (dolist (block (hir-function-blocks function))
             (let ((id (hir-block-id block)))
               (declare (type (unsigned-byte 32) id))
-              (setf (aref incoming id) (length (hir-block-predecessors block)))))
+              (setf (aref incoming id)
+                (count-if (lambda (previous) (svref reachable (hir-block-id previous)))
+                  (hir-block-predecessors block)))))
+          (dolist (reverse-comparison '(nil t))
           (dolist (block (hir-function-blocks function))
             (let* ((branch (hir-block-terminator block))
                    (test (and (eq (hir-instruction-opcode branch) :branch)
                               (first (hir-instruction-inputs branch))))
-                   (premise (and test (multiple-value-list (hir-type-truth-premise test cells))))
+                   (premise (and test (multiple-value-list (hir-type-truth-premise test cells reverse-comparison))))
                    (observed (first premise))
                    (producer (and observed (hir-value-producer observed)))
                    (cell (and (%hir-instruction-p producer)
@@ -1172,7 +1186,11 @@ A budget limits cost; stopping early only loses optimization opportunities."
                                 (hir-copy-source observed)))
                    (arms (hir-instruction-attributes branch))
                    (private (gethash cell cells)))
-              (when (and (plusp budget) (< (hir-function-debug-level function) 2)
+              (when (and (or (not reverse-comparison)
+                             (and (consp (third premise))
+                                  (eq (car (third premise)) :integer-comparison)))
+                         (plusp budget) (< (hir-function-debug-level function) 2)
+                         (svref reachable (hir-block-id block))
                          (eq (hir-instruction-opcode branch) :branch)
                          (or source (eq private t)
                              (and (eq private :mutable)
@@ -1241,7 +1259,7 @@ A budget limits cost; stopping early only loses optimization opportunities."
                                             (aref remaining next) (aref incoming next)))
                                     (when (plusp (aref remaining next))
                                       (when (zerop (decf (aref remaining next)))
-                                        (push successor pending)))))))))))))))))))
+                                        (push successor pending))))))))))))))))))))
     guards))
 
 (defun hir-inline-primitive (instruction)
@@ -1328,6 +1346,18 @@ hole, so keep the original interval in that case."
             (t (compiler-statistic :proof/integer-branch-refinement name)
                (list 'integer (or a '*) (or b '*)))))))
 
+(defun hir-integer-comparison-branch-type (type name positive opposite)
+  "Project an executed comparison against the opposite immutable observation."
+  ;; Unvisited inputs are bottom. Publishing a loose result before either
+  ;; observation is visited would lose later refinements at monotone joins.
+  (when (or (null type) (null opposite))
+    (return-from hir-integer-comparison-branch-type nil))
+  (multiple-value-bind (low high integer) (hir-integer-interval opposite)
+    (unless integer (return-from hir-integer-comparison-branch-type type))
+    (let ((threshold (if (if positive (member name '(< <=)) (member name '(> >=)))
+                         high low)))
+      (if threshold (hir-integer-branch-type type name positive threshold) type))))
+
 (defun hir-integer-predicate-type (name type)
   (declare (type symbol name))
   (multiple-value-bind (low high integer) (hir-integer-interval type)
@@ -1384,6 +1414,11 @@ numbers, including bignums, and is never proved true by this rule."
   (declare (type list types))
   (when (member nil types) (return-from hir-inline-result-type nil))
   (let ((fallback (standard-function-result-type name types)))
+  ;; Exact integer arithmetic remains integer even when a finite scalar
+  ;; interval is lost. This is a domain fact, never an overflow permission.
+  (when (and (member name '(+ - *)) types
+             (every (lambda (type) (nth-value 2 (hir-integer-interval type))) types))
+    (setq fallback 'integer))
   (let ((query (and inputs (hir-type-query-result-type name types inputs))))
     (when query (return-from hir-inline-result-type query)))
   ;; These describe successful returns of canonical target operations. Keep
@@ -1647,7 +1682,10 @@ be discarded after mutation. The public inference boundary accepts no maps."
                  (edge (if (eq opcode :jump) (first inputs) (third inputs))
                        (first (hir-block-parameters target)))))))))
       (maphash (lambda (value premises)
-                (dolist (premise premises) (edge (car premise) value nil))) guards)
+                (dolist (premise premises)
+                  (edge (car premise) value nil)
+                  (when (and (consp (cdr premise)) (eq (cadr premise) :integer-comparison))
+                    (edge (fourth premise) value nil)))) guards)
       (when rootsp
         (let ((pending roots) (needed nil))
           (loop while pending do
@@ -1655,7 +1693,10 @@ be discarded after mutation. The public inference boundary accepts no maps."
               (unless (gethash value required)
                 (setf (gethash value required) t) (push value needed)
                 (dolist (source (gethash value sources)) (push source pending))
-                (dolist (premise (gethash value guards)) (push (car premise) pending)))))
+                (dolist (premise (gethash value guards))
+                  (push (car premise) pending)
+                  (when (and (consp (cdr premise)) (eq (cadr premise) :integer-comparison))
+                    (push (fourth premise) pending))))))
           (dolist (value needed) (enqueue value))))
       (loop while work do
         (let* ((value (pop work)) (previous (gethash value facts))
@@ -1709,8 +1750,8 @@ be discarded after mutation. The public inference boundary accepts no maps."
                              ;; An unvisited dependency is bottom, not an
                              ;; unknown settled type. Premature T would lose
                              ;; later bounds in this monotone fixed point.
-                             (hir-integer-branch-type (gethash (car premise) facts)
-                               (third premise) (fifth premise) (fourth premise)))
+                             (hir-integer-comparison-branch-type (gethash (car premise) facts)
+                               (third premise) (fifth premise) (gethash (fourth premise) facts)))
                             ((and (consp (cdr premise))
                                   (member (cadr premise) '(zerop minusp plusp)))
                               ;; Standard numeric predicates retain their ANSI

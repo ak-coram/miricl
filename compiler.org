@@ -80,7 +80,8 @@ SAFETY and DEBUG retain lexical scope through deferred work and inlining. SAFETY
 declaration-based unchecked lowering without bypassing public validation. DEBUG 0 permits
 eligible out-of-line frame omission. DEBUG 1 permits bounded inlining and reuse of
 the caller's owned frame at proven tail sites; ordinary non-tail entries retain
-their frames. DEBUG 2 retains native listings; DEBUG 3 selects interactive HIR.
+their frames except for the independently audited no-observation leaf entry
+described below. DEBUG 2 retains native listings; DEBUG 3 selects interactive HIR.
 SPEED, SPACE and COMPILATION-SPEED are retained separately from those contracts.
 Whole-function policy summaries let local speed-oriented regions veto outlining. The compact
 deployment policy is =(optimize (space 3) (speed 1))= ; STRIP and visibility remain explicit.
@@ -128,9 +129,9 @@ boundaries, then to infinity; stable endpoints remain exact. Every later thresho
 crossing reschedules dependent facts. The finite ladder bounds cyclic range growth without asserting a
 machine width. Integer joins normalize infinite endpoints, while dominated branch
 premises can retain narrower body bounds. Ordinary declared inference keeps informative
-assertion fallbacks and otherwise uses the same ladder. Arithmetic outside the finite
-scalar domain retains its shared successful-return type, which can lose integer membership
-or sign information.
+assertion fallbacks and otherwise uses the same ladder. Addition, subtraction and
+multiplication of known integers retain INTEGER when their finite scalar interval is lost;
+this successful-return domain fact supplies no overflow or representation permission.
 
 Private cells initialized by proper quoted lists retain an executable LIST invariant
 when every write is a canonical CDR or REST of a read of that same cell. Empty
@@ -159,8 +160,13 @@ Dominated truth tests and canonical predicates narrow values only across paths t
 the premise. Aliases, writes, captured landings and unresolved entries prevent unsupported
 propagation. Executed truth facts are available at every SAFETY level; unchecked declarations
 retain their own restrictions. Arithmetic uses target intervals, contagion and bignum
-promotion. Exact binary ordered comparisons against literal integers refine independently
-known integer ranges on both arms, including reversed operands and bignum thresholds. These
+promotion. Exact binary ordered comparisons refine independently known integer ranges
+on both arms using the opposite immutable SSA observation's interval, including reversed
+operands and bignum thresholds. Both observations participate in dependency scheduling and
+demand roots. Unvisited observations remain bottom; unknown or noninteger opposite types
+supply no new bound. Complete bounded reachability excludes unused inventory predecessors
+while retaining captured landings as independent roots and proof barriers. Each projected
+cell observation has its own private-use, read-order and write barriers. These
 facts retain the comparison and its operand effects; they do not establish integer membership,
 an integer object representation or a scalar storage contract. Fresh CONS field observations
 and proper-list facts are temporary and invalidated
@@ -215,6 +221,17 @@ Static guarded effective-method plans remain available for next-method chains, a
 EQL candidates, wider calls and complete value groups. Their current entry transports a proper argument
 list and preserves effective-method context and all returned values.
 
+Fixed native entries with one through four arguments retain their scheduling
+checkpoint before checking the live native entry. Their direct hits and the
+callback-free recent generic selector enter shared ready executors without
+polling again between selection and worker entry. Readiness is private to this
+checked interval; a callback or further poll invalidates its live selection facts.
+Zero-argument and callback-capable guarded generic paths retain their polling
+entries. The common full executor owns the Lisp backtrace frame, dynamic-state
+restoration and nonlocal-transfer cleanup. Primary adapters clear secondary
+values only after successful return; full-value consumers retain the complete
+group, including zero values.
+
 Scalar DEBUG 0 frame-omission certificates grow from eligible leaves through
 closed fixed-arity calls whose results have only primary or discarded demand.
 Each dependency has proved callee identity and an existing scalar certificate;
@@ -238,6 +255,42 @@ and debugger paths can change handler or dynamic-binding state before transferri
 absence of explicit binding forms alone does not justify removing cleanup.
 Ordinary checked callee entries therefore retain the frame and restoration owners
 required by the existing error, scheduling and debugger contracts.
+
+The adapter independently audits final executable bytes for a narrower dynamic
+entry exception. A bounded straight-line grammar admits checked argument/local
+moves and NIL followed by the owned =native-return1= import. This proves absence
+of signaling, traps, callbacks, allocation, polls and dynamic-state access, plus
+exactly one normalized result. Unknown instructions, types, imports or exhausted
+work leave the ordinary entry intact. The audit follows final function indices
+through named exports or the current compact table's complete active element
+segment; compiler metadata supplies no executable authority.
+
+The trusted host attaches each audited entry atomically through a =core-=
+export unavailable to supplied native modules. A private bounded registry owns
+the actual immutable direct-code object. The object's packed slot/arity field
+is only a hint: canonical WasmGC layouts can be reproduced by supplied modules,
+so dispatch also checks object identity against the registry and the function's
+actual arity. Eviction loses only this optimization. Core readers serialize zero
+for the hint, constructors ignore supplied hint values, and its immutable field
+has no setter. The registry is process-local and is absent from saved roots.
+Restored, host-linked and runtime-attached nested entries retain ordinary dispatch.
+
+After the existing call checkpoint, a registered non-debug entry can omit its
+ring frame and dynamic-root cleanup owner while retaining the actual out-of-line
+call. Its trusted final =return1= also makes the pre-entry values clear redundant.
+A shared direct executor returns the worker's extern reference and accepts a
+primary/full mode. Fixed primary dispatchers tail-call this executor; full-value
+generic and capture consumers preserve the complete group and adapt its primary
+at their typed boundary. The audited leaf tail-calls its worker directly because
+its final =return1= already clears every secondary slot and normalizes one value.
+Ordinary entries admit their returned Lisp value within the protected dynamic
+owner, restore all roots and the named frame, and rethrow pending transfers before
+clearing secondary values for primary mode. The caller and ancestor frames and
+their cleanup remain. A stronger caller DEBUG policy adds no observation inside this restricted
+body; DEBUG-enabled callee subtypes and debugger evaluation retain ordinary
+dispatch. This exception does not consume conditional ANSI operation contracts
+yet; broader operation admission needs the existing shared type/contract queries
+and an executable lowering proof for each additional obligation.
 
 Separate DEBUG 0 frame-omission certificates for exact two-to-four-value workers grow from eligible leaves
 through closed forwarding calls. Each nonprimitive call must have proved callee identity and
@@ -303,7 +356,7 @@ Raw SSA operands without saved references keep the raw integer ABI; the compiler
 does not construct boxes merely to inspect their representation.
 Overflow, large shifts, division traps and infinite two's-complement semantics retain
 checks or general helpers. Private numeric cells require proofs for every write and no
-capture/escape; reads keep SSA snapshots. Logical checked-producer provenance establishes
+capture/escape; reads keep SSA snapshots. Executable integer-range proofs establish
 scalar extraction, not a physical i31 representation, including restored boxed small integers.
 Predicates can feed branches directly. A bounded same-block, single-use suffix
 folds canonical NOT/NULL calls into branch polarity. One active plan controls
@@ -317,14 +370,14 @@ fresh spines and operand order. APPLY/MVC binding rewrites check proper lists an
 unchecked reads.
 
 At SAFETY 1, binary ordered comparisons can use signed-i64 instructions when fresh,
-declaration-independent inference proves both operand ranges fit signed i64. A separate,
-bounded representation check follows copies and primary extraction to integer literals,
-retained checked binary LOGAND calls or the proved arithmetic plans below. LOGAND validates its operands;
+declaration-independent inference proves both operand ranges fit signed i64. Retained
+checked producers, executed predicates and private data flow establish these logical
+integer facts; unchecked declarations alone do not. LOGAND validates its operands;
 successful signed-i64 results can use either scalar representation. Extraction accepts both i31 and boxed i64 even for narrow
 ranges; accepted raw SSA snapshots are read directly. A range alone does not prove an i31
-representation. Unknown facts or origins retain
+representation. Unknown executable facts retain
 the checked comparison helper. This comparison plan preserves producer evaluation and checks,
-returns one ordinary Lisp value, and does not enable raw cells, branch fusion or loop motion.
+returns one ordinary Lisp value. Raw cells retain their separate storage proof.
 
 At SAFETY 1 and DEBUG below 2, binary addition/subtraction and unary 1+/1- can use
 i64 arithmetic when fresh, declaration-independent inference bounds both operands and the
@@ -337,9 +390,7 @@ the proof. Arithmetic candidates are collected during ordinary primitive plannin
 Arithmetic and ordered comparison candidates share one declaration-independent demand
 query over their operand roots, treating every function as externally callable.
 The query reuses the emission's structural callee, standard-operation and branch-premise
-maps; it does not reuse declared type facts. Comparison admission may inspect prospective
-arithmetic producers, but extraction requires those producers' accepted plans after the
-query. All maps and facts belong to the unchanged validated HIR during this emission
+maps; it does not reuse declared type facts. All maps and facts belong to the unchanged validated HIR during this emission
 and must be discarded after mutation. The bounded arithmetic planner omits selection at maximum COMPILATION-SPEED;
 unknown or exhausted selection retains the checked call. Operand producers stay in order,
 and each selected operation retains its scheduling poll at the original call site, including
@@ -349,10 +400,35 @@ Intermediate SSA results share the existing raw i64 locals, allowing
 arithmetic chains to avoid intermediate boxes. Reference consumers retain the i64 tier
 when boxing computed results, independently of the proved result width.
 Private cell storage and loop induction require their separate existing proofs.
-The mixed-fact filter in =native-plan-proven-integers= can still omit cyclic arithmetic
-whose ordinary inference retains a broad numeric successful-return type, even when the
-declaration-independent query would retain finite bounds. Cell origins also retain their
-separate representation and storage requirements.
+
+Selected declared FIXNUM snapshots can establish a checked ingress at SAFETY 1 and
+DEBUG below 2. Selection follows bounded copy chains from ordered-comparison operands
+to an entry-block copy of a direct argument, retaining that copy's original declaration
+scope and execution position. The helper validates the foreign reference and target scalar
+integer subtype, signaling a Lisp TYPE-ERROR before any unchecked extraction. It accepts
+both target i31 and boxed signed-i64 FIXNUMs. Only the exact checked output receives a
+temporary executable FIXNUM fact; the outside argument does not. Tentative facts are
+queried in a private guard map and retained only with a dependent bounded comparison and
+bounded arithmetic consumer in that function. Otherwise all tentative guards and facts
+are discarded and the ordinary query reruns before publishing plans. Checks remain live
+through value forwarding and dead-result removal. Entry backedges, capture barriers,
+unknown proofs and exhausted selection retain ordinary lowering. These conditional
+non-signaling arithmetic proofs do not remove polls or grant whole-function leaf status.
+
+The bounded single-use suffix in =native-plan-branch-tests= lets
+=emit-native-condition= consume proved signed-i64 comparisons as raw predicates
+when both successors are forward edges. Observed or multiply used results retain
+ordinary Lisp booleans; operand effects and backedge polling retain their positions.
+=native-plan-unboxed-arguments=
+caches SAFETY 0 argument reads with a dominating entry use, while selected checked
+copy snapshots retain full scalar extraction at each use. Extending the existing
+raw cache to those snapshots requires initialization at the original checked copy,
+copy-descendant identity rather than forwarding back to the outside argument, and
+preservation of ordinary reference consumers. That cache trades one i64 local and
+entry extraction against repeated loop extractions. Raw predicate consumption removes
+the boolean conversion and its otherwise unused import without duplicating the loop.
+Both mechanisms retain the existing declaration scope and polls.
+
 In =native-plan-unboxed-cell-values=, initializers and every write must fit i64,
 and all cell uses must remain structurally private. SAFETY 0 admits ordinary type
 facts; SAFETY 1 requires separate declaration-independent executable facts for the
@@ -623,6 +699,12 @@ ordinary user functions and arbitrary implementation setter names retain live re
 Checked linkage needs no operand-type proof, while unchecked workers still require one.
 NOTINLINE calls remain out of line. Host runtime-kernel adapters retain their explicit linkage
 and conservatively decline these mixed-signature plans.
+
+Native global references share a checked name resolver. Fused literal references feed the
+selected pool element directly to this resolver, avoiding an intermediate exported literal
+call and external-reference conversion. Both routes validate the name representation and
+read its current function binding at the original selection point; mutable SETF names,
+replacement, unbinding, saved function identity and call checkpoints retain ordinary behavior.
 
 The evaluator's fixed-call selector intersects checked native capabilities with standard
 function/accessor kind, accepted arity and exactly one successful value. Public Lisp overrides

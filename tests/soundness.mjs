@@ -795,6 +795,133 @@ try {
     assert.ok(function_, 'The Lisp callback bridge supplied its function.');
     return function_;
   };
+  // A loader proof belongs to one actual code object. Image constructors
+  // cannot restore authority from an integer supplied by a saved payload.
+  const coreFields = object => {
+    const type = vm.vm['core-object-type'](object);
+    const reader = Object.keys(vm.vm).find(name => name.startsWith(`core-read:${type}:`));
+    return {type, signature: reader.split(':')[2], values: vm.vm[reader](object)};
+  };
+  const provedRoot = packetFunction(`(compile-native '(lambda (x)
+    (declare (optimize (debug 1))) x) :name 'soundness-proof-replay)`);
+  const checkedRoot = packetFunction(`(compile-native '(lambda (x)
+    (declare (inline car) (optimize (debug 1) (safety 1))) (car x)))`);
+  const provedFields = coreFields(provedRoot), checkedFields = coreFields(checkedRoot);
+  const directSlot = provedFields.signature.indexOf('e') + 2;
+  const provedCode = provedFields.values[directSlot];
+  const codeFields = coreFields(provedCode);
+  const codeEntry = codeFields.signature.indexOf('e'), proofSlot = codeEntry + 1;
+  const cloneFields = codeFields.values.slice();
+  cloneFields[codeEntry] = coreFields(checkedFields.values[directSlot]).values[codeEntry];
+  cloneFields[proofSlot] = 0x7fffffff;
+  const clonedCode = vm.vm[`core-new:${codeFields.type}`](...cloneFields.filter((_, index) =>
+    codeFields.signature[index] === codeFields.signature[index].toLowerCase()));
+  assert.equal(coreFields(provedCode).values[proofSlot], 0, 'Saving strips the process-local proof hint.');
+  assert.equal(coreFields(clonedCode).values[proofSlot], 0, 'Restoring ignores a supplied proof hint.');
+  const setDirect = direct => vm.vm[`core-set:${provedFields.type}`](provedRoot,
+    ...provedFields.values.map((value, index) => index === directSlot ? direct : value)
+      .filter((_, index) => provedFields.signature[index] !== provedFields.signature[index].toLowerCase()));
+  try {
+    setDirect(clonedCode);
+    assert.throws(() => {
+      try {vm.vm['native-call1'](provedRoot, elements[0]);}
+      catch (cause) {
+        assert.ok(cause instanceof WebAssembly.Exception);
+        throw vm.failure(cause);
+      }
+    }, error => /SOUNDNESS-PROOF-REPLAY/.test(error.backtrace ?? ''));
+  } finally {setDirect(provedCode);}
+  assert.equal(vm.vm['native-call1'](provedRoot, elements[0]), elements[0]);
+  // An ordinary attached worker has no executable result proof. Reject
+  // foreign references and private packets within its dynamic/frame owner.
+  const rawResult = new WebAssembly.Global({value: 'externref', mutable: true}, null);
+  const rawEntries = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.from([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    ...section(1, [2, 0x60, 2, 0x6f, 0x6f, 1, 0x6f,
+      0x60, 5, ...Array(5).fill(0x6f), 1, 0x6f]),
+    ...section(2, [1, 1, 109, 5, 118, 97, 108, 117, 101, 3, 0x6f, 1]),
+    ...section(3, [2, 0, 1]),
+    ...section(7, [2, 5, 101, 110, 116, 114, 121, 0, 0,
+      6, 100, 105, 114, 101, 99, 116, 0, 1]),
+    ...section(10, [2, ...body([0xd0, 0x6f, 0x0b]), ...body([0x23, 0, 0x0b])]),
+  ])), {m: {value: rawResult}}).exports;
+  const uncheckedResult = vm.vm['native-attach-direct-root'](
+    vm.vm['core-native-function'](rawEntries.entry, null, null, 0, null), rawEntries.direct, 1);
+  for (const invalid of [foreign, packets.empty()]) {
+    for (const invoke of [() => vm.vm['native-call1'](uncheckedResult, null),
+      () => vm.vm['native-call-values1'](uncheckedResult, null)]) {
+      rawResult.value = invalid;
+      rejectPacketOperation(invoke);
+      rawResult.value = elements[0];
+      assert.deepEqual(vm.vm['native-call-values1'](uncheckedResult, null),
+        [elements[0], null, null, null, 1]);
+    }
+  }
+  for (const primary of elements) for (const stale of [
+    () => vm.vm['native-return'](null),
+    () => vm.vm['native-return3'](...Array(3).fill(elements[0])),
+  ]) {
+    stale();
+    assert.deepEqual(vm.vm['native-call-values1'](provedRoot, primary),
+      [primary, null, null, null, 1], 'An audited leaf normalizes zero or stale extra values to exactly one.');
+  }
+  rejectPacketOperation(() => vm.vm['core-native-attach-certified-root'](provedRoot,
+    codeFields.values[codeEntry], 1));
+  console.log('Soundness: executable authority is transient, bound to its owned code object and cannot replace an existing attachment.');
+
+  // The same proved leaf remains an ordinary mutable function binding and
+  // explicit object. Stronger caller debugging preserves caller ownership.
+  check(`(let* ((saved (compile-native '(lambda (x)
+        (declare (optimize (debug 1))) x)))
+      (caller (compile-native '(lambda (function x)
+        (declare (optimize (debug 2))) (values (funcall function x)))))
+      (named (compile-native '(lambda (x)
+        (declare (notinline soundness-proof-global) (optimize (debug 1)))
+        (soundness-proof-global x))))
+      (object (list :identity)))
+    (unwind-protect
+      (progn (setf (symbol-function 'soundness-proof-global) saved)
+        (and (eq (funcall named object) object)
+          (equal (multiple-value-list (funcall caller saved nil)) '(nil))
+          (progn (setf (symbol-function 'soundness-proof-global)
+                   (compile-native '(lambda (x) (values x :replacement))))
+            (and (equal (multiple-value-list (funcall named object))
+                        (list object :replacement))
+              (eq (funcall caller saved object) object)))))
+      (fmakunbound 'soundness-proof-global)))`);
+  // Native name lookup reads the live binding cell, including
+  // unbinding and first installation after an absent lookup. Exercise the
+  // public raw boundary directly so compiler activity cannot hide stale hits.
+  const lookupName = vm.vm['native-call0'](packetFunction("(lambda () 'soundness-live-lookup)"));
+  const lookupAbsent = vm.vm['native-call0'](packetFunction("(lambda () 'soundness-absent-lookup)"));
+  const lookupSet = packetFunction('(lambda (name function) (setf (fdefinition name) function))');
+  const lookupUnset = packetFunction('(lambda (name) (fmakunbound name))');
+  const lookupFunctions = [packetFunction('(lambda (x) (values x :original))'),
+    packetFunction('(lambda (x) (values x :replacement))')];
+  const lookup = name => vm.vm['native-function-reference'](name);
+  const installLookup = (name, function_) => vm.vm['native-call2'](lookupSet, name, function_);
+  try {
+    installLookup(lookupName, lookupFunctions[0]);
+    assert.equal(lookup(lookupName), lookupFunctions[0]);
+    assert.equal(lookup(lookupName), lookupFunctions[0]);
+    installLookup(lookupName, lookupFunctions[1]);
+    assert.equal(lookup(lookupName), lookupFunctions[1], 'A warmed name observes replacement.');
+    vm.vm['native-call1'](lookupUnset, lookupName);
+    rejectPacketOperation(() => lookup(lookupName));
+    installLookup(lookupName, lookupFunctions[0]);
+    assert.equal(lookup(lookupName), lookupFunctions[0]);
+    rejectPacketOperation(() => lookup(lookupAbsent));
+    installLookup(lookupAbsent, lookupFunctions[1]);
+    assert.equal(lookup(lookupAbsent), lookupFunctions[1], 'An absent lookup cannot freeze an undefined binding.');
+    for (const invalid of [foreign, packets.empty(), packets.make(...elements)]) {
+      rejectPacketOperation(() => lookup(invalid));
+      assert.equal(lookup(lookupName), lookupFunctions[0]);
+    }
+  } finally {
+    vm.vm['native-call1'](lookupUnset, lookupName);
+    vm.vm['native-call1'](lookupUnset, lookupAbsent);
+  }
+  console.log('Soundness: native name lookup observes warmed cell mutation and rejects malformed names with recovery.');
   // Private binder packets admit finite dotted spines, but cycles must fail
   // even when the requested slot occurs before the cycle. Repair the same
   // object to check that rejection leaves its storage and the runtime usable.
@@ -1046,6 +1173,15 @@ try {
   const freshInteger = number => vm.vm['native-call0'](
     packetFunction(`(compile-native '(lambda () ${number}))`));
   const freshZero = freshInteger(0n), freshOne = freshInteger(1n);
+  for (const value of [freshZero, freshOne, boxedInteger(1n), boxedInteger(-(1n << 63n)),
+    boxedInteger((1n << 63n) - 1n)]) {
+    assert.equal(vm.vm['native-check-int64'](value), value,
+      'Checked scalar ingress preserves both immediate and boxed integer identity.');
+  }
+  for (const invalid of [foreign, packets.empty(), null, freshInteger(1n << 80n)]) {
+    rejectPacketOperation(() => vm.vm['native-check-int64'](invalid));
+  }
+  assert.equal(vm.vm['native-check-int64'](freshOne), freshOne);
   for (const [name, expected] of [['add', 2n], ['sub', 0n], ['mul', 1n]]) {
     const operation = vm.vm[`native-${name}-integer`];
     assert.equal(operation(freshOne, freshOne), freshInteger(expected),
@@ -2638,6 +2774,34 @@ try {
           (list (${operator} 1073741824 1073741824) 1 0))
         (= effects (1+ (length inputs)))))`);
   }
+  // Dynamic integer bounds justify the final strict update, while inclusive
+  // guards at the scalar endpoints still require exact bignum promotion.
+  for (const [operator, initial, limit, step, expected, reversed] of [
+    ['<', '9223372036854775806', '9223372036854775807', '1+', '9223372036854775807'],
+    ['<=', '9223372036854775806', '9223372036854775807', '1+', '9223372036854775808'],
+    ['>', '-9223372036854775807', '-9223372036854775808', '1-', '-9223372036854775808'],
+    ['>=', '-9223372036854775807', '-9223372036854775808', '1-', '-9223372036854775809'],
+    ['>', '9223372036854775806', '9223372036854775807', '1+', '9223372036854775807', true],
+    ['<', '-9223372036854775807', '-9223372036854775808', '1-', '-9223372036854775808', true],
+  ]) {
+    check(`(let ((function (compile-native
+        '(lambda (limit)
+           (declare (type fixnum limit)
+             (optimize (space 3) (speed 1) (safety 1) (debug 1)))
+           (let ((index ${initial}))
+             (loop while (${operator} ${reversed ? 'limit index' : 'index limit'})
+               do (setq index (${step} index)))
+             (values index :done))))))
+      (equal (multiple-value-list (funcall function ${limit})) '(${expected} :done)))`);
+  }
+  check(`(let ((function (compile-native
+      '(lambda (count)
+         (declare (type fixnum count)
+           (optimize (space 3) (speed 1) (safety 1) (debug 1)))
+         (dotimes (index count (values index :done)) nil)))))
+    (and (equal (multiple-value-list (funcall function -3)) '(0 :done))
+      (equal (multiple-value-list (funcall function 0)) '(0 :done))
+      (equal (multiple-value-list (funcall function 7)) '(7 :done))))`);
   // Statistics distinguish accepted plans from emitted arithmetic. Checked
   // fixed calls remain available under NOTINLINE; expansion honors its veto.
   check(`(with-compilation-statistics (statistics)
