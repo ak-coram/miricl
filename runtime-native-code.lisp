@@ -929,6 +929,17 @@
   #@(call $clear-values)
   #@(local.get $value))
 
+(define-runtime-function $native-return2 (($a externref) ($b externref)) (externref)
+  (:export-raw "native-return2")
+  #@(extern.convert_any (call $two-values
+    ,(native-object '(local.get $a)) ,(native-object '(local.get $b)))))
+
+(define-runtime-function $native-return3 (($a externref) ($b externref) ($c externref)) (externref)
+  (:export-raw "native-return3")
+  #@(extern.convert_any (call $three-values
+    ,(native-object '(local.get $a)) ,(native-object '(local.get $b))
+    ,(native-object '(local.get $c)))))
+
 (define-runtime-function $native-int64 (($value i64)) (externref)
   (:export-raw "native-int64")
   #@(extern.convert_any (call $box-int64 (local.get $value))))
@@ -2586,7 +2597,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-global-read) ($native-global-write) ($native-function-reference) ($native-standard-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
   ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-write)
   ($native-call) ($native-primary-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
-  ($native-return) ($native-return1)
+  ($native-return) ($native-return1) ($native-return2) ($native-return3)
   ($native-int64) ($native-unbox-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)
   ($native-add-integer) ($native-sub-integer) ($native-mul-integer)
   ($native-logand-int64) ($native-logior-int64) ($native-logxor-int64) ($native-ash-int64)

@@ -188,6 +188,15 @@ component locals; ordinary boundaries pack values. Failed signature-preserving r
 back. General primary/discard calls use =native-primary-call= and clear secondary state after
 success; full consumers retain =native-call= .
 
+Frame-omission certificates for exact two-to-four-value workers grow from eligible leaves
+through closed forwarding calls. Each nonprimitive call must have proved callee identity and
+matching fixed arity, and target an already certified tuple worker. These calls lower before
+tail-frame setup, so an omitted forwarder frame cannot replace its caller's retained frame.
+The planner starts with a fresh table for each emission and bounds both individual body scans
+and aggregate repeated work. Recursive dependencies cannot seed a certificate; unknown
+callees, exhausted work and bodies with dynamic state or captured exits retain ordinary
+lowering. This admission does not apply to open named calls or relax DEBUG contracts.
+
 Direct closed calls and frame omission require the applicable effect/debug contract. Dynamic
 state, cleanup, captured exits and unknown calls retain ordinary dispatch. Global calls
 resolve live user bindings at the required point; operand effects cannot be moved across

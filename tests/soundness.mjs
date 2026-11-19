@@ -1783,6 +1783,41 @@ try {
                       ${full ? `'(23 ${Array(count - 1).fill('29').join(' ')})` : '23'})
             (equal effects '(:operand :branch))))))`);
   }
+  // Closed tuple forwarders retain each escaped closure's context and full
+  // value group across calls that replace the ambient multiple-value state.
+  for (const count of [2, 3]) {
+    const names = ['a', 'b', 'c'].slice(0, count).join(' ');
+    check(`(let* ((factory (compile-native '(lambda (capture)
+          (declare (optimize (debug 0)))
+          (flet ((leaf (x) (values capture x ${count === 3 ? 'nil' : ''})))
+            (declare (notinline leaf))
+            (flet ((forward (x)
+                     (multiple-value-bind (${names}) (leaf x) (values ${names}))))
+              (declare (notinline forward))
+              (flet ((forward2 (x)
+                       (multiple-value-bind (${names}) (forward x) (values ${names}))))
+                (declare (notinline forward2))
+                (lambda (x effect)
+                  (multiple-value-prog1 (forward2 x) (funcall effect)))))))))
+        (object (list :identity))
+        (left (funcall factory object)) (right (funcall factory nil))
+        (events nil) (snapshot nil))
+      (and (loop for effect in
+            (list (lambda () (push :effect events) (values))
+                  (lambda () (push :effect events) (values :noise))
+                  (lambda () (push :effect events) (values 1 2 3 4 5))) always
+          (loop for entry in (list (list left object nil) (list right nil object)
+                                   (list left object object)) always
+            (progn (setq events nil)
+              (let ((result (multiple-value-list (funcall (first entry) (third entry) effect))))
+                (unless snapshot (setq snapshot result))
+                (and (= (length result) ${count})
+                  (eq (first result) (second entry)) (eq (second result) (third entry))
+                  ${count === 3 ? '(null (third result))' : 't'}
+                  (equal events '(:effect)))))))
+        (eq (first snapshot) object) (null (second snapshot))
+        ${count === 3 ? '(null (third snapshot))' : 't'}))`);
+  }
   // Mixed targets, unknown ingress and a captured mutable function variable
   // must retain general dispatch and the replacement's complete return group.
   for (const selection of [
