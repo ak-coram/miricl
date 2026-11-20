@@ -1051,7 +1051,7 @@
       (incf cursor 2))
     (and (= (1+ cursor) size) (= (aref helper cursor) #x0b))))
 
-(defun native-outline-region (body ops types start end last-uses stack &optional discovery bucket)
+(defun native-outline-region (body ops types start end stack &optional discovery bucket)
   ;; Alpha-renaming respects aliases. A local read before its first write is
   ;; an input; other locals begin with a dominating write inside the helper.
   (let ((locals nil) (inputs nil) (written nil) (output nil))
@@ -1069,8 +1069,11 @@
                       (unless (member index written) (pushnew index inputs))
                       (pushnew index written)))
           (setq locals (nreverse locals) inputs (nreverse inputs))))
+    ;; Every write remains visible in the caller, including uses reached through
+    ;; a backedge before this region in textual order. Omitting a write would
+    ;; require control-flow liveness, not its last textual occurrence.
     (dolist (index locals)
-      (when (and (member index written) (>= (aref last-uses index) end)) (push index output)))
+      (when (member index written) (push index output)))
     (setq output (nreverse output))
     (unless (and (<= (length inputs) 6) (<= (length output) 4) (<= (length locals) 12))
       (return-from native-outline-region nil))
@@ -1131,90 +1134,113 @@ ELIGIBLE contains each body's packed SPACE/SPEED/COMPILATION-SPEED policy.
 Return replacement bodies and (body parameters results) helper records."
   (let ((groups (make-hash-table :test 'equal)) (group-count 0)
         (fingerprints (make-hash-table :test 'eql)) (occurrences 0)
-        (candidates nil) (selected nil) (helpers nil) (work budget))
-    (dotimes (function (length records))
-      (let ((record (aref records function)))
-        (when (and record (aref eligible function) (plusp work)
-                   (plusp (logand 3 (ash (aref eligible function) -2)))
-                   (<= (logand 3 (aref eligible function)) (logand 3 (ash (aref eligible function) -2))))
-          (let* ((body (first record)) (ops (second record)) (types (third record))
-                 (policy (aref eligible function))
-                 (space (logand 3 (ash policy -2)))
-                 (minimum (max *native-outlining-minimum-bytes* (case space (1 256) (2 128) (otherwise 64))))
-                 (function-work (case (ash policy -4) (0 200000) (1 100000) (2 25000) (otherwise 4000)))
-                 (*native-module-stack-effects* (fourth record))
-                 (last-uses (make-array (length types) :initial-element -1)))
-            ;; A moved store must remain visible if a handler in this activation
-            ;; catches a transfer. Keep these functions intact, including their
-            ;; handler-free regions; a smaller proof can relax this later.
-            (unless (find #x1f ops :key (lambda (op) (native-op-code op)))
-              (loop for op across ops for i from 0 when (member (native-op-code op) '(#x20 #x21 #x22))
-                    do (setf (aref last-uses (native-op-argument op)) i))
-              (dotimes (start (length ops))
-                (when (and (plusp work) (plusp function-work) (member (native-op-code (aref ops start)) '(#x20 #x41 #x42 #xd0)))
-                  (let ((stack nil) (depth 0) (fingerprint 0) (core-fingerprint 0)
-                        (discovery (list nil nil nil)))
-                    (declare (type (unsigned-byte 24) fingerprint core-fingerprint))
-                    (loop for end from start below (min (length ops) (+ start 128))
-                          for op = (aref ops end) for code = (native-op-code op) do
-                      (decf work) (decf function-work)
-                      ;; Control, tails, REF.FUNC and unknown operations are
-                      ;; barriers. Regions neither consume an outside operand
-                      ;; nor introduce a new branch or retained recursive frame.
-                      (unless (and (plusp work) (plusp function-work) (or (/= code #x10) (= (aref body (native-op-start op)) #x10))
-                                   (member code '(#x10 #x1a #x20 #x21 #x22 #x41 #x42 #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad #xd0 #xd1 #xd3 #xfb)))
-                        (return))
-                      (multiple-value-bind (pops pushes)
-                          (if (= code #x10)
-                              (let ((signature (aref signatures (native-op-argument op))))
-                                (values (length (first signature)) (length (second signature))))
-                              (native-op-stack op))
-                        (unless (and (<= pops depth) (<= pushes 1)) (return))
-                        (dotimes (i pops) (pop stack)) (decf depth pops)
-                        (when (plusp pushes)
-                          (push (native-outline-result op body types signatures) stack) (incf depth)))
-                      (when (member code '(#x20 #x21 #x22))
-                        (let ((index (native-op-argument op)))
-                          (pushnew index (first discovery))
-                          (if (= code #x20)
-                              (unless (member index (third discovery)) (pushnew index (second discovery)))
-                              (pushnew index (third discovery)))))
-                      (setq fingerprint (logand #xffffff (+ (* fingerprint 33) code)))
-                      (unless (member code '(#x20 #x21 #x22))
-                        (loop for offset from (1+ (native-op-start op)) below (native-op-end op) do
-                          (setq fingerprint (logand #xffffff (+ (* fingerprint 33) (aref body offset))))))
-                      (unless (= code #x20) (setq core-fingerprint fingerprint))
-                      ;; Equal helpers have equal opcode sequences after removing
-                      ;; trailing GETs, including those appended for outputs. Once
-                      ;; groups fill, a missing fingerprint rules out a match;
-                      ;; collisions still require the complete normalized key.
-                      ;; Nonlocal immediates strengthen this filter; normalized
-                      ;; locals contribute their opcode, never their old index.
-                      ;; Check every endpoint from 16 operations within the
-                      ;; bounded window; local simplification changes lengths.
-                      (when (and (>= (- end start) 15) (<= depth 1)
-                                 (every #'identity stack)
-                                 (>= (- (native-op-end op) (native-op-start (aref ops start))) minimum)
-                                 (or (< group-count 4096) (gethash core-fingerprint fingerprints)))
-                        (multiple-value-bind (region matched)
-                            (native-outline-region body ops types start (1+ end) last-uses stack
-                                                   discovery (gethash core-fingerprint fingerprints))
-                          (when region
-                            (let* ((key (first region)) (group (or matched (gethash key groups))))
-                              (when (and (null group) (< group-count 4096))
-                                ;; Group: representative region and occurrences.
-                                (setq group (list region nil)) (setf (gethash key groups) group)
-                                (incf group-count) (push group candidates)
-                                ;; Bound collision comparisons. Further exact
-                                ;; groups retain the ordinary full-key lookup.
-                                (when (< (length (gethash core-fingerprint fingerprints)) 8)
-                                  (push group (gethash core-fingerprint fingerprints))))
-                              (when (and group (< occurrences 8192))
-                                ;; A site owns its local numbering, even when
-                                ;; all normalized bytes match another function.
-                                (push (list function (native-op-start (aref ops start))
-                                            (native-op-end op) region) (second group))
-                                (incf occurrences)))))))))))))))
+        (candidates nil) (selected nil) (helpers nil)
+        (frequencies (make-hash-table :test 'eql)))
+    ;; Preserve large-region discovery, then count and discover short regions
+    ;; from the other end of the module. Each phase has its own work/storage
+    ;; bounds, so short candidates neither evict large groups nor spend their
+    ;; scan budget. Frequency is only a discovery filter, never a match proof.
+    (dolist (phase '(nil :count :short))
+      (let ((work budget) (short phase))
+        (clrhash groups) (clrhash fingerprints) (setq group-count 0 occurrences 0)
+        (dotimes (ordinal (length records))
+          (let* ((function (if short (- (length records) ordinal 1) ordinal))
+                 (record (aref records function)))
+            (when (and record (aref eligible function) (plusp work)
+                       (plusp (logand 3 (ash (aref eligible function) -2)))
+                       (<= (logand 3 (aref eligible function)) (logand 3 (ash (aref eligible function) -2))))
+              (let* ((body (first record)) (ops (second record)) (types (third record))
+                     (policy (aref eligible function))
+                     (space (logand 3 (ash policy -2)))
+                     (minimum (max *native-outlining-minimum-bytes*
+                                   (case space (1 256) (2 128) (otherwise (if short 6 64)))))
+                     (function-work (case (ash policy -4) (0 200000) (1 100000) (2 25000) (otherwise 4000)))
+                     (*native-module-stack-effects* (fourth record)))
+                ;; A moved store must remain visible if a handler in this activation
+                ;; catches a transfer. Keep these functions intact, including their
+                ;; handler-free regions; a smaller proof can relax this later.
+                (unless (find #x1f ops :key (lambda (op) (native-op-code op)))
+                  (dotimes (start (length ops))
+                    (when (and (plusp work) (plusp function-work) (member (native-op-code (aref ops start)) '(#x20 #x41 #x42 #xd0)))
+                      (let ((stack nil) (depth 0) (fingerprint 0) (core-fingerprint 0)
+                            (discovery (list nil nil nil)))
+                        (declare (type (unsigned-byte 24) fingerprint core-fingerprint))
+                        (loop for end from start below (min (length ops) (+ start (if short 16 128)))
+                              for op = (aref ops end) for code = (native-op-code op) do
+                          (decf work) (decf function-work)
+                          ;; Control, tails, REF.FUNC and unknown operations are
+                          ;; barriers. Regions neither consume an outside operand
+                          ;; nor introduce a new branch or retained recursive frame.
+                          (unless (and (plusp work) (plusp function-work) (or (/= code #x10) (= (aref body (native-op-start op)) #x10))
+                                       (member code '(#x10 #x1a #x20 #x21 #x22 #x41 #x42 #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad #xd0 #xd1 #xd3 #xfb)))
+                            (return))
+                          (multiple-value-bind (pops pushes)
+                              (if (= code #x10)
+                                  (let ((signature (aref signatures (native-op-argument op))))
+                                    (values (length (first signature)) (length (second signature))))
+                                  (native-op-stack op))
+                            (unless (and (<= pops depth) (<= pushes 1)) (return))
+                            (dotimes (i pops) (pop stack)) (decf depth pops)
+                            (when (plusp pushes)
+                              (push (native-outline-result op body types signatures) stack) (incf depth)))
+                          (when (member code '(#x20 #x21 #x22))
+                            (let ((index (native-op-argument op)))
+                              (pushnew index (first discovery))
+                              (if (= code #x20)
+                                  (unless (member index (third discovery)) (pushnew index (second discovery)))
+                                  (pushnew index (third discovery)))))
+                          (setq fingerprint (logand #xffffff (+ (* fingerprint 33) code)))
+                          (unless (member code '(#x20 #x21 #x22))
+                            (loop for offset from (1+ (native-op-start op)) below (native-op-end op) do
+                              (setq fingerprint (logand #xffffff (+ (* fingerprint 33) (aref body offset))))))
+                          (unless (= code #x20) (setq core-fingerprint fingerprint))
+                          ;; Equal helpers have equal opcode sequences after removing
+                          ;; trailing GETs, including those appended for outputs. Once
+                          ;; groups fill, a missing fingerprint rules out a match;
+                          ;; collisions still require the complete normalized key.
+                          ;; Nonlocal immediates strengthen this filter; normalized
+                          ;; locals contribute their opcode, never their old index.
+                          ;; Short regions have 3..16 operations. Count their
+                          ;; fingerprints before allocating normalized groups:
+                          ;; unique literal combinations would otherwise consume
+                          ;; the group cap before common small helpers are found.
+                          (when (and (>= (- end start) (if short 2 15)) (<= depth 1)
+                                     (every #'identity stack)
+                                     (>= (- (native-op-end op) (native-op-start (aref ops start))) minimum)
+                                     (or (eq phase :count)
+                                         (and (or (null short)
+                                                  (>= (* (gethash core-fingerprint frequencies 0)
+                                                         (- (native-op-end op) (native-op-start (aref ops start))))
+                                                      *native-outlining-minimum-saving*))
+                                              (or (< group-count 4096) (gethash core-fingerprint fingerprints)))))
+                            (if (eq phase :count)
+                                (incf (gethash core-fingerprint frequencies 0))
+                                (multiple-value-bind (region matched)
+                                    (native-outline-region body ops types start (1+ end) stack
+                                                           discovery (gethash core-fingerprint fingerprints))
+                                  ;; Even the smallest possible helper index cannot
+                                  ;; make a nonshrinking site worth retaining. Final
+                                  ;; selection still prices the actual helper index.
+                                  (when (and region
+                                             (> (- (native-op-end op) (native-op-start (aref ops start)))
+                                                (+ 1 (wasm-u32-width (length signatures))
+                                                   (loop for local in (append (fifth region) (sixth region))
+                                                         sum (+ 1 (wasm-u32-width local))))))
+                                    (let* ((key (first region)) (group (or matched (gethash key groups))))
+                                      (when (and (null group) (< group-count 4096))
+                                        ;; Group: representative region and occurrences.
+                                        (setq group (list region nil)) (setf (gethash key groups) group)
+                                        (incf group-count) (push group candidates)
+                                        ;; Bound collision comparisons. Further exact
+                                        ;; groups retain the ordinary full-key lookup.
+                                        (when (< (length (gethash core-fingerprint fingerprints)) 8)
+                                          (push group (gethash core-fingerprint fingerprints))))
+                                      (when (and group (< occurrences 32768))
+                                        ;; A site owns its local numbering, even when
+                                        ;; all normalized bytes match another function.
+                                        (push (list function (native-op-start (aref ops start))
+                                                    (native-op-end op) region) (second group))
+                                        (incf occurrences))))))))))))))))))
     (let ((occupied (make-array (length records) :initial-element nil)))
       ;; Larger total byte savings first. Price the actual parameter traffic,
       ;; helper, signature, body/function counts and bounded section growth.

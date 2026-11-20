@@ -218,6 +218,118 @@ try {
             (equal (multiple-value-list (funcall next)) '(0 :retained :next))))`);
   console.log('Optimizations: deep generic calls preserve values and escaping next-method context.');
 
+  // Changed CALL-NEXT-METHOD arguments retain applicability checks and live
+  // protocol extensions after the native chain and its metadata are warm.
+  evaluate(`(defclass optimization-cnm-parent () ())
+    (defclass optimization-cnm-child (optimization-cnm-parent) ())
+    (defgeneric optimization-cnm-args (object amount))
+    (defparameter *optimization-cnm-replacement* nil)
+    (defparameter *optimization-cnm-protocol-calls* 0)
+    (funcall (miricl-compiler:compile-native '(lambda ()
+      (defmethod optimization-cnm-args ((object optimization-cnm-parent) amount) ${policy}
+        (cond ((eq amount :empty) (values))
+              ((eq amount :throw) (throw 'optimization-cnm-transfer :transferred))
+              (t (values amount object :cnm))))
+      (defmethod optimization-cnm-args ((object optimization-cnm-child) amount) ${policy}
+        (cond ((eq amount :escape)
+               (values (lambda (new-amount) (call-next-method object new-amount)) :captured))
+              ((eq amount :arity) (call-next-method object))
+              (t (call-next-method (or *optimization-cnm-replacement* object)
+                   (if (numberp amount) (1+ amount) amount))))))))
+    (defparameter *optimization-cnm-object* (make-instance 'optimization-cnm-child))
+    (defparameter *optimization-cnm-next* (optimization-cnm-args *optimization-cnm-object* :escape))
+    (values)`);
+  define('optimization-cnm-driver', `(lambda (object amount) ${policy}
+    (optimization-cnm-args object amount))`);
+  check('native replacement chains retain values, arity, applicability and cleanup', `(let
+      ((object *optimization-cnm-object*))
+    (dotimes (i 8) (optimization-cnm-driver object i))
+    (and (equal (multiple-value-list (optimization-cnm-driver object 10)) (list 11 object :cnm))
+      (null (multiple-value-list (optimization-cnm-driver object :empty)))
+      (eq (catch 'optimization-cnm-transfer (optimization-cnm-driver object :throw)) :transferred)
+      (handler-case (progn (optimization-cnm-driver object :arity) nil) (error () t))
+      (let ((*optimization-cnm-replacement* (make-instance 'optimization-cnm-parent)))
+        (handler-case (progn (optimization-cnm-driver object 10) nil) (error () t)))
+      (let* ((other (make-instance 'optimization-cnm-child)) (*optimization-cnm-replacement* other))
+        (equal (multiple-value-list (optimization-cnm-driver object 10)) (list 11 other :cnm)))
+      (equal (multiple-value-list (optimization-cnm-driver object 12)) (list 13 object :cnm))))`);
+  evaluate(`(defmethod optimization-cnm-args ((object optimization-cnm-parent) (amount (eql 11)))
+      (values amount object :eql)) (values)`);
+  check('new EQL applicability invalidates a warmed replacement path', `(unwind-protect
+      (handler-case (progn (optimization-cnm-driver *optimization-cnm-object* 10) nil) (error () t))
+    (remove-method #'optimization-cnm-args
+      (find-method #'optimization-cnm-args nil
+        (list (find-class 'optimization-cnm-parent) (miricl-mop:intern-eql-specializer 11)))))`);
+  evaluate(`(defmethod compute-applicable-methods :around
+        ((gf (eql #'optimization-cnm-args)) arguments)
+      (declare (ignore gf arguments))
+      (incf *optimization-cnm-protocol-calls*) (call-next-method)) (values)`);
+  check('escaped native replacement calls observe custom applicable-method protocol', `(unwind-protect
+      (progn (setq *optimization-cnm-protocol-calls* 0)
+        (and (equal (multiple-value-list (funcall *optimization-cnm-next* 9))
+               (list 9 *optimization-cnm-object* :cnm))
+          (= *optimization-cnm-protocol-calls* 2)))
+    (remove-method #'compute-applicable-methods
+      (find-method #'compute-applicable-methods '(:around)
+        (list (miricl-mop:intern-eql-specializer #'optimization-cnm-args) (find-class t)))))`);
+  check('replacement path recovers after protocol removal', `(equal
+    (multiple-value-list (optimization-cnm-driver *optimization-cnm-object* 20))
+    (list 21 *optimization-cnm-object* :cnm))`);
+  // Saved-image constructors expose canonical layouts. Distinct cached cells
+  // with copied values still cannot authorize skipping the live-property proof.
+  // Keep values equivalent here so the ordinary fallback remains meaningful.
+  const capturedCallback = vm.javascript.callback;
+  let cnmGeneric;
+  vm.javascript.callback = function (value) {
+    cnmGeneric = value;
+    return capturedCallback.call(this, value);
+  };
+  try {evaluate("(js:callback #'optimization-cnm-args) (values)");}
+  finally {vm.javascript.callback = capturedCallback;}
+  const cnmFields = object => {
+    const type = vm.vm['core-object-type'](object);
+    const reader = Object.keys(vm.vm).find(name => name.startsWith(`core-read:${type}:`));
+    assert.ok(reader, 'Canonical CLOS metadata has a saved-image reader.');
+    return {type, signature: reader.split(':')[2], values: vm.vm[reader](object)};
+  };
+  const cnmSetFields = (object, fields, values) => vm.vm[`core-set:${fields.type}`](object,
+    ...values.filter((_, index) => fields.signature[index] !== fields.signature[index].toLowerCase()));
+  const cnmInfo = cnmFields(cnmGeneric).values[4], cnmInfoFields = cnmFields(cnmInfo);
+  const cnmCache = cnmInfoFields.values[6];
+  assert.ok(cnmCache, 'The preceding native calls warmed generic metadata.');
+  const cnmCacheType = vm.vm['core-object-type'](cnmCache);
+  const cnmCacheLengthExport = Object.keys(vm.vm).find(name => name.startsWith(`core-array:${cnmCacheType}:`));
+  const cnmCacheLength = vm.vm[cnmCacheLengthExport](cnmCache);
+  const cnmCopiedCache = vm.vm[`core-new:${cnmCacheType}`](cnmCacheLength);
+  for (let index = 0; index < cnmCacheLength; index++) {
+    let value = vm.vm[`core-read:${cnmCacheType}`](cnmCache, index);
+    // Cache entries 1..8 are value cells; the remaining entries are derived
+    // dispatch rows and validation state and retain their original identities.
+    if (index > 0 && index <= 8 && value !== null) {
+      const fields = cnmFields(value);
+      const copy = vm.vm[`core-new:${fields.type}`](...fields.values.filter((_, position) =>
+        fields.signature[position] === fields.signature[position].toLowerCase()));
+      cnmSetFields(copy, fields, fields.values);
+      value = copy;
+    }
+    vm.vm[`core-set:${cnmCacheType}`](cnmCopiedCache, index, value);
+  }
+  try {
+    for (const cache of [cnmCopiedCache, null]) {
+      cnmSetFields(cnmInfo, cnmInfoFields,
+        cnmInfoFields.values.map((value, index) => index === 6 ? cache : value));
+      check('replacement calls recover with copied or borrowed cache cells', `(and
+        (equal (multiple-value-list (optimization-cnm-driver *optimization-cnm-object* 22))
+          (list 23 *optimization-cnm-object* :cnm))
+        (handler-case (progn (optimization-cnm-driver *optimization-cnm-object* :arity) nil)
+          (error () t)))`);
+    }
+  } finally {cnmSetFields(cnmInfo, cnmInfoFields, cnmInfoFields.values);}
+  check('replacement calls recover after restoring warmed metadata', `(equal
+    (multiple-value-list (optimization-cnm-driver *optimization-cnm-object* 24))
+    (list 25 *optimization-cnm-object* :cnm))`);
+  console.log('Optimizations: native next-method replacements retain applicability, live protocols and complete values.');
+
   evaluate(`(defgeneric optimization-generic-three (n acc token))
     (funcall (miricl-compiler:compile-native '(lambda ()
       (defmethod optimization-generic-three ((n integer) acc token) ${policy}
@@ -548,6 +660,50 @@ try {
                 (optimization-inline-literal #(43) #'effect)) '(:definition 43 :callee))))))`);
     }
   }
+
+  // Lifetime hints never imply absence of aliases or mutation. Exercise the
+  // private REST path alongside uses that must retain an ordinary Lisp list.
+  for (const safety of [0, 1, 3]) {
+    const restPolicy = `(declare (dynamic-extent xs)
+      (optimize (space 3) (speed 1) (debug 1) (safety ${safety})))`;
+    define('optimization-dx-count', `(lambda (prefix &rest xs) ${restPolicy}
+      (values prefix (length xs) (length xs)))`);
+    define('optimization-dx-nested', `(lambda (hook &rest xs) ${restPolicy}
+      (funcall hook) (length xs))`);
+    define('optimization-dx-mutate', `(lambda (hook &rest xs) ${restPolicy}
+      (funcall hook xs) (length xs))`);
+    define('optimization-dx-assign', `(lambda (&rest xs) ${restPolicy}
+      (setq xs (list :replacement :tail)) (length xs))`);
+    define('optimization-dx-alias', `(lambda (&rest xs) ${restPolicy}
+      (let ((alias xs)) (rplacd alias nil) (values (eq alias xs) (length xs))))`);
+    define('optimization-dx-free', `(lambda (&rest xs)
+      (locally (declare (dynamic-extent xs)) (length xs)))`);
+    define('optimization-dx-shadow', `(lambda (&rest xs) ${restPolicy}
+      (let ((xs (list :inner :binding))) (length xs)))`);
+    check('dynamic-extent REST preserves counts, nested calls, mutation and binding identity', `(and
+      (equal (multiple-value-list (optimization-dx-count :prefix)) '(:prefix 0 0))
+      (equal (multiple-value-list
+        (apply #'optimization-dx-count :prefix (make-list 64 :initial-element :value))) '(:prefix 64 64))
+      (= (optimization-dx-nested (lambda () (list :nested :call :packet)) :a :b :c) 3)
+      (= (optimization-dx-mutate (lambda (list) (rplacd list nil)) :a :b :c) 1)
+      (= (optimization-dx-assign :a :b :c) 2)
+      (equal (multiple-value-list (optimization-dx-alias :a :b :c)) '(t 1))
+      (= (optimization-dx-free :a :b) 2)
+      (= (optimization-dx-shadow :a :b :c) 2))`);
+  }
+  vm.mountFile('/optimization-dx-rest.lisp', `(in-package :cl-user)
+    (defun optimization-dx-loaded (&optional prefix &rest xs)
+      (declare (dynamic-extent xs))
+      (values prefix (length xs)))
+    (defun optimization-dx-out-of-line (&rest xs)
+      (declare (dynamic-extent xs) (notinline length)) (length xs))`);
+  evaluate(`(compile-file "/optimization-dx-rest.lisp" :verbose nil :block-compile nil)
+    (miricl-compiler:compile-native-bundle "/optimization-dx-rest.wasm" "/optimization-dx-rest-native.wasm")
+    (load "/optimization-dx-rest-native.wasm") (values)`);
+  check('dynamic-extent REST survives file preparation and native conversion', `(and
+    (equal (multiple-value-list (optimization-dx-loaded)) '(nil 0))
+    (equal (multiple-value-list (optimization-dx-loaded :prefix :a :b)) '(:prefix 2))
+    (= (optimization-dx-out-of-line :a :b :c) 3))`);
 
   define('optimization-mutable-loop', `(lambda (cell n)
     (declare (optimize (speed 3) (space 1) (safety 0))

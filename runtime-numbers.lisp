@@ -862,7 +862,9 @@
            ($an :object)
            ($ad :object)
            ($bn :object)
-           ($bd :object))
+           ($bd :object)
+           ($g :object)
+           ($negative i32))
   #@(local.set $kind (select (call $tag (local.get $a)) (call $tag (local.get $b))
                           (i32.gt_u (call $tag (local.get $a)) (call $tag (local.get $b)))))
   (wat-fail-when #@(i32.and (i32.eq (local.get $op) (i32.const 3)) (call $zero (local.get $b))) :division-by-zero)
@@ -892,9 +894,32 @@
               (call $imul (local.get $bn) (local.get $ad)))
             (if (result (ref eq)) (i32.eq (call $tag (local.get $a)) (i32.const 2))
               (then (local.get $ad)) (else (local.get $bd))) (ref.null eq)))))
-        (return (call $ratio (call $iadd (call $imul (local.get $an) (local.get $bd))
-                                       (call $imul (local.get $bn) (local.get $ad)))
-                            (call $imul (local.get $ad) (local.get $bd))))))
+        ;; For reduced ratios, only common denominator factors can divide
+        ;; the sum's numerator. Cancel those factors before forming the
+        ;; denominator, instead of taking a GCD of the full cross products.
+        (local.set $g (call $gcd (local.get $ad) (local.get $bd)))
+        (if (i32.eqz (call $cmpabs (local.get $g) (call $int (i32.const 1))))
+          (then
+            (local.set $an (call $iadd (call $imul (local.get $an) (local.get $bd))
+              (call $imul (local.get $bn) (local.get $ad)))))
+          (else
+            (local.set $ad (call $quotient (local.get $ad) (local.get $g)))
+            (local.set $an (call $iadd
+              (call $imul (local.get $an) (call $quotient (local.get $bd) (local.get $g)))
+              (call $imul (local.get $bn) (local.get $ad))))
+            (local.set $g (call $gcd (local.get $an) (local.get $g)))
+            (if (call $cmpabs (local.get $g) (call $int (i32.const 1)))
+              (then
+                ;; $QUOTIENT divides magnitudes; restore the numerator sign.
+                (local.set $negative (i32.lt_s (call $value-n (local.get $an)) (i32.const 0)))
+                (local.set $an (call $quotient (local.get $an) (local.get $g)))
+                (if (local.get $negative) (then (local.set $an (call $negative (local.get $an)))))
+                (local.set $bd (call $quotient (local.get $bd) (local.get $g)))))))
+        (local.set $ad (call $imul (local.get $ad) (local.get $bd)))
+        (if (i32.eqz (call $cmpabs (local.get $ad) (call $int (i32.const 1))))
+          (then (return (local.get $an))))
+        (return (call $node (i32.const 2) (i32.const 0)
+          (local.get $an) (local.get $ad) (ref.null eq)))))
   #@(if (i32.eq (local.get $op) (i32.const 2))
       (then (return (call $ratio (call $imul (local.get $an) (local.get $bn))
                                 (call $imul (local.get $ad) (local.get $bd))))))

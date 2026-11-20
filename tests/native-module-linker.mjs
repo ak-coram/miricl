@@ -190,6 +190,24 @@ const optimizerFixture = `(module
   ${['i32', 'i64'].flatMap(type => comparisonNames.map(name => `
     (func (export "negate-${type}-${name}") (param ${type} ${type}) (result i32)
       local.get 0 call $${type}-hook local.get 1 call $${type}-hook ${type}.${name} i32.eqz)`)).join('\n')}
+  ${['i32', 'i64'].map(type => `
+    (func (export "zero-${type}") (param ${type}) (result i32)
+      local.get 0 call $${type}-hook ${type}.const 0 ${type}.eq)
+    (func (export "zero-branch-${type}") (param ${type}) (result i32)
+      block (result i32)
+        local.get 0 call $${type}-hook ${type}.const 0 ${type}.eq
+        if (result i32) i32.const 17 else i32.const 29 end
+      end)`).join('\n')}
+  (func (export "zero-pair") (param i32 i64) (result i32 i32)
+    local.get 0 call $i32-hook i32.const 0 i32.eq
+    local.get 1 call $i64-hook i64.const 0 i64.eq)
+  (func (export "opaque-zero") (param i32) (result i32)
+    v128.const i32x4 0x00460041 0 0 0 drop
+    local.get 0 i32.const 0 i32.eq)
+  (func (export "zero-f64") (param f64) (result i32)
+    local.get 0 f64.const 0 f64.eq)
+  (func (export "zero-trap") (param i32) (result i32)
+    i32.const 17 local.get 0 i32.div_s i32.const 0 i32.eq)
   (func (export "extend-signed") (param i32) (result i32)
     local.get 0 call $i32-hook i64.extend_i32_s i32.wrap_i64)
   (func (export "extend-unsigned") (param i32) (result i32)
@@ -366,6 +384,18 @@ const checkOptimized = bytes => {
     ['i32', 32, [-2147483648, -1, 0, 1, 2, 2147483647]],
     ['i64', 64, [-(1n << 63n), -1n, 0n, 1n, 2n, (1n << 63n) - 1n]],
   ]) {
+    for (const input of inputs) {
+      events.length = 0;
+      assert.equal(entries[`zero-${type}`](input), Number(input === (type === 'i64' ? 0n : 0)));
+      assert.deepEqual(events, [input], 'Zero equality retains the operand callback.');
+      events.length = 0;
+      assert.equal(entries[`zero-branch-${type}`](input), input ? 29 : 17);
+      assert.deepEqual(events, [input]);
+    }
+    throwing = true; events.length = 0;
+    assert.throws(() => entries[`zero-${type}`](inputs[0]), error => error === failure);
+    assert.deepEqual(events, [inputs[0]]);
+    throwing = false;
     for (const name of comparisonNames) for (const left of inputs) for (const right of inputs) {
       events.length = 0;
       assert.equal(entries[`negate-${type}-${name}`](left, right), Number(!compare(name, left, right, width)));
@@ -388,6 +418,18 @@ const checkOptimized = bytes => {
   }
   for (const left of [NaN, -Infinity, -0, 0, Infinity]) for (const right of [NaN, -1, 0, 1])
     assert.equal(entries['negate-float-lt'](left, right), Number(!(left < right)));
+  for (const input of [-2147483648, -1, 0, 1, 2147483647])
+    assert.equal(entries['opaque-zero'](input), Number(input === 0), 'Unsupported bodies retain behavior.');
+  for (const [left, right] of [[0, 0n], [-1, 0n], [0, 1n], [1, -1n]]) {
+    events.length = 0;
+    assert.deepEqual(entries['zero-pair'](left, right), [Number(left === 0), Number(right === 0n)]);
+    assert.deepEqual(events, [left, right], 'Several zero comparisons retain values and operand order.');
+  }
+  for (const input of [NaN, -Infinity, -1, -0, 0, 1, Infinity])
+    assert.equal(entries['zero-f64'](input), Number(input === 0), 'Integer folding does not alter float comparisons.');
+  assert.throws(() => entries['zero-trap'](0), WebAssembly.RuntimeError);
+  assert.equal(entries['zero-trap'](17), 0);
+  assert.equal(entries['zero-trap'](18), 1, 'Zero equality remains usable after an operand trap.');
   assert.throws(() => entries['trapping-comparison'](0, 17), WebAssembly.RuntimeError);
   assert.equal(entries['trapping-comparison'](1, 17), 0, 'Comparison remains usable after an operand trap.');
   events.length = 0;
@@ -458,7 +500,10 @@ const checkOptimized = bytes => {
 // list. Local simplification first removes the saved copy. Sharing must still
 // find profitable boundaries and preserve the callback and both return values.
 const outlineInputs = [0n, -1n, 0x123456789abcdefn, -(1n << 63n), (1n << 63n) - 1n];
-const outlineNames = Array.from({length: 12}, (_, i) => `fold-${i}`);
+// Include enough independent short folds for sharing to repay the complete
+// helper cost. The two-operand case exercises short-region discovery; longer
+// folds retain the large-region checks after local simplification.
+const outlineNames = Array.from({length: 64}, (_, i) => `fold-${i}`);
 const outlineOperands = count => Array.from({length: count}, (_, i) =>
   0x123456789abcdefn ^ (BigInt(i + 1) * 0x100000001n));
 const outliningFixture = count => `(module
@@ -468,6 +513,89 @@ const outliningFixture = count => `(module
       local.get 0 local.set 1 local.get 1
       ${outlineOperands(count).map(value => `i64.const ${value} i64.xor`).join('\n')}
       call $hook i32.const ${i})`).join('\n')})`;
+
+// A host countdown bounds execution even if outlining loses the loop-carried
+// store. Its only later dynamic read precedes that store in textual order.
+const outliningLoopFixture = count => `(module
+  (import "m" "hook" (func $hook (param i64) (result i64)))
+  (import "m" "tick" (func $tick (param i32) (result i32)))
+  ${outlineNames.map((name, i) => `
+    (func (export "${name}") (param i64) (result i64 i32) (local i64 i64)
+      (block $exit (loop $again
+        local.get 0 local.set 1
+        i32.const ${i} call $tick i32.eqz br_if $exit
+        local.get 0 local.set 2 local.get 2
+        ${outlineOperands(count).map(value => `i64.const ${value} i64.xor`).join('\n')}
+        call $hook local.set 0 br $again))
+      local.get 1 i32.const ${i})`).join('\n')})`;
+
+const checkOutliningLoops = (bytes, count) => {
+  assert.ok(WebAssembly.validate(bytes), 'Every loop outlining variant must validate.');
+  const folded = input => outlineOperands(count).reduce((value, operand) => value ^ operand, input);
+  const expected = (input, steps, token) => {
+    const trace = [];
+    let state = input;
+    for (let i = 0; i < steps; i++) {
+      trace.push(['tick', token, true], ['hook', folded(state)]);
+      state = BigInt.asIntN(64, folded(state) + 17n);
+    }
+    trace.push(['tick', token, false]);
+    return {value: [state, token], trace};
+  };
+  const failure = new Error('loop outlining callback'), events = [], frames = [];
+  let entries, reenter = false, throwing = false;
+  const run = (token, input, steps) => {
+    frames.push({token, remaining: steps, polls: 0, limit: steps + 1});
+    try { return entries[token](input); }
+    finally { frames.pop(); }
+  };
+  const exports = new WebAssembly.Instance(new WebAssembly.Module(bytes), {m: {
+    tick(token) {
+      const frame = frames.at(-1);
+      assert.equal(token, frame.token, 'Reentry retains the active loop identity.');
+      assert.ok(++frame.polls <= frame.limit, 'The loop obeys its host countdown.');
+      const active = frame.remaining-- > 0;
+      events.push(['tick', token, active]);
+      return Number(active);
+    },
+    hook(value) {
+      events.push(['hook', value]);
+      if (throwing) throw failure;
+      if (reenter) {
+        reenter = false;
+        const token = entries.length - 1;
+        assert.deepEqual(run(token, -1n, 3), expected(-1n, 3, token).value);
+      }
+      return BigInt.asIntN(64, value + 17n);
+    },
+  }}).exports;
+  entries = outlineNames.map(name => exports[name]);
+  for (const token of entries.keys()) {
+    for (const input of outlineInputs) {
+      for (const steps of [0, 1, 3]) {
+        const reference = expected(input, steps, token);
+        events.length = 0;
+        assert.deepEqual(run(token, input, steps), reference.value, 'Each backedge observes the preceding loop write.');
+        assert.deepEqual(events, reference.trace, 'Loop callback values and order remain observable.');
+      }
+    }
+    const outer = expected(0n, 1, token), inner = expected(-1n, 3, entries.length - 1);
+    events.length = 0;
+    reenter = true;
+    assert.deepEqual(run(token, 0n, 1), outer.value);
+    assert.deepEqual(events, [...outer.trace.slice(0, 2), ...inner.trace, ...outer.trace.slice(2)],
+      'Reentry preserves the loop-carried state of both activations.');
+    events.length = 0;
+    throwing = true;
+    assert.throws(() => run(token, 0n, 3), error => error === failure);
+    assert.deepEqual(events, expected(0n, 3, token).trace.slice(0, 2));
+    throwing = false;
+    events.length = 0;
+    const recovery = expected(-1n, 3, token);
+    assert.deepEqual(run(token, -1n, 3), recovery.value, 'The loop remains usable after a callback throws.');
+    assert.deepEqual(events, recovery.trace);
+  }
+};
 
 const checkOutlining = (bytes, count) => {
   assert.ok(WebAssembly.validate(bytes), 'Every outlining variant must validate.');
@@ -555,11 +683,14 @@ if (mode === 'prepare') {
   console.log('Native module optimizer: copies and joins shrink; writes, control, callbacks, landing pads and references retain behavior.');
 } else if (mode === 'prepare-outlining') {
   await fs.writeFile(pathname, outliningFixture(Number(optimizedPath)));
-} else if (mode === 'verify-outlining') {
+} else if (mode === 'prepare-outlining-loops') {
+  await fs.writeFile(pathname, outliningLoopFixture(Number(optimizedPath)));
+} else if (mode === 'verify-outlining' || mode === 'verify-outlining-loops') {
   const original = await fs.readFile(pathname), plain = await fs.readFile(optimizedPath);
   const shared = await fs.readFile(sharedPath), count = Number(operandCount);
-  for (const bytes of [original, plain, shared]) checkOutlining(bytes, count);
+  const loops = mode === 'verify-outlining-loops';
+  for (const bytes of [original, plain, shared]) (loops ? checkOutliningLoops : checkOutlining)(bytes, count);
   assert.ok(plain.length < original.length, 'Local simplification must shorten the repeated fold.');
   assert.ok(shared.length < plain.length, 'Sharing must reduce the complete module after local simplification.');
-  console.log(`Native module optimizer: ${count}-operand folds share after simplification; values, callbacks, reentry and recovery pass.`);
+  console.log(`Native module optimizer: ${count}-operand ${loops ? 'loop ' : ''}folds share after simplification; values, callbacks, reentry and recovery pass.`);
 } else throw new Error('Expected a native linker or optimizer preparation/verification mode.');

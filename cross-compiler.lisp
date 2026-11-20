@@ -721,7 +721,8 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                        '((:object :i64 :i64) :object))
             (setf integer-call t call-slots (max call-slots 1)))
           (when (member target '("native-arguments" "native-argument-set" "native-argument"
-                                "native-rest-argument" "native-check-arguments" "native-argument-present"
+                                "native-rest-argument" "native-prepare-dynamic-rest" "native-dynamic-rest-length"
+                                "native-check-arguments" "native-argument-present"
                                 "native-keyword-present" "native-keyword-argument" "native-check-keywords") :test #'equal)
             (setf integer-call t call-slots (max call-slots 3)))))
       (setf vector-index (+ 5 (length locals)) vector-object (1+ vector-index) vector-value (+ 2 vector-index)
@@ -837,7 +838,8 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                  ((string= target "native-packet-length") (write-line "call $native-packet-length-cl" out))
                  ((string= target "native-packet-ref") (write-line "call $native-packet-ref-cl" out))
                  ((member target '("native-arguments" "native-argument-set" "native-argument"
-                                   "native-rest-argument" "native-check-arguments" "native-argument-present"
+                                   "native-rest-argument" "native-prepare-dynamic-rest" "native-dynamic-rest-length"
+                                   "native-check-arguments" "native-argument-present"
                                    "native-keyword-present" "native-keyword-argument" "native-check-keywords") :test #'equal)
                   ;; Keep private packets as raw references. Imports have mixed
                   ;; boxed-reference and i32 operands; save each in a matching

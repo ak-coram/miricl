@@ -125,11 +125,11 @@ is committed to an actually adjustable array."
            (inline svref (setf svref) = < >= logand zerop array-rank array-total-size))
   (values
    (let* ((info (the simple-vector (funcall metadata 0 old nil)))
-          (kind (the (integer 0 3) (svref info 0)))
+          (kind (the (integer 0 4) (svref info 0)))
           (rank (the (integer 0 255) (svref info 1)))
           (adjustable (svref info 2))
           (fill (the (integer -1 536870910) (svref info 3))))
-     (if (= kind (the (integer 0 3) (funcall metadata 1 (svref state 1) nil)))
+     (if (= kind (the (integer 0 4) (funcall metadata 1 (svref state 1) nil)))
          nil (funcall metadata 9 old 0))
      ;; Target DEFTYPE expansion can have effects, including changing the
      ;; original fill pointer. Preserve it after that expansion, as ADJUST-ARRAY

@@ -408,7 +408,7 @@
              (i32.sub (local.get $a) (i32.const 1)))) (else (ref.null eq)))
          (local.get $registers) (local.get $captures) (i32.const ,(if (eq opcode :debug-step) 1 0))) effects))
       (:constant (setf result (hir-literal)))
-      ((:argument :argument-present :rest-argument)
+      ((:argument :argument-present :rest-argument :dynamic-rest-argument)
        (setf result (native-object `(call ,(case opcode
                                            (:argument '$native-argument)
                                            (:argument-present '$native-argument-present)
@@ -497,7 +497,7 @@
       ;; The dispatcher and nonlocal landing path establish one value. These
       ;; operations only manipulate explicit registers and cannot change the
       ;; ambient value packet. Calls still capture their results and clear it.
-      (unless (member opcode '(:constant :argument :argument-present :rest-argument :check-arguments
+      (unless (member opcode '(:constant :argument :argument-present :rest-argument :dynamic-rest-argument :check-arguments
                                :keyword-present :keyword-argument :check-keywords :truth
                                :values :values-list :list :value-ref :checked-argument
                                :cell-new :cell-read :cell-write :primary :copy :capture :closure

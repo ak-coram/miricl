@@ -200,6 +200,30 @@
 (defun module-write-section (id bytes)
   (wasm-byte id) (wasm-u32 (length bytes)) (module-write-bytes bytes))
 
+(defun module-integer-zero-comparisons (bytes ops)
+  ;; Use decoded instruction boundaries: opcode-looking bytes in an operand
+  ;; are not instructions. Integer EQ against zero has the unary EQZ result.
+  (let ((replacements nil))
+    (loop for i below (1- (length ops))
+          for constant = (aref ops i) for comparison = (aref ops (1+ i))
+          for code = (aref bytes (native-op-start constant))
+          when (and (eql (native-op-argument constant) 0)
+                    (= (native-op-end constant) (native-op-start comparison))
+                    (or (and (= code #x41)
+                             (= (aref bytes (native-op-start comparison)) #x46))
+                        (and (= code #x42)
+                             (= (aref bytes (native-op-start comparison)) #x51))))
+            do (push (list (native-op-start constant) (native-op-end comparison)
+                           (if (= code #x41) #x45 #x50)) replacements))
+    (if (null replacements) bytes
+        (with-wasm-bytes
+          (let ((position 0))
+            (dolist (replacement (nreverse replacements))
+              (wasm-append bytes position (first replacement))
+              (wasm-byte (third replacement))
+              (setq position (second replacement)))
+            (wasm-append bytes position))))))
+
 (defun module-label-mapping (ops bytes)
   (let ((next 0))
     (coerce (loop for op across ops
@@ -280,6 +304,13 @@ the module, the number of smaller bodies and the number of unsupported bodies."
                       (when decoded
                         (multiple-value-bind (optimized mapping)
                             (apply #'native-optimize-body body decoded)
+                          (setq optimized
+                            (handler-case
+                                (module-integer-zero-comparisons optimized
+                                  (module-read-body optimized
+                                    (aref types (aref functions function)) types functions
+                                    (make-hash-table :test 'eq)))
+                              (unsupported-wasm-optimization () optimized)))
                           (when (< (length optimized) (length body))
                             (setf (gethash function label-mappings)
                               (module-label-mapping (first decoded) body))

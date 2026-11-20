@@ -12,6 +12,81 @@ const check = source => assert.equal(evaluate(source), 'T\n', source);
 const recover = () => assert.equal(evaluate("(funcall (compile-native '(lambda (x) (+ x 1))) 41)"), '42\n');
 try {
   evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
+  // This target specialization exceeds the host's FIXNUM range. Keep its
+  // numeric values and shared displaced backing through an actual image save.
+  {
+    const numeric = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
+    const numericCheck = source => assert.equal(numeric.evaluate(source, {eof: true}).output, 'T\n', source);
+    try {
+      numeric.evaluate('(setq miricl-compiler:*compile-evaluations* nil) (values)', {eof: true});
+      numericCheck(`(and
+        (every (lambda (type) (eq (upgraded-array-element-type type) 'fixnum))
+          '(fixnum (signed-byte 8) (signed-byte 64) (unsigned-byte 63)
+            (member 0 2) (or bit (signed-byte 8)) (and fixnum (integer 2 5))))
+        (eq (upgraded-array-element-type '(unsigned-byte 1)) 'bit)
+        (eq (upgraded-array-element-type '(unsigned-byte 64)) t)
+        (eq (upgraded-array-element-type '(and (member 0 :non-integer) integer)) 'bit)
+        (eq (upgraded-array-element-type '(and (or bit character) integer)) 'bit)
+        (eq (upgraded-array-element-type (cons 'or (make-list 9000 :initial-element 'fixnum))) 'fixnum)
+        (eq (upgraded-array-element-type
+              (cons 'or (make-list 9000 :initial-element '(signed-byte 8)))) 'fixnum)
+        (every (lambda (type)
+          (eq (upgraded-array-element-type (list 'or type type))
+              (upgraded-array-element-type type)))
+          '((signed-byte 64) (unsigned-byte 63) (unsigned-byte 64)
+            (unsigned-byte 1) (integer 0 1) (integer (0) (3))))
+        (eq (upgraded-array-element-type
+              '(and (signed-byte 8) (integer 0 1))) 'bit)
+        (eq (upgraded-array-element-type
+              '(and (member 0 #\\a) integer)) 'bit)
+        (eq (upgraded-array-element-type
+              '(or character (unsigned-byte 1))) t)
+        (eq (upgraded-array-element-type
+              (list 'and (cons 'or (make-list 9000 :initial-element '(eql 2))) 'fixnum)) 'fixnum)
+        (let ((array (make-array 1 :element-type '(signed-byte 8) :initial-element 127)))
+          (and (eq (array-element-type array) 'fixnum)
+            (= (setf (aref array 0) 1000) 1000)
+            (= (aref array 0) 1000)
+            (handler-case
+              (progn (make-array 1 :element-type '(signed-byte 8) :initial-element 128) nil)
+              (type-error () t)))))`);
+      for (const safety of [0, 1, 3]) {
+        numericCheck(`(let* ((values '(0 -1 -9223372036854775808 9223372036854775807 9007199254740993))
+            (array (make-array (length values) :element-type 'fixnum :initial-contents values))
+            (writer (miricl-compiler:compile-native '(lambda (array index value)
+              (declare (type (simple-array fixnum (*)) array)
+                (optimize (space 3) (speed 1) (debug 1) (safety ${safety})))
+              (values (setf (aref array index) value) (aref array index))))))
+          (and (typep array '(simple-array fixnum (*))) (not (simple-vector-p array))
+            (loop for value in values for index from 0 always
+              (equal (multiple-value-list (funcall writer array index value)) (list value value)))
+            (handler-case (progn (funcall writer array 0 9223372036854775808) nil)
+              (type-error () (= (aref array 0) 0)))
+            (handler-case (progn (funcall writer array 0 1/2) nil)
+              (type-error () (= (aref array 0) 0)))
+            (equalp array (coerce values 'vector))))`);
+      }
+      numeric.evaluate(`(defparameter *soundness-fixnum-base*
+        (make-array 3 :element-type 'fixnum :adjustable t
+          :initial-contents '(0 -9223372036854775808 9223372036854775807)))
+        (defparameter *soundness-fixnum-view*
+          (make-array 2 :element-type '(signed-byte 64)
+            :displaced-to *soundness-fixnum-base* :displaced-index-offset 1))
+        (adjust-array *soundness-fixnum-base* 5 :initial-element 0) (values)`, {eof: true});
+      const restored = await Miricl.instantiate(numeric.saveImage());
+      try {
+        assert.equal(restored.evaluate(`(and
+          (eq (array-element-type *soundness-fixnum-base*) 'fixnum)
+          (eq (array-displacement *soundness-fixnum-view*) *soundness-fixnum-base*)
+          (= (aref *soundness-fixnum-view* 0) -9223372036854775808)
+          (= (aref *soundness-fixnum-view* 1) 9223372036854775807)
+          (progn (setf (aref *soundness-fixnum-base* 1) 9007199254740993)
+            (= (aref *soundness-fixnum-view* 0) 9007199254740993))
+          (progn (setf (aref *soundness-fixnum-view* 1) -9223372036854775808)
+            (= (row-major-aref *soundness-fixnum-base* 2) -9223372036854775808)))`, {eof: true}).output, 'T\n');
+      } finally { restored.close(); }
+    } finally { numeric.close(); }
+  }
   // These private method bodies are callable independently of their public
   // MOP generic functions. Keep their checked boundary and live callbacks.
   evaluate(`(defclass soundness-mop-meta (standard-class) ())
@@ -2210,6 +2285,55 @@ try {
     evaluate("(fmakunbound 'soundness-normal-checked) (fmakunbound 'soundness-normal-cleanup-call) (values)");
   }
   console.log('Soundness: ordinary tuple entries retain complete values, live bindings, checked leaf frames and dynamic cleanup.');
+
+  // Retained-frame recursion preserves distinct closure contexts beyond the
+  // backtrace ring, and wrong-arity rejection leaves the same entry usable.
+  check(`(let* ((factory (compile-native '(lambda (capture)
+        (declare (optimize (debug 1)))
+        (labels ((walk (n) (if (< n 1) capture (progn (walk (- n 1)) capture))))
+          (declare (notinline walk)) #'walk))))
+      (one (list :one)) (two (list :two))
+      (left (funcall factory one)) (right (funcall factory two)))
+    (and (eq (funcall left 70) one) (eq (funcall right 70) two)
+      (handler-case (progn (funcall left) nil) (program-error () t))
+      (eq (funcall left 70) one)))`);
+  // A primary recursive use is not an exact-one-result certificate. The
+  // self call observes only primary truth; every level can return zero or two.
+  check(`(let ((function (compile-native '(lambda (choose capture)
+        (declare (optimize (debug 1)))
+        (labels ((walk (n)
+                   (if (< n 1)
+                       (if choose (values capture :secondary) (values))
+                       (if (walk (- n 1)) (values capture :secondary) (values)))))
+          (declare (notinline walk)) (values (walk 70)))))))
+    (and (equal (multiple-value-list (funcall function t :one)) '(:one))
+      (equal (multiple-value-list (funcall function nil :one)) '(nil))))`);
+  evaluate(`(defvar *soundness-recursive-scope* :outside)
+    (defvar *soundness-recursive-cleanup* nil)
+    (setf (symbol-function 'soundness-framed-recursion)
+      (compile-native '(lambda (input)
+        (declare (optimize (debug 1) (safety 1)))
+        (labels ((walk (n) (if (< n 1) (+ input 0) (+ 1 (walk (- n 1))))))
+          (declare (notinline walk)) (values (walk 70))))
+        :name 'soundness-framed-recursion)) (values)`);
+  try {
+    assert.throws(() => evaluate('(soundness-framed-recursion :invalid)'), error =>
+      /:\+\n/.test(error.backtrace ?? '') &&
+      (error.backtrace?.match(/:LAMBDA\b/g) ?? []).length >= 60);
+    check(`(and
+      (eq (catch 'recursive-exit
+        (let ((*soundness-recursive-scope* :inside))
+          (unwind-protect
+            (handler-bind ((type-error (lambda (condition)
+              (declare (ignore condition))
+              (throw 'recursive-exit *soundness-recursive-scope*))))
+              (soundness-framed-recursion :invalid))
+            (push *soundness-recursive-scope* *soundness-recursive-cleanup*)))) :inside)
+      (eq *soundness-recursive-scope* :outside)
+      (equal *soundness-recursive-cleanup* '(:inside))
+      (= (soundness-framed-recursion 0) 70))`);
+  } finally {evaluate("(fmakunbound 'soundness-framed-recursion) (values)");}
+  console.log('Soundness: framed recursive calls retain captures, primary boundaries, error frames, transfer cleanup and ring recovery.');
 
   // Scalar forwarders keep each closure's capture and the primary-value
   // boundary, including checked effects in a discarded secondary value.

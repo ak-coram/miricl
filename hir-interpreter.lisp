@@ -259,7 +259,7 @@
                        (case opcode
                          ((:constant :function-reference :global-read :global-write :dynamic-bind)
                           (word (literal (first attributes))))
-                         ((:argument :argument-present :rest-argument :value-ref :capture :control-call :restart-signal
+                         ((:argument :argument-present :rest-argument :dynamic-rest-argument :value-ref :capture :control-call :restart-signal
                            :check-apply-arguments :checked-argument)
                           (word (first attributes)))
                          (:check-arguments (word (first attributes)) (word (1+ (second attributes))))

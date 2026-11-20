@@ -29,7 +29,8 @@
     (:call-primary 6 6 0 t) (:copy 1 1 0 t) (:debug-step 0 0 1 nil) (:debug-resume 0 0 1 nil)
     (:call 2 nil 0 t nil :speed) (:call-primary 2 nil 0 t nil :speed)
     (:argument-present 0 0 1 t) (:keyword-present 0 0 2 t)
-    (:keyword-argument 0 0 2 t) (:check-keywords 0 0 2 nil)) 'simple-vector))
+    (:keyword-argument 0 0 2 t) (:check-keywords 0 0 2 nil)
+    (:dynamic-rest-argument 0 0 1 t)) 'simple-vector))
 
 (defun hir-code-error (object reason)
   (error 'hir-code-input-error :datum object :reason reason))

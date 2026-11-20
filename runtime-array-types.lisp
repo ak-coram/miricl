@@ -38,7 +38,7 @@
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (if (i32.eq (local.get $mode) (i32.const 1))
-      (then ,(wat-fail-when #@(i32.or (i32.gt_u (local.get $flags) (i32.const 127))
+      (then ,(wat-fail-when #@(i32.or (i32.gt_u (local.get $flags) (i32.const 255))
         (i32.lt_s (local.get $rank) (i32.const -1))) :malformed-type)))
     (if (i32.ne (local.get $mode) (i32.const 1))
       (then (call $check-type-control-structure (local.get $a))
@@ -118,7 +118,7 @@
       (return (local.get $type))))
   #@(if (i64.eq (local.get $code) (i64.const 1))
     (then (call $check-type-control-structure (local.get $type))
-      (return (call $int (call $upgraded-array-kind (local.get $type))))))
+      (return (call $int (call $upgraded-array-kind-environment (local.get $type) (local.get $environment))))))
   #@(if (i64.eq (local.get $code) (i64.const 2))
     (then
       (local.set $class (call $subtype-class (local.get $type)))

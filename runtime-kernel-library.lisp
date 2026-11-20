@@ -1347,7 +1347,7 @@ uses this worker for physical storage beyond a vector's fill pointer."
               (go next-vector))))))))
 
 (defun concatenate-sequence-values (sequences kind)
-  (declare (type (integer 0 4) kind) (optimize (safety 0) (debug 0))
+  (declare (type (integer 0 5) kind) (optimize (safety 0) (debug 0))
            (inline car cdr listp length = 1+ + > cons rplacd))
   (values (block done
     (let ((scan sequences) (size 0) (output 0) (head nil) (tail nil) (result nil))
@@ -1360,7 +1360,8 @@ uses this worker for physical storage beyond a vector's fill pointer."
         (go size)
        allocate
         (setq result (if (= kind 0) nil
-                         (make-array size :element-type (if (= kind 1) 'character (if (= kind 3) 'bit (if (= kind 4) nil t)))))
+                         (make-array size :element-type (if (= kind 1) 'character
+                           (if (= kind 3) 'bit (if (= kind 4) nil (if (= kind 5) 'fixnum t))))))
               scan sequences)
        next
         (if scan nil (return-from done (if (= kind 0) head result)))

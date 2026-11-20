@@ -80,12 +80,19 @@
 ;; Saturation is useful for finite list lengths. NTHCDR separately retains
 ;; large counters because its input can also be circular.
 (define-runtime-function $natural-count (($x :nullable-object)) (i32)
-  (:locals ($value i32))
+  (:locals ($value i32) ($wide i64))
   ;; Immediate nonnegative integers need neither magnitude limbs nor a
-  ;; saturation check. Keep the full checked path for all other values.
+  ;; saturation check. Other representations retain checked handling below.
   #@(if (ref.test (ref i31) (local.get $x))
     (then (local.set $value (i31.get_s (ref.cast (ref i31) (local.get $x))))
       (if (i32.ge_s (local.get $value) (i32.const 0)) (then (return (local.get $value))))))
+  ;; Native scalar arithmetic can retain boxed i64 values even for small
+  ;; indices. Validate that representation before extracting and saturating.
+  #@(if (ref.test (ref $fixnum) (local.get $x))
+    (then (local.set $wide (struct.get $fixnum $value (ref.cast (ref $fixnum) (local.get $x))))
+      (if (i64.ge_s (local.get $wide) (i64.const 0))
+        (then (return (if (result i32) (i64.gt_s (local.get $wide) (i64.const 2147483647))
+          (then (i32.const 2147483647)) (else (i32.wrap_i64 (local.get $wide)))))))))
   #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
     (call $natural-count-cl (local.get $x) (call $int (i32.const 2147483647)))))))
 

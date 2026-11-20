@@ -434,6 +434,33 @@
   #@(call $native-check-private-spine (local.get $value))
   #@(extern.convert_any (call $native-rest-argument-cl (local.get $value) (call $int (local.get $index)))))
 
+(define-runtime-function $native-prepare-dynamic-rest (($args externref) ($index i32)) (externref)
+  (:export-raw "native-prepare-dynamic-rest")
+  (:locals ($value :nullable-object))
+  (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
+  #@(local.set $value (call $native-checked-object (local.get $args)))
+  #@(if (ref.test (ref $objects) (local.get $value))
+    (then
+      (call $native-validate-packet (ref.cast (ref $objects) (local.get $value)))
+      (return (local.get $args))))
+  ;; Materialize other representations at the original binding observation,
+  ;; preserving private-tail errors and aliases before later body effects.
+  #@(return_call $native-rest-argument (local.get $args) (local.get $index)))
+
+(define-runtime-function $native-dynamic-rest-length (($args externref) ($index i32)) (externref)
+  (:export-raw "native-dynamic-rest-length")
+  (:locals ($value :nullable-object) ($count i32))
+  (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
+  #@(local.set $value (call $native-checked-object (local.get $args)))
+  #@(if (ref.test (ref $objects) (local.get $value))
+    (then
+      (call $native-validate-packet (ref.cast (ref $objects) (local.get $value)))
+      (local.set $count (array.len (ref.cast (ref $objects) (local.get $value))))
+      (return (extern.convert_any (call $int
+        (if (result i32) (i32.le_u (local.get $count) (local.get $index))
+          (then (i32.const 0)) (else (i32.sub (local.get $count) (local.get $index)))))))))
+  #@(return_call $native-length-inline (local.get $args)))
+
 (define-runtime-function $native-arguments-list (($args :nullable-object)) (:nullable-object)
   #@(ref.cast (ref null eq) (any.convert_extern
     (call $native-rest-argument (extern.convert_any (local.get $args)) (i32.const 0)))))
@@ -1571,6 +1598,40 @@
   (:export-raw "native-poll")
   #@(call $thread-checkpoint))
 
+(define-runtime-function $native-frame-enter (($function externref)) (i32 externref)
+  (:export-raw "native-frame-enter")
+  (:locals ($name :nullable-object) ($depth i32) ($frame :nullable-object))
+  ;; A suspended/throwing checkpoint has not acquired this activation's frame.
+  #@(call $thread-checkpoint)
+  #@(local.set $name (call $native-checked-value (local.get $function)))
+  (wat-fail-when #@(i32.eqz (ref.test (ref $native-function) (local.get $name))) :malformed-form)
+  #@(local.set $depth (global.get $backtrace-depth))
+  #@(local.set $frame (array.get $objects (global.get $backtrace-frames)
+    (i32.and (local.get $depth) (i32.const 63))))
+  #@(array.set $objects (global.get $backtrace-frames)
+    (i32.and (local.get $depth) (i32.const 63)) (local.get $name))
+  #@(global.set $backtrace-depth (i32.add (local.get $depth) (i32.const 1)))
+  #@(call $clear-values)
+  #@(local.get $depth)
+  #@(extern.convert_any (local.get $frame)))
+
+(define-runtime-function $native-frame-leave
+    (($value externref) ($depth i32) ($saved externref) ($normal i32)) (externref)
+  (:export-raw "native-frame-leave")
+  (:locals ($frame :nullable-object))
+  (wat-fail-when #@(i32.or (i32.gt_u (local.get $normal) (i32.const 1))
+    (i32.or (i32.eqz (global.get $backtrace-depth))
+      (i32.ne (i32.add (local.get $depth) (i32.const 1)) (global.get $backtrace-depth)))) :malformed-form)
+  #@(local.set $frame (call $native-checked-value (local.get $saved)))
+  ;; A failed result check transfers while the generated catch still owns the
+  ;; frame. Its exceptional leave restores without changing the transfer group.
+  #@(if (local.get $normal)
+    (then (drop (call $native-checked-value (local.get $value))) (call $clear-values)))
+  #@(array.set $objects (global.get $backtrace-frames)
+    (i32.and (local.get $depth) (i32.const 63)) (local.get $frame))
+  #@(global.set $backtrace-depth (local.get $depth))
+  #@(local.get $value))
+
 (define-runtime-function $native-tail-enter (($function externref)) (externref)
   (:export-raw "native-tail-enter")
   ;; Match the dispatcher's checkpoint, frame and multiple-value setup.
@@ -2482,12 +2543,12 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
 (define-runtime-function $native-call3
     (($function externref) ($a externref) ($b externref) ($c externref)) (externref)
   (:export-raw "native-call3")
-  (:locals ($direct-result :nullable-object) ($hit i32) ($id i32) ($index i32) ($array :nullable-object) ($subscript :nullable-object))
-  #@(local.set $id (i32.sub (i32.const -2)
-    (call $native-builtin-id ,(native-object '(local.get $function)))))
-  #@(local.set $array ,(native-object '(local.get $b)))
-  #@(local.set $subscript ,(native-object '(local.get $c)))
+  (:locals ($direct-result :nullable-object) ($hit i32) ($id i32) ($index i32)
+           ($array :nullable-object) ($subscript :nullable-object) ($function-object :nullable-object))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(local.set $function-object (call $native-checked-value (local.get $function)))
+  #@(local.set $id (i32.sub (i32.const -2)
+    (call $native-builtin-id (local.get $function-object))))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
     (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 5))
       (then ,(native-direct-call-wat 3 t nil nil nil t)
@@ -2495,10 +2556,30 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
         ,(native-object '(local.get $function)) (array.new_fixed $objects 3
           ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) ,(native-object '(local.get $c))))))))))
   (native-fixed-vector-call-wat 3)
+  ;; Ordinary AREF has the negative identity after this dispatcher's setter
+  ;; transform. Probe only after the checkpoint, since adjustment can replace
+  ;; dimensions and backing storage there. Misses keep the complete old path.
+  #@(if (i32.eq (local.get $id) (i32.const ,(- -2 (runtime-symbol-id 'aref))))
+    (then
+      (drop (call $native-checked-value (local.get $a)))
+      (drop (call $native-checked-value (local.get $b)))
+      (drop (call $native-checked-value (local.get $c)))
+      (local.set $index (call $array-rank2-index ,(native-object '(local.get $a))
+        ,(native-object '(local.get $b)) ,(native-object '(local.get $c))))
+      (if (i32.ge_s (local.get $index) (i32.const 0))
+        (then
+          (local.set $direct-result (call $array-raw-element ,(native-object '(local.get $a))
+            (local.get $index) (ref.null eq) (i32.const 0)))
+          (call $clear-values)
+          (return (extern.convert_any (local.get $direct-result)))))))
   #@(if (i32.eq (local.get $id) (i32.const ,(- -2 (runtime-symbol-id 'list))))
     (then (return (extern.convert_any
       (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
         (call $cons ,(native-object '(local.get $c)) (ref.null eq))))))))
+  ;; These aliases serve the older setter cases. Do not cast arbitrary raw
+  ;; operands before the checked rank-two branch has admitted them.
+  #@(local.set $array (call $native-checked-value (local.get $b)))
+  #@(local.set $subscript (call $native-checked-value (local.get $c)))
   (wat-symbol-case #@(local.get $id)
     ((bit sbit)
       #@(if (i32.and (i32.eq (call $tag (local.get $array)) (i32.const 36))
@@ -2528,8 +2609,9 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
 (define-runtime-function $native-call4
     (($function externref) ($a externref) ($b externref) ($c externref) ($d externref)) (externref)
   (:export-raw "native-call4")
-  (:locals ($direct-result :nullable-object) ($id i32))
+  (:locals ($direct-result :nullable-object) ($id i32) ($index i32) ($function-object :nullable-object))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(local.set $function-object (call $native-checked-value (local.get $function)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
     (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 6))
       (then ,(native-direct-call-wat 4 t nil nil nil t)
@@ -2539,8 +2621,22 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
           ,(native-object '(local.get $c)) ,(native-object '(local.get $d))))))))))
   ;; Failed fixed guards only read this actual function; successful ones return.
   ;; Share its ID from the original first query until the ordinary fallback.
-  #@(local.set $id (call $native-builtin-id ,(native-object '(local.get $function))))
+  #@(local.set $id (call $native-builtin-id (local.get $function-object)))
   (native-fixed-vector-call-wat 4)
+  #@(if (i32.eq (local.get $id) (i32.const ,(- -2 (runtime-symbol-id 'aref))))
+    (then
+      (drop (call $native-checked-value (local.get $a)))
+      (drop (call $native-checked-value (local.get $b)))
+      (drop (call $native-checked-value (local.get $c)))
+      (drop (call $native-checked-value (local.get $d)))
+      (local.set $index (call $array-rank2-index ,(native-object '(local.get $b))
+        ,(native-object '(local.get $c)) ,(native-object '(local.get $d))))
+      (if (i32.ge_s (local.get $index) (i32.const 0))
+        (then
+          (drop (call $array-raw-element ,(native-object '(local.get $b))
+            (local.get $index) ,(native-object '(local.get $a)) (i32.const 1)))
+          (call $clear-values)
+          (return (local.get $a))))))
   #@(if (i32.eq (local.get $id)
                  (i32.const ,(runtime-symbol-id 'list)))
     (then (return (extern.convert_any
@@ -2714,7 +2810,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-packet-length-cl) ($native-packet-ref-cl) ($native-arguments-list)
   ($native-argument-present) ($native-keyword-find-cl) ($native-check-keywords-cl)
   ($native-keyword-find) ($native-keyword-present) ($native-keyword-argument) ($native-check-keywords)
-  ($native-two-arguments) ($native-packed-argument) ($native-list-tail-cl) ($native-list-tail) ($native-private-spine-count-cl) ($native-check-private-spine) ($native-argument-cl) ($native-argument) ($native-rest-argument-cl) ($native-rest-argument) ($native-check-arguments-cl) ($native-check-arguments) ($native-check-apply-arguments) ($native-check-apply-list) ($native-environment)
+  ($native-two-arguments) ($native-packed-argument) ($native-list-tail-cl) ($native-list-tail) ($native-private-spine-count-cl) ($native-check-private-spine) ($native-argument-cl) ($native-argument) ($native-rest-argument-cl) ($native-rest-argument) ($native-prepare-dynamic-rest) ($native-dynamic-rest-length) ($native-check-arguments-cl) ($native-check-arguments) ($native-check-apply-arguments) ($native-check-apply-list) ($native-environment)
   ($native-restore-environment) ($native-bind)
   ($native-block-enter) ($native-block-environment) ($native-block-return) ($native-block-match) ($native-block-values)
   ($native-control) ($native-restart-signal) ($native-throw)
@@ -2753,7 +2849,8 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-character-code-at-unboxed-inline)
   ($native-character-code-at64-unboxed-inline)
   ($native-vector-set-inline)
-  ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
+  ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-frame-enter) ($native-frame-leave)
+  ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
   ($native-call0) ($native-call1) ($native-call-values1) ($native-call2) ($native-call3) ($native-call4) ($native-generic-call)
   ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)

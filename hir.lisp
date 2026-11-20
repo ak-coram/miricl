@@ -248,7 +248,7 @@
 
 (defun hir-declarations (body &optional documentation)
   (declare (type list body))
-  (let ((specials nil) (types nil) (policy nil) (custom nil))
+  (let ((specials nil) (types nil) (policy nil) (custom nil) (extent nil))
     (loop while body do
       (cond
         ((and documentation (stringp (first body)) (cdr body))
@@ -266,7 +266,10 @@
               (let ((type (copy-hir-debug-type (second declaration))))
                 (dolist (name (cddr declaration))
                   (push (cons (list :ftype (hir-code-name name)) type) policy))))
-             ((optimize ignore ignorable dynamic-extent declaration))
+             (dynamic-extent
+              (dolist (name (cdr declaration))
+                (push (if (consp name) (list 'function (hir-code-name (second name))) name) extent)))
+             ((optimize ignore ignorable declaration))
              (otherwise
               ;; Proclaimed declaration names are not shorthand type names.
               ;; Share the runtime's metadata without consulting host types.
@@ -282,7 +285,7 @@
     ;; Retain opaque free declarations until the actual body contour begins.
     ;; Analysis-only callers of this splitter never execute extension handlers.
     (values (if custom (cons (cons 'declare (nreverse custom)) (copy-list body)) body)
-      specials (nreverse types) (nreverse policy))))
+      specials (nreverse types) (nreverse policy) (nreverse extent))))
 
 (defun hir-intersect-types (left right)
   (cond ((eq left t) right) ((eq right t) left) ((equal left right) left)
@@ -1708,7 +1711,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
     (setf (hir-block-environment *hir-block*) *hir-dynamic*)
     (setf (hir-function-environment *hir-function*) *hir-dynamic*)
     (push *hir-function* (hir-unit-functions *hir-unit*))
-    (multiple-value-bind (body specials types policy)
+    (multiple-value-bind (body specials types policy extent)
         (hir-declarations (cddr form) t)
       (let* ((local variables) (index 0) (parameters (second form)) (mode :required)
              (required (or (position-if (lambda (p) (member p lambda-list-keywords)) parameters) (length parameters)))
@@ -1728,7 +1731,11 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                (setq parameter (pop parameters))
                (when (member parameter names) (error "Duplicate parameter ~S." parameter))
                (push parameter names)
-               (setq local (hir-bind-value parameter (hir-emit :rest-argument nil :single (list index)) local specials)
+               (setq local (hir-bind-value parameter
+                             (hir-emit (if (and (member parameter extent)
+                                                (not (hir-special-p parameter specials)))
+                                           :dynamic-rest-argument :rest-argument)
+                               nil :single (list index)) local specials)
                      mode :after-rest)
                (when types (setq *hir-types* (hir-bound-type-environment parameter local types))))
               ((eq parameter '&aux)
@@ -1915,6 +1922,7 @@ global definitions. Internal calls refer to this group's lexical definitions."
   ;; Build its index once; graph-dependent validation tables remain fresh.
   (let ((table (make-hash-table :test 'eq)))
     (dolist (shape '((:constant 0 0 1 1) (:argument 0 0 1 1) (:rest-argument 0 0 1 1)
+                      (:dynamic-rest-argument 0 0 1 1)
                       (:argument-present 0 0 1 1) (:keyword-present 0 0 2 2)
                       (:keyword-argument 0 0 2 2) (:check-keywords 0 0 3 3)
                       (:check-arguments 0 0 2 2) (:check-apply-arguments 1 1 1 1)
@@ -2078,11 +2086,15 @@ global definitions. Internal calls refer to this group's lexical definitions."
                             (eq (hir-value-kind (first inputs)) :single)
                             (eq (hir-value-kind (hir-instruction-output object)) :single))
                  (compiler-input-fail "HIR copy" object "copy requires single-value operands")))
+             (when (eq opcode :dynamic-rest-argument)
+               (unless (and (hir-instruction-output object)
+                            (eq (hir-value-kind (hir-instruction-output object)) :single))
+                 (compiler-input-fail "HIR dynamic rest" object "requires a single-value output")))
              (case opcode
                (:call
                 (unless (or (null attributes) (equal attributes '(:speed)))
                   (compiler-input-fail "HIR call policy" attributes "expected NIL or (:SPEED)")))
-               ((:argument :rest-argument :argument-present :check-apply-arguments :checked-argument :value-ref :capture)
+               ((:argument :rest-argument :dynamic-rest-argument :argument-present :check-apply-arguments :checked-argument :value-ref :capture)
                 (unless (typep (first attributes) '(unsigned-byte 32))
                   (compiler-input-fail "HIR index" attributes "expected a nonnegative 32-bit index")))
                ((:keyword-present :keyword-argument :check-keywords)

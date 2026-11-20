@@ -625,17 +625,27 @@ cannot use the ordinary branch writer. Loops never supply exit aliases.
 
 =native-outline-code= shares repeated straight-line regions using exact normalized bytes
 and Wasm types. Local renaming preserves aliases; reads before the first write become
-inputs, and written locals used later become outputs. Regions neither consume inherited
-stack operands nor cross control transfers. Unknown result types and bodies with exception
+inputs, and every written local becomes an output. Returning all writes preserves uses
+reached through loop backedges; textual instruction order does not prove a write dead.
+Regions neither consume inherited stack operands nor cross control transfers. Unknown
+result types and bodies with exception
 handlers decline outlining. Each site supplies its own local mapping, and selected sites
 must not overlap. Encoded call, argument/result traffic, helper and section costs determine
 whether sharing saves space under the function's policy.
 
-Discovery checks every endpoint from 16 through 128 instructions, subject to minimum byte
-size and stack shape. Local simplification can change region lengths, so endpoint selection
-does not depend on a sparse length schedule. Per-function and global scan budgets, bounded
-region length, and caps on groups, occurrences and helpers limit work and storage. Exhausted
-budgets retain ordinary code; discovery order can limit the repetitions found.
+Large-region discovery checks every endpoint from 16 through 128 instructions, subject to
+minimum byte size and stack shape. A separate scan from the other end of the module finds
+short regions of 3 through 16 instructions under SPACE 3. It first counts fingerprints,
+then admits groups whose frequency and gross byte size could repay the minimum saving.
+This filter reserves group storage for repeated sequences; exact normalized bytes and types
+still establish every match. Sites whose argument, call and result traffic cannot shrink
+the original region are discarded before retention. Final selection prices complete helpers
+and chooses nonoverlapping sites from both scans together.
+
+Local simplification can change region lengths, so endpoint selection does not depend on a
+sparse length schedule. Each scan has independent per-function and global work budgets;
+bounded region length and caps on groups, occurrences and helpers limit work and storage.
+Exhausted budgets retain ordinary code; discovery order can limit the repetitions found.
 Discovery extends local, input and write sets as each endpoint advances. Retained sites
 own copies of their local mappings. A rolling fingerprint includes opcodes and nonlocal
 immediate bytes, omitting original local indices and terminal local reads, including reads

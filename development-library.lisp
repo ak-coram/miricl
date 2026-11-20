@@ -188,7 +188,8 @@
             ((and (consp type) (member head '(array simple-array vector)) (cdr type)
                   (not (eq (cadr type) '*)))
              (let ((upgraded (upgraded-array-element-type (cadr type))))
-               (cond ((eq upgraded 'character) 1) ((eq upgraded 'bit) 3) ((null upgraded) 4) (t 2))))
+               (cond ((eq upgraded 'character) 1) ((eq upgraded 'bit) 3) ((null upgraded) 4)
+                     ((eq upgraded 'fixnum) 5) (t 2))))
             (t 2))))
 ;; The unspecified initial contents retain the target's chosen NUL character.
 (defun make-sequence (result-type size &key (initial-element nil supplied-p))
@@ -200,6 +201,8 @@
                                       (if supplied-p initial-element 0)))
                        ((eql kind 4) (if supplied-p (make-array size :element-type nil :initial-element initial-element)
                                                        (make-array size :element-type nil)))
+                       ((eql kind 5) (make-array size :element-type 'fixnum :initial-element
+                                      (if supplied-p initial-element 0)))
                        (t (%%sequence-construction 6 size initial-element)))))
     (unless (typep result result-type)
       (error 'type-error :datum result :expected-type result-type)) result))

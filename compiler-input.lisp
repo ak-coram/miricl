@@ -241,6 +241,16 @@ Objects inside MEMBER and EQL remain literal data, including cyclic objects."
          (dolist (name (cddr declaration)) (compiler-variable-name name "TYPE declaration variable")))
         ((inline notinline)
          (dolist (name (cdr declaration)) (compiler-function-name name "function declaration")))
+        (dynamic-extent
+         (dolist (name (cdr declaration))
+           (if (consp name)
+               (progn
+                 (unless (and (= (compiler-list-length name "DYNAMIC-EXTENT function") 2)
+                              (eq (first name) 'function))
+                   (compiler-input-fail "DYNAMIC-EXTENT declaration" name
+                     "expected a variable or (FUNCTION function-name)"))
+                 (compiler-function-name (second name) "DYNAMIC-EXTENT function"))
+               (compiler-variable-name name "DYNAMIC-EXTENT variable"))))
         (ftype
          (unless (cdr declaration) (compiler-input-fail "FTYPE declaration" declaration "missing function type"))
          (compiler-type-specifier (second declaration))

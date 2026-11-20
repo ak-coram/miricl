@@ -97,7 +97,7 @@
                       (:function-reference
                        (case number (35 (list (svref literals a) 'inline))
                          (36 (list (svref literals a) 'notinline)) (otherwise (list (svref literals a)))))
-                      ((:argument :argument-present :rest-argument :value-ref :control-call :restart-signal
+                      ((:argument :argument-present :rest-argument :dynamic-rest-argument :value-ref :control-call :restart-signal
                         :check-apply-arguments :checked-argument) (list a))
                       (:check-arguments (list a (1- b)))
                       ((:keyword-present :keyword-argument) (list a (svref literals b)))

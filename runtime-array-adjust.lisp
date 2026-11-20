@@ -145,6 +145,7 @@
       (local.set $kind (call $array-kind (local.get $object)))
       (if (i32.eq (local.get $kind) (i32.const 1)) (then (drop (call $character-code (local.get $argument)))))
       (if (i32.eq (local.get $kind) (i32.const 2)) (then (drop (call $bit-value (local.get $argument)))))
+      (if (i32.eq (local.get $kind) (i32.const 4)) (then (drop (call $array-fixnum-value (local.get $argument)))))
       (if (i32.eq (local.get $kind) (i32.const 3))
         (then (call $type-fail (local.get $argument) (ref.null eq) (i32.const ,(runtime-error-code :expected-designator)))))
       (return (local.get $argument))))
@@ -377,6 +378,7 @@
       ;; Check the new element before any growth can change the vector.
       (if (i32.eq (local.get $kind) (i32.const 1)) (then (drop (call $character-code (local.get $value)))))
       (if (i32.eq (local.get $kind) (i32.const 2)) (then (drop (call $bit-value (local.get $value)))))
+      (if (i32.eq (local.get $kind) (i32.const 4)) (then (drop (call $array-fixnum-value (local.get $value)))))
       (if (i32.eq (local.get $kind) (i32.const 3))
         (then (call $type-fail (local.get $value) (ref.null eq) (i32.const ,(runtime-error-code :expected-designator)))))
       (local.set $growth (if (result i32) (ref.is_null (local.get $extension))
