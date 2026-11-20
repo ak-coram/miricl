@@ -2,7 +2,7 @@
 import fs from 'node:fs/promises';
 import readline from 'node:readline';
 import path from 'node:path';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {collectCompilationStatistics, writeCompilationStatistics} from './compilation-statistics.mjs';
 
 const options = {devServer: false, tcpBridge: false, entryPoints: [], keep: []};
@@ -87,7 +87,7 @@ if (help) {
     ? await replCompilerImage(selectedImage) : undefined;
   const {TerminalDebugger} = await import('./terminal-debugger.mjs');
   const debuggerUI = options.bundle || options.optimize ? undefined : new TerminalDebugger();
-  const interpreter = await Miricl.instantiate(compilerImage ?? await fs.readFile(selectedImage), {
+  const interpreter = await loadMiricl(compilerImage ?? await fs.readFile(selectedImage), {
     onOutput: output => process.stdout.write(output), onThreadError: report,
     onDebugger: debuggerUI && (event => debuggerUI.handle(event))
   });

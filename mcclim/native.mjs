@@ -2,13 +2,13 @@
 // node mcclim/native.mjs [portable.wasm] [native.wasm] [runtime.wasm]
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {Miricl} from '../scripts/miricl.mjs';
+import {loadMiricl} from '../scripts/miricl-loader.mjs';
 import {mcclimFiles} from './files.mjs';
 import {collectCompilationStatistics, writeCompilationStatistics} from '../scripts/compilation-statistics.mjs';
 const [input = 'mcclim/build/mcclim-demo-library.wasm',
   output = 'mcclim/build/mcclim-demo-native.wasm', runtime = 'miricl.wasm'] = process.argv.slice(2);
 let count = 0, file = '', started = performance.now();
-const vm = await Miricl.instantiate(await fs.readFile(runtime), {
+const vm = await loadMiricl(await fs.readFile(runtime), {
   onOutput: text => process.stdout.write(text),
   imports: {mcclimBuild: {progress(name, compiled) {file = name; count = compiled;}}},
 });

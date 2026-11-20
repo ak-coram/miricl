@@ -1,11 +1,11 @@
 // Reusable browser/Node session. Algebra and parsing run entirely in MIRICL.
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 const lispString = text => '"' + text.replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"';
 
 export async function createMaxima(image, core, {progress = () => {}, onPrompt, ...host} = {}) {
   const results = [];
   let answer;
-  const vm = await Miricl.instantiate(image, {...host, imports: {...host.imports,
+  const vm = await loadMiricl(image, {...host, imports: {...host.imports,
     maxima: {
       result(label, text) {results.push({label, text});},
       prompt(text) {answer = undefined; onPrompt(text);},

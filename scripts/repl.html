@@ -134,14 +134,14 @@
 <noscript>This REPL needs JavaScript and WebAssembly.</noscript>
 <script id="miricl-wasm" type="application/gzip">@@MIRICL_WASM@@</script>
 <script id="miricl-worker" type="text/plain">
-@@MIRICL_ADAPTER@@
+@@MIRICL_LOADER@@
 
 let interpreter;
 const debuggerStops = new Map();
 self.onmessage = async ({data}) => {
   try {
     if (data.type === 'initialize') {
-      interpreter = await Miricl.instantiate(data.bytes, {
+      interpreter = await loadMiricl(data.bytes, {
         onOutput: output => self.postMessage({type: 'output', output}),
         onDebugger: event => {
           if (event.type === 'stopped') {

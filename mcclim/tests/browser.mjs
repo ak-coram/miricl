@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 const files = new Map([
-  ['/miricl.js', await fs.readFile(new URL('../../miricl.js', import.meta.url))],
+  ['/miricl-loader.mjs', await fs.readFile(new URL('../../scripts/miricl-loader.mjs', import.meta.url))],
   ['/core.wasm', await fs.readFile(process.argv[2] ?? new URL('../build/mcclim-core.wasm', import.meta.url))],
 ]);
 // A cached image can skip the build that normally creates this directory.
@@ -104,14 +104,14 @@ const html = `<!doctype html><meta charset="utf-8"><style>
 body {margin:0;background:#9999cc} #mcclim-desktop {width:960px;height:700px}
 .mcclim-window {background:#ffffea;border:1px solid #333;box-shadow:4px 4px #3335}
 </style><div id="mcclim-desktop"></div><script type="module">
-import {Miricl} from './miricl.js';
+import {loadMiricl} from './miricl-loader.mjs';
 globalThis.output = '';
 addEventListener('error', event => {
   globalThis.callbackFailure = {message:event.error?.message,cause:String(event.error?.cause),
     causeName:event.error?.cause?.name,code:event.error?.code,backtrace:event.error?.backtrace};
 });
 try {
- globalThis.app = await Miricl.instantiate(await (await fetch('./core.wasm')).arrayBuffer(),
+ globalThis.app = await loadMiricl(await fetch('./core.wasm'),
    {onOutput: text => {globalThis.output += text;},
     onThreadError: error => {globalThis.failure = error.message+'\\n'+error.backtrace;}});
  app.evaluate('(setq miricl-compiler:*compile-evaluations* nil) (values)');

@@ -1,5 +1,5 @@
 // Shared by the Node probe and its browser worker. No host Lisp is involved.
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 
 export const maximaSmokeCases = [
   ['arithmetic', '2+3*4;', '14;'],
@@ -16,7 +16,7 @@ export const maximaSmokeCases = [
 
 export async function probeMaxima(image, files, emit = () => {}, mode = 'source', options = {}) {
   const report = {mode, stages: [], loads: [], compilations: [], tests: [], suiteProgress: []};
-  const createVM = () => Miricl.instantiate(image, {imports: {probe: {
+  const createVM = () => loadMiricl(image, {imports: {probe: {
     event(kind, file) {
       if (kind === 'load' || kind === 'compile')
         report[kind === 'load' ? 'loads' : 'compilations'].push(file);

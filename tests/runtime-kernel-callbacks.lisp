@@ -107,7 +107,25 @@
                            :fixed-callbacks (list (list 1 primitive))) nil)
                   (miricl-compiler::compiler-input-error () t)))
         (assert (stringp (miricl-cross:runtime-kernel-wat 'miricl::$entry 'callback-test-entry
-                           :fixed-callbacks descriptor)))))
+                           :fixed-callbacks descriptor)))
+        ;; A portable pass can be cold in the shipped compiler while remaining
+        ;; part of the active host backend. Replacing it must invalidate a warm
+        ;; kernel, rather than returning code compiled by the previous pass.
+        (dolist (pass '(miricl-compiler::native-simplify-ops-lisp
+                        miricl-compiler::native-op-liveness-lisp))
+          (let ((original (fdefinition pass)) (calls 0))
+            (unwind-protect
+                (progn
+                  (setf (fdefinition pass)
+                        (lambda (&rest arguments)
+                          (incf calls)
+                          (apply original arguments)))
+                  (assert (stringp (miricl-cross:runtime-kernel-wat 'miricl::$entry 'callback-test-entry
+                                     :fixed-callbacks descriptor)))
+                  (assert (plusp calls)))
+              (setf (fdefinition pass) original))
+            (assert (stringp (miricl-cross:runtime-kernel-wat 'miricl::$entry 'callback-test-entry
+                               :fixed-callbacks descriptor)))))))
     ;; The opaque callback is deliberately represented by an integer in this
     ;; private substrate: zero is the saved primitive; one is a replacement.
     (fixture "copied"

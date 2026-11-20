@@ -25,6 +25,16 @@ node lem/tests/image.mjs build/lem/miricl-lem.wasm
 node lem/tests/browser.mjs build/lem/site
 #+end_src
 
+The Node application driver reuses MIRICL's existing platform adapter for Wasm
+instantiation, asynchronous scheduling and checkpoint/save/restore entry points.
+Sharing those entry points with the browser runtime avoids a second host adapter
+and keeps scheduler, image-format and validation integration in one maintained
+implementation. The driver uses Node built-in modules without additional packages;
+SBCL runs the pinned upstream Lisp Unicode data generator. ASDF and application
+compilation execute as Common Lisp inside Wasm. Page packaging copies, compresses
+and versions the resulting artifacts; this driver adds no compiler, bytecode
+linker or compiler-bootstrap algorithm.
+
 The browser check streams the packaged files and limits Chromium to one renderer.
 =LEM_BROWSER_EVIDENCE= selects its observation directory; otherwise it creates a
 temporary directory. A failed observation records scalar Lisp/DOM state, console
@@ -241,6 +251,32 @@ completion or cancellation produces the next prompt. Navigation and source-buffe
 editing remain available while yielding Lisp work runs; pending unsent REPL input
 is not accepted and then overwritten by a later result.
 
+=C-c C-m= (or =lisp-macroexpand=) invokes the genuine LEM one-step command for
+the form at point. Each query opens its own read-only typeout buffer, labelled
+with the captured source buffer/tick, execution-start package and global =NIL=
+lexical environment. The reader uses the session readtable at serialized
+execution; a surrounding =MACROLET= or =SYMBOL-MACROLET= is not reconstructed.
+The generic service preserves both actual =MACROEXPAND-1= values, distinguishing
+input =NIL= from an expansion to =NIL=. It never evaluates the expansion.
+
+The query reads exactly one form and rejects additional or incomplete trailing
+input before expansion. Both reads preserve normal target reader effects,
+including =#.= and custom readers; rejection and cancellation do not undo those
+effects. A bounded cycle-aware check validates the outer call spine, leaving
+argument data opaque. Circular quoted data and circular expansion results are
+valid. Full/recursive expansion, lexical macrostep and in-place replacement report
+useful unavailable-operation conditions.
+
+Macro/hook output appears separately from the bounded expansion display. Circle,
+depth, length and retained-character controls make this a diagnostic view, not
+replacement source. A query printer failure produces an explicit error while
+retaining its computed values and preceding output; the ordinary listener keeps
+its existing printing behavior. Custom reader, macro, hook and printer work can
+have effects, yield or fail; display bounds do not guarantee bounded execution.
+Completion updates only the exact owned result buffer, preserving later source
+edits and focus. Deleting a pending result cancels its exact request and releases
+its spinner; late delivery cannot recreate the buffer or overwrite another query.
+
 The optional =miricl-ide-services= system in =compatibility/ide-services/=
 has no LEM dependency and supplies reusable evaluation/compilation sessions.
 Requests run serially on a lazily created green thread. The editor only submits
@@ -328,6 +364,9 @@ Both source authentication and a fresh image restore run on a cache hit.
 The image retains development sources and system-loading support; this route
 does not produce a minimal application payload. A corrupt
 cache fails usefully. Only successfully built and restored images are published.
+The browser page loads =miricl-lem.wasm.gz= through =miricl-loader.mjs=. The saved
+image contains its matching JavaScript adapter; the site does not ship a separate
+full adapter file.
 Use a fresh output directory for a clean build. =--prepare-only= prepares these
 inputs and the cache key, including host data generation; it does not build or
 certify an application image.
@@ -345,8 +384,8 @@ that a remote run or external deployment has succeeded.
 ASDF compilation. Portable compilation is reported as a measurement; the native
 application stage is explicitly skipped. Cache reuse records cached coverage and
 no invented fresh counters. Instrumented durations include counter collection.
-The size report includes the complete image and separate adapter/application
-JavaScript, with raw, gzip level 9 and Brotli quality 11 measurements; the compiler
+The size report includes the complete image with its embedded adapter and the
+separate loader/application JavaScript, with raw, gzip level 9 and Brotli quality 11 measurements; the compiler
 inside the saved image is not added twice.
 
 For a focused report from existing matching artifacts, without rebuilding or

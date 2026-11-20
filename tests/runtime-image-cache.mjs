@@ -40,7 +40,8 @@ test('runtime cache follows compiler and host dependencies independently of appl
     const compilerChanged = await key(); assert.notEqual(compilerChanged, initial);
     await fs.writeFile(dependency, 'changed host library');
     let previous = await key(); assert.notEqual(previous, compilerChanged, 'Host dependency bytes invalidate the distribution');
-    for (const file of ['scripts/miricl.mjs', 'vendor/asdf/asdf.lisp', 'libwasmtime.so']) {
+    for (const file of ['scripts/miricl.mjs', 'scripts/compiler-image-bootstrap.lisp',
+      'vendor/asdf/asdf.lisp', 'libwasmtime.so']) {
       await fs.appendFile(path.join(workspace, file), '\nchanged input');
       const changed = await key(); assert.notEqual(changed, previous, file); previous = changed;
     }

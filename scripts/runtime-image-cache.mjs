@@ -8,9 +8,9 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {pathToFileURL} from 'node:url';
 const run = promisify(execFile), root = path.resolve(import.meta.dirname, '..');
-export const runtimeArtifacts = ['miricl.js', 'miricl.wasm', 'miricl-interpreter.wasm', 'miricl-cold.wasm',
+export const runtimeArtifacts = ['miricl.js', 'miricl-loader.mjs', 'miricl.wasm', 'miricl-interpreter.wasm', 'miricl-cold.wasm',
   'miricl-repl.wasm', 'miricl-asdf.wasm', 'runtime/miricl.js', 'runtime/version-assets.mjs',
-  'runtime/compress-images.mjs', 'build/asdf/asdf.lisp'];
+  'runtime/compress-images.mjs', 'runtime/miricl-loader.mjs', 'build/asdf/asdf.lisp'];
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const read = name => fs.readFile(path.resolve(root, name));
 export async function runtimeInputKey({workspace = root, execute = run} = {}) {
@@ -23,9 +23,10 @@ export async function runtimeInputKey({workspace = root, execute = run} = {}) {
   const tracked = (await run('git', ['ls-files', '-z'], {cwd: root, maxBuffer: 4 * 1024 * 1024})).stdout.split('\0');
   for (const name of tracked.filter(name => /^[^/]+\.(?:lisp|asd)$/.test(name)).sort()) add(name, await read(name));
   const scripts = new Set(['build-wasm.lisp', 'html-builder.lisp', 'build-runtime-pages.lisp', 'runtime-cache-host-inputs.lisp',
-    'runtime-image-cache.mjs', 'build-asdf.mjs', 'prepare-compiler-image.mjs', 'native-module-linker.mjs',
+    'runtime-image-cache.mjs', 'build-asdf.mjs', 'prepare-compiler-image.mjs', 'compiler-image-bootstrap.lisp',
     'build-adapter.mjs', 'miricl.mjs', 'dev-repl.mjs', 'dev-filesystem.mjs', 'repl.mjs', 'host-filesystem.mjs',
-    'terminal-debugger.mjs', 'repl-bridge.mjs', 'compilation-statistics.mjs', 'version-assets.mjs', 'compress-images.mjs']);
+    'terminal-debugger.mjs', 'repl-bridge.mjs', 'compilation-statistics.mjs', 'version-assets.mjs', 'compress-images.mjs',
+    'miricl-loader.mjs']);
   for (const name of tracked.filter(name => /^scripts\/(?:repl[^/]*\.lisp|ports\/.*\.lisp)$/.test(name)))
     add(name, await read(name));
   // Include static and dynamic relative JS import closure of the build tools.

@@ -750,12 +750,13 @@
         (then
           (array.set $digits (local.get $active) (local.get $top) (local.get $i))
           (local.set $top (i32.add (local.get $top) (i32.const 1)))
-          (if ,(wat-native-op-member '(#x02 #x03))
-            (then (if (call $eql ,(wat-native-simplify-field '$op 1) (call $int (i32.const 64)))
-              (then (local.set $void (i32.const 1))))))
+          (if (i32.or (i32.eq (local.get $code) (i32.const 2))
+                (i32.and (i32.eq (local.get $code) (i32.const 3))
+                  (call $eql ,(wat-native-simplify-field '$op 1) (call $int (i32.const 64)))))
+            (then (local.set $void (i32.const 1))))
           (local.set $dead ,(wat-native-op-member '(#x00 #x08 #x0c #x0e #x0f #x12))))))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
-  ;; Success plus clean-scopes/void-scopes flags; zero is never an unsupported
+  ;; Success plus clean-scopes/candidate-scopes flags; zero is never an unsupported
   ;; marker (NIL is the host fallback marker).
   #@(call $int (i32.or (i32.const 1)
     (i32.or (i32.shl (local.get $clean) (i32.const 1)) (i32.shl (local.get $void) (i32.const 2))))))

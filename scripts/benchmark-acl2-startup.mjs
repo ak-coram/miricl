@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {portAcl2Source} from '../acl2/host.mjs';
 import {startWasmProfile} from './wasm-profile.mjs';
 
@@ -40,7 +40,7 @@ async function evaluate(name, source) {
   } finally {if (finish) await finish();}
 }
 try {
-  vm = await Miricl.instantiate(image);
+  vm = await loadMiricl(image);
   for (const entry of await fs.readdir('vendor/acl2', {withFileTypes: true})) {
     if (!entry.isFile() || entry.name === '.git') continue;
     vm.mountFile(`/acl2/${entry.name}`, portAcl2Source(entry.name,

@@ -47,8 +47,10 @@ if (!checkpoint) {
   files.push(['/acl2/miricl-host.lisp', await fs.readFile(path.join(root, 'acl2/miricl-host.lisp'))]);
 }
 await fs.mkdir(output, {recursive: true});
+// Remove the former separate adapter when repackaging an existing site.
+await Promise.all(['miricl.js', 'miricl.mjs'].map(name => fs.rm(path.join(output, name), {force: true})));
 const assets = ['index.html', 'examples.mjs', 'worker.mjs', 'app.mjs', 'session-store.mjs',
-  'miricl.mjs', 'acl2.mjs', 'filesystem-archive.mjs'];
+  'miricl-loader.mjs', 'acl2.mjs', 'filesystem-archive.mjs'];
 assets.push('acl2-books.mjs', 'dev-filesystem.mjs');
 const data = checkpoint ? {'acl2-image.wasm.gz': gzipSync(checkpoint, {level: 9})} : {
   'miricl.wasm.gz': gzipSync(image, {level: 9}), 'filesystem.bin.gz': gzipSync(encodeFilesystem(files), {level: 9}),
@@ -60,7 +62,7 @@ await Promise.all([
     data[name] ? fs.writeFile(path.join(output, name), data[name]) : fs.rm(path.join(output, name), {force: true})),
   ...['index.html', 'examples.mjs', 'worker.mjs'].map(name => fs.copyFile(path.join(root, 'acl2', name), path.join(output, name))),
   ...['app.mjs', 'session-store.mjs'].map(name => fs.copyFile(path.join(root, 'app-common', name), path.join(output, name))),
-  ...['miricl.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs'].map(name => fs.copyFile(path.join(root, 'scripts', name), path.join(output, name))),
+  ...['miricl-loader.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs'].map(name => fs.copyFile(path.join(root, 'scripts', name), path.join(output, name))),
   fs.copyFile(path.join(upstream, 'LICENSE'), path.join(output, 'LICENSE')),
   fs.copyFile(path.join(root, 'LICENSE'), path.join(output, 'MIRICL-LICENSE')),
 ]);

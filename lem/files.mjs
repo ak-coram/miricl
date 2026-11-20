@@ -358,7 +358,7 @@ export async function prepareLemSources({workspace = root, inspect = inspectChec
   const modeSources = ['errors', 'ui-mode', 'connections', 'message-dispatcher', 'grammar',
     'internal-package', 'message', 'file-conversion', 'ext/detective', 'ext/completion',
     'lisp-mode', 'message-definitions', 'repl', 'ext/inspector', 'ext/eval', 'ext/sldb',
-    'ext/paren-coloring', 'package'];
+    'ext/paren-coloring', 'ext/macroexpand', 'package'];
   const upstream = await source('vendor/lem', '/lem', ['src', 'resources', 'extensions/lisp-syntax'],
     ['lem.asd', 'LICENCE', ...modeSources.map(name => `extensions/lisp-mode/${name}.lisp`)]);
   await source('mcclim/deps/alexandria', '/deps/alexandria', ['alexandria-1', 'alexandria-2'], ['alexandria.asd', 'LICENCE']);

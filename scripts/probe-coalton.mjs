@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {coaltonFiles} from './coalton-files.mjs';
 import {createHash} from 'node:crypto';
 const output = process.argv[3] ?? 'build/coalton/compile.json';
@@ -44,7 +44,7 @@ async function saveFasl(file, previous) {
   await fs.writeFile(`${target}.tmp`, bytes);
   await fs.rename(`${target}.tmp`, target);
 }
-const vm = await Miricl.instantiate(image, {
+const vm = await loadMiricl(image, {
   imports: {coaltonBuild: {event(kind, file) {
     if (kind === 'finished') {
       const {operation, start} = activeFiles.pop();

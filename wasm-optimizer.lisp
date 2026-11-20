@@ -214,7 +214,8 @@
 
 (defun native-op-liveness (ops total exceptions &optional blocks)
   (declare (type simple-vector ops) (type (unsigned-byte 32) total)
-           (type (or null simple-vector) blocks))
+           (type (or null simple-vector) blocks)
+           (notinline native-op-liveness-lisp))
   (setq blocks (or blocks (native-liveness-blocks ops)))
   (when (compiler-primitive 41 ops (vector blocks exceptions) total)
     (return-from native-op-liveness blocks))
@@ -687,9 +688,10 @@
 
 (defun native-clean-scopes (ops bytes)
   (declare (type simple-vector ops) (type vector bytes))
-  ;; MergeBlocks/RemoveUnusedBrs: an untargeted void block/loop contributes no
-  ;; execution or values. Retain if scopes and all exception/cast branch scopes.
-  ;; Rewrite depths against the original scope stack when wrappers disappear.
+  ;; Untargeted void wrappers contribute no execution or values. Adjacent BLOCK
+  ;; wrappers with identical literal signatures also have the same exit; alias
+  ;; their labels before removing the inner wrapper. Retain IF, exception and
+  ;; cast scopes, and rewrite depths against the complete original scope stack.
   (when (loop for op across ops thereis
           (or (eql (native-op-code op) #x1f)
               (and (eql (native-op-code op) #x0d)
@@ -699,25 +701,55 @@
          (ends (make-array size :initial-element nil))
          (used (make-array size :initial-element nil))
          (removed (make-array size :initial-element nil))
+         (previous (make-array size :initial-element nil))
          (scopes (make-array size)) (prefix (make-array (1+ size) :initial-element 0))
-         (top 0) (changed nil))
+         (top 0) (prior nil) (complete nil) (changed nil))
     (declare (type (unsigned-byte 32) size top)
-             (type simple-vector codes ends used removed scopes prefix))
+             (type simple-vector codes ends used removed previous scopes prefix))
     (dotimes (i size)
       (declare (type (unsigned-byte 32) i))
       (let ((op (aref ops i)))
+        (when (aref codes i)
+          (when complete (return-from native-clean-scopes ops))
+          (setf (aref previous i) prior) (setq prior i))
         (case (aref codes i)
           ((#x02 #x03 #x04) (setf (aref scopes top) i) (incf top))
-          (#x0b (when (plusp top) (decf top) (setf (aref ends (aref scopes top)) i)))
+          (#x0b (if (plusp top)
+                    (progn (decf top) (setf (aref ends (aref scopes top)) i))
+                    (setq complete t)))
           ((#x0c #x0d #x0e)
            (dolist (depth (if (eql (aref codes i) #x0e) (native-op-argument op)
                              (list (native-op-argument op))))
              (when (< depth top)
                (setf (aref used (aref scopes (- top depth 1))) t)))))))
+    ;; An incomplete match supplies no permission to delete or rewrite scopes.
+    (when (or (plusp top) (not complete)) (return-from native-clean-scopes ops))
+    (labels ((signature (index)
+               (let* ((op (aref ops index)) (argument (native-op-argument op)))
+                 (when (= (- (native-op-end op) (native-op-start op)) 2)
+                   ;; Match the writer: a newly selected literal result takes
+                   ;; precedence over the original bytes. The module decoder
+                   ;; otherwise represents every nonvoid signature as T.
+                   (if (member argument '(#x7f #x7e #x7d #x7c #x7b #x70 #x6f #x6e #x6d #x6c #x6b #x6a))
+                       argument
+                       (let ((literal (aref bytes (1+ (native-op-start op)))))
+                         (and (member literal '(#x40 #x7f #x7e #x7d #x7c #x7b #x70 #x6f #x6e #x6d #x6c #x6b #x6a))
+                              literal)))))))
+      ;; Reverse order propagates a targeted inner label through an arbitrary
+      ;; chain of aliases before deciding whether the surviving void label is
+      ;; unused. Openings and matching ENDs must be consecutive live records.
+      (loop for i downfrom (1- size) to 0 for outer = (aref previous i) do
+        (when (and (eql (aref codes i) #x02) outer
+                   (eql (aref codes outer) #x02)
+                   (eql (aref previous (aref ends outer)) (aref ends i))
+                   (signature i) (eql (signature i) (signature outer)))
+          (setf changed t (aref removed i) t)
+          (when (aref used i) (setf (aref used outer) t)))))
     (dotimes (i size)
       (declare (type (unsigned-byte 32) i))
-      (when (and (member (aref codes i) '(#x02 #x03))
-                 (eql (native-op-argument (aref ops i)) #x40) (not (aref used i)))
+      (when (or (aref removed i)
+                (and (member (aref codes i) '(#x02 #x03))
+                     (eql (native-op-argument (aref ops i)) #x40) (not (aref used i))))
         (setf changed t (aref removed i) t
               (native-op-code (aref ops i)) nil
               (native-op-code (aref ops (aref ends i))) nil)))
@@ -846,14 +878,18 @@
              (declare (type (or null (unsigned-byte 8)) live-code))
              (when live-code
                (setf (aref active top) i) (incf top)
-               (when (and (member live-code '(#x02 #x03)) (eql (native-op-argument op) #x40))
+               (when (or (= live-code #x02)
+                         (and (= live-code #x03) (eql (native-op-argument op) #x40)))
                  (setq void-scopes t))
                (setq dead (member live-code '(#x00 #x08 #x0c #x0e #x0f #x12)))))))))
     (when (and clean-scopes void-scopes) (native-clean-scopes ops bytes))
     (remove-if-not (lambda (op) (native-op-code op)) ops)))
 
 (defun native-simplify-ops (ops bytes &optional (clean-scopes t))
-  (declare (type simple-vector ops) (type vector bytes))
+  ;; Host kernel caches track the portable pass's live definition. Preserve
+  ;; that call across same-file compilation as well as cache invalidation.
+  (declare (type simple-vector ops) (type vector bytes)
+           (notinline native-simplify-ops-lisp))
   (let ((status (compiler-primitive 42 ops bytes)))
     (when status
       (when (and (logbitp 2 status) (or clean-scopes (logbitp 1 status)))

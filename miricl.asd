@@ -168,9 +168,17 @@
                (:file "scripts/repl-host-filesystem")
                (:file "scripts/repl-terminal")
                (:file "scripts/repl-command")
+               (:file "native-module-linker")
+               (:static-file "scripts/compiler-image-bootstrap.lisp")
                (:file "runtime-compiler-image")
+               (:file "image-adapter")
                (:file "miricl")
                (:file "interpreter-reader")))
+
+(asdf:defsystem #:miricl/wasmtime-native
+  :description "Optional Wasmtime native-module service for host experiments"
+  :depends-on (#:miricl)
+  :components ((:file "host-native-service")))
 
 (asdf:defsystem #:miricl/*
   :depends-on (#:miricl))

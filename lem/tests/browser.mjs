@@ -88,9 +88,14 @@ try {
   };
   await command('Page.enable'); await command('Runtime.enable');
   await command('Emulation.setDeviceMetricsOverride', {width: 1100, height: 800, deviceScaleFactor: 1, mobile: false});
+  const navigationStarted = performance.now();
   await command('Page.navigate', {url: `http://127.0.0.1:${server.address().port}/`});
   stage='startup';
   await wait(() => js('globalThis.lemReady === true && !globalThis.lem?.threads?.main'), 'LEM did not finish starting');
+  const firstObservedReady = performance.now();
+  observations.push({startup: {navigationStarted, firstObservedReady,
+    elapsedMs: firstObservedReady - navigationStarted, pollIntervalMs: 25,
+    observation: 'First success of the existing ready and idle-main check.'}});
   stage='initial-lisp';
   const healthy = async () => {
     assert.equal(await js('!globalThis.lemFailure && document.getElementById("lem-desktop").dataset.lemState === "ready"'), true);
@@ -104,11 +109,12 @@ try {
     (and (string= (lem:buffer-text buffer) ${JSON.stringify(text).replaceAll('\\n', '\n')})
          (= (lem:line-number-at-point point) ${line}) (= (lem:point-column point) ${column}) t))`);
   const expectState = (text, line, column) => wait(async () => await state(text, line, column) === 'T\n', `Wrong buffer/point: ${JSON.stringify({text,line,column})}`);
-  const key = async (name, {shift = false, text = name.length === 1 ? name : undefined} = {}) => {
-    const params = {type: 'keyDown', key: name, modifiers: shift ? 8 : 0};
+  const key = async (name, {shift = false, ctrl = false, text = !ctrl && name.length === 1 ? name : undefined} = {}) => {
+    const modifiers = (shift ? 8 : 0) + (ctrl ? 2 : 0);
+    const params = {type: 'keyDown', key: name, modifiers};
     if (text !== undefined) params.text = text;
     await command('Input.dispatchKeyEvent', params);
-    await command('Input.dispatchKeyEvent', {type: 'keyUp', key: name, modifiers: shift ? 8 : 0});
+    await command('Input.dispatchKeyEvent', {type: 'keyUp', key: name, modifiers});
   };
   await js('document.querySelector(".lem-editor").focus()');
   stage='editing';
@@ -226,9 +232,11 @@ try {
     if(b){
       const png=await command('Page.captureScreenshot',{format:'png'});
       const [gx,gy]=geometry.absoluteGroup;
-      const samples=[[Math.floor(gx+b*cw/2+2),Math.floor(gy+b*ch/2)],
+      // One-pixel edges can start at half pixels for odd cell dimensions.
+      // Sample their centers, keeping the compositor's painted pixel.
+      const samples=[[Math.floor(gx+b*cw/2+2),Math.floor(gy+b*ch/2+0.5)],
                      [Math.floor(gx+b*cw+w*cw-2),Math.floor(gy+b*ch+h*ch-2)],
-                     [Math.floor(gx+b*cw/2),Math.floor(gy+1)]];
+                     [Math.floor(gx+b*cw/2+0.5),Math.floor(gy+1)]];
       lastPopupBodyPoint=samples[1];
       const composite=await js(`new Promise((resolve,reject)=>{const image=new Image();image.onerror=reject;image.onload=()=>{const c=document.createElement('canvas');c.width=image.width;c.height=image.height;const ctx=c.getContext('2d');ctx.drawImage(image,0,0);resolve(${JSON.stringify(samples)}.map(([x,y])=>Array.from(ctx.getImageData(x,y,1,1).data)));};image.src='data:image/png;base64,${png.data}';})`);
       assert.notDeepEqual(composite[0],geometry.background,'Visible border pixel missing');
@@ -377,8 +385,8 @@ try {
   await listener('(values 7 nil :tail)', ':ok', '(7 nil :tail)');
   await listener('(defpackage :browser-test-package (:use :cl)) (in-package :browser-test-package) (values 9)', ':ok', '(9)');
   await listener('(package-name *package*)', ':ok', '("BROWSER-TEST-PACKAGE")');
-  await listener('(progn (write-string "browser-output") (values 42))', ':ok', '(42)', 'browser-output');
-  await listener('(in-package :cl-user) (error "browser-error")', ':error', undefined, 'browser-error');
+  await listener('(progn (write-string (concatenate (quote string) "browser-" "output")) (values 42))', ':ok', '(42)', 'browser-output');
+  await listener('(in-package :cl-user) (error (concatenate (quote string) "browser-" "error"))', ':error', undefined, 'browser-error');
   await listener('(+ 40 2)', ':ok', '(42)');
   await queue(`(lem:switch-to-buffer (lem:make-buffer "*browser-compile-check.lisp*" :temporary t))
     (lem:change-buffer-mode (lem:current-buffer) 'lem-lisp-mode/internal::lisp-mode)
@@ -393,6 +401,76 @@ try {
   await queue('(lem:switch-to-buffer *browser-test-original-buffer*)');
   await expectState('abc\ndA!λzptqv', 2, 9);
   observations.push({localListenerValuesOutputErrorRecovery:true,guestCompileRegionLoaded:true});
+  stage='manual-macroexpand';
+  await lisp(`(defparameter *browser-test-expansion-executed* nil)
+    (defparameter *browser-test-expansion-started* nil)
+    (defparameter *browser-test-expansion-release* nil)
+    (defparameter *browser-test-expansion-unwound* nil)
+    (defparameter *browser-test-expansion-source* nil)
+    (defparameter *browser-test-expansion-result* nil)
+    (defparameter *browser-test-one-step-calls* 0)
+    (defmacro browser-one-step ()
+      (incf *browser-test-one-step-calls*)
+      (write-string (concatenate 'string "macro-" "stdout"))
+      '(setq *browser-test-expansion-executed* t))
+    (defmacro browser-wait-step ()
+      (unwind-protect
+           (progn (setq *browser-test-expansion-started* t)
+                  (loop until *browser-test-expansion-release* do (sleep 0.01))
+                  '(values :finished))
+        (setq *browser-test-expansion-unwound* t)))
+    (values)`);
+  const querySource = async source => {
+    await queue(`(setf *browser-test-expansion-source*
+      (lem:make-buffer (lem:unique-buffer-name "*browser-macro-source.lisp*") :temporary t))
+      (lem:switch-to-buffer *browser-test-expansion-source*)
+      (lem:change-buffer-mode (lem:current-buffer) 'lem-lisp-mode/internal::lisp-mode)
+      (setf (lem-lisp-mode/internal::buffer-package (lem:current-buffer)) "CL-USER")
+      (lem:insert-string (lem:current-point) ${JSON.stringify(source)})
+      (lem:buffer-start (lem:current-point))`);
+    // Actual DOM key input -> Lisp keymap -> genuine installed LEM command.
+    await key('c', {ctrl:true}); await key('m', {ctrl:true});
+    await wait(async () => await lisp(`(and lem-core::*typeout-window*
+      (let ((buffer (lem:window-buffer lem-core::*typeout-window*)))
+        (when (lem:buffer-value buffer 'lem-lisp-mode/connection::macroexpand-context)
+          (setq *browser-test-expansion-result* buffer) t)))`) === 'T\n', 'One-step command did not create its real result window');
+  };
+  await querySource('(browser-one-step)');
+  await wait(async () => await providerIdle() === 'T\n', 'One-step expansion did not settle');
+  assert.equal(await lisp(`(and (lem:buffer-read-only-p *browser-test-expansion-result*)
+    (string= "(browser-one-step)" (lem:buffer-text *browser-test-expansion-source*))
+    (null *browser-test-expansion-executed*)
+    (let ((text (lem:buffer-text *browser-test-expansion-result*)))
+      (and (search "global environment (NIL)" text) (search "expanded-p: true" text)
+           (search "macro-stdout" text) (search "Expansion:" text))) t)`), 'T\n');
+  await lisp(`(defparameter *browser-test-earlier-expansion* *browser-test-expansion-result*)
+    (defparameter *browser-test-earlier-expansion-text* (lem:buffer-text *browser-test-expansion-result*))
+    (values)`);
+  await queue('(lem-core::dismiss-typeout-window)');
+  await querySource('(browser-wait-step)');
+  await wait(async () => await lisp('*browser-test-expansion-started*') === 'T\n', 'Yielding macro did not start');
+  await queue(`(lem-core::dismiss-typeout-window)
+    (lem:switch-to-buffer *browser-test-expansion-source*)
+    (lem:buffer-end (lem:current-point)) (lem:insert-string (lem:current-point) " ; edited")`);
+  await lisp('(setq *browser-test-expansion-release* t) (values)');
+  await wait(async () => await providerIdle() === 'T\n', 'Edited-source query did not finish');
+  assert.equal(await lisp(`(and *browser-test-expansion-unwound*
+    (eq (lem:current-buffer) *browser-test-expansion-source*)
+    (string= "(browser-wait-step) ; edited" (lem:buffer-text *browser-test-expansion-source*))
+    (search "(browser-wait-step)" (lem:buffer-text *browser-test-expansion-result*))
+    (search "expanded-p: true" (lem:buffer-text *browser-test-expansion-result*)) t)`), 'T\n');
+  await lisp('(setq *browser-test-expansion-started* nil *browser-test-expansion-release* nil *browser-test-expansion-unwound* nil) (values)');
+  await querySource('(browser-wait-step)');
+  await wait(async () => await lisp('*browser-test-expansion-started*') === 'T\n', 'Second yielding macro did not start');
+  await queue('(lem:delete-buffer *browser-test-expansion-result*)');
+  await wait(async () => await providerIdle() === 'T\n', 'Deleting result did not cancel and finalize query');
+  assert.equal(await lisp(`(and *browser-test-expansion-unwound*
+    (not (member *browser-test-expansion-result* (lem:buffer-list)))
+    (null (lem:buffer-value *browser-test-expansion-result* 'lem-lisp-mode/connection::macroexpand-owner)) t)`), 'T\n');
+  await queue('(lem:switch-to-buffer *browser-test-original-buffer*)');
+  await expectState('abc\ndA!λzptqv', 2, 9);
+  observations.push({manualOneStepCommand:true,readonlyOwnedResult:true,macroOutputSeparated:true,
+    sourceEditSnapshotPreserved:true,deletedResultCancelsAndUnwinds:true});
   stage='provider-stop-cancellation';
   await lisp('(defparameter *browser-test-provider-unwound* nil) (defparameter *browser-test-provider-connection* nil) (values)');
   await queue(`(setf *browser-test-provider-connection* (lem-lisp-mode/connection:current-connection))
@@ -403,6 +481,21 @@ try {
       (request (first (lem-lisp-mode/connection:connection-requests connection))))
     (and request (eq :running (miricl-ide-services:request-state
       (lem-lisp-mode/connection:local-request-service request))) t))`) === 'T\n', 'Busy listener did not start before STOP');
+  await lisp(`(defparameter *browser-test-pending-query* nil)
+    (defparameter *browser-test-pending-query-buffer* nil)
+    (defparameter *browser-test-pending-query-text* nil)
+    (defparameter *browser-test-query-calls-before-stop* *browser-test-one-step-calls*)
+    (values)`);
+  await querySource('(browser-one-step)');
+  assert.equal(await lisp(`(progn
+    (setq *browser-test-pending-query-buffer* *browser-test-expansion-result*
+          *browser-test-pending-query-text* (lem:buffer-text *browser-test-expansion-result*)
+          *browser-test-pending-query*
+          (lem:buffer-value *browser-test-expansion-result* 'lem-lisp-mode/connection::macroexpand-owner))
+    (and *browser-test-pending-query*
+         (eq :queued (miricl-ide-services:request-state
+                       (lem-lisp-mode/connection:local-request-service *browser-test-pending-query*))) t))`), 'T\n');
+  await queue('(lem-core::dismiss-typeout-window) (lem:switch-to-buffer *browser-test-original-buffer*)');
   stage='ordered-stop';
   await queue(`(setf *browser-test-popup* (lem:display-popup-message "Pending at STOP" :timeout 5))`);
   await lisp(`(defparameter *browser-test-old-browser* lem-browser:*browser*)
@@ -440,6 +533,13 @@ try {
   assert.equal(await lisp(`(and *browser-test-provider-unwound*
     (null (lem-lisp-mode/connection:connection-requests *browser-test-provider-connection*))
     (not (miricl-ide-services:session-worker-alive-p (lem-lisp-mode/connection:connection-session *browser-test-provider-connection*))) t)`), 'T\n');
+  assert.equal(await lisp(`(and
+    (eq :cancelled (miricl-ide-services:request-state
+                    (lem-lisp-mode/connection:local-request-service *browser-test-pending-query*)))
+    (not (lem-lisp-mode/connection::local-request-active *browser-test-pending-query*))
+    (= *browser-test-query-calls-before-stop* *browser-test-one-step-calls*)
+    (null (lem:buffer-value *browser-test-pending-query-buffer* 'lem-lisp-mode/connection::macroexpand-owner))
+    (null (lem:buffer-value *browser-test-pending-query-buffer* 'lem/loading-spinner::spinner)) t)`), 'T\n');
   assert.equal(await lisp(`(and (null (lem:get-frame *browser-test-old-browser*))
     (null (lem-browser::browser-popups *browser-test-old-browser*))
     (null (lem-browser::browser-generation *browser-test-old-browser*))
@@ -458,6 +558,10 @@ try {
   await key('R');
   await wait(async () => await lisp('(and (search "R" (lem:buffer-text (lem:window-buffer (lem:current-window)))) t)') === 'T\n', 'Restarted editor did not accept input');
   await healthy();
+  assert.equal(await lisp(`(and
+    (string= *browser-test-pending-query-text* (lem:buffer-text *browser-test-pending-query-buffer*))
+    (string= *browser-test-earlier-expansion-text* (lem:buffer-text *browser-test-earlier-expansion*))
+    (= *browser-test-query-calls-before-stop* *browser-test-one-step-calls*) t)`), 'T\n');
   const remainingMs=Number(await lisp('(max 0 (ceiling (* 1000 (- *browser-test-old-deadline* (get-internal-real-time))) internal-time-units-per-second))'));
   assert.ok(remainingMs>0,'Restart did not precede the retained old deadline');
   await new Promise(resolve=>setTimeout(resolve,remainingMs+150));

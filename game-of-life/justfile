@@ -23,9 +23,9 @@ dev http='8000' websocket='4006' *options:
     done
     exec {{repl}} "${preopens[@]}" -S inherit-network=y miricl-repl.wasm --dev-server --http-port="$1" --websocket-port="$2" "${@:3}"
 
-# Compile with the precompiled compiler; publish four separate production files.
+# Compile with the precompiled compiler; publish the image and generic loader.
 build:
     {{ quote(node) }} runtime/miricl.js miricl-repl.wasm --optimize game-of-life --native --entry LIFE:START --output build/game-of-life.wasm --report build/retention.txt
-    cp index.html runtime/miricl.js images/miricl.wasm build/
+    cp index.html runtime/miricl-loader.mjs images/miricl.wasm build/
     {{ quote(node) }} runtime/compress-images.mjs build/miricl.wasm build/game-of-life.wasm
-    {{ quote(node) }} runtime/version-assets.mjs build index.html miricl.js miricl.wasm.gz game-of-life.wasm.gz
+    {{ quote(node) }} runtime/version-assets.mjs build index.html miricl-loader.mjs miricl.wasm.gz game-of-life.wasm.gz

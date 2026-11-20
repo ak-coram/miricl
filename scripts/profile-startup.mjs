@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import inspector from 'node:inspector';
 import {PerformanceObserver} from 'node:perf_hooks';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 
 const [imagePath, bundlePath, output, interval = '10000'] = process.argv.slice(2);
 if (!imagePath || !bundlePath || !output) throw new Error('Expected IMAGE BUNDLE OUTPUT-DIRECTORY');
@@ -44,7 +44,7 @@ const active = [];
 let vm, profile;
 const start = performance.now();
 try {
-  vm = await Miricl.instantiate(image, {imports: {startupProfile: {event(kind, first, end) {
+  vm = await loadMiricl(image, {imports: {startupProfile: {event(kind, first, end) {
     if (kind === 0) active.push({start: performance.now(), first, end,
       ...units.get(`${first}:${end}`)});
     else {

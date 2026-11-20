@@ -1,5 +1,5 @@
 // The browser REPL and Node tests use the same Coalton compiler and library.
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 
 export function coaltonInput(source, mode = 'lisp', {persistentPackage = false} = {}) {
   if (typeof source !== 'string') throw new TypeError('Expected source text.');
@@ -30,7 +30,7 @@ export function coaltonInput(source, mode = 'lisp', {persistentPackage = false} 
 
 export async function createCoalton(image, core, {progress = () => {}, replPackage, ...host} = {}) {
   if (core == null) progress('Restoring Coalton compiler and standard library');
-  const vm = await Miricl.instantiate(image, host);
+  const vm = await loadMiricl(image, host);
   try {
     let startup = {output: ''};
     if (core != null) {

@@ -2,12 +2,14 @@
 // retained development REPL and never creates DOM resources.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import {Miricl} from '../../scripts/miricl.mjs';
+import {loadMiricl} from '../../scripts/miricl-loader.mjs';
 import {applicationCheck} from '../image.mjs';
 const image = process.argv[2] ?? 'build/lem/miricl-lem.wasm';
-const vm = await Miricl.instantiate(await fs.readFile(image), {onOutput: text => process.stdout.write(text)});
+const vm = await loadMiricl(await fs.readFile(image), {onOutput: text => process.stdout.write(text)});
 try {
   await vm.evaluateAsync(applicationCheck, {eof: true});
+  await vm.evaluateAsync(await fs.readFile(new URL('ide-services.lisp', import.meta.url), 'utf8'), {eof: true});
+  assert.equal((await vm.evaluateAsync('(lem-browser-ide-service-tests:check-macroexpansion)', {eof:true})).output, 'T\n');
   const result = await vm.evaluateAsync(`
     (progn
     (let ((session (miricl-ide-services:make-session)))

@@ -17,7 +17,8 @@
                    (file-length in)))))
       (format t "Wrote ~A~%" path))))
 
-;; The runtime distribution consists of ordinary files, never embedded assets.
+;; Images carry their matching adapter. Keep the full terminal adapter and the
+;; small generic image launcher available as ordinary distribution files too.
 (let* ((root (uiop:pathname-parent-directory-pathname (uiop:pathname-directory-pathname *load-truename*)))
        (output (uiop:ensure-directory-pathname (or (first (uiop:command-line-arguments)) (uiop:getcwd))))
        (runtime (merge-pathnames "runtime/" output)))
@@ -26,6 +27,10 @@
     (namestring (merge-pathnames "scripts/build-adapter.mjs" root))
     (namestring (merge-pathnames "miricl.js" output))) :output *standard-output* :error-output *error-output*)
   (uiop:copy-file (merge-pathnames "miricl.js" output) (merge-pathnames "miricl.js" runtime))
+  (uiop:copy-file (merge-pathnames "scripts/miricl-loader.mjs" root)
+                  (merge-pathnames "miricl-loader.mjs" output))
+  (uiop:copy-file (merge-pathnames "miricl-loader.mjs" output)
+                  (merge-pathnames "miricl-loader.mjs" runtime))
   (dolist (name '("version-assets.mjs" "compress-images.mjs"))
     (uiop:copy-file (merge-pathnames (concatenate 'string "scripts/" name) root)
                     (merge-pathnames name runtime))))

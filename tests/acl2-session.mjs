@@ -2,7 +2,7 @@
 // This fixture does not implement ACL2 or validate theorem proving.
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-import {Miricl} from '../scripts/miricl.mjs';
+import {loadMiricl} from '../scripts/miricl-loader.mjs';
 import {createAcl2} from '../scripts/acl2.mjs';
 
 const image = fs.readFileSync(process.argv[2] ?? 'miricl.wasm');
@@ -34,7 +34,7 @@ const source = Buffer.from(`(in-package :acl2)
           (:stop (values nil '(:stop-ld 0) *the-live-state*))
           (otherwise (format t "~S~%" (eval form)) (values nil :eof *the-live-state*))))))
   (defmacro ld (input &rest options) (cons 'fixture-ld (cons input options)))`);
-let vm = await Miricl.instantiate(image), session;
+let vm = await loadMiricl(image), session;
 try {
   vm.mountFile('/acl2/init.lisp', init); vm.mountFile('/core.lisp', source);
   vm.evaluate('(load "/acl2/init.lisp") (compile-file "/core.lisp" :output-file "/core.wasm")', {eof: true});

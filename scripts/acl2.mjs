@@ -1,5 +1,5 @@
 // ACL2's logical top level in a browser/Node MIRICL session.
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {Acl2Books} from './acl2-books.mjs';
 const lispString = text => '"' + text.replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"';
 
@@ -7,7 +7,7 @@ export async function createAcl2(image, core, files, {progress = () => {}, books
   let accepted = false, busy = false, closed = false;
   let books;
   if (!core) progress('Restoring ACL2 logical world');
-  const vm = await Miricl.instantiate(image, {...host, imports: {...host.imports,
+  const vm = await loadMiricl(image, {...host, imports: {...host.imports,
     acl2Browser: {result(value) {accepted = value;}}}});
   const evaluate = source => vm.evaluateAsync(source, {eof: true});
   try {

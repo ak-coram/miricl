@@ -49,6 +49,51 @@
                          miricl-compiler::*compiler-origin* :image
                          miricl-compiler:*compile-evaluations* ,*compile-evaluations-default*))))))))))
 
+(defun native-compiler-image-from-manifest (manifest)
+  ;; Treat the current build manifest as untrusted serialized compiler data.
+  ;; Validate list spines before iteration and executable modules before the
+  ;; private policy reader; reuse the ordinary FASL graph validator.
+  (unless (= 4 (miricl-compiler::compiler-list-length manifest "native compiler manifest"))
+    (native-link-fail manifest "expected names, modules, roots and records"))
+  (destructuring-bind (names codes roots records) manifest
+    (miricl-compiler::compiler-list-length names "native compiler names")
+    (miricl-compiler::compiler-list-length codes "native compiler modules")
+    (miricl-compiler::compiler-list-length roots "native compiler roots")
+    (miricl-compiler::compiler-list-length records "native compiler records")
+    (dolist (name names)
+      (unless (and (= 2 (miricl-compiler::compiler-list-length name "native compiler name"))
+                   (or (null (first name)) (stringp (first name))) (stringp (second name)))
+        (native-link-fail name "expected a package/name string pair")))
+    (unless (= (length codes) (length roots))
+      (native-link-fail manifest "module and literal-root counts differ"))
+    (let ((graph (coerce records 'vector)))
+      (miricl-compiler::validate-fasl-graph roots graph)
+      ;; Current compiler factories take one general literal vector. Verify
+      ;; the (:MODULE vector) wrapper before startup follows its CADR and
+      ;; passes that pool into unchecked compiler-generated entry points.
+      (labels ((symbol-record-p (record name package)
+                 (and (= 4 (first record)) (string= name (second record))
+                      (equal package (third record)) (zerop (fourth record)))))
+        (dolist (root roots)
+          (let ((head (aref graph root)))
+            (unless (= 5 (first head)) (native-link-fail root "expected a module literal wrapper"))
+            (let ((marker (aref graph (second head))) (tail (aref graph (third head))))
+              (unless (and (symbol-record-p marker "MODULE" "KEYWORD") (= 5 (first tail)))
+                (native-link-fail root "expected (:MODULE literal-vector)"))
+              (let ((pool (aref graph (second tail))) (end (aref graph (third tail))))
+                (unless (and (= 0 (first end)) (= 6 (first pool)) (= 1 (length (second pool)))
+                             (symbol-record-p (aref graph (third pool)) "T" "COMMON-LISP"))
+                  (native-link-fail root "expected one simple general literal vector"))))))))
+    (let* ((bytes (mapcar #'native-link-octets codes))
+           (wat (link-native-modules bytes))
+           (policies
+             (loop for code in bytes for i from 0 append
+               (handler-case (miricl-compiler::native-module-outline-policies code i)
+                 (error (condition) (native-link-fail code "malformed compilation policies: ~A" condition))))))
+      (list wat
+            (loop for (package name) in names when (equal package "MIRICL-COMPILER") collect name)
+            roots records policies))))
+
 (defun ensure-native-compiler-image ()
   (unless *native-compiler-image*
     (uiop:with-temporary-file (:stream out :pathname bootstrap :type "wasm"
@@ -57,8 +102,7 @@
       ;; distributed: Node uses it to produce the self-compiled native image.
       (write-sequence (wasm-without-debug-names (wt:wat-to-wasm (interpreter-wat))) out)
       (finish-output out)
-      (let ((wat (make-pathname :type "wat" :defaults bootstrap))
-            (manifest (make-pathname :type "lisp" :defaults bootstrap)))
+      (let ((manifest (make-pathname :type "lisp" :defaults bootstrap)))
         (unwind-protect
             (progn
               (uiop:run-program
@@ -70,16 +114,11 @@
               (with-open-file (in manifest)
                 (with-standard-io-syntax
                   (let ((*read-eval* nil))
-                    (destructuring-bind (names codes roots records) (read in)
-                      (let ((policies (loop for code in codes for i from 0 append
-                                        (miricl-compiler::native-module-outline-policies (coerce code 'vector) i))))
-                        (dolist (entry policies)
-                          (miricl-compiler::record-wasm-outline-policy (car entry) (cdr entry)))
-                        (setf *native-compiler-image*
-                        (list (uiop:read-file-string wat)
-                              (loop for (package name) in names
-                                    when (equal package "MIRICL-COMPILER") collect name)
-                              roots records policies))))))))
-          (uiop:delete-file-if-exists wat)
+                    (let ((image (native-compiler-image-from-manifest (read in))) (eof (gensym)))
+                      (unless (eq eof (read in nil eof))
+                        (native-link-fail manifest "trailing compiler manifest data"))
+                      (dolist (entry (fifth image))
+                        (miricl-compiler::record-wasm-outline-policy (car entry) (cdr entry)))
+                      (setf *native-compiler-image* image))))))
           (uiop:delete-file-if-exists manifest)))))
   *native-compiler-image*)

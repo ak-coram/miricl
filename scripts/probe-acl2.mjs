@@ -7,7 +7,7 @@ import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {gzipSync, brotliCompressSync} from 'node:zlib';
 import {Worker, isMainThread, parentPort, workerData} from 'node:worker_threads';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {portAcl2Source, acl2Adaptations} from '../acl2/host.mjs';
 import {startWasmProfile} from './wasm-profile.mjs';
 
@@ -36,7 +36,7 @@ if (!isMainThread) {
     return result;
   };
   try {
-    vm = await Miricl.instantiate(fs.readFileSync(workerData.image), {imports: {acl2Probe: {
+    vm = await loadMiricl(fs.readFileSync(workerData.image), {imports: {acl2Probe: {
       file(kind, name) {
         const file = {kind, name}; files.push(file);
         parentPort.postMessage({file});

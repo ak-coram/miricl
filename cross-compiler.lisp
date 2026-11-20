@@ -550,7 +550,10 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
     (copy-tree (kernel-fixed-imports))
     (fdefinition 'kernel-macroexpand-hook)
     (copy-tree miricl-compiler::*native-imports*)
-    (loop for name in miricl-compiler::*native-compiler-seeds*
+    ;; Portable passes remain active on the host even when their Wasm
+    ;; accelerators let the shipped compiler retain only interpreted sources.
+    (loop for name in (append miricl-compiler::*native-compiler-seeds*
+                             miricl-compiler::*native-compiler-cold-functions*)
           when (and (fboundp name) (not (macro-function name)))
             collect (cons name (fdefinition name)))))
 

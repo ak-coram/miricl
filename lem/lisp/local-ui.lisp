@@ -1,17 +1,23 @@
 (in-package #:lem-lisp-mode/connection)
 
 (defun live-buffer-p (buffer) (member buffer (lem:buffer-list) :test #'eq))
+(defun macroexpand-request-p (request) (eq :macroexpand-1 (local-request-kind request)))
 (defun destination-live-p (request)
   (and (connection-live-p (local-request-connection request))
        (live-buffer-p (local-request-destination request))
-       ;; The upstream transcript helpers resolve this exact named buffer.
-       (eq (local-request-destination request) (lem-lisp-mode/internal:repl-buffer))))
+       (if (macroexpand-request-p request)
+           (eq request (lem:buffer-value (local-request-destination request) 'macroexpand-owner))
+           ;; The upstream transcript helpers resolve this exact named buffer.
+           (eq (local-request-destination request) (lem-lisp-mode/internal:repl-buffer)))))
 (defun finalize-request (request)
   (let ((finalizer (local-request-finalizer request)))
     (setf (local-request-finalizer request) nil)
     (when finalizer (funcall finalizer))))
 (defun release-ui-request (request)
   (unwind-protect (finalize-request request)
+    (when (and (macroexpand-request-p request) (local-request-destination request)
+               (eq request (lem:buffer-value (local-request-destination request) 'macroexpand-owner)))
+      (setf (lem:buffer-value (local-request-destination request) 'macroexpand-owner) nil))
     (setf (local-request-active request) nil (local-request-callback request) nil
           (local-request-source request) nil (local-request-destination request) nil)
     (let ((connection (local-request-connection request)))
@@ -25,6 +31,51 @@
         (lem-browser::record-failure (connection-owner connection) :local-finalize condition))))
   (setf (connection-requests connection) nil)
   (values))
+(defun query-text-prefix (text &optional (limit 2048))
+  (if (> (length text) limit)
+      (concatenate 'string (subseq text 0 limit) " [source label truncated]")
+      (copy-seq text)))
+(defun render-macroexpand-result (request result &optional rejection)
+  ;; Called only by the owning editor. All arbitrary printers have already run
+  ;; on the service worker; this display consumes strings and a boolean only.
+  (require-editor-thread (connection-owner (local-request-connection request)))
+  (when (destination-live-p request)
+    (let* ((buffer (local-request-destination request))
+           (context (lem:buffer-value buffer 'macroexpand-context))
+           (state (if result (miricl-ide-services:request-state result) :error))
+           (failure (or rejection (and result (miricl-ide-services:request-condition result))))
+           (text
+             (format nil "MACROEXPAND-1 — global environment (NIL)~%Source: ~A (tick ~D)~%Package at start: ~A~%Reader: session readtable at serialized execution~%Request ~D: ~A~%expanded-p: ~A~%Display is bounded (circle/depth/length/characters); it is not replacement source.~%~%Input snapshot:~%~A~%~%~A~A~A"
+                     (getf context :name) (local-request-tick request)
+                     (query-text-prefix
+                      (or (and result (miricl-ide-services:request-start-package result))
+                          (getf context :package)) 256)
+                     (local-request-id request) state
+                     (if (and result (miricl-ide-services:request-values result))
+                         (if (second (miricl-ide-services:request-values result)) "true" "false")
+                         "unavailable")
+                     (getf context :source)
+                     (if (and result (plusp (length (miricl-ide-services:request-output result))))
+                         (format nil "Captured output:~%~A~%~%" (miricl-ide-services:request-output result)) "")
+                     (if failure (format nil "Failure: ~A~%" failure) "Expansion:~%")
+                     (if (and result (eq state :ok))
+                         (miricl-ide-services:request-printed-values result) ""))))
+      (lem:with-buffer-read-only buffer nil
+        (lem:erase-buffer buffer)
+        (lem:insert-string (lem:buffer-point buffer) text)
+        (lem:buffer-start (lem:buffer-point buffer)))
+      (setf (lem:buffer-read-only-p buffer) t))))
+(defun cancel-macroexpand-buffer-request (buffer)
+  ;; Deletion revokes execution and delivery before the buffer is freed. The
+  ;; worker sees the existing scalar cancellation flag, never editor structures.
+  (let ((request (lem:buffer-value buffer 'macroexpand-owner)))
+    (when request
+      (require-editor-thread (connection-owner (local-request-connection request)))
+      (unwind-protect
+           (when (local-request-service request)
+             (miricl-ide-services:cancel
+              (connection-session (local-request-connection request)) (local-request-service request)))
+        (release-ui-request request)))))
 (defun local-result-value (request result)
   (case (local-request-kind request)
     (:pretty (list :value (miricl-ide-services:request-printed-values result)
@@ -45,12 +96,14 @@
                   (listener (eq :listener (local-request-kind request))))
              (when name (setf (connection-package connection) name
                               (connection-prompt-string connection) name))
-             (when (or listener (plusp (length output))
+             (if (macroexpand-request-p request)
+                 (render-macroexpand-result request result)
+                 (when (or listener (plusp (length output))
                        (not (member (local-request-kind request) '(:packages :package))))
                (lem-lisp-mode/internal:write-string-to-repl
                 (format nil "~&; Request ~D (~A)~%~A~A~%"
                         (local-request-id request) (local-request-kind request) output
-                        (or failure (miricl-ide-services:request-printed-values result)))))
+                        (or failure (miricl-ide-services:request-printed-values result))))))
              (let ((callback (local-request-callback request)))
                (when callback
                  (funcall callback
@@ -65,29 +118,45 @@
   ;; mutation runs on the service worker.
   (when (and (local-request-active request)
              (connection-live-p (local-request-connection request)))
-    (if (destination-live-p request)
+    (if (macroexpand-request-p request)
+        ;; Query buffer ownership is inspected only in the editor event. Its
+        ;; deletion hook has already revoked the scalar active/cancel authority.
         (lem:send-event (lambda () (deliver-result request result)))
+        (if (destination-live-p request)
+            (lem:send-event (lambda () (deliver-result request result)))
         ;; A deleted target receives no output/callback. The editor still owns
         ;; spinner cleanup; the worker may only enqueue this distinct route.
         (lem:send-event
          (lambda ()
            (when (and (local-request-active request)
                       (connection-live-p (local-request-connection request)))
-             (release-ui-request request)))))))
+             (release-ui-request request))))))))
 (defun submit-local-source (connection operation source
-                            &key continuation package request-id (kind :eval) finalizer)
+                            &key continuation package request-id (kind :eval) finalizer destination
+                              (source-buffer (lem:current-buffer))
+                              (source-tick (lem:buffer-modified-tick source-buffer)))
   (check-type connection connection)
   (require-editor-thread (connection-owner connection))
   (unless (connection-live-p connection) (lem:editor-error "The local Lisp connection is closed."))
-  (let* ((origin (lem:current-buffer))
-         (destination (lem-lisp-mode/internal::ensure-repl-buffer-exist))
+  (let* ((origin source-buffer)
+         (destination (or destination (lem-lisp-mode/internal::ensure-repl-buffer-exist)))
          (request (make-local-request :connection connection :id (or request-id (new-request-id))
-                   :source origin :destination destination :tick (lem:buffer-modified-tick origin)
+                   :source origin :destination destination :tick source-tick
                    :callback continuation :kind kind :finalizer finalizer)))
     (handler-case
         (progn
+          (when (macroexpand-request-p request)
+            (unless (and (live-buffer-p destination)
+                         (null (lem:buffer-value destination 'macroexpand-owner)))
+              (error "The macroexpansion result destination is unavailable."))
+            (setf (lem:buffer-value destination 'macroexpand-owner) request)
+            (lem:add-hook (lem:variable-value 'lem:kill-buffer-hook :buffer destination)
+                          'cancel-macroexpand-buffer-request))
+          (unless (and (lem:bufferp origin) (not (lem:deleted-buffer-p origin)))
+            (error "The Lisp request source buffer was deleted."))
+          (check-type source-tick (integer 0 *))
           ;; Include completed requests whose terminal editor event is pending.
-          ;; The generic worker queue alone cannot bound this UI backlog.
+          ;; Establish query ownership first so rejection is displayed there.
           (when (>= (length (connection-requests connection)) 32)
             (error "The local Lisp UI has too many outstanding requests."))
           (push request (connection-requests connection))
@@ -105,15 +174,18 @@
         (unwind-protect
              (when (destination-live-p request)
                (let ((description (lem-browser::diagnostic-description condition 2048)))
-                 (lem-lisp-mode/internal:write-string-to-repl
-                  (format nil "~&; Request ~D aborted: ~A~%" (local-request-id request) description))
+                 (if (macroexpand-request-p request)
+                     (render-macroexpand-result request nil description)
+                     (lem-lisp-mode/internal:write-string-to-repl
+                      (format nil "~&; Request ~D aborted: ~A~%" (local-request-id request) description)))
                  (when continuation (funcall continuation (list :abort description)))))
           (release-ui-request request))
         (local-request-id request)))))
 (defun bounded-form-size (form)
   (loop for tail = form then (cdr tail) for size from 0 to 16
         when (null tail) return size unless (consp tail) return nil finally (return nil)))
-(defun submit-local-form (connection form &key continuation package request-id)
+(defun submit-local-form (connection form &key continuation package request-id destination finalizer
+                         source-buffer source-tick)
   (unless (and (bounded-form-size form) (symbolp (first form)))
     (lem:editor-error "Malformed local Lisp service form."))
   (let ((operator (first form)) (arguments (rest form)))
@@ -130,6 +202,15 @@
          (unsupported-operation "compile-string policy overrides"))
        (submit-local-source connection :compile-and-load (first arguments) :kind :compile
                            :continuation continuation :package package :request-id request-id))
+      ((eq operator 'micros:swank-macroexpand-1)
+       (unless (and (= (length arguments) 1) (stringp (first arguments)))
+         (lem:editor-error "One-step macroexpansion requires source text."))
+       (unless destination
+         (unsupported-operation "one-step expansion without an owned result destination"))
+       (submit-local-source connection :macroexpand-1 (first arguments) :kind :macroexpand-1
+                           :continuation continuation :package package :request-id request-id
+                           :destination destination :finalizer finalizer
+                           :source-buffer source-buffer :source-tick source-tick))
       ((eq operator 'micros:compile-file-for-emacs)
        (unsupported-operation "file compilation; use compile-region or compile-defun"))
       ((eq operator 'micros:list-all-package-names)
@@ -148,6 +229,48 @@
       (t (unsupported-operation (format nil "~S" operator))))))
 
 (in-package #:lem-lisp-mode/internal)
+(defun local-macroexpand-1 (expander)
+  (unless (eq expander 'micros:swank-macroexpand-1)
+    (unsupported-operation "full, recursive or lexical macroexpansion"))
+  ;; Capture source and its actual package before creating/switching result UI.
+  (let* ((connection (ensure-local-connection))
+         (origin (current-buffer)) (tick (buffer-modified-tick origin))
+         (name (lem-lisp-mode/connection::query-text-prefix (buffer-name origin) 256))
+         (source (form-string-at-point)) (package (copy-seq (current-package)))
+         (buffer (make-buffer (unique-buffer-name "*lisp-macroexpand*")))
+         (spinner nil) (handed-off nil) (finalized nil))
+    (labels ((finish ()
+               (unless finalized
+                 (setf finalized t)
+                 (when spinner (stop-loading-spinner spinner)))))
+      (unwind-protect
+           (progn
+             (change-buffer-mode buffer 'lisp-mode)
+             (setf (buffer-package buffer) package
+                   (buffer-value buffer 'lem-lisp-mode/connection::macroexpand-context)
+                   (list :name name :package (lem-lisp-mode/connection::query-text-prefix package 256)
+                         :source (lem-lisp-mode/connection::query-text-prefix source)))
+             (with-buffer-read-only buffer nil
+               (insert-string (buffer-point buffer)
+                              (format nil "MACROEXPAND-1 — global environment (NIL)~%Source: ~A (tick ~D)~%Package: ~A~%Reader: session readtable at execution~%~%Waiting for one-step expansion...~%~%Captured output and bounded expansion will appear here.~%"
+                                      name tick (lem-lisp-mode/connection::query-text-prefix package 256))))
+             (setf (buffer-read-only-p buffer) t
+                   spinner (start-loading-spinner :modeline :buffer buffer
+                                                  :loading-message "Expanding once..."))
+             (lem-lisp-mode/connection:submit-local-form
+              connection (list expander source) :package package :destination buffer :finalizer #'finish
+              :source-buffer origin :source-tick tick)
+             ;; Use LEM's actual typeout window once, on the command thread.
+             ;; Completion only updates its owned buffer, never steals later focus
+             ;; or recreates a dismissed/deleted window or buffer.
+             (with-pop-up-typeout-window (out buffer) (declare (ignore out)))
+             (setf handed-off t))
+        (unless handed-off
+          (unwind-protect
+               (let ((request (buffer-value buffer 'lem-lisp-mode/connection::macroexpand-owner)))
+                 (when request
+                   (lem-lisp-mode/connection::cancel-macroexpand-buffer-request buffer)))
+            (finish)))))))
 (defun local-lisp-eval-async (form cont package)
   (let ((buffer (current-buffer)))
     (with-remote-eval (form :package package)

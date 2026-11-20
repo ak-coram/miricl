@@ -56,32 +56,25 @@
          (path (merge-pathnames output-name output))
          (template (uiop:read-file-string (merge-pathnames template-name root)
                                           :external-format :utf-8))
-         ;; Use the adapter as a classic script, both in workers and on the
-         ;; main thread, so the resulting page also runs directly from file://.
-         (adapter (with-output-to-string (out)
-                    (dolist (line (uiop:read-file-lines (merge-pathnames "scripts/miricl.mjs" root)
-                                                       :external-format :utf-8))
-                      (write-line (if (uiop:string-prefix-p "export class " line)
-                                      (subseq line (length "export ")) line)
-                                  out)))))
+         ;; The image owns its adapter. Inline only the generic loader as a
+         ;; classic script, so workers and pages also run directly from file://.
+         (loader (browser-inline-module (merge-pathnames "scripts/miricl-loader.mjs" root))))
     ;; Explicit distribution input avoids rebuilding the compiler when CI reuses
     ;; matching runtime artifacts. Ordinary callers still build current sources.
     (unless image
       (asdf:load-asd (merge-pathnames "miricl.asd" root))
       (if (find-package :ql) (uiop:symbol-call :ql :quickload :miricl) (asdf:load-system :miricl)))
-    ;; The adapter is embedded in a script element.
-    (when (search "</script" adapter :test #'char-equal)
-      (error "The JavaScript adapter contains an HTML script terminator."))
     (let ((replacements
-            (list (cons "@@MIRICL_ADAPTER@@" adapter)
+            (list (cons "@@MIRICL_LOADER@@" loader)
                   (cons "@@MIRICL_WASM@@"
                         (browser-compressed-image
                          (if image
                              (with-open-file (in image :element-type '(unsigned-byte 8))
                                (let ((bytes (make-array (file-length in) :element-type '(unsigned-byte 8))))
                                  (read-sequence bytes in) bytes))
-                             (uiop:symbol-call :miricl :interpreter-wasm
-                                               :compiler compiler :native-compiler compiler)))))))
+                             (uiop:symbol-call :miricl :image-with-javascript-adapter
+                               (uiop:symbol-call :miricl :interpreter-wasm
+                                                 :compiler compiler :native-compiler compiler))))))))
       (dolist (replacement replacements)
         (let ((start (search (car replacement) template)))
           (unless (and start (not (search (car replacement) template :start2 (1+ start))))

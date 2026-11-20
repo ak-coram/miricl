@@ -40,9 +40,12 @@ compiler, then restores the preceding optimization policy before that compiler e
 the saved original source corpus for shipping. SAFETY, DEBUG and COMPILATION-SPEED
 are unchanged by this temporary policy. The first generation is not retained in the
 shipped payload. =*native-compiler-seeds*= selects the native shipping corpus;
-=*native-compiler-cold-functions*= retains opt-in counter expansion workers and
-rare source/report builders in the ordinary interpreted compiler library. Native
-admission wrappers bypass those workers under compact policy. The image builder
+=*native-compiler-cold-functions*= retains opt-in counter expansion workers,
+the portable simplifier and liveness pass, and rare source/report builders in the
+ordinary interpreted compiler library. Native admission wrappers bypass the opt-in
+workers under compact policy, and the shipped simplifier and liveness wrappers use
+shared Wasm kernels. The host and source compiler environments retain the portable
+rules. The image builder
 temporarily compiles the cold helpers too, then emits only the shipping corpus.
 =ensure-compiler= coordinates requests, records failure or completion, and avoids
 recursive bootstrap. Explicit =:interpreted= state preserves live source definitions.
@@ -54,6 +57,30 @@ bootstrap. =miricl-cross:compile-lambda= emits target bytes, literals and debug 
 =compile-module= also returns HIR. They neither install host definitions nor execute target
 code. Target macro and LOAD-TIME-VALUE adapters are explicit; host expansion and EVAL are not
 target semantics.
+
+** Image loading and host adapters
+
+Public compiler, cold and compiler-free runtime images contain one
+=miricl.adapter.gz= custom section. It holds the gzip-compressed matching JavaScript
+adapter, including its development providers. The small =miricl-loader.mjs= module
+exports =loadMiricl(source, options)= for browser and Node hosts. It accepts bytes,
+responses, blobs, URLs and Node pathnames, decompresses an outer gzip container when
+present, extracts the adapter and instantiates the image with that adapter. A WASI
+development component supplies its embedded Node core for this route. Other Wasm
+hosts ignore the JavaScript section.
+
+Adapter loading is explicit: =Miricl.instantiate= does not execute arbitrary custom
+sections. =getMiriclAdapter= exposes the checked image bytes and imported module
+namespace to host code that needs adapter classes before instantiation. A VM returned
+by =loadMiricl= exposes that namespace as =vm.adapter=, preserving the identity of its
+error classes. Missing or duplicate adapter sections and malformed gzip fail before
+instantiation. Saved images retain the original adapter section with their runtime.
+
+Browser application distributions copy the generic loader alongside their images;
+the adapter is counted inside the image. Standalone HTML pages inline only the
+loader and compressed image, including their worker source. Repository bootstrap
+transport can instantiate its deliberately bare seed with the source adapter;
+the compiler bootstrap algorithms themselves live in the shared CL driver.
 
 ** Package-local names
 
@@ -586,6 +613,16 @@ Runtime worker adaptation maps object-valued control signatures to the same GC r
 ABI as its locals and parameters. Instruction extents distinguish single-byte result types
 from signed-LEB type indices in encoding and disassembly.
 
+=native-clean-scopes= removes untargeted void wrappers and aliases nested BLOCK
+labels when their live openings and matching ENDs are adjacent and their effective
+literal signatures agree. Literal signatures have no parameters; indexed signatures
+remain opaque. A newly selected result type takes precedence over the original
+encoded type. Targetedness propagates outward through aliases before unused wrappers
+are removed, and branch depths are rewritten against the original scope stack with
+prefix counts. Complete matching precedes mutation. Exception-bearing bodies and
+reference or cast branches retain their scopes because their opaque encoded depths
+cannot use the ordinary branch writer. Loops never supply exit aliases.
+
 =native-outline-code= shares repeated straight-line regions using exact normalized bytes
 and Wasm types. Local renaming preserves aliases; reads before the first write become
 inputs, and written locals used later become outputs. Regions neither consume inherited
@@ -660,6 +697,9 @@ unchecked traversal. Fixed-callback proofs require immutable private ingress and
 replacement, capture, escape or unknown provenance. List/sequence/stream/package/metadata
 kernels share compiler sources; remaining representation adapters stay native until equivalent
 lowering is suitable. Host tooling is not a shipped runtime dependency.
+The host kernel cache tracks live backend definitions, including the portable
+optimization passes. Their dispatchers use NOTINLINE calls so replacing a pass
+both invalidates cached kernels and reaches the current definition on recompilation.
 
 The optional =compatibility/gray-streams/miricl-gray.lisp= module supplies extensible
 streams above small native leaf hooks. Its fundamental classes inherit the actual
@@ -775,6 +815,7 @@ exposed. Native Wasm does not yet provide equivalent stepping instrumentation.
 - =evaluation-library.lisp=, =compiler-library.lisp=: evaluation/file integration.
 - =runtime-hir.lisp=, =runtime-native-code.lisp=, =runtime-values.lisp=,
   =scripts/miricl.mjs=: runtime execution, installation and image boundaries.
+- =image-adapter.lisp=, =scripts/miricl-loader.mjs=: matching embedded adapter packaging and host loading.
 
 DISASSEMBLE handles retained HIR; =disassemble-native= accepts emitted bytes and the actual
 function index without changing optimization policy. Sealed native callers retain their

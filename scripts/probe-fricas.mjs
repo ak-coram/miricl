@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {Worker, isMainThread, parentPort, workerData} from 'node:worker_threads';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {fricasFiles, fricasRevision} from './fricas-files.mjs';
 import {createFriCAS, lispString} from './fricas.mjs';
 if (!isMainThread) {
@@ -11,10 +11,9 @@ if (!isMainThread) {
   try {
     const {files, order} = fricasFiles(workerData.native);
     const image = fs.readFileSync(workerData.image);
-    const imageModule = await WebAssembly.compile(image);
     const parts = [];
     const fresh = async () => {
-      vm?.close(); vm = await Miricl.instantiate(imageModule);
+      vm?.close(); vm = await loadMiricl(image);
       for (const [file, bytes] of files)
         if (!file.startsWith('/fricas/algebra/') || file.endsWith('exposed.lisp')) vm.mountFile(file, bytes);
       let setup = '(load "/fricas/lisp/fricas-package.lisp")\n';

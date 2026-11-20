@@ -1,4 +1,4 @@
-import {Miricl} from './miricl.js';
+import {loadMiricl} from './miricl-loader.mjs';
 const status = document.getElementById('status');
 const launchButton = document.getElementById('launch');
 const container = document.getElementById('lem-desktop');
@@ -29,7 +29,7 @@ document.getElementById('restart').addEventListener('click', () => location.relo
 try {
   const response = await fetch('./miricl-lem.wasm.gz');
   if (!response.ok) throw new Error(`Cannot load LEM (${response.status}).`);
-  const app = await Miricl.instantiate(await response.arrayBuffer(), {
+  const app = await loadMiricl(response, {
     onOutput: text => console.log(text), onThreadError: fail,
   });
   globalThis.lem = app;

@@ -26,8 +26,15 @@ test('browser source preparation preserves real sources and rejects unsafe input
   assert.deepEqual(live.files.get('/lem-browser-frontend/startup.lisp'), await fs.readFile(path.join(root, 'lem/startup.lisp')));
   assert(live.files.get('/lem-browser-lisp-mode/lem-browser-lisp-mode.asd').toString().includes('(asdf:defsystem "lem-browser-lisp-mode"'));
   assert(live.files.has('/deps/miricl-ide-services/services.lisp'));
-  for (const name of ['lisp-mode', 'repl', 'ext/eval'])
+  for (const name of ['lisp-mode', 'repl', 'ext/eval', 'ext/macroexpand'])
     assert(live.files.has(`/lem/extensions/lisp-mode/${name}.lisp`));
+  const macroexpand = live.files.get('/lem/extensions/lisp-mode/ext/macroexpand.lisp').toString();
+  assert(macroexpand.includes('(define-command lisp-macroexpand ()'));
+  assert(macroexpand.includes('(macroexpand-internal \'micros:swank-macroexpand-1)'));
+  assert(macroexpand.includes('local-macroexpand-1 expander'));
+  assert(!macroexpand.includes('(kill-sexp)'));
+  assert(!macroexpand.includes('(define-minor-mode macrostep-mode'));
+  assert(live.files.get('/lem-browser-lisp-mode/lem-browser-lisp-mode.asd').toString().includes('(:file "ext/macroexpand")'));
   const localMode = live.files.get('/lem/extensions/lisp-mode/lisp-mode.lisp').toString();
   assert(localMode.includes('(defun self-connect () (ensure-local-connection))'));
   assert(!localMode.includes('lem-process:'));

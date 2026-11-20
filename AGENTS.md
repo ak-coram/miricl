@@ -20,6 +20,26 @@ more useful as declared and inferred type information improves.
 
 Full ANSI Common Lisp compliance is important.
 
+# Implementation language and bootstrap
+
+Keep the compiler and cross-compiler in Common Lisp, including native module
+linking and bootstrap algorithms. Keep Lisp programs in Lisp source files rather
+than JavaScript strings. JavaScript may host the interpreter, including bootstrap,
+and support platform adapters, tests and distribution packaging. Reuse existing Node
+tooling when it provides substantial, concrete size, performance or maintenance
+benefits. Do not add dependencies without the user's explicit approval, including
+runtime, build, development, test and CI tooling dependencies.
+Preserve the interpreted Wasm compiler stage before
+native self-compilation rather than compiling the whole compiler on the host.
+
+# Runtime image distribution
+
+Public runtime images, including compiler-free interpreter images, carry a matching,
+self-contained compressed JS adapter. Saved images retain that adapter, and all
+embedded bytes count toward raw image size budgets. Users should not have to match
+a separate full adapter to an image. Keep app loaders and distribution documentation
+consistent with this contract.
+
 # Artifact compatibility
 
 Compatibility between compiler versions is not required for any generated

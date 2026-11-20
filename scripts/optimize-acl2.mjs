@@ -2,7 +2,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {portAcl2Source} from '../acl2/host.mjs';
 import {execFileSync} from 'node:child_process';
 import {startWasmProfile} from './wasm-profile.mjs';
@@ -15,7 +15,7 @@ const image = await fs.readFile(imagePath), portable = await fs.readFile(input);
 let stage = 'runtime', count = 0;
 const started = performance.now();
 const heartbeat = setInterval(() => console.log(`ACL2 native: ${stage} (${count} initializers, ${Math.round((performance.now() - started) / 1000)} s)`), 30000);
-const vm = await Miricl.instantiate(image, {imports: {acl2Build: {
+const vm = await loadMiricl(image, {imports: {acl2Build: {
   progress(file, compiled) {count = compiled; if (count % 500 === 0) console.log(`ACL2 native: ${file}, ${count} initializers`);},
 }}});
 const stages = [];

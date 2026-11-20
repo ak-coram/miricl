@@ -60,7 +60,8 @@ on.
 
 The =miricl-runtime= build artifact includes:
 
-- =miricl.js=: browser adapter and Node terminal command.
+- =miricl-loader.mjs=: small browser/Node loader for the adapter embedded in each image.
+- =miricl.js=: optional Node terminal and development command.
 - =miricl-cold.wasm=: interpreter and source compiler for bootstrap work.
 - =miricl-interpreter.wasm=: interpreter with minimal compilation, without
   the optimizing Wasm compiler. Also published as =miricl-interpreter=.
@@ -69,10 +70,44 @@ The =miricl-runtime= build artifact includes:
 - =miricl-repl.wasm=: Wasmtime terminal command and precompiled compiler for Node.
 - =miricl-asdf.wasm=: optional ASDF/UIOP library.
 
-Keep these files together. Node and Wasmtime commands below work without a
-MIRICL checkout; browser applications import =miricl.js= directly. ASDF is needed
-for development and bundling, but ordinary production applications only need
-the adapter, interpreter and their application FASL.
+Each runtime image contains its matching gzip-compressed JavaScript adapter,
+including compiler-free and saved images. A host extracts that adapter and
+instantiates the image. The examples below include the small loader inline, so
+they need only the image and standard host APIs. =miricl-loader.mjs= is also
+available for applications sharing a loader across modules. The full =miricl.js=
+terminal command is optional. Node and Wasmtime commands below work without a
+MIRICL checkout. ASDF is needed for development and bundling.
+
+#+begin_src javascript
+import {readFile} from "node:fs/promises";
+import {gunzipSync} from "node:zlib";
+
+async function loadMiricl(filename, options) {
+  let image = await readFile(filename);
+  if (image[0] === 0x1f && image[1] === 0x8b) image = gunzipSync(image);
+  const sections = WebAssembly.Module.customSections(
+    await WebAssembly.compile(image), "miricl.adapter.gz");
+  if (sections.length !== 1) throw new Error("Expected one embedded MIRICL adapter.");
+  const source = new TextDecoder("utf-8", {fatal: true})
+    .decode(gunzipSync(Buffer.from(sections[0])));
+  const adapter = await import("data:text/javascript," + encodeURIComponent(source));
+  const lisp = await adapter.Miricl.instantiate(image, options);
+  Object.defineProperty(lisp, "adapter", {value: adapter});
+  return lisp;
+}
+
+const lisp = await loadMiricl("./miricl.wasm");
+try {
+  console.log(lisp.evaluate("(+ 1 2)").output);
+} finally {
+  lisp.close();
+}
+#+end_src
+
+=miricl-loader.mjs= exports the same =loadMiricl= operation with additional support
+for image bytes, a =Blob=, a =Response= or a URL, and outer gzip files. The returned interpreter's =adapter= property
+contains its matching adapter exports, including =MiriclError=. For example,
+use =error instanceof lisp.adapter.MiriclError= when inspecting Lisp errors.
 
 *** Building from source
 
@@ -112,7 +147,8 @@ already compiled to native Wasm; =miricl-cold.wasm=, the cold bootstrap image;
 =miricl-interpreter.wasm=, the smaller compiler-free scripting image;
 and =miricl-repl.wasm=, the WASI 0.3 terminal
 REPL and development command. The adapter and WASI command provide the
-development bridge.  It also writes =miricl.js= and the optional
+development bridge. It also writes =miricl-loader.mjs=, the optional full
+=miricl.js= command and the optional
 =miricl-asdf.wasm=.
 
 CI caches the complete matching runtime distribution and optional ASDF library
@@ -181,10 +217,24 @@ Save this as =hello.html= beside the distribution files:
 </script>
 
 <script type="module">
-  import {Miricl} from "./miricl.js";
+  async function loadMiricl(url, options) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Cannot load ${url}: HTTP ${response.status}`);
+    const gunzip = bytes => new Response(new Blob([bytes]).stream()
+      .pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+    let image = new Uint8Array(await response.arrayBuffer());
+    if (image[0] === 0x1f && image[1] === 0x8b) image = new Uint8Array(await gunzip(image));
+    const sections = WebAssembly.Module.customSections(
+      await WebAssembly.compile(image), "miricl.adapter.gz");
+    if (sections.length !== 1) throw new Error("Expected one embedded MIRICL adapter.");
+    const source = new TextDecoder("utf-8", {fatal: true}).decode(await gunzip(sections[0]));
+    const adapter = await import("data:text/javascript," + encodeURIComponent(source));
+    const lisp = await adapter.Miricl.instantiate(image, options);
+    Object.defineProperty(lisp, "adapter", {value: adapter});
+    return lisp;
+  }
 
-  const bytes = await (await fetch("./miricl.wasm")).arrayBuffer();
-  const lisp = await Miricl.instantiate(bytes);
+  const lisp = await loadMiricl("./miricl.wasm");
   for (const script of document.querySelectorAll('script[type="text/x-common-lisp"]')) {
     lisp.evaluate(script.textContent, {eof: true});
   }
@@ -208,18 +258,11 @@ Common Lisp via =js:invoke=.
 
 *** Development mode
 
-Save this as =dev.html= beside the distribution files:
+Use the inline loader from the preceding =hello.html= example in =dev.html=.
+Enable the development connection when creating its interpreter:
 
-#+begin_src html
-<!doctype html>
-<meta charset="utf-8">
-<title>Common Lisp development</title>
-<script type="module">
-  import {Miricl} from "./miricl.js";
-
-  const bytes = await (await fetch("./miricl.wasm")).arrayBuffer();
-  const lisp = await Miricl.instantiate(bytes, {dev: true});
-</script>
+#+begin_src javascript
+const lisp = await loadMiricl("./miricl.wasm", {dev: true});
 #+end_src
 
 Start the terminal browser REPL and serve the current directory with
@@ -371,12 +414,14 @@ The same Lisp operation is available in a terminal REPL:
 #+end_src
 
 With =:save nil=, the bundle remains in the interpreter's virtual filesystem;
-=await lisp.readFile("/dist/app.wasm")= retrieves its bytes. The adapter and interpreter are separate distribution files that can be referenced or symlinked into applications.
+=await lisp.readFile("/dist/app.wasm")= retrieves its bytes. The runtime image
+contains its adapter; distribute it with the application bundle and use the
+inline loader above, or the optional shared =miricl-loader.mjs=.
 
 In production, mount and load only the bundle, then start the application:
 
 #+begin_src javascript
-const lisp = await Miricl.instantiate(interpreterBytes);
+const lisp = await loadMiricl(interpreterBytes);
 lisp.mountFile("/app.wasm", await (await fetch("./app.wasm")).arrayBuffer());
 await lisp.evaluateAsync('(load "/app.wasm") (app:start)', {eof: true});
 #+end_src
@@ -401,8 +446,8 @@ zero-argument function or its symbol. Miricl calls it after restore.
 #+end_src
 
 Retrieve the image with =await lisp.readFile("/app-image.wasm")= and pass
-its bytes to =Miricl.instantiate= in a browser or in Node. The image
-includes the runtime, Lisp definitions, data, and virtual files. Host
+its bytes to =loadMiricl= in a browser or in Node. The image
+includes its adapter, runtime, Lisp definitions, data, and virtual files. Host
 imports are supplied when opening the image. Save from a single Lisp
 thread with no live JavaScript values in the saved data.
 
@@ -463,7 +508,7 @@ this default. Development REPL input follows the browser's setting,
 just like local input.
 
 #+begin_src javascript
-const lisp = await Miricl.instantiate(interpreterBytes);
+const lisp = await loadMiricl(interpreterBytes);
 lisp.evaluate("(defparameter *f* (miricl-compiler:compile-native '(lambda (x) (+ x 2))))");
 lisp.evaluate('(funcall *f* 40)'); // 42
 #+end_src
@@ -551,7 +596,7 @@ setup-game-of-life=, then =cd game-of-life && just dev=. Development
 loads =miricl.wasm= in the browser, with the WASI command
 forwarding terminal input and serving files.  Production builds run
 the precompiled compiler image in Node. =just build= writes
-=build/index.html=, =miricl.js=, =miricl.wasm= and =game-of-life.wasm=
+=build/index.html=, =miricl-loader.mjs=, =miricl.wasm= and =game-of-life.wasm=
 as separate files. [[https://ak-coram.github.io/miricl/game-of-life/][Play the production build]].
 
 Run =just benchmark-game-of-life= from the repository root to measure

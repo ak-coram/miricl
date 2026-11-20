@@ -84,12 +84,14 @@ jobs:
         with:
           path: |
             miricl.js
+            miricl-loader.mjs
             miricl.wasm
             miricl-interpreter.wasm
             miricl-cold.wasm
             miricl-repl.wasm
             miricl-asdf.wasm
             runtime/miricl.js
+            runtime/miricl-loader.mjs
             runtime/version-assets.mjs
             runtime/compress-images.mjs
             build/asdf/asdf.lisp
@@ -121,6 +123,7 @@ jobs:
           name: miricl-runtime
           path: |
             miricl.js
+            miricl-loader.mjs
             miricl.wasm
             miricl-interpreter.wasm
             miricl-cold.wasm
@@ -144,6 +147,7 @@ jobs:
           name: build-support
           path: |
             runtime/miricl.js
+            runtime/miricl-loader.mjs
             runtime/version-assets.mjs
             runtime/compress-images.mjs
             build/asdf/asdf.lisp
@@ -307,7 +311,7 @@ jobs:
           name: application-game-of-life
           path: |
             game-of-life/build/index.html
-            game-of-life/build/miricl.js
+            game-of-life/build/miricl-loader.mjs
             game-of-life/build/miricl.wasm
             game-of-life/build/miricl.wasm.gz
             game-of-life/build/game-of-life.wasm
@@ -504,7 +508,7 @@ jobs:
           path: |
             build/coalton/coalton-image.wasm
             build/coalton/coalton-image.wasm.json
-          key: coalton-image-v1-${{ runner.os }}-${{ hashFiles('miricl.wasm', 'build/coalton/coalton.wasm', 'scripts/miricl.mjs', 'scripts/coalton.mjs', 'scripts/snapshot-coalton.mjs') }}
+          key: coalton-image-v1-${{ runner.os }}-${{ hashFiles('miricl.wasm', 'build/coalton/coalton.wasm', 'scripts/miricl-loader.mjs', 'scripts/coalton.mjs', 'scripts/snapshot-coalton.mjs') }}
       - name: Save and validate initialized Coalton snapshot
         if: steps.snapshot.outputs.cache-hit != 'true'
         run: node scripts/snapshot-coalton.mjs miricl.wasm build/coalton/coalton.wasm build/coalton/coalton-image.wasm

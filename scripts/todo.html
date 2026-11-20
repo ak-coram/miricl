@@ -283,7 +283,7 @@
 </script>
 <script id="miricl-wasm" type="application/octet-stream">@@MIRICL_WASM@@</script>
 <script>
-@@MIRICL_ADAPTER@@
+@@MIRICL_LOADER@@
 
 // Application state, DOM rendering, persistence and events are all in Lisp.
 // Evaluate all embedded Common Lisp scripts in document order.
@@ -293,7 +293,7 @@ let todoInterpreter;
   document.getElementById('lisp-source').textContent = scripts.map(script => script.textContent.trim()).join('\n\n');
   try {
     const bytes = Uint8Array.from(atob(document.getElementById('miricl-wasm').textContent.trim()), c => c.charCodeAt(0));
-    todoInterpreter = await Miricl.instantiate(bytes);
+    todoInterpreter = await loadMiricl(bytes);
     for (const script of scripts) todoInterpreter.evaluate(script.textContent, {eof: true});
   } catch (error) {
     const status = document.getElementById('status');

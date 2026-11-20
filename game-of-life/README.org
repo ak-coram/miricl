@@ -48,8 +48,9 @@ or interpretation using =miricl-compiler:*compile-evaluations*=, initially =t=.
 Production builds run the precompiled compiler image in Node.
 The build prunes the ASDF system and compiles its retained functions and
 initializers to WASM with =--native=, then copies
-the production HTML, adapter and runtime into =build/=. Publish these four files
-together: =index.html=, =miricl.js=, =miricl.wasm= and =game-of-life.wasm=.
+the production HTML, image loader and runtime into =build/=. Publish
+=index.html=, =miricl-loader.mjs=, =miricl.wasm.gz= and
+=game-of-life.wasm.gz= together. The runtime contains its matching adapter.
 =build/retention.txt= explains which definitions the optimizer keeps.
 =dev.html= loads source files through the development server instead.
 

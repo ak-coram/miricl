@@ -6186,6 +6186,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     emit-native-tiered-copy emit-native-tiered-small emit-native-tiered-i64
     emit-native-tiered-materialize emit-native-tiered-classify emit-native-tiered-update
     emit-native-tiered-instruction-worker emit-native-tiered-comparison-worker
+    native-simplify-ops-lisp native-op-liveness-lisp
     compilation-statistics-report compiler-input-summary
     hir-assert-form hir-correctable-place-form hir-restart-options
     hir-condition-initializer hir-define-condition hir-restart-expression

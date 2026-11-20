@@ -2,7 +2,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {Miricl} from '../scripts/miricl.mjs';
+import {loadMiricl} from '../scripts/miricl-loader.mjs';
 import {mcclimFiles, root} from './files.mjs';
 const mode = process.argv[2] ?? 'core';
 if (!['silex', 'core', 'browser', 'demo'].includes(mode)) throw new Error('Expected silex, core, browser or demo.');
@@ -13,7 +13,7 @@ for (const [name, bytes] of [...files].sort(([a], [b]) => a.localeCompare(b))) h
 const cacheDirectory = path.join(root, 'build/cache', hash.digest('hex'));
 const cachedFiles = new Set();
 const libraryParts = [];
-const vm = await Miricl.instantiate(runtime, {onOutput: text => {
+const vm = await loadMiricl(runtime, {onOutput: text => {
   for (const match of text.matchAll(/Loading #P"(\/cache\/[^"\n]+\.wasm)"/gu)) cachedFiles.add(match[1]);
   process.stdout.write(text);
 }});

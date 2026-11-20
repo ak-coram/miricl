@@ -89,24 +89,24 @@ try {
   fs.writeFileSync(path.join(directory, 'todo.html'), '<script type="text/x-common-lisp">(print "TODO λ🙂")</script>'.repeat(150));
   fs.mkdirSync(path.join(directory, 'game-of-life/build'), {recursive: true});
   fs.writeFileSync(path.join(directory, 'game-of-life/build/index.html'), '<!doctype html><p>Life λ🙂</p>'.repeat(100));
-  fs.writeFileSync(path.join(directory, 'game-of-life/build/miricl.js'), 'export class Miricl {}');
+  fs.writeFileSync(path.join(directory, 'game-of-life/build/miricl-loader.mjs'), 'export class Miricl {}');
   for (const file of ['miricl.wasm', 'game-of-life.wasm'])
     fs.writeFileSync(path.join(directory, 'game-of-life/build', file), repeatedSections);
   fs.mkdirSync(path.join(directory, 'build/maxima/site'), {recursive: true});
   for (const file of ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-    'miricl.mjs', 'maxima.mjs'])
+    'miricl-loader.mjs', 'maxima.mjs'])
     fs.writeFileSync(path.join(directory, 'build/maxima/site', file), 'Maxima fixture λ🙂'.repeat(20));
   for (const file of ['miricl.wasm', 'maxima.core'])
     fs.writeFileSync(path.join(directory, 'build/maxima/site', file), repeatedSections);
   fs.mkdirSync(path.join(directory, 'build/fricas/site'), {recursive: true});
   for (const file of ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-    'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'filesystem.bin.gz'])
+    'miricl-loader.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'filesystem.bin.gz'])
     fs.writeFileSync(path.join(directory, 'build/fricas/site', file), 'FriCAS fixture λ🙂'.repeat(20));
   for (const file of ['miricl.wasm', 'fricas.wasm'])
     fs.writeFileSync(path.join(directory, 'build/fricas/site', file), repeatedSections);
   fs.mkdirSync(path.join(directory, 'build/acl2/site'), {recursive: true});
   for (const file of ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-    'miricl.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs', 'filesystem.bin.gz', 'build.json'])
+    'miricl-loader.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs', 'filesystem.bin.gz', 'build.json'])
     fs.writeFileSync(path.join(directory, 'build/acl2/site', file), 'ACL2 fixture λ🙂'.repeat(20));
   for (const file of ['miricl.wasm', 'acl2.wasm'])
     fs.writeFileSync(path.join(directory, 'build/acl2/site', file), repeatedSections);
@@ -114,16 +114,16 @@ try {
   fs.writeFileSync(path.join(directory, 'build/acl2/books/manifest.json'), '{}');
   fs.writeFileSync(path.join(directory, 'build/acl2/books/filesystem.bin.gz'), gzipSync('book sources'));
   fs.mkdirSync(path.join(directory, 'build/coalton/site'), {recursive: true});
-  for (const file of ['index.html', 'client.mjs', 'repl-debugger.mjs', 'app.mjs', 'worker.mjs', 'examples.mjs', 'session-store.mjs', 'coalton.mjs', 'miricl.mjs', 'build.json'])
+  for (const file of ['index.html', 'client.mjs', 'repl-debugger.mjs', 'app.mjs', 'worker.mjs', 'examples.mjs', 'session-store.mjs', 'coalton.mjs', 'miricl-loader.mjs', 'build.json'])
     fs.writeFileSync(path.join(directory, 'build/coalton/site', file), 'Coalton fixture λ🙂'.repeat(20));
   for (const file of ['miricl.wasm', 'coalton.wasm'])
     fs.writeFileSync(path.join(directory, 'build/coalton/site', file), repeatedSections);
   fs.mkdirSync(path.join(directory, 'build/mcclim/site'), {recursive: true});
-  for (const file of ['index.html', 'app.mjs', 'startup.lisp', 'miricl.js'])
+  for (const file of ['index.html', 'app.mjs', 'startup.lisp', 'miricl-loader.mjs'])
     fs.writeFileSync(path.join(directory, 'build/mcclim/site', file), 'McCLIM fixture λ🙂');
   fs.writeFileSync(path.join(directory, 'build/mcclim/site/miricl-mcclim.wasm'), repeatedSections);
   fs.mkdirSync(path.join(directory, 'build/lem/site'), {recursive: true});
-  for (const file of ['index.html', 'app.mjs', 'miricl.js'])
+  for (const file of ['index.html', 'app.mjs', 'miricl-loader.mjs'])
     fs.writeFileSync(path.join(directory, 'build/lem/site', file), 'LEM fixture λ🙂');
   fs.writeFileSync(path.join(directory, 'build/lem/site/miricl-lem.wasm'), repeatedSections);
   for (const app of ['build/lem/site', 'game-of-life/build', 'build/maxima/site', 'build/fricas/site', 'build/acl2/site', 'build/coalton/site', 'build/mcclim/site']) {
@@ -146,7 +146,7 @@ try {
   const lem = report.artifacts.find(artifact => artifact.file === 'lem/');
   assert.ok(lem.files.some(file => file.file.endsWith('/miricl-lem.wasm.gz')));
   assert.ok(!lem.files.some(file => file.file.endsWith('/miricl.wasm.gz')), 'The embedded compiler is counted once');
-  for (const file of ['app.mjs', 'miricl.js'])
+  for (const file of ['app.mjs', 'miricl-loader.mjs'])
     assert.equal(report.artifacts.find(artifact => artifact.file === 'build/lem/site/' + file).rawBytes,
       fs.statSync(path.join(directory, 'build/lem/site', file)).size);
   assert.match(renderImageSizes(report), /href="lem\/"/);

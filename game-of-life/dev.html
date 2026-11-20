@@ -55,7 +55,7 @@
 </main>
 <noscript>This simulation needs JavaScript and WebAssembly.</noscript>
 <script type="module">
-  import {Miricl} from "./runtime/miricl.js";
+  import {loadMiricl} from "./runtime/miricl-loader.mjs";
   const report = error => {
     document.getElementById("status").textContent = error.message;
     document.getElementById("status").classList.add("error");
@@ -67,7 +67,7 @@
     url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     url.port = new URLSearchParams(location.search).get("ws") ?? "4006";
     url.pathname = "/repl"; url.search = ""; url.hash = "";
-    const lisp = globalThis.miriclInterpreter = await Miricl.instantiate(await image.arrayBuffer(), {
+    const lisp = globalThis.miriclInterpreter = await loadMiricl(image, {
       dev: {url: url.href}, onThreadError: report
     });
     await lisp.evaluateAsync(`

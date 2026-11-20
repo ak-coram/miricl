@@ -5,7 +5,7 @@
            #:session-worker-alive-p #:close-session #:submit #:cancel #:result
            #:forget-result #:request-id #:request-state #:request-values
            #:request-output #:request-printed-values #:request-condition
-           #:request-package #:request-compilation #:request-operation
+           #:request-package #:request-start-package #:request-compilation #:request-operation
            #:request-cancelled #:input-unavailable #:debugger-unavailable))
 (in-package #:miricl-ide-services)
 
@@ -13,6 +13,7 @@
 (defconstant +output-limit+ 65536)
 (defconstant +queue-limit+ 32)
 (defconstant +result-limit+ 128)
+(defconstant +form-spine-limit+ 65536)
 
 (define-condition request-cancelled (error) () (:report "The Lisp request was cancelled."))
 (define-condition input-unavailable (stream-error) ()
@@ -63,7 +64,7 @@
   package readtable (live-p t) worker current (queue nil) (next-id 0)
   (results nil) (history (make-list 9)) compile-evaluations notification-error)
 (defstruct (request (:constructor %make-request))
-  session id operation source package callback history-p
+  session id operation source package start-package callback history-p
   (state :queued) (values nil) (output "") (printed-values "") condition
   compilation (cancel-p nil))
 (defun make-session (&key (package "CL-USER") (readtable *readtable*))
@@ -97,6 +98,53 @@
             (write-string "; No value" out))
       (request-cancelled (condition) (error condition))
       (error () (write-string "<value printing failed>" out)))
+    (captured-string out)))
+
+(defun read-query-form (source)
+  ;; The second READ enforces exactly one form before expansion. Both READs
+  ;; retain normal target reader effects, including #. and custom readers.
+  (with-input-from-string (stream source)
+    (let* ((eof (list nil)) (form (read stream nil eof)))
+      (when (eq form eof) (error "Macroexpansion requires one Lisp form."))
+      (unless (eq eof (read stream nil eof))
+        (error "Macroexpansion accepts exactly one Lisp form; trailing input remains."))
+      form)))
+(defun check-query-form-spine (form)
+  ;; Only the outer call spine is traversed. Arguments are opaque: quoted or
+  ;; shared/circular data does not become executable syntax by being an argument.
+  (when (consp form)
+    (let ((slow form) (fast form))
+      (loop repeat +form-spine-limit+
+            do (when (null fast) (return-from check-query-form-spine form))
+               (unless (consp fast) (error "Macroexpansion form has a dotted call spine."))
+               (setf fast (cdr fast))
+               (when (null fast) (return-from check-query-form-spine form))
+               (unless (consp fast) (error "Macroexpansion form has a dotted call spine."))
+               (setf fast (cdr fast) slow (cdr slow))
+               (when (eq slow fast) (error "Macroexpansion form has a circular call spine."))
+            finally (error "Macroexpansion call spine exceeds the validation work limit."))))
+  form)
+(defun query-failure-description (condition phase source)
+  ;; Some target reader conditions have no descriptive report yet. Add bounded
+  ;; phase/type/source context to the terminal diagnostic without replacing the
+  ;; actual signalled condition or changing reader effects.
+  (concatenate 'string
+               (case phase
+                 (:read "Macroexpansion reader failed")
+                 (:validate "Macroexpansion input validation failed")
+                 (:display "Macroexpansion display failed")
+                 (otherwise "Macroexpansion failed"))
+               " (condition " (describe-safely (type-of condition) 128) "): "
+               (describe-safely condition)
+               (if (eq phase :read)
+                   (concatenate 'string "; source prefix: " (subseq source 0 (min 160 (length source))))
+                   "")))
+(defun print-expansion (expansion)
+  ;; Unlike the listener formatter, an error here is a query presentation error.
+  ;; The caller has already retained the actual computed values.
+  (let ((*print-readably* nil) (*print-circle* t) (*print-level* 6) (*print-length* 32)
+        (*print-pretty* nil) (out (make-instance 'capture-stream)))
+    (prin1 expansion out)
     (captured-string out)))
 
 (defun evaluate-source (request)
@@ -160,22 +208,45 @@
          (*** (third (session-history session))) (+ (fourth (session-history session)))
          (++ (fifth (session-history session))) (+++ (sixth (session-history session)))
          (/ (seventh (session-history session))) (// (eighth (session-history session)))
-         (/// (ninth (session-history session))) (state :ok) (failure nil))
+         (/// (ninth (session-history session))) (state :ok) (failure nil) (phase :operation))
     (unwind-protect
          (handler-case
              (progn
                (when (request-cancel-p request) (error 'request-cancelled))
+               ;; A queued package can have been deleted. Validate before copying
+               ;; its name or invoking any user reader, hook, macro or printer.
+               (unless (and (package-name *package*)
+                            (eq *package* (find-package (package-name *package*))))
+                 (error "The request's Lisp package was deleted."))
+               (check-type *readtable* readtable)
+               (setf (request-start-package request) (copy-seq (package-name *package*)))
                (setf (request-values request)
                      (ecase (request-operation request)
                        (:eval (evaluate-source request))
-                       (:compile-and-load (compile-source request))))
+                       (:compile-and-load (compile-source request))
+                       (:macroexpand-1
+                        (setf phase :read)
+                        (let ((form (read-query-form (request-source request))))
+                          (setf phase :validate)
+                          (check-query-form-spine form)
+                          (setf phase :expand)
+                          ;; Source syntax is not a captured lexical environment.
+                          ;; Preserve both actual values; never evaluate expansion.
+                          (multiple-value-list (macroexpand-1 form nil))))))
                ;; Keep :RUNNING through all user printers and diagnostics.
-               (setf (request-printed-values request) (print-values (request-values request))))
+               (setf phase :display
+                     (request-printed-values request)
+                     (if (eq :macroexpand-1 (request-operation request))
+                         (print-expansion (first (request-values request)))
+                         (print-values (request-values request)))))
            (request-cancelled ()
              (setf state :cancelled failure "The Lisp request was cancelled."))
            (serious-condition (condition)
              (handler-case
-                 (setf state :error failure (describe-safely condition))
+                 (setf state :error
+                       failure (if (eq :macroexpand-1 (request-operation request))
+                                   (query-failure-description condition phase (request-source request))
+                                   (describe-safely condition)))
                (request-cancelled ()
                  (setf state :cancelled failure "The Lisp request was cancelled.")))))
       (miricl-threads:without-interrupts
@@ -239,7 +310,7 @@
               (settle-request session request :cancelled "The Lisp service worker exited."))))))))
 (defun submit (session operation source &key package callback history-p)
   (check-type session session)
-  (unless (member operation '(:eval :compile-and-load)) (error "Unknown Lisp service operation ~S." operation))
+  (unless (member operation '(:eval :compile-and-load :macroexpand-1)) (error "Unknown Lisp service operation ~S." operation))
   (check-type source string)
   (unless (<= (length source) +source-limit+) (error "Lisp source exceeds the 1,048,576 character request limit."))
   (when callback (check-type callback function))

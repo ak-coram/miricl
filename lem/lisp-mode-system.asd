@@ -16,5 +16,6 @@
                           (:file "message-definitions") (:file "repl")
                           (:file "ext/inspector") (:file "ext/eval")
                           (:file "ext/sldb") (:file "ext/paren-coloring")
+                          (:file "ext/macroexpand")
                           (:file "package")))
    (:file "local-ui")))

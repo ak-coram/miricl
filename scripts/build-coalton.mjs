@@ -35,6 +35,8 @@ if (initialized) {
 const dataAssets = checkpoint ? ['coalton-image.wasm.gz'] : ['miricl.wasm.gz', 'coalton.wasm.gz'];
 const replacements = {'@@REVISION@@': revision};
 await fs.mkdir(output, {recursive: true});
+// Remove the former separate adapter when repackaging an existing site.
+await Promise.all(['miricl.js', 'miricl.mjs'].map(name => fs.rm(path.join(output, name), {force: true})));
 await Promise.all([
   fs.writeFile(path.join(output, 'index.html'), template.replace(/@@[A-Z]+@@/gu, marker => {
     if (!Object.hasOwn(replacements, marker)) throw new Error(`Unknown REPL marker ${marker}`);
@@ -46,7 +48,7 @@ await Promise.all([
   fs.writeFile(path.join(output, 'examples.mjs'),
     exampleSource.replaceAll('@@REVISION@@', revision)),
   ...['app.mjs', 'session-store.mjs'].map(name => fs.copyFile(path.join(root, 'app-common', name), path.join(output, name))),
-  ...['miricl.mjs', 'coalton.mjs', 'repl-debugger.mjs'].map(name => fs.copyFile(path.join(root, 'scripts', name), path.join(output, name))),
+  ...['miricl-loader.mjs', 'coalton.mjs', 'repl-debugger.mjs'].map(name => fs.copyFile(path.join(root, 'scripts', name), path.join(output, name))),
   fs.copyFile(path.join(root, 'vendor/coalton/LICENSE.txt'), path.join(output, 'LICENSE.txt')),
   fs.copyFile(path.join(root, 'LICENSE'), path.join(output, 'MIRICL-LICENSE')),
 ]);
@@ -69,7 +71,7 @@ for (const dependency of dependencies) {
 }
 await fs.writeFile(path.join(output, 'DEPENDENCY-LICENSES.txt'), notices.join('\n\n'));
 const assetVersion = await versionAssets(output, ['index.html', 'client.mjs', 'repl-debugger.mjs', 'app.mjs', 'worker.mjs', 'examples.mjs', 'session-store.mjs', 'coalton.mjs',
-  'miricl.mjs', ...dataAssets]);
+  'miricl-loader.mjs', ...dataAssets]);
 await fs.writeFile(path.join(output, 'build.json'), JSON.stringify({revision, assetVersion, dependencies,
   imageSha256: sha256(image), coreSha256: sha256(core), coreBytes: core.length,
   backend: 'native-wasm', initializedImage: Boolean(checkpoint),

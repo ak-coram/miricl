@@ -2,7 +2,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {fricasFiles} from './fricas-files.mjs';
 import {measureWasm} from './wasm-size.mjs';
 import {collectCompilationStatistics, writeCompilationStatistics} from './compilation-statistics.mjs';
@@ -13,7 +13,7 @@ const original = await fs.readFile(input);
 const compilerImage = await fs.readFile(image);
 const stages = [];
 let initializers = 0;
-const vm = await Miricl.instantiate(compilerImage, {imports: {build: {
+const vm = await loadMiricl(compilerImage, {imports: {build: {
   progress(count) {initializers = count; if (count % 1000 === 0) console.log(`FriCAS: compiled ${count} initializers`);},
 }}});
 async function phase(name, source) {

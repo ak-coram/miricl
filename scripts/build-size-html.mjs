@@ -13,21 +13,21 @@ const artifacts = [
   {file: 'miricl-asdf.wasm', description: 'Optional ASDF and UIOP library', kind: 'wasm'},
   {file: 'miricl.html', description: 'Complete browser REPL page', kind: 'html'},
   {file: 'todo.html', description: 'Complete Common Lisp + CLOS TODO page', kind: 'html'},
-  {file: 'game-of-life/', description: 'Game of Life — total HTML, adapter, interpreter and application',
-    kind: 'application', files: ['game-of-life/build/index.html', 'game-of-life/build/miricl.js',
+  {file: 'game-of-life/', description: 'Game of Life — total HTML, loader, runtime image and application',
+    kind: 'application', files: ['game-of-life/build/index.html', 'game-of-life/build/miricl-loader.mjs',
       'game-of-life/build/miricl.wasm.gz', 'game-of-life/build/game-of-life.wasm.gz']},
   {file: 'game-of-life/build/game-of-life.wasm.gz', description: 'Game of Life — Lisp payload only (included in total above)', kind: 'wasm'},
   {file: 'maxima/', description: 'Maxima — HTML, scripts, interpreter and optimized core',
     kind: 'application', files: ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-      'miricl.mjs', 'maxima.mjs', 'miricl.wasm.gz', 'maxima.core.gz'].map(file => `build/maxima/site/${file}`)},
+      'miricl-loader.mjs', 'maxima.mjs', 'miricl.wasm.gz', 'maxima.core.gz'].map(file => `build/maxima/site/${file}`)},
   {file: 'build/maxima/site/maxima.core.gz', description: 'Maxima — optimized Lisp core (included in total above)', kind: 'wasm'},
   {file: 'fricas/', description: 'FriCAS — initial HTML, scripts, interpreter, optimized image and algebra filesystem',
     kind: 'application', files: ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-      'miricl.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm.gz', 'fricas.wasm.gz', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`)},
+      'miricl-loader.mjs', 'fricas.mjs', 'filesystem-archive.mjs', 'mounted-filesystem.mjs', 'miricl.wasm.gz', 'fricas.wasm.gz', 'filesystem.bin.gz'].map(file => `build/fricas/site/${file}`)},
   {file: 'build/fricas/site/fricas.wasm.gz', description: 'FriCAS — optimized Lisp payload (included in total above)', kind: 'wasm'},
 ];
 const acl2Scripts = ['index.html', 'app.mjs', 'examples.mjs', 'session-store.mjs', 'worker.mjs',
-  'miricl.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs'];
+  'miricl-loader.mjs', 'acl2.mjs', 'acl2-books.mjs', 'dev-filesystem.mjs', 'filesystem-archive.mjs'];
 const acl2Preview = [
   {file: 'acl2/', description: 'ACL2 — HTML, scripts, interpreter, native compiled core and system sources (bootstrap unverified)',
     kind: 'application', files: [...acl2Scripts,
@@ -44,7 +44,7 @@ const acl2Image = [
 const booksArtifact = {file: 'build/acl2/books/filesystem.bin.gz',
   description: 'ACL2 — selected math book sources and dependencies, separate on-demand download; no precompiled books', kind: 'data'};
 const coaltonScripts = ['index.html', 'client.mjs', 'repl-debugger.mjs', 'app.mjs', 'worker.mjs', 'examples.mjs', 'session-store.mjs', 'coalton.mjs',
-  'miricl.mjs', 'build.json'];
+  'miricl-loader.mjs', 'build.json'];
 const coaltonArtifacts = [
   {file: 'coalton/', description: 'Lisp and Coalton REPL — scripts, examples, interpreter and native compiler and standard library',
     kind: 'application', files: [...coaltonScripts, 'miricl.wasm.gz', 'coalton.wasm.gz'].map(file => `build/coalton/site/${file}`)},
@@ -58,17 +58,17 @@ const coaltonImage = [
 ];
 const mcclimArtifacts = [
   {file: 'mcclim/', description: 'McCLIM — demonstrations page, scripts and reusable native Lisp image',
-    kind: 'application', files: ['index.html', 'app.mjs', 'startup.lisp', 'miricl.js', 'miricl-mcclim.wasm.gz']
+    kind: 'application', files: ['index.html', 'app.mjs', 'startup.lisp', 'miricl-loader.mjs', 'miricl-mcclim.wasm.gz']
       .map(file => `build/mcclim/site/${file}`)},
   {file: 'build/mcclim/site/miricl-mcclim.wasm.gz', description: 'McCLIM — native compiled library, demonstrations, resources and ready compiler (included in total above)', kind: 'wasm'},
 ];
 const lemArtifacts = [
   {file: 'lem/', description: 'LEM — editor page, scripts and initialized guest-compiled Lisp image',
-    kind: 'application', files: ['index.html', 'app.mjs', 'miricl.js', 'miricl-lem.wasm.gz']
+    kind: 'application', files: ['index.html', 'app.mjs', 'miricl-loader.mjs', 'miricl-lem.wasm.gz']
       .map(file => `build/lem/site/${file}`)},
   {file: 'build/lem/site/miricl-lem.wasm.gz', description: 'LEM — complete editor, Lisp services, sources, ASDF and ready compiler (included in total above)', kind: 'wasm'},
   {file: 'build/lem/site/app.mjs', description: 'LEM — application JavaScript (included in total above)', kind: 'javascript'},
-  {file: 'build/lem/site/miricl.js', description: 'LEM — JavaScript runtime adapter (included in total above)', kind: 'javascript'},
+  {file: 'build/lem/site/miricl-loader.mjs', description: 'LEM — JavaScript image loader (included in total above)', kind: 'javascript'},
 ];
 const artifactDefinitions = [...artifacts, ...acl2Preview, ...acl2Image, booksArtifact,
   ...coaltonArtifacts, ...coaltonImage, ...mcclimArtifacts, ...lemArtifacts];

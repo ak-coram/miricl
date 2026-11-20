@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {Miricl} from '../scripts/miricl.mjs';
+import {loadMiricl} from '../scripts/miricl-loader.mjs';
 import {prepareLemSources, root} from './files.mjs';
 import {unicodeData, digest, lispString, atomicWrite} from './unicode.mjs';
 import {collectCompilationStatistics, writeCompilationStatistics} from '../scripts/compilation-statistics.mjs';
@@ -21,7 +21,7 @@ export async function prepareBuild(runtime, asdf, output, options = {}) {
   for (const [name, bytes] of [...files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
     hash.update(name + '\0' + bytes.length + '\0').update(bytes);
   for (const name of ['lem/image.mjs', 'lem/files.mjs', 'lem/lisp-mode-sources.mjs', 'lem/unicode.mjs',
-    'lem/page.mjs', 'lem/app.mjs', 'lem/index.html', 'scripts/miricl.mjs', 'miricl.js',
+    'lem/page.mjs', 'lem/app.mjs', 'lem/index.html', 'scripts/miricl-loader.mjs',
     'scripts/compilation-statistics.mjs', 'scripts/version-assets.mjs'])
     hash.update(name).update(await fs.readFile(path.join(root, name)));
   const key = hash.digest('hex');
@@ -35,7 +35,7 @@ export const applicationCheck = `(assert (and (find-package "ASDF") (find-packag
   (fboundp 'lem-browser:start-editor) (fboundp 'lem-lisp-mode/connection:ensure-local-connection)
   (null lem-browser:*browser*) (null lem-lisp-mode/connection::*connection*))) (values)`;
 export async function checkImage(bytes, {onOutput = text => process.stdout.write(text)} = {}) {
-  const vm = await Miricl.instantiate(bytes, {onOutput});
+  const vm = await loadMiricl(bytes, {onOutput});
   try {
     await vm.evaluateAsync(applicationCheck, {eof: true});
     assert.ok(vm.vm['core-checkpoint-safe'](), 'The restored application has no live worker thread.');
@@ -64,7 +64,7 @@ export async function buildImage(runtime, asdf, output, options = {}) {
   let vm, bytes, manifest;
   try {
     stage('instantiate');
-    vm = await Miricl.instantiate(runtimeBytes, {onOutput});
+    vm = await loadMiricl(runtimeBytes, {onOutput});
     try {
       if (!vm.threads) throw new Error('LEM requires the asynchronous Wasm thread scheduler.');
       assert.equal((await vm.evaluateAsync('(eq miricl-compiler::*compiler-state* :ready)')).output, 'T\n');

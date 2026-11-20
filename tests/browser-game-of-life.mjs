@@ -206,7 +206,7 @@ try {
       (/^https?:/.test(url) && /asdf|quicklisp|dev-repl|dev-filesystem/.test(new URL(url).pathname))),
       false, 'Production must not fetch development dependencies.');
     const versions = new Set();
-    for (const file of ['miricl.js', 'miricl.wasm.gz', 'game-of-life.wasm.gz']) {
+    for (const file of ['miricl-loader.mjs', 'miricl.wasm.gz', 'game-of-life.wasm.gz']) {
       const request = requests.find(url => new URL(url).origin === origin && new URL(url).pathname === `/${file}`);
       assert.ok(request, `Production must load its separate ${file} asset.`);
       const version = new URL(request).searchParams.get('v');

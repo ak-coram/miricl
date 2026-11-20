@@ -1,4 +1,3 @@
-import {Miricl} from './miricl.mjs';
 import {decodeFilesystem} from './filesystem-archive.mjs';
 import {createFriCAS} from './fricas.mjs';
 
@@ -8,7 +7,8 @@ const resource = async name => {
   if (!response.ok) throw new Error(`Unable to load ${name}: ${response.status}`);
   return response;
 };
-const bytes = async name => Miricl.decompress(await (await resource(name)).arrayBuffer());
+const bytes = async name => new Uint8Array(await new Response((await resource(name)).body
+  .pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
 const image = () => bytes('miricl.wasm.gz');
 const filesystem = async () => {
   return decodeFilesystem(await bytes('filesystem.bin.gz'));

@@ -18,8 +18,8 @@ node mcclim/image.mjs
 node mcclim/page.mjs
 #+end_src
 
-The output is =mcclim/build/miricl-mcclim.wasm=. Load it with the existing
-=Miricl.instantiate= adapter and use =evaluateAsync= to start applications,
+The output is =mcclim/build/miricl-mcclim.wasm=. Load it with =loadMiricl= from
+=miricl-loader.mjs=; the image supplies its matching adapter. Use =evaluateAsync= to start applications,
 so CLIM's event and application processes can run cooperatively. The backend
 uses a =mcclim-desktop= element, creating one if needed. Windows share that
 desktop, with their own title bars and move, resize and close controls.

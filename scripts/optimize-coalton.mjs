@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {collectCompilationStatistics, writeCompilationStatistics} from './compilation-statistics.mjs';
 const [image = 'miricl.wasm', input = 'build/coalton/coalton-portable.wasm',
   output = 'build/coalton/coalton.wasm'] = process.argv.slice(2);
@@ -32,7 +32,7 @@ if (prefix) {
 let count = 0, currentFile = '', phase = 'initialize runtime';
 const timings = {};
 const started = performance.now();
-const vm = await Miricl.instantiate(runtime, {imports: {
+const vm = await loadMiricl(runtime, {imports: {
   coaltonBuild: {progress(file, compiled) {
     count = compiled;
     if (file !== currentFile || count % 500 === 0) console.log(`Coalton native: ${file}, ${count} initializers`);

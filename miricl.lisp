@@ -52,6 +52,8 @@
    (symbol-names :initform (make-hash-table) :reader interpreter-symbol-names)
    (functions :initform (make-hash-table) :reader interpreter-function-objects)
    (packages :initform (make-hash-table) :reader interpreter-packages)
+   (native-modules :initform (make-hash-table :test 'equalp) :reader interpreter-native-modules)
+   (native-service-instance :initform nil :accessor interpreter-native-service-instance)
    (readtable :initform nil :accessor interpreter-readtable)))
 
 (cffi:defcallback interpreter-host-service :pointer
@@ -169,10 +171,13 @@ COMPILER NIL writes the smaller interpreter-only image."
   (let ((bytes (if wasi
                        (wasm-with-custom-section
                          (repl-command-wasm (interpreter-wasm :wasi t :debug-names debug-names :compiler compiler))
-                         "miricl.node-compiler" (interpreter-wasm :native-compiler t :debug-names debug-names))
-                       (wasm-with-custom-section
-                         (interpreter-wasm :native-compiler native-compiler :debug-names debug-names :compiler compiler)
-                         "miricl.repl-bridge" (repl-bridge-core-wasm)))))
+                         "miricl.node-compiler"
+                         (image-with-javascript-adapter
+                           (interpreter-wasm :native-compiler t :debug-names debug-names)))
+                       (image-with-javascript-adapter
+                         (wasm-with-custom-section
+                           (interpreter-wasm :native-compiler native-compiler :debug-names debug-names :compiler compiler)
+                           "miricl.repl-bridge" (repl-bridge-core-wasm))))))
     (with-open-file (stream pathname :direction :output :if-exists :supersede
                                     :element-type '(unsigned-byte 8))
       (write-sequence bytes stream)))
@@ -180,6 +185,8 @@ COMPILER NIL writes the smaller interpreter-only image."
 
 (defun close-interpreter (interpreter)
   "Release all Wasmtime resources. It is safe to close an interpreter twice."
+  (when (fboundp 'close-interpreter-native-services)
+    (close-interpreter-native-services interpreter))
   (when (interpreter-instance interpreter)
     (cffi:foreign-free (interpreter-instance interpreter))
     (setf (interpreter-instance interpreter) nil))
@@ -194,7 +201,7 @@ COMPILER NIL writes the smaller interpreter-only image."
     (setf (interpreter-engine interpreter) nil))
   (values))
 
-(defun make-interpreter (&key (fuel 500000000) parallel-compilation)
+(defun make-interpreter (&key (fuel 500000000) parallel-compilation image native-service)
   "Create an isolated guest with FUEL instructions available per evaluation."
   (check-type fuel (unsigned-byte 64))
   (let ((interpreter (make-instance 'interpreter :fuel fuel)))
@@ -214,10 +221,16 @@ COMPILER NIL writes the smaller interpreter-only image."
           (setf (interpreter-context interpreter) (wt::wasmtime-store-context (interpreter-store interpreter)))
           ;; Bootstrap loads the shared runtime libraries before per-request fuel applies.
           (wt:check-error (wt:wasmtime-context-set-fuel (interpreter-context interpreter) (max fuel 3000000000)))
-          (setf (interpreter-module interpreter) (wt:compile-module (interpreter-engine interpreter) (interpreter-wasm :debug-names t)))
+          (setf (interpreter-module interpreter)
+                (wt:compile-module (interpreter-engine interpreter)
+                                   (or image (interpreter-wasm :debug-names t))))
           (setf (interpreter-instance interpreter) (cffi:foreign-alloc '(:struct wt::wasmtime-instance)))
           (wt:instantiate (interpreter-context interpreter) (interpreter-module interpreter) (interpreter-instance interpreter))
           (install-interpreter-host-services interpreter)
+          (when native-service
+            (unless (fboundp 'install-interpreter-native-services)
+              (error "Load MIRICL/WASMTIME-NATIVE before requesting its native service."))
+            (install-interpreter-native-services interpreter))
           (loop for symbol in *runtime-symbols* for id from 0 do
             (setf (gethash symbol (interpreter-symbols interpreter)) id
                   (gethash id (interpreter-symbol-names interpreter)) symbol))

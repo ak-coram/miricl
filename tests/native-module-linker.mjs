@@ -1,7 +1,6 @@
 // Build-time linking must preserve transfer tags and function index spaces.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import {linkNativeModules} from '../scripts/native-module-linker.mjs';
 
 const word = value => {
   const bytes = [];
@@ -124,10 +123,68 @@ const wrappingConstants = [0n, -1n, 0x7fffffffn, 0x80000000n, 0xffffffffn,
   0x100000000n, -0x100000001n, -(1n << 63n), (1n << 63n) - 1n];
 const optimizerFixture = `(module
   (type $box (struct (field i32)))
+  (type $identity (func (param i32) (result i32)))
   (import "m" "hook" (func $hook (param externref) (result externref)))
   (import "m" "fail" (func $fail))
   (import "m" "i32-hook" (func $i32-hook (param i32) (result i32)))
   (import "m" "i64-hook" (func $i64-hook (param i64) (result i64)))
+  ;; Only the inner void label is targeted; its surviving alias must remain.
+  (func (export "alias-void") (param i32 externref) (result externref)
+    block $outer block $inner
+      local.get 0 br_if $inner local.get 1 call $hook drop
+    end end local.get 1)
+  (func (export "alias-chain") (param i32 externref externref) (result externref)
+    block $outer (result externref)
+      block $middle (result externref)
+        block $inner (result externref)
+          local.get 1
+          local.get 0 i32.eqz br_if $inner
+          local.get 0 i32.const 1 i32.eq br_if $middle
+          local.get 0 i32.const 2 i32.eq br_if $outer
+          drop local.get 2 call $hook
+        end
+      end
+    end)
+  (func (export "alias-table") (param i32 externref externref) (result externref externref)
+    block $surround (result externref)
+      block $outer (result externref)
+        block $inner (result externref)
+          local.get 1 local.get 0 br_table $inner $outer $surround
+        end
+      end
+    end local.get 2)
+  (func (export "alias-function") (param i32) (result i32)
+    block $outer (result i32) block $inner (result i32)
+      i32.const 17 local.get 0 br_table $inner $outer 2
+    end end i32.const 1 i32.add)
+  (func (export "alias-trap") (param i32) (result i32)
+    block (result i32) block (result i32)
+      i32.const 17 call $i32-hook local.get 0 i32.div_s
+    end end)
+  (func (export "alias-unreachable") (param i32) (result i32)
+    block $outer (result i32) block $inner (result i32)
+      loop $again
+        local.get 0 i32.eqz if unreachable end
+        local.get 0 i32.const 1 i32.eq if i32.const 17 br $inner end
+        local.get 0 i32.const 2 i32.eq if i32.const 29 br $outer end
+        local.get 0 i32.const 1 i32.sub local.set 0 br $again
+      end unreachable
+    end end)
+  ;; Indexed signatures can have parameters or several results. They remain
+  ;; checked ordinary control frames rather than supplying literal-type proof.
+  (func (export "alias-parameters") (param i32) (result i32)
+    local.get 0 block (type $identity) block (type $identity) end end)
+  (func (export "alias-multiple") (param i32 externref) (result externref i32)
+    block $outer (result externref i32) block $inner (result externref i32)
+      local.get 1 i32.const 29 local.get 0 br_table $inner $outer
+    end end)
+  (func (export "alias-landing") (param externref) (result externref)
+    block $outer block $inner
+      try_table (catch_all $inner) call $fail end unreachable
+    end end local.get 0)
+  (func (export "alias-reference") (param externref)
+    block $outer block $inner local.get 0 br_on_null $outer drop end end
+    local.get 0 call $hook drop)
   ${wrappingConstants.map((value, index) => `(func (export "wrap-${index}") (result i32)
     i64.const ${value} i32.wrap_i64)`).join('\n')}
   ${['i32', 'i64'].flatMap(type => comparisonNames.map(name => `
@@ -365,6 +422,36 @@ const checkOptimized = bytes => {
   }
   assert.equal(entries['landing-join'](original, replacement), original, 'A landing pad retains the pre-join assignment.');
   assert.equal(entries.initialized(17, 29), 17, 'Non-defaultable references retain their initialization.');
+  reenter = false;
+  for (const flag of [0, 1, 2, 3]) {
+    events.length = 0;
+    assert.equal(entries['alias-void'](flag, original), original);
+    assert.deepEqual(events, flag ? [] : [original]);
+    events.length = 0;
+    assert.equal(entries['alias-chain'](flag, original, replacement), flag < 3 ? original : replacement);
+    assert.deepEqual(events, flag < 3 ? [] : [replacement]);
+    assert.deepEqual(entries['alias-table'](flag, original, replacement), [original, replacement]);
+    assert.equal(entries['alias-function'](flag), flag < 2 ? 18 : 17);
+    assert.deepEqual(entries['alias-multiple'](flag, original), [original, 29]);
+    assert.equal(entries['alias-parameters'](flag), flag);
+    if (flag) assert.equal(entries['alias-unreachable'](flag), flag === 1 ? 17 : 29);
+  }
+  assert.throws(() => entries['alias-unreachable'](0), WebAssembly.RuntimeError);
+  assert.equal(entries['alias-unreachable'](1), 17);
+  events.length = 0;
+  assert.throws(() => entries['alias-trap'](0), WebAssembly.RuntimeError);
+  assert.deepEqual(events, [17], 'The operand callback precedes a division trap.');
+  events.length = 0; throwing = true;
+  assert.throws(() => entries['alias-trap'](1), error => error === failure);
+  assert.deepEqual(events, [17]);
+  throwing = false;
+  assert.equal(entries['alias-trap'](1), 17, 'Aliased control remains usable after a failed callback.');
+  assert.equal(entries['alias-landing'](original), original);
+  for (const value of [original, null]) {
+    events.length = 0;
+    entries['alias-reference'](value);
+    assert.deepEqual(events, [value], 'A reference branch retains its landing depth and following effect.');
+  }
 };
 
 // Each fold is a repeated semantic unit whose length changes with its input
@@ -423,31 +510,23 @@ const [mode, pathname, optimizedPath, sharedPath, operandCount] = process.argv.s
 if (mode === 'prepare') {
   const bytes = fixture();
   check(bytes);
-  for (const [options, reason, valid] of [
-    [{tagName: 'foreign'}, /Unsupported native exception tag/, true],
-    [{payload: true}, /Native transfer tag must have no payload/, true],
-    [{catchIndex: 1}, /Invalid compiler module/, false],
+  await fs.writeFile(pathname, bytes);
+  for (const [suffix, options, valid] of [
+    ['foreign', {tagName: 'foreign'}, true],
+    ['payload', {payload: true}, true],
+    ['catch', {catchIndex: 1}, false],
   ]) {
     const malformed = fixture(options);
     assert.equal(WebAssembly.validate(malformed), valid);
-    assert.throws(() => linkNativeModules([malformed]), reason);
+    await fs.writeFile(pathname + '.' + suffix, malformed);
   }
-  const {wat, entries, declarations} = linkNativeModules([bytes]);
-  await fs.writeFile(pathname, `(module
-    (type $native-entry (func (param externref externref) (result externref)))
-    (type $native-direct-entry (func (param externref externref externref externref externref) (result externref)))
-    (import "m" "before" (func $native-before (param externref) (result externref)))
-    (import "m" "transfer" (tag $transfer))
-    (import "m" "after" (func $native-after (param externref) (result externref)))
-    ${wat}
-    (export "entry" (func ${entries[0]}))
-    ${declarations.slice(2).map((declaration, index) => `(export "numeric-${index}" (func ${declaration}))`).join('\n')})`);
-  console.log('Native module linker: original transfer behavior and malformed-input rejection pass.');
+  console.log('Native linker fixture: original transfer behavior and malformed inputs prepared.');
 } else if (mode === 'verify') {
   const entries = check(await fs.readFile(pathname));
   for (const [type, inputs] of [['i32', [-2147483648, -1, 0, 1, 2147483647]],
     ['i64', [-(1n << 63n), -1n, 0n, 1n, (1n << 63n) - 1n]]]) {
-    for (const [index, relation] of comparisonNames.entries()) for (let left of inputs) for (let right of inputs) {
+    for (const [index, relation] of comparisonNames.entries()) for (const first of inputs) for (const second of inputs) {
+      let left = first, right = second;
       const actual = entries[`numeric-${(type === 'i32' ? 0 : comparisonNames.length) + index}`](left, right);
       if (relation.endsWith('_u')) {
         const width = type === 'i32' ? 32 : 64;
@@ -463,12 +542,6 @@ if (mode === 'prepare') {
   console.log('Native module linker: linked catches, propagation, function calls and recovery pass.');
 } else if (mode === 'prepare-counters') {
   await fs.writeFile(pathname, counterFixture);
-} else if (mode === 'link-counters') {
-  const bytes = await fs.readFile(pathname);
-  checkCounters(bytes);
-  const {wat, entries} = linkNativeModules([bytes]);
-  await fs.writeFile(optimizedPath, `(module ${counterImports} ${wat}
-    (export "entry" (func ${entries[0]})))`);
 } else if (mode === 'verify-counters') {
   checkCounters(await fs.readFile(pathname));
   console.log('Native module linker: linked immediate counter steps, promotion, generic effects and recovery pass.');

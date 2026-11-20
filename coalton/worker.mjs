@@ -1,4 +1,3 @@
-import {Miricl} from './miricl.mjs';
 import {createCoalton} from './coalton.mjs';
 let session, busy = false;
 const debuggerStops = new Map();
@@ -7,7 +6,8 @@ const resource = async (name, options) => {
   if (!response.ok) throw new Error(`Unable to load ${name}: ${response.status}`);
   return response;
 };
-const bytes = async name => Miricl.decompress(await (await resource(name)).arrayBuffer());
+const bytes = async name => new Uint8Array(await new Response((await resource(name)).body
+  .pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
 onmessage = async ({data}) => {
   // Evaluation is suspended while a stop is open. Debugger commands must pass
   // through even though the ordinary evaluation request is still busy.

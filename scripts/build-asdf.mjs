@@ -72,8 +72,8 @@ export function buildAsdf(output = path.join(root, 'build/asdf')) {
 }
 
 export async function compileAsdf(source, image, output) {
-  const {Miricl} = await import('./miricl.mjs');
-  const lisp = await Miricl.instantiate(fs.readFileSync(image));
+  const {loadMiricl} = await import('./miricl-loader.mjs');
+  const lisp = await loadMiricl(fs.readFileSync(image));
   try {
     lisp.mountFile('/asdf.lisp', fs.readFileSync(source, 'utf8'));
     // Keep the complete dynamic library interface while pooling constants and

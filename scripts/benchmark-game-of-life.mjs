@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {measureFile} from './wasm-size.mjs';
 
 const directory = path.resolve(process.argv[2] ?? 'game-of-life');
@@ -23,7 +23,7 @@ report.graph = {inputRecords: Number(records[1]), outputRecords: Number(records[
 // A fresh production interpreter has the built-in compiler and no ASDF. Verify the
 // persistent set operations, previous-world sharing and printable REPL state.
 const initializeStarted = performance.now();
-const production = await Miricl.instantiate(interpreter);
+const production = await loadMiricl(interpreter);
 report.timings.initializeMs = Math.round(performance.now() - initializeStarted);
 try {
   const loadStarted = performance.now();
@@ -55,7 +55,7 @@ try {
 } finally {production.close();}
 
 for (const [role, name] of [['application', 'build/game-of-life.wasm'],
-  ['interpreter', 'build/miricl.wasm'], ['adapter', 'build/miricl.js'],
+  ['interpreter', 'build/miricl.wasm'], ['loader', 'build/miricl-loader.mjs'],
   ['html', 'build/index.html'],
   ['developmentRepl', 'miricl-repl.wasm']]) {
   const measurement = {role, ...measureFile(file(name))};

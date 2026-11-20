@@ -1,5 +1,5 @@
 // FriCAS sessions in MIRICL; no native algebra or remote evaluation.
-import {Miricl} from './miricl.mjs';
+import {loadMiricl} from './miricl-loader.mjs';
 import {MountedFilesystem} from './mounted-filesystem.mjs';
 export const lispString = text => '"' + text.replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"';
 export const fricasInitialize = `(progn
@@ -11,7 +11,7 @@ export const fricasInitialize = `(progn
   (boot::|open_category_db| t) (boot::|open_operation_db| t) (boot::|open_browse_db| t)
   (values))`;
 export async function createFriCAS(image, core, files, {progress = () => {}, lazyFiles = false, ...host} = {}) {
-  const vm = await Miricl.instantiate(image, host);
+  const vm = await loadMiricl(image, host);
   let filesystem;
   try {
     if (lazyFiles && vm.threads && !vm.vm['filesystem-services']?.get(0))

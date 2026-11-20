@@ -33,7 +33,8 @@ export function patchLispMode(files, replaceChecked) {
       if (c === '"') string = true;
       else if (c === '(') depth++;
       else if (c === ')' && --depth === 0)
-        return replaceChecked(source, source.slice(start, i + 1), replacement, anchor);
+        return replacement === undefined ? source.slice(start, i + 1)
+          : replaceChecked(source, source.slice(start, i + 1), replacement, anchor);
     }
     throw new Error(`Unbalanced Lisp-mode overlay form: ${anchor}`);
   }
@@ -120,5 +121,24 @@ export function patchLispMode(files, replaceChecked) {
   (list (lem/context-menu:make-item :label "Clear eval results"
          :callback (lambda (&rest args) (declare (ignore args)) (lisp-eval-clear)))))`);
     return source;
+  });
+  patch('ext/macroexpand', source => {
+    // Select the genuine package and one-step command, without loading the
+    // macrostep/source replacement closure. The provider owns async display.
+    const selected = [form(source, '(defpackage :lem-lisp-mode/macroexpand'),
+      form(source, '(in-package :lem-lisp-mode/macroexpand)'),
+      form(form(source, '(defun macroexpand-internal (expander)'),
+        '(defun macroexpand-internal (expander)',
+        '(defun macroexpand-internal (expander)\n  (lem-lisp-mode/internal::local-macroexpand-1 expander))'),
+      form(source, '(define-command lisp-macroexpand ()')];
+    for (const [anchor, operation] of [
+      ['(define-command lisp-macroexpand-in-place ()', 'in-place macroexpansion'],
+      ['(define-command lisp-macroexpand-all ()', 'full or recursive macroexpansion'],
+      ['(define-command lisp-macrostep-expand ()', 'lexical macrostep']]) {
+      const original = form(source, anchor);
+      selected.push(form(original, anchor, `${anchor} ()\n  (lem-lisp-mode/connection:unsupported-operation "${operation}"))`));
+    }
+    selected.push('(define-key *lisp-mode-keymap* "C-c C-m" \'lisp-macroexpand)');
+    return ';;;; Selected genuine LEM one-step command; owned local display.\n' + selected.join('\n\n') + '\n';
   });
 }

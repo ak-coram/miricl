@@ -117,7 +117,12 @@ const opcodeNames = new Map([
   [18, 'return_call'], [26, 'drop'], [32, 'local.get'], [33, 'local.set'],
   [34, 'local.tee'], [35, 'global.get'], [36, 'global.set'], [65, 'i32.const'],
   [66, 'i64.const'], [69, 'i32.eqz'], [70, 'i32.eq'], [71, 'i32.ne'],
-  [72, 'i32.lt_s'], [74, 'i32.gt_s'], [76, 'i32.le_s'], [78, 'i32.ge_s'],
+  [72, 'i32.lt_s'], [73, 'i32.lt_u'], [74, 'i32.gt_s'], [75, 'i32.gt_u'],
+  [76, 'i32.le_s'], [77, 'i32.le_u'], [78, 'i32.ge_s'], [79, 'i32.ge_u'],
+  [80, 'i64.eqz'], [81, 'i64.eq'], [82, 'i64.ne'], [83, 'i64.lt_s'], [84, 'i64.lt_u'],
+  [85, 'i64.gt_s'], [86, 'i64.gt_u'], [87, 'i64.le_s'], [88, 'i64.le_u'],
+  [89, 'i64.ge_s'], [90, 'i64.ge_u'], [167, 'i32.wrap_i64'],
+  [172, 'i64.extend_i32_s'], [173, 'i64.extend_i32_u'],
   [113, 'i32.and'], [124, 'i64.add'], [125, 'i64.sub'], [126, 'i64.mul'],
   [208, 'ref.null'], [209, 'ref.is_null'], [210, 'ref.func'], [211, 'ref.eq'],
 ]);

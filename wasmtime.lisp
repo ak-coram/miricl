@@ -65,6 +65,8 @@
 (defcfun wasmtime-context-set-fuel :pointer (context :pointer) (fuel :uint64))
 (defcfun wasmtime-context-get-fuel :pointer (context :pointer) (fuel (:pointer :uint64)))
 (defcfun wasmtime-context-gc :pointer (context :pointer))
+(defcfun wasmtime-module-validate :pointer
+  (engine p-wasm-engine) (wasm :pointer) (length size))
 
 (defmacro with-engine ((engine &key fuel parallel-compilation) &body body)
   (alexandria:with-gensyms (config)
@@ -178,6 +180,7 @@
 (defctype p-wasmtime-instance (:pointer (:struct wasmtime-instance)))
 (defcfun wasmtime-extern-delete :void (value p-wasmtime-extern))
 (defcfun wasmtime-val-unroot :void (value p-wasmtime-val))
+(defcfun wasmtime-val-clone :void (source p-wasmtime-val) (destination p-wasmtime-val))
 (defcfun wasm-valtype-new p-wasm-valtype (kind :uint8))
 (defcfun wasm-valtype-kind :uint8 (type p-wasm-valtype))
 (defcfun wasm-functype-new p-wasm-functype (params :pointer) (results :pointer))
@@ -310,11 +313,13 @@
                (let ((data (foreign-slot-value vector '(:struct wasm-valtype-vec) 'data)))
                  (loop for kind in kinds for i from 0
                        do (setf (mem-aref data :pointer i)
-                                (wasm-valtype-new (or (second (assoc kind *value-types*))
+                                (wasm-valtype-new (or (case kind (:externref #x80) (:funcref #x81))
+                                                     (second (assoc kind *value-types*))
                                                      (error "Unknown value type ~S." kind))))))))
       ;; Validate before allocating any owned vector elements.
       (dolist (kind (append parameters results))
-        (unless (assoc kind *value-types*) (error "Unknown value type ~S." kind)))
+        (unless (or (member kind '(:funcref :externref)) (assoc kind *value-types*))
+          (error "Unknown value type ~S." kind)))
       (fill-types params parameters)
       (fill-types returns results)
       (let ((type (wasm-functype-new params returns))
