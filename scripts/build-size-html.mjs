@@ -70,8 +70,13 @@ const lemArtifacts = [
   {file: 'build/lem/site/app.mjs', description: 'LEM — application JavaScript (included in total above)', kind: 'javascript'},
   {file: 'build/lem/site/miricl-loader.mjs', description: 'LEM — JavaScript image loader (included in total above)', kind: 'javascript'},
 ];
+const clysmArtifacts = [
+  {file: 'clysm/', description: 'Clysm — minimal REPL, MIRICL bootstrap image and compressed Common Lisp sources',
+    kind: 'application', files: ['index.html', 'filesystem.bin.gz'].map(file => `build/clysm/site/${file}`)},
+  {file: 'build/clysm/site/filesystem.bin.gz', description: 'Clysm — compressed compiler and runtime sources (included in total above)', kind: 'data'},
+];
 const artifactDefinitions = [...artifacts, ...acl2Preview, ...acl2Image, booksArtifact,
-  ...coaltonArtifacts, ...coaltonImage, ...mcclimArtifacts, ...lemArtifacts];
+  ...coaltonArtifacts, ...coaltonImage, ...mcclimArtifacts, ...lemArtifacts, ...clysmArtifacts];
 const escape = value => String(value ?? '').replace(/[&<>"']/g,
   char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
 const number = value => value.toLocaleString('en-US');
@@ -87,6 +92,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
   coaltonDirectory = path.join(directory, 'build/coalton/site'),
   mcclimDirectory = path.join(directory, 'build/mcclim/site'),
   lemDirectory = path.join(directory, 'build/lem/site'),
+  clysmDirectory = path.join(directory, 'build/clysm/site'),
   acl2BooksDirectory = path.join(directory, 'build/acl2/books')} = {}) {
   if (selection !== undefined && selection !== 'lem') throw new Error('Unknown size report selection.');
   const wasm = new Set(artifactDefinitions
@@ -98,6 +104,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
       : name.startsWith('build/acl2/site/') ? path.join(acl2Directory, name.slice('build/acl2/site/'.length))
       : name.startsWith('build/acl2/books/') ? path.join(acl2BooksDirectory, name.slice('build/acl2/books/'.length))
       : name.startsWith('build/coalton/site/') ? path.join(coaltonDirectory, name.slice('build/coalton/site/'.length))
+      : name.startsWith('build/clysm/site/') ? path.join(clysmDirectory, name.slice('build/clysm/site/'.length))
       : name.startsWith('build/lem/site/') ? path.join(lemDirectory, name.slice('build/lem/site/'.length))
       : name.startsWith('build/mcclim/site/') ? path.join(mcclimDirectory, name.slice('build/mcclim/site/'.length))
       : name.startsWith('build/fricas/site/') ? path.join(fricasDirectory, name.slice('build/fricas/site/'.length))
@@ -133,6 +140,7 @@ export function collectImageSizes(directory, {commit = '', runURL = '', generate
       ...acl2Artifacts,
       ...(fs.existsSync(path.join(acl2BooksDirectory, 'manifest.json')) ? [booksArtifact] : []),
       ...selectedCoalton,
+      ...(fs.existsSync(path.join(clysmDirectory, 'index.html')) ? clysmArtifacts : []),
       ...(fs.existsSync(path.join(mcclimDirectory, 'miricl-mcclim.wasm.gz')) ? mcclimArtifacts : []),
       ...(fs.existsSync(path.join(lemDirectory, 'miricl-lem.wasm.gz')) ? lemArtifacts : [])];
   return {schemaVersion: 1, generatedAt, commit, runURL, ...(selection ? {selection} : {}),
@@ -182,6 +190,7 @@ export function renderImageSizes(report, {replPage = 'miricl.html', jsonPage = '
     ['Maxima', artifact => artifact.file === 'maxima/' || artifact.file.startsWith('build/maxima/')],
     [initializedAcl2 ? 'ACL2' : 'ACL2 (development preview)', artifact => artifact.file === 'acl2/' || artifact.file.startsWith('build/acl2/')],
     ['Coalton', artifact => artifact.file === 'coalton/' || artifact.file.startsWith('build/coalton/')],
+    ['Clysm', artifact => artifact.file === 'clysm/' || artifact.file.startsWith('build/clysm/')],
     ['LEM', artifact => artifact.file === 'lem/' || artifact.file.startsWith('build/lem/')],
     ['McCLIM', artifact => artifact.file === 'mcclim/' || artifact.file.startsWith('build/mcclim/')],
   ].filter(([, matches]) => report.artifacts.some(matches)).map(([title, matches]) => `<tbody><tr class="group"><th colspan="5" scope="rowgroup">${title}</th></tr>\n` +

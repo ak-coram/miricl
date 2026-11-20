@@ -1,0 +1,54 @@
+* Clysm in MIRICL
+
+This application boots [[https://github.com/cxxxr/clysm][Clysm]] from Common Lisp sources inside MIRICL. Packaging
+embeds the matching MIRICL image and its adapter and the Clysm browser host in
+the page. Sources live in a separate compressed filesystem image,
+=filesystem.bin.gz=, loaded when the page opens. Press *Start bootstrap* to
+build Clysm's Wasm image in the browser and start its own REPL. Packaging does
+not build or embed a Clysm Wasm image.
+
+With the Clysm submodule initialized and an existing matching =miricl.wasm=:
+
+#+begin_src sh
+just build-clysm
+#+end_src
+
+Serve =build/clysm/site/= as static files, or open =index.html= directly and
+select the neighboring =filesystem.bin.gz= with the archive picker. The page
+shows elapsed bootstrap time and the current phase and source file before
+accepting input. Restart discards the worker and returns to the start button;
+it also interrupts a running computation. Neither compiler needs changes to
+provide the timer and progress display.
+
+#+begin_src sh
+just test-clysm
+#+end_src
+
+The browser check uses an existing Chromium installation (=CHROMIUM= overrides
+the executable). It checks source-image loading, explicit bootstrap, the
+generated Clysm compiler and REPL, and recovery after an error.
+
+** Multi-agent workflow
+
+The coordinator owns persistent host and Wasm REPL processes and a serial
+token for compiler builds and browser bootstrap checks. Agents attach with
+the shared queue clients; ending an agent must leave those sessions alive.
+Before reusing a session, submit a fresh request and verify both its response
+and the expected loaded state.
+
+Each iteration assigns separate bootstrap, packaging, and semantic review
+roles. There is one writer per source area. Initial investigation records
+the upstream entry points and a reproducible small probe before implementation.
+The implementation follows the upstream REPL build algorithm in a Lisp driver;
+packaging and browser interaction remain in JavaScript and HTML.
+
+At the end of every iteration, agents write evidence and pending questions to
+temporary handoff files, then finish. Fresh agents take over with rotated
+roles, independently check the previous findings, and reproduce the relevant
+probe before making further changes. The coordinator retains the REPLs and
+hands off the workload token explicitly. Final validation opens the actual
+standalone file and runs the Clysm code it generates in the browser.
+
+Upstream source remains in =clysm/upstream= at the pinned submodule revision.
+The upstream repository does not currently declare a license for its own
+compiler, runtime, and browser host; MIRICL's license does not cover them.

@@ -46,6 +46,15 @@ build-html:
 build-todo:
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/build-todo.lisp {{ quote(build_dir) }}
 
+# Package Clysm sources; opening the standalone page bootstraps its REPL in MIRICL.
+build-clysm:
+    {{ quote(node) }} scripts/build-clysm.mjs {{ quote(precompiled) }} build/clysm/site
+
+# Check the packaged page offline, including its browser-time compiler bootstrap.
+test-clysm:
+    {{ quote(node) }} tests/clysm-packaging.mjs
+    {{ quote(node) }} tests/browser-clysm.mjs build/clysm/site/index.html
+
 # Prepare an independent application directory with runtime and library symlinks.
 setup-game-of-life: build asdf-init build-asdf
     {{ quote(sbcl) }} --noinform --load {{ quote(quicklisp) }} --script scripts/setup-application.lisp {{ quote(absolute_path("game-of-life")) }} game-of-life {{ quote(absolute_path(build_dir)) }} {{ quote(node) }}

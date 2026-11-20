@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Clysm REPL / MIRICL</title>
+<style>
+:root {color-scheme:light dark;font:16px/1.5 system-ui,sans-serif;background:#fafafa;color:#202124}
+* {box-sizing:border-box} body {margin:0} main {max-width:960px;margin:auto;padding:24px;display:flex;flex-direction:column;min-height:100dvh}
+header {display:flex;align-items:baseline;gap:16px;flex-wrap:wrap} h1 {font-size:1.25rem;margin:0} header p {margin:0;flex:1;color:#555;font-size:.875rem}
+button,textarea {font:inherit;color:inherit} button {padding:6px 14px;border:1px solid #aaa;border-radius:4px;background:transparent;cursor:pointer}
+button:disabled {opacity:.5;cursor:wait} :focus-visible {outline:2px solid #2762a8;outline-offset:3px}
+.startup {display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:16px 0;font-size:.875rem;color:#555}
+#status {flex:1;margin:0} #timer {white-space:nowrap;font-variant-numeric:tabular-nums} #output {flex:1;min-height:40vh;white-space:pre-wrap;overflow-wrap:anywhere;font:1rem/1.5 ui-monospace,monospace;margin:0 0 20px}
+label {display:block;font-family:ui-monospace,monospace} textarea {width:100%;resize:vertical;padding:10px;border:1px solid #aaa;border-radius:4px;background:transparent;font:1rem/1.5 ui-monospace,monospace}
+.actions {display:flex;align-items:center;gap:14px;margin-top:8px}.actions small {font-size:.875rem;color:#555}
+.source-picker {font-size:.875rem;margin:0 0 16px}.source-picker label{font:inherit}.source-picker input{display:block;margin-top:6px;max-width:100%}
+[hidden]{display:none!important}
+@media(prefers-color-scheme:dark) {:root{background:#191b20;color:#eee}header p,.startup,.actions small{color:#b5b7bf}button,textarea{border-color:#656b79}}
+@media(max-width:540px) {main{padding:16px}.actions{flex-wrap:wrap}header p{flex-basis:100%}}
+</style>
+</head>
+<body data-state="loading-sources">
+<main>
+<header><h1>Clysm REPL</h1><p>Common Lisp, bootstrapped in your browser.</p><button id="start" type="button" disabled>Start bootstrap</button><button id="restart" type="button" disabled>Restart</button></header>
+<div class="startup"><p id="status" role="status" aria-live="polite">Loading Clysm sources…</p><span>Bootstrap <span id="timer" role="timer" aria-label="Elapsed bootstrap time" data-milliseconds="0">0.0 s</span></span></div>
+<div class="source-picker" id="source-picker" hidden><label for="filesystem-file">Clysm source filesystem (filesystem.bin.gz)</label><input id="filesystem-file" type="file" accept=".gz,application/gzip"></div>
+<pre id="output" aria-label="REPL output" aria-live="polite"></pre>
+<form id="form"><label id="prompt" for="source">Lisp input</label><textarea id="source" rows="4" spellcheck="false" autocapitalize="off" autocomplete="off" disabled>(+ 20 22)</textarea><div class="actions"><button id="evaluate" disabled>Evaluate</button><small>Ctrl / ⌘ + Enter to evaluate</small></div></form>
+</main>
+<script id="build-data" type="application/json">@@CLYSM_PAYLOAD@@</script>
+<script>
+'use strict';
+const payload = JSON.parse(document.getElementById('build-data').textContent);
+const output = document.getElementById('output');
+const source = document.getElementById('source');
+const evaluate = document.getElementById('evaluate');
+const status = document.getElementById('status');
+const prompt = document.getElementById('prompt');
+const timer = document.getElementById('timer');
+const startButton = document.getElementById('start');
+const restartButton = document.getElementById('restart');
+const sourcePicker = document.getElementById('source-picker');
+const filesystemFile = document.getElementById('filesystem-file');
+let worker;
+let generation = 0;
+let timerInterval;
+let startedAt;
+let sourceArchive;
+let sourceGeneration = 0;
+let hasStarted = false;
+const write = text => {output.textContent += text;};
+function updateTimer() {
+  const milliseconds = Math.max(0, performance.now() - startedAt);
+  const seconds = milliseconds / 1000;
+  timer.textContent = seconds < 60 ? `${seconds.toFixed(1)} s`
+    : `${Math.floor(seconds / 60)} min ${(seconds % 60).toFixed(1)} s`;
+  timer.dataset.milliseconds = Math.round(milliseconds);
+}
+function stopTimer() {
+  if (timerInterval === undefined) return;
+  clearInterval(timerInterval);
+  timerInterval = undefined;
+  updateTimer();
+}
+function state(name, message) {
+  document.body.dataset.state = name;
+  source.disabled = evaluate.disabled = name !== 'ready';
+  startButton.disabled = name !== 'idle' || !sourceArchive;
+  restartButton.disabled = !hasStarted || !sourceArchive;
+  status.textContent = message;
+  if (name === 'ready' || name === 'failed') stopTimer();
+}
+function start() {
+  if (!sourceArchive) return;
+  const current = ++generation;
+  hasStarted = true;
+  filesystemFile.disabled = true;
+  worker?.terminate();
+  output.textContent = '';
+  prompt.textContent = 'Lisp input';
+  delete document.body.dataset.clysmBytes;
+  delete document.body.dataset.bootstrapMilliseconds;
+  clearInterval(timerInterval);
+  startedAt = performance.now();
+  updateTimer();
+  timerInterval = setInterval(updateTimer, 100);
+  state('bootstrapping', 'Starting MIRICL…');
+  // A data URL also loads from file://, where Chrome rejects blob module workers.
+  worker = new Worker('data:text/javascript;base64,' + payload.worker, {type: 'module'});
+  worker.onerror = event => {
+    if (current !== generation) return;
+    state('failed', 'Session failed. Restart to try again.');
+    write(`; Error: ${event.message || event.error?.message || 'The REPL worker could not start.'}\n`);
+  };
+  worker.onmessage = ({data}) => {
+    if (current !== generation) return;
+    if (data.type === 'status') status.textContent = data.message;
+    else if (data.type === 'output') write(data.text);
+    else if (data.type === 'ready') {
+      output.textContent = '';
+      document.body.dataset.clysmBytes = data.wasmBytes;
+      document.body.dataset.bootstrapMilliseconds = data.bootstrapMilliseconds;
+      prompt.textContent = data.prompt;
+      state('ready', 'Ready');
+      source.focus();
+    } else if (data.type === 'result') {
+      write(data.result.endsWith('\n') ? data.result : data.result + '\n');
+      prompt.textContent = data.prompt;
+      state('ready', 'Ready');
+      source.focus();
+    } else if (data.type === 'error') {
+      write(`; Error: ${data.message}\n`);
+      if (data.prompt) prompt.textContent = data.prompt;
+      state(data.fatal ? 'failed' : 'ready', data.fatal ? 'Session failed. Restart to try again.' : 'Ready');
+    }
+  };
+  const sources = sourceArchive.slice(0);
+  worker.postMessage({type: 'start', image: payload.image, sources}, [sources]);
+}
+document.getElementById('form').addEventListener('submit', event => {
+  event.preventDefault();
+  if (evaluate.disabled || !source.value.trim()) return;
+  write(prompt.textContent + source.value + '\n');
+  state('evaluating', 'Evaluating…');
+  worker.postMessage({type: 'evaluate', source: source.value});
+});
+source.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    document.getElementById('form').requestSubmit();
+  }
+});
+function startSafely() {
+  try {start();} catch (error) {state('failed', 'Startup failed.'); write(`; Error: ${error.message}\n`);}
+}
+function restart() {
+  ++generation;
+  worker?.terminate();
+  worker = undefined;
+  clearInterval(timerInterval);
+  timerInterval = undefined;
+  startedAt = undefined;
+  timer.textContent = '0.0 s';
+  timer.dataset.milliseconds = '0';
+  hasStarted = false;
+  filesystemFile.disabled = false;
+  output.textContent = '';
+  prompt.textContent = 'Lisp input';
+  delete document.body.dataset.clysmBytes;
+  delete document.body.dataset.bootstrapMilliseconds;
+  state('idle', 'Sources ready. Select Start bootstrap.');
+}
+async function prepareSources(bytesPromise) {
+  const current = ++sourceGeneration;
+  sourceArchive = undefined;
+  state('loading-sources', 'Loading Clysm sources…');
+  try {
+    const bytes = await bytesPromise;
+    if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== payload.metadata.sourceGzipBytes)
+      throw new Error('Clysm source filesystem has the wrong size. Select the matching filesystem.bin.gz.');
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    const hash = Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+    if (hash !== payload.metadata.sourceGzipSha256)
+      throw new Error('Clysm source filesystem does not match this page. Select the matching filesystem.bin.gz.');
+    if (current !== sourceGeneration) return;
+    sourceArchive = bytes;
+    state('idle', 'Sources ready. Select Start bootstrap.');
+  } catch (error) {
+    if (current !== sourceGeneration) return;
+    sourcePicker.hidden = false;
+    state('failed', 'Could not load Clysm sources. Select filesystem.bin.gz below.');
+    write(`; Error: ${error.message}\n`);
+  }
+}
+startButton.addEventListener('click', startSafely);
+restartButton.addEventListener('click', restart);
+filesystemFile.addEventListener('change', () => {
+  const file = filesystemFile.files[0];
+  if (file && !hasStarted) prepareSources(file.size === payload.metadata.sourceGzipBytes
+    ? file.arrayBuffer() : Promise.reject(new Error('Select the matching filesystem.bin.gz.')));
+});
+if (location.protocol === 'file:') {
+  sourcePicker.hidden = false;
+  state('idle', 'Choose filesystem.bin.gz to load Clysm sources.');
+} else {
+  prepareSources(fetch(new URL(payload.filesystem, location.href)).then(response => {
+    if (!response.ok) throw new Error(`Clysm sources: HTTP ${response.status}.`);
+    return response.arrayBuffer();
+  }));
+}
+</script>
+</body>
+</html>

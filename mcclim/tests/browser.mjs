@@ -128,10 +128,20 @@ const server = http.createServer((request, response) => {
   if (request.url === '/') {response.setHeader('Content-Type', 'text/html'); response.end(html); return;}
   const bytes = files.get(request.url);
   if (!bytes) {response.writeHead(404).end(); return;}
-  response.setHeader('Content-Type', request.url.endsWith('.js') ? 'text/javascript' : 'application/octet-stream');
+  response.setHeader('Content-Type', /\.(?:mjs|js)$/u.test(request.url) ? 'text/javascript' : 'application/octet-stream');
   response.end(bytes);
 });
 await new Promise((resolve, reject) => {server.once('error', reject); server.listen(0, '127.0.0.1', resolve);});
+// Module scripts require a JavaScript MIME type. Check the actual HTTP
+// response before waiting for page startup, where a rejected initial module
+// cannot install its own error handler or diagnostics.
+for (const name of files.keys()) {
+  if (!/\.(?:mjs|js)$/u.test(name)) continue;
+  const response = await fetch(`http://127.0.0.1:${server.address().port}${name}`);
+  assert.ok(response.ok, `Cannot load browser module ${name}: HTTP ${response.status}.`);
+  assert.match(response.headers.get('content-type') ?? '', /^(?:text|application)\/javascript(?:;|$)/iu,
+    `Browser module ${name} must be served as JavaScript.`);
+}
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-mcclim-browser-'));
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', '--no-default-browser-check',

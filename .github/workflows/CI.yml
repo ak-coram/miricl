@@ -159,6 +159,34 @@ jobs:
           path: build/compiler-statistics/*.json
           if-no-files-found: warn
 
+  clysm:
+    name: Application / clysm browser bootstrap
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Checkout Clysm sources
+        run: git submodule update --init -- clysm/upstream
+      - uses: ./.github/actions/setup-miricl
+      - uses: actions/download-artifact@v4
+        with:
+          name: miricl-runtime
+      - name: Package and check browser-bootstrapped Clysm
+        env:
+          CHROMIUM: google-chrome
+        run: |
+          node scripts/build-clysm.mjs miricl.wasm build/clysm/site
+          node tests/clysm-packaging.mjs
+          node tests/browser-clysm.mjs build/clysm/site/index.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: application-clysm
+          path: build/clysm/site/
+          if-no-files-found: error
+
   core-checks:
     name: Core checks beyond ANSI
     needs: runtime
@@ -637,7 +665,7 @@ jobs:
 
   browser-examples:
     name: Assemble browser examples and size report
-    needs: [host, runtime, core-checks, applications, acl2, coalton]
+    needs: [host, runtime, core-checks, applications, acl2, coalton, clysm]
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -673,6 +701,10 @@ jobs:
           path: build/coalton/site
       - uses: actions/download-artifact@v4
         with:
+          name: application-clysm
+          path: build/clysm/site
+      - uses: actions/download-artifact@v4
+        with:
           name: application-mcclim
           path: build/mcclim/site
       - uses: actions/download-artifact@v4
@@ -693,6 +725,7 @@ jobs:
           cp -R build/fricas/site public/fricas
           cp -R build/acl2/site public/acl2
           cp -R build/coalton/site public/coalton
+          cp -R build/clysm/site public/clysm
           cp -R build/mcclim/site public/mcclim
           cp -R build/lem/site public/lem
           node scripts/build-size-html.mjs . public/image-sizes.html index.html
@@ -704,7 +737,7 @@ jobs:
 
   compiler-report:
     name: Collect compiler and prover report
-    needs: [host, runtime, core-checks, applications, acl2, coalton, ansi-reports, browser-examples]
+    needs: [host, runtime, core-checks, applications, acl2, coalton, clysm, ansi-reports, browser-examples]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 360

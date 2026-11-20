@@ -136,3 +136,6 @@
 [submodule "lem/deps/cl-utilities"]
 	path = lem/deps/cl-utilities
 	url = https://github.com/Publitechs/cl-utilities.git
+[submodule "clysm/upstream"]
+	path = clysm/upstream
+	url = https://github.com/cxxxr/clysm

@@ -126,6 +126,9 @@ try {
   for (const file of ['index.html', 'app.mjs', 'miricl-loader.mjs'])
     fs.writeFileSync(path.join(directory, 'build/lem/site', file), 'LEM fixture λ🙂');
   fs.writeFileSync(path.join(directory, 'build/lem/site/miricl-lem.wasm'), repeatedSections);
+  fs.mkdirSync(path.join(directory, 'build/clysm/site'), {recursive: true});
+  fs.writeFileSync(path.join(directory, 'build/clysm/site/index.html'), '<p>Clysm bootstrap λ🙂</p>');
+  fs.writeFileSync(path.join(directory, 'build/clysm/site/filesystem.bin.gz'), gzipSync('Clysm Lisp sources'));
   for (const app of ['build/lem/site', 'game-of-life/build', 'build/maxima/site', 'build/fricas/site', 'build/acl2/site', 'build/coalton/site', 'build/mcclim/site']) {
     for (const name of fs.readdirSync(path.join(directory, app))) {
       if (name.endsWith('.gz')) {
