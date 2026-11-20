@@ -73,7 +73,7 @@ export async function createAcl2(image, core, files, {progress = () => {}, books
               (multiple-value-bind (erp val state)
                   (acl2::ld "/acl2/browser-input.lsp" :ld-skip-proofsp nil
                     :ld-error-action :return :ld-prompt nil :ld-pre-eval-print nil
-                    :ld-post-eval-print t :ld-verbose nil)
+                    :ld-post-eval-print :command-conventions :ld-verbose nil)
                 (declare (ignore state))
                 (cl-user::acl2-browser-result
                   (not (or erp (eq val :error)
