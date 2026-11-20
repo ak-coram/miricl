@@ -404,6 +404,37 @@ try {
         (reject) (= *soundness-initarg-cache-calls* 2)
         (typep (make-instance 'soundness-initarg-cache) 'soundness-initarg-cache))))`);
   console.log('Soundness: warmed initarg checks observe method keyword changes and invoke hooks once.');
+  check(`(progn
+    (defclass soundness-constructor-plan ()
+      ((value :initarg :value) (alias :initarg :value)))
+    (defparameter *soundness-constructor-hooks* 0)
+    (let* ((class (find-class 'soundness-constructor-plan))
+           (first (make-instance class :value 1))
+           (second (make-instance 'soundness-constructor-plan :value 2)))
+      (dotimes (i 12) (make-instance class :value i))
+      (setf (slot-value first 'value) 7)
+      (and (= (slot-value first 'alias) 1)
+           (= (slot-value second 'value) 2)
+           (= (slot-value second 'alias) 2)
+           (progn
+             (defmethod shared-initialize :after
+                 ((object soundness-constructor-plan) slots &key value)
+               (declare (ignore object slots value))
+               (incf *soundness-constructor-hooks*))
+             (let ((method (find-method #'shared-initialize '(:after)
+                             (list class (find-class t)))))
+               (unwind-protect
+                   (and (= (slot-value (make-instance class :value 3) 'value) 3)
+                        (= *soundness-constructor-hooks* 1))
+                 (remove-method #'shared-initialize method))))
+           (progn
+             (dotimes (i 12) (make-instance class :value i))
+             (defclass soundness-constructor-plan ()
+               ((value :initarg :value) (added :initform 41)))
+             (let ((object (make-instance class :value 9)))
+               (and (= (slot-value object 'value) 9)
+                    (= (slot-value object 'added) 41)))))))`);
+  console.log('Soundness: warmed constructors preserve fresh slot storage, user initialization and class redefinition.');
   evaluate(`(defclass soundness-initarg-owned-union () ())
     (defmethod initialize-instance :after ((object soundness-initarg-owned-union) &key one two)
       (declare (ignore object one two))) (values)`);

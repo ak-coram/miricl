@@ -104,19 +104,36 @@ and periodically compare full Maxima, FriCAS, ACL2 and Coalton compilations.
 # Common Lisp semantics
 
 ANSI Common Lisp is the authority for language semantics, not the current
-implementation. Preserve defined ANSI behavior; do not make accidental current
-behavior or behavior whose consequences ANSI leaves undefined into a compiler
-contract. In particular, optimizations may rely on the standard definitions of
-COMMON-LISP functions: redefining or binding CL:EQL and other standard functions
-where ANSI specifies undefined consequences need not be supported or guarded.
+implementation. Preserve defined ANSI behavior and its permitted extensions and
+redefinitions. Do not turn accidental current behavior or private implementation
+details into additional optimization contracts. Where ANSI leaves a result
+unspecified, do not require a particular accidental choice; behavior with undefined
+consequences need not be supported. In particular, optimizations may rely on the
+standard definitions of COMMON-LISP functions: redefining or binding CL:EQL and
+other standard functions where ANSI specifies undefined consequences need not be
+supported or guarded.
 Use standardized operation identity rather than package membership alone.
+Apply the extension permissions specified for each operation; do not infer
+permission solely from its implementation mechanism.
 Fixed standard operators do not make user callbacks, permitted method extensions
 or documented runtime hooks immutable. This does not relax
 the redefinition and identity requirements ANSI actually imposes on ordinary
 user functions, or the
-contracts of explicit MIRICL extensions such as scheduling and debugging.
-Tests must follow this distinction rather than constrain optimizations to
-undefined behavior of the current implementation.
+contracts of explicit MIRICL extensions such as scheduling and debugging where
+those contracts are actually specified. Private internal interfaces, object
+representations and aliasing, nonstandard introspection, and helper-call structure
+do not become public contracts merely because the current implementation exposes
+them. Absence of explicit permission does not by itself require preserving such
+details. Tests must follow this distinction rather than constrain optimizations to
+incidental behavior.
+
+A new bounded runtime algorithm need not reproduce its predecessor's internal
+helper calls or exact polling inventory. Preserve actual operation-entry interrupt
+handling, cooperative responsiveness at applicable loop boundaries, and specified
+public scheduling and debugging guarantees. This does not make an existing
+operation's required observable checkpoints removable merely because its ordinary
+work is proved non-signaling. Structural validation of untrusted boundary inputs
+remains mandatory.
 
 Optimizations may use every compile-time and runtime consistency assumption
 ANSI permits, including the applicable INLINE, same-file, recursive-call and

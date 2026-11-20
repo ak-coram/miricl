@@ -9,7 +9,8 @@
     (local.get $function) (ref.null eq) (ref.null eq) (local.get $gf)))
 
 (defparameter *generic-property-cache-keys*
-  '(:discriminating-function :cache :lambda-list :methods :cache-protocol :name :eql-dispatch-profile :cache-token))
+  '(:discriminating-function :cache :lambda-list :methods :cache-protocol :name :eql-dispatch-profile :cache-token
+    :dispatch-profile :applicable-cache))
 
 ;; The owned metadata vector also holds two recent flattened dispatch rows
 ;; and the call-history identity under which they were populated. Borrowing

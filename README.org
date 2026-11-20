@@ -56,13 +56,6 @@ on.
 
 ** Usage
 
-*** Clysm application
-
-=just build-clysm= packages a minimal REPL page and compressed source filesystem
-using the existing =miricl.wasm=. The page loads the sources when opened;
-*Start bootstrap* builds Clysm inside MIRICL in the browser, with elapsed time
-and phase/file progress. See [[file:clysm/README.org][Clysm setup and multi-agent workflow]].
-
 *** Distribution
 
 The =miricl-runtime= build artifact includes:
@@ -71,7 +64,7 @@ The =miricl-runtime= build artifact includes:
 - =miricl.js=: optional Node terminal and development command.
 - =miricl-cold.wasm=: interpreter and source compiler for bootstrap work.
 - =miricl-interpreter.wasm=: interpreter with minimal compilation, without
-  the optimizing Wasm compiler. Also published as =miricl-interpreter=.
+  the optimizing Wasm compiler.
 - =miricl.wasm=: import-free interpreter with the size-optimized,
   bootstrapped native compiler ready at startup, for browsers and Node.
 - =miricl-repl.wasm=: Wasmtime terminal command and precompiled compiler for Node.

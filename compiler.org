@@ -1050,12 +1050,40 @@ retains ordinary validation. On the valid owned path, guarded shape reuse and pr
 traversal do not yield or call Lisp. Borrowed fallback remains checked live observation and
 does not promise a snapshot of arbitrary concurrent user mutation.
 
+The property cache retains live value cells for dispatch profiles and applicable-method
+caches alongside other generic properties. Reads observe the current cell contents;
+updating a property does not freeze its earlier value. Applicability checks retain their
+method-token, dispatch-version, argument-class and final live rereads.
+
+*** Default constructor plans
+
+The selected standard =MAKE-INSTANCE= body keeps a bounded process-private history of
+class/initarg construction plans. A successful ordinary construction admits finalized
+standard classes with at most eight instance slots, T slot types, no default initargs or
+initfunctions, and one supplied initarg accepted by a slot. The plan records slot names,
+locations and the slots initialized by that key. It creates fresh canonical property-list
+value cells and an indexed side array referring to those same cells; instances share no
+mutable storage. Unspecified slots remain unbound.
+
+Admission reuses the generic dispatch cache's actual selected method set. The applicable
+=INITIALIZE-INSTANCE= and =SHARED-INITIALIZE= executions must be the canonical default
+bodies under standard method combination. Class redefinition invalidates the dispatch
+epoch; generic method edits replace cache tokens. Every hit checks those identities,
+current function bindings/discriminators and the authenticated executable adapters. An
+entry checkpoint precedes the bounded nonpolling lookup and allocation. Unknown classes,
+other argument shapes and user initialization methods keep ordinary construction.
+The private plan table is absent from saved roots and is rebuilt after restoration.
+
+Symbol designators still redispatch =MAKE-INSTANCE= on the resolved class. A registered
+class lookup reads the current named-class binding directly; missing bindings retain
+ordinary =FIND-CLASS= for lazy condition classes and errors.
+
 *** Remaining compiler limits
 
-Initialization still computes applicable-method unions, slot validity and requirements on
-each request. Guarded whole initialization plans and reusable unions remain candidates;
-mutable custom MOP readers preclude identity-only caching. Retained descriptors contribute
-both code and data to shipped artifacts.
+Outside the bounded default constructor slice, initialization computes applicable-method
+unions, slot validity and requirements on each request. Additional argument shapes,
+defaults, initforms and slot types need separately justified plans. Retained descriptors
+contribute both code and data to shipped artifacts.
 
 Argument/method-context transport, repeated keyword scans, interpreter callbacks and
 continuation capture remain candidates. =hir-lambda= retains separate presence/value scans

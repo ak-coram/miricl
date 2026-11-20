@@ -222,7 +222,7 @@
         (previous (svref (the simple-vector state) 2))
         (class nil)
         (slots nil) (allowed nil) (allow nil) (keys nil) (methods nil)
-        (name nil) (actual nil) (ll nil)
+        (name nil) (actual nil)
         (part nil) (method-keys nil) (method-allow nil))
     (funcall metadata 9 names nil)
     ;; All three outer lists survive extensible metadata callbacks. Own their
@@ -271,11 +271,9 @@
             (setq tail cell scan (cdr scan)) (go next) done) head))
      method
        (if methods nil (go next-function))
-       (setq ll (funcall metadata 17 (car methods) nil))
-       ;; Only the standard-reader service can supply a private cached profile.
-       ;; Custom readers keep ordinary live validation and normalization.
-       (setq part (funcall metadata 28 (car methods) ll))
-       (if part nil (setq part (clos-initarg-profile-value ll metadata)))
+       ;; One checked service runs the live reader and then queries its owned
+       ;; profile. Custom readers retain ordinary validation/normalization.
+       (setq part (funcall metadata 31 (car methods) nil))
        (setq method-keys (car part) method-allow (cdr part))
      normalized
        (if method-allow (setq allow t))
