@@ -278,8 +278,10 @@
                (ref.test (ref $generic-discriminator) (local.get $function)))
     (then
       (if (ref.test (ref $direct-function) (local.get $function))
-        (then (if (i32.ge_u (struct.get $direct-function $mode
+        (then (if (i32.and (i32.ge_u (struct.get $direct-function $mode
             (ref.cast (ref $direct-function) (local.get $function))) (i32.const 17))
+            (i32.le_u (struct.get $direct-function $mode
+            (ref.cast (ref $direct-function) (local.get $function))) (i32.const 19)))
           (then (return_call $function-documentation
             (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $function)))
             (local.get $value) (local.get $write))))))
@@ -325,8 +327,10 @@
                (ref.test (ref $generic-discriminator) (local.get $function)))
     (then
       (if (ref.test (ref $direct-function) (local.get $function))
-        (then (if (i32.ge_u (struct.get $direct-function $mode
+        (then (if (i32.and (i32.ge_u (struct.get $direct-function $mode
             (ref.cast (ref $direct-function) (local.get $function))) (i32.const 17))
+            (i32.le_u (struct.get $direct-function $mode
+            (ref.cast (ref $direct-function) (local.get $function))) (i32.const 19)))
           (then (return_call $function-lambda-expression-native
             (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $function))))))))
       (return_call $function-lambda-expression-native

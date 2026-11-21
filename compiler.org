@@ -76,6 +76,16 @@ by =loadMiricl= exposes that namespace as =vm.adapter=, preserving the identity 
 error classes. Missing or duplicate adapter sections and malformed gzip fail before
 instantiation. Saved images retain the original adapter section with their runtime.
 
+Saved-image restoration derives field layouts from the runtime's exported core
+accessors. Each encoded descriptor keeps ordered immutable, mutable and immutable
+reference field indexes, so object construction and filling reuse those selections.
+Immutable references retain bounds and visitation checks before construction;
+mutable references preserve sharing and cycles. The final weak-table discovery
+uses a validated scalar prefix to exclude objects with a different decoded tag,
+while descriptors without that prefix retain the ordinary object read. These
+per-restore descriptor tables do not grant executable permissions or replace
+encoded-field and reference validation.
+
 Browser application distributions copy the generic loader alongside their images;
 the adapter is counted inside the image. Standalone HTML pages inline only the
 loader and compressed image, including their worker source. Repository bootstrap
@@ -685,6 +695,14 @@ objects. Images retain reachable Lisp state, native bytes and captures, excludin
 scheduler/decoder caches. Only matching current formats are supported. Bootstrap source
 packing is separate, bounded and checked, and uses target symbol identities rather than
 host-private names.
+
+FASL reconstruction entry points resolve the current unit's records, values and
+states from their dynamic bindings. Native cons and array traversal passes that
+context explicitly through recursive reconstruction. Lisp fallback recipes can
+invoke nested =LOAD= with separate unit bindings; after return, the outer traversal
+continues with its retained context. Each later root resolves the current unit
+again. Root execution order, pending initialization and traversal checkpoints stay
+part of the ordinary loader protocol.
 
 Bootstrap initialization bytes use a bounded LZ encoding with literal runs and overlapping
 back references. A checked startup pass reconstructs the exact packed source bytes before

@@ -12,6 +12,50 @@ const check = source => assert.equal(evaluate(source), 'T\n', source);
 const recover = () => assert.equal(evaluate("(funcall (compile-native '(lambda (x) (+ x 1))) 41)"), '42\n');
 try {
   evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
+  // Shared generated functions retain checked descriptor boundaries and
+  // captured state across an actual image restore.
+  {
+    let generated = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
+    try {
+      generated.evaluate(`(setq miricl-compiler:*compile-evaluations* nil)
+        (let ((counter 0))
+          (defstruct (soundness-shared-boa (:constructor make-soundness-shared-boa (value)))
+            value (serial (incf counter))))
+        (defparameter *soundness-shared-constructor* #'make-soundness-shared-boa)
+        (values)`, {eof: true});
+      assert.equal(generated.evaluate(`(let* ((class (find-class 'soundness-shared-boa))
+          (maker (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%STRUCTURE-FUNCTION")))
+          (allocate (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%ALLOCATE")))
+          (slots (funcall (symbol-function (miricl-compiler::compiler-primitive 10 1 "%GET")) class :slots)))
+        (labels ((recover () (= (soundness-shared-boa-value
+                                (funcall *soundness-shared-constructor* 42)) 42))
+                 (reject (owner plan)
+                   (handler-case (progn (funcall (funcall maker (lambda () nil) owner plan 20) 1) nil)
+                     (error () (recover)))))
+          (and (reject class #())
+            (reject class (vector 1 slots #(:value :serial) #(-1 nil)))
+            (reject class (vector 1 slots #(:value) #(0)))
+            (let* ((bad-slots (list 3))
+                   (forged (funcall allocate (class-of class)
+                     (list :slots bad-slots :struct-initargs '(:value)))))
+              (reject forged (vector 1 bad-slots #(:value) #(0))))
+            (recover))))`, {eof: true}).output, 'T\n');
+      generated.evaluate(`(defgeneric soundness-shared-keyword (value &key marker))
+        (defmethod soundness-shared-keyword ((value t) &key marker) (values value marker))
+        (defmethod soundness-shared-keyword ((value integer) &key marker)
+          (declare (ignore marker)) (lambda () (call-next-method)))
+        (defparameter *soundness-shared-next* (soundness-shared-keyword 42 :marker :retained))
+        (defparameter *soundness-shared-serial*
+          (soundness-shared-boa-serial (funcall *soundness-shared-constructor* 1)))
+        (values)`, {eof: true});
+      const saved = generated.saveImage(); generated.close(); generated = await Miricl.instantiate(saved);
+      assert.equal(generated.evaluate(`(and
+        (= (soundness-shared-boa-serial (funcall *soundness-shared-constructor* 2))
+           (1+ *soundness-shared-serial*))
+        (equal (multiple-value-list (funcall *soundness-shared-next*)) '(42 :retained)))`,
+      {eof: true}).output, 'T\n');
+    } finally { generated?.close(); }
+  }
   // This target specialization exceeds the host's FIXNUM range. Keep its
   // numeric values and shared displaced backing through an actual image save.
   {

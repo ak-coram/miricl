@@ -1205,20 +1205,23 @@
       (incf position) (setq args (cdr args))) (values key mode)))
 (defun %key-equal (a b)
   (if a (and b (eql (car a) (car b)) (%key-equal (cdr a) (cdr b))) (not b)))
-(defun %effective-keyword-form (gf methods form)
+(defun %effective-keywords (gf methods)
   (let ((ll (%get gf :lambda-list)))
     (unless (or (%member '&key ll) (%member '&rest ll))
-      (return-from %effective-keyword-form form))
+      (return-from %effective-keywords nil))
     (let* ((profile (%lambda-profile ll)) (keyp (%nth 3 profile))
            (allowed (%nth 4 profile)) (allow (%member '&allow-other-keys ll)))
       (%%while methods
         (let* ((params (%get (pop methods) :lambda-list)) (part (%lambda-profile params)))
           (when (%nth 3 part) (setq keyp t allowed (append (%nth 4 part) allowed)))
           (when (%member '&allow-other-keys params) (setq allow t))))
-      (if keyp
-          (list 'progn (list '%context-check-keys '%effective-context
-            (+ (car profile) (cadr profile)) (%quote allowed) (not (not allow))) form)
-          form))))
+      (when keyp (list (+ (car profile) (cadr profile)) allowed (not (not allow)))))))
+(defun %effective-keyword-form (gf methods form)
+  (let ((keys (%effective-keywords gf methods)))
+    (if keys
+        (list 'progn (list '%context-check-keys '%effective-context
+          (car keys) (%quote (cadr keys)) (caddr keys)) form)
+        form)))
 (defun %interpret-generated-function (form)
   ;; The HIR compiler needs no native loader, including during compilation of
   ;; an effective method. Only the earliest source bootstrap lacks it.
@@ -1242,7 +1245,12 @@
 (defun %make-effective-function (gf methods args)
   (let* ((form (compute-effective-method gf (%get gf :method-combination) methods))
          (function (%%property-effective nil form gf args)))
-    (or function
+    (or (when function
+          (let ((keys (%effective-keywords gf methods)))
+            (if keys
+                (%%structure-function (lambda (args) (declare (ignore args)) nil)
+                  gf (cons function keys) 21)
+                function)))
         (let ((entry (%compile-effective-function gf (list 'lambda '(%effective-context)
                  (%effective-keyword-form gf methods (%expand-effective-form gf form))))))
           ;; Public callers still supply one proper Lisp argument list. The
@@ -1382,9 +1390,14 @@
 (defun %primary-effective (function gf method next)
   ;; The next-method chain belongs to the cached effective method, not to an
   ;; invocation. Only the context's original arguments vary between calls.
-  (let ((continuation (%compile-effective-function gf (list 'lambda '(%effective-context)
-            (list '%effective-call (%quote gf) (%quote (car next))
-              (%quote (cdr next)) '%effective-context)))))
+  (let ((scan next) (tails nil) (continuation nil))
+    (%%while scan (push scan tails) (setq scan (cdr scan)))
+    (%%while tails
+      (let ((tail (pop tails)))
+        (setq continuation
+          (if continuation
+              (%%structure-function function gf (list (car tail) (cdr tail) continuation) 9)
+              (%%structure-function function gf (car tail) 8)))))
     (%%structure-function function gf (list method next continuation) 9)))
 (defun compute-discriminating-function (gf)
   (%%generic-discriminator gf (lambda (args) (%invoke-effective gf args))))
@@ -1645,7 +1658,40 @@
         (cond ((%member param '(&optional &rest &key &aux &allow-other-keys)) (setq mode param))
               ((and (eq mode '&aux) (or (symbolp param) (not (cdr param))))
                (push (if (symbolp param) param (car param)) result))))) result))
+(defun %simple-boa-plan (class params)
+  ;; The general compiler binds complex and special parameters. The shared
+  ;; worker only substitutes ordinary required lexical arguments.
+  (unless (and (not %booting) (not %compiling-effective-function)
+               (boundp 'miricl-compiler::*compiler-state*)
+               (eq miricl-compiler::*compiler-state* :ready)
+               (miricl-compiler::compiler-primitive 21 nil)
+               (not (%get class :representation))
+               (or (not (boundp '%size-default-policy))
+                   (<= (logand %size-default-policy 3)
+                       (logand (ash %size-default-policy -2) 3))))
+    (return-from %simple-boa-plan nil))
+  (let ((scan params) (seen nil))
+    (%%while scan
+      (let ((name (pop scan)))
+        (unless (and (symbolp name) name (not (eq name t)) (not (keywordp name))
+                     (not (%member name lambda-list-keywords)) (not (constantp name))
+                     (not (%member name seen)) (not (%%compile 18 name)))
+          (return-from %simple-boa-plan nil))
+        (push name seen))))
+  (let ((slots (%get class :slots)) (keys nil) (bindings nil))
+    (let ((scan slots))
+      (%%while scan
+        (let* ((slot (pop scan)) (name (slot-definition-name slot))
+               (position (position name params :test #'eq)))
+          (push (%keyword name) keys)
+          (push (if position position (slot-definition-initfunction slot)) bindings))))
+    (vector (length params) slots (coerce (reverse keys) 'vector) (coerce (reverse bindings) 'vector))))
 (defun %struct-boa-function (class params)
+  (%proper-list-length params "BOA lambda list")
+  (let ((plan (%simple-boa-plan class params)))
+    (when plan
+      (return-from %struct-boa-function
+        (%%structure-function (lambda (&rest args) (declare (ignore args)) nil) class plan 20))))
   (let* ((scan (%get class :slots)) (variables (%lambda-names params))
          (uninitialized (%boa-uninitialized params)) (slots nil) (arguments nil))
     (%%while scan

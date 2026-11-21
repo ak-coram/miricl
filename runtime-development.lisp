@@ -1243,13 +1243,19 @@
   #@(ref.null eq) #@(i32.const 0))
 
 (define-runtime-function $fasl-object (($root :nullable-object)) (:nullable-object)
-  (:locals ($records (ref $objects)) ($values (ref $objects)) ($states (ref $objects))
-           ($index i32) ($state i32) ($kind i32) ($handled i32) ($i i32)
+  ;; The public primitive resolves the active unit. Recursive reconstruction
+  ;; retains that unit's arrays in locals, including across nested LOADs.
+  #@(return_call $fasl-object-context (local.get $root)
+    (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-records)))
+    (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-values)))
+    (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-states)))))
+
+(define-runtime-function $fasl-object-context
+    (($root :nullable-object) ($records (ref $objects)) ($values (ref $objects)) ($states (ref $objects)))
+    (:nullable-object)
+  (:locals ($index i32) ($state i32) ($kind i32) ($handled i32) ($i i32)
            ($record :nullable-object) ($value :nullable-object) ($type :nullable-object)
            ($elements :nullable-object))
-  #@(local.set $records (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-records))))
-  #@(local.set $values (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-values))))
-  #@(local.set $states (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-states))))
   #@(block $slow
     (br_if $slow (i32.ne (call $tag (local.get $root)) (i32.const 1)))
     (local.set $index (call $natural-count (local.get $root)))
@@ -1261,11 +1267,13 @@
     (local.set $record (array.get $objects (local.get $records) (local.get $index)))
     (local.set $kind (call $natural-count (call $car (local.get $record))))
     (if (i32.eq (local.get $kind) (i32.const 5))
-      (then (return (call $fasl-cons (local.get $root)))))
+      (then (return (call $fasl-cons-context (local.get $root)
+        (local.get $records) (local.get $values) (local.get $states)))))
     (if (i32.eq (local.get $kind) (i32.const 6))
       (then
         (local.set $record (call $cdr (local.get $record)))
-        (local.set $type (call $fasl-object (call $car (call $cdr (local.get $record)))))
+        (local.set $type (call $fasl-object-context (call $car (call $cdr (local.get $record)))
+          (local.get $records) (local.get $values) (local.get $states)))
         (local.set $value (call $make-array-native (call $car (local.get $record))
           (call $upgraded-array-kind (local.get $type)) (ref.null eq) (ref.null eq)
           (i32.const 0) (i32.const 0) (ref.null eq) (ref.null eq) (ref.null eq) (local.get $type)))
@@ -1274,7 +1282,8 @@
         (local.set $elements (call $car (call $cdr (call $cdr (local.get $record)))))
         (block $filled (loop $fill (br_if $filled (ref.is_null (local.get $elements)))
           (drop (call $array-raw-element (local.get $value) (local.get $i)
-            (call $fasl-object (call $car (local.get $elements))) (i32.const 1)))
+            (call $fasl-object-context (call $car (local.get $elements))
+              (local.get $records) (local.get $values) (local.get $states)) (i32.const 1)))
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (local.set $elements (call $cdr (local.get $elements)))
           (call $thread-checkpoint) (br $fill)))
@@ -1291,12 +1300,16 @@
 ;; FASLs are dominated by cons records. Reconstruct their graph in a native
 ;; traversal; the Lisp loader still handles atoms and MAKE-LOAD-FORM dependencies.
 (define-runtime-function $fasl-cons (($root :nullable-object)) (:nullable-object)
-  (:locals ($records (ref $objects)) ($values (ref $objects)) ($states (ref $objects))
-           ($stack :digits) ($new :digits) ($index i32) ($id i32) ($child i32) ($state i32)
+  #@(return_call $fasl-cons-context (local.get $root)
+    (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-records)))
+    (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-values)))
+    (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-states)))))
+
+(define-runtime-function $fasl-cons-context
+    (($root :nullable-object) ($records (ref $objects)) ($values (ref $objects)) ($states (ref $objects)))
+    (:nullable-object)
+  (:locals ($stack :digits) ($new :digits) ($index i32) ($id i32) ($child i32) ($state i32)
            ($frame i32) ($depth i32) ($capacity i32) ($record :nullable-object) ($value :nullable-object) ($handled i32))
-  #@(local.set $records (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-records))))
-  #@(local.set $values (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-values))))
-  #@(local.set $states (call $vector-data (call $symbol-value ,(clos-library-reference '%fasl-states))))
   #@(local.set $index (call $natural-count (local.get $root)))
   #@(local.set $capacity (i32.const 32))
   #@(local.set $stack (array.new_default $digits (local.get $capacity)))
@@ -1333,7 +1346,8 @@
             (local.set $state (i32.const 4))))))
     (local.set $value (if (result (ref null eq)) (i32.ge_u (local.get $state) (i32.const 3))
       (then (array.get $objects (local.get $values) (local.get $child)))
-      (else (call $fasl-object (call $int (local.get $child))))))
+      (else (call $fasl-object-context (call $int (local.get $child))
+        (local.get $records) (local.get $values) (local.get $states)))))
     (if (i32.and (local.get $frame) (i32.const 1))
       (then
         (struct.set $obj $b (ref.cast (ref $obj) (array.get $objects (local.get $values) (local.get $id))) (local.get $value))
@@ -1800,7 +1814,7 @@
   #@(global $macro-bindings (ref $symbol-index) ,(empty-symbol-index-wat))
   #@(global $source-files (mut (ref null eq)) (ref.null eq))
   ($compiler-macro-access) ($setf-expander-access) ($make-symbol-macro-binding) ($symbol-macro-binding) ($define-symbol-macro)
-  ($fasl-cons-new) ($fasl-atom) ($fasl-object) ($fasl-cons) ($fasl-execute) ($fasl-dependencies) ($evaluate-in-environment) ($source-environment-snapshot) ($compile-primitive)
+  ($fasl-cons-new) ($fasl-atom) ($fasl-object) ($fasl-object-context) ($fasl-cons) ($fasl-cons-context) ($fasl-execute) ($fasl-dependencies) ($evaluate-in-environment) ($source-environment-snapshot) ($compile-primitive)
   ($function-environment) ($lexical-function-id) ($lexical-function) ($set-macro) ($macro-function) ($constant-function) ($constant-macro-function) ($macroexpand-1) ($prog-expansion-cl) ($prog-expansion) ($values-expansion-cl) ($values-expansion) ($output-string-expansion-cl) ($output-string-expansion) ($input-string-expansion-cl) ($macro-structure-error) ($input-string-error) ($input-string-expansion)
   ($do-expansion-cl) ($do-expansion-list) ($do-expansion)
   ($iteration-expansion-cl) ($iteration-expansion)

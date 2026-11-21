@@ -125,8 +125,10 @@
   ;; the retained body. Report that body's native code just as for an ordinary
   ;; compiled closure, including when the adapter itself has no module bytes.
   #@(if (ref.test (ref $direct-function) (local.get $function))
-    (then (if (i32.ge_u (struct.get $direct-function $mode
+    (then (if (i32.and (i32.ge_u (struct.get $direct-function $mode
         (ref.cast (ref $direct-function) (local.get $function))) (i32.const 17))
+        (i32.le_u (struct.get $direct-function $mode
+        (ref.cast (ref $direct-function) (local.get $function))) (i32.const 19)))
       (then (return_call $native-code-size
         (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $function))))))))
   #@(if (ref.test (ref $native-function) (local.get $function))

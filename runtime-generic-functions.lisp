@@ -111,6 +111,9 @@
   #@(if (ref.test (ref $direct-function) (local.get $function))
     (then
       (local.set $mode (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $function))))
+      (if (i32.eq (local.get $mode) (i32.const 21))
+        (then (return_call $keyword-effective-call (ref.cast (ref $direct-function) (local.get $function))
+          (local.get $args))))
       (if (i32.eq (local.get $mode) (i32.const 19))
         (then
           (local.set $context (call $argument-context (local.get $args)))
@@ -133,6 +136,40 @@
   ;; A custom/public effective function retains its unary list protocol.
   #@(return_call $apply (local.get $function) (call $cons
     (call $native-arguments-list (call $argument-context-arguments (local.get $args))) (ref.null eq))))
+
+(define-runtime-function $keyword-effective-call
+    (($function (ref $direct-function)) ($args :nullable-object)) (:nullable-object)
+  (:locals ($plan :nullable-object) ($inner :nullable-object) ($method :nullable-object)
+           ($next :nullable-object) ($start :nullable-object) ($keys :nullable-object)
+           ($allow i32) ($mode i32))
+  #@(local.set $plan (struct.get $direct-function $slot (local.get $function)))
+  #@(call $check-apply-list (local.get $plan))
+  #@(call $arity (local.get $plan) (i32.const 4) (i32.const 4))
+  #@(local.set $inner (call $car (local.get $plan)))
+  (wat-fail-when #@(i32.eqz (ref.test (ref $direct-function) (local.get $inner))) :malformed-form)
+  #@(local.set $mode (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $inner))))
+  (wat-fail-when #@(i32.and (i32.ne (local.get $mode) (i32.const 8))
+    (i32.ne (local.get $mode) (i32.const 9))) :malformed-form)
+  (wat-fail-when #@(i32.eqz (ref.eq (struct.get $direct-function $owner (local.get $function))
+    (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $inner))))) :malformed-form)
+  #@(local.set $start (call $car (call $cdr (local.get $plan))))
+  #@(local.set $keys (call $car (call $cdr (call $cdr (local.get $plan)))))
+  #@(local.set $allow (i32.eqz (ref.is_null (call $car (call $cdr (call $cdr (call $cdr (local.get $plan))))))))
+  #@(call $native-check-keywords (extern.convert_any (call $argument-context-arguments (local.get $args)))
+    (call $natural-count (local.get $start)) (extern.convert_any (local.get $keys)) (local.get $allow))
+  ;; Restoration validates representations, not the meaning of an arbitrary
+  ;; descriptor. Check the method and its finite metadata before invocation.
+  #@(local.set $method (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $inner))))
+  #@(if (i32.eq (local.get $mode) (i32.const 9))
+    (then
+      (call $check-apply-list (local.get $method))
+      (call $arity (local.get $method) (i32.const 3) (i32.const 3))
+      (local.set $next (call $car (call $cdr (local.get $method))))
+      (call $check-apply-list (local.get $next))
+      (local.set $method (call $car (local.get $method)))))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $method)) (i32.const 23)) :malformed-form)
+  #@(call $check-apply-list (struct.get $obj $b (ref.cast (ref $obj) (local.get $method))))
+  #@(return_call $effective-apply (local.get $inner) (local.get $args)))
 
 (define-runtime-function $context-invoke-method
     (($gf :nullable-object) ($method :nullable-object) ($rest :nullable-object)
@@ -429,6 +466,10 @@
     (($gf :nullable-object) ($method :nullable-object) ($rest :nullable-object)
      ($args :nullable-object) ($continuation :nullable-object) ($forbidden i32)) (:nullable-object)
   (:locals ($saved :nullable-object) ($context :nullable-object) ($result :nullable-object) ($function :nullable-object) ($thrown i32))
+  ;; Recent fixed calls retain a list in their method context, while ordinary
+  ;; calls retain a packet. Unwrap either context before normalizing its
+  ;; arguments: the native method adapter below requires an owned packet.
+  #@(local.set $args (call $argument-context-arguments (local.get $args)))
   #@(if (i32.eqz (ref.test (ref $objects) (local.get $args)))
     (then (local.set $args (call $argument-context-arguments (call $argument-context (local.get $args))))))
   #@(local.set $context (struct.new $method-context
@@ -1346,7 +1387,7 @@
 (define-runtime-function $property-effective
     (($function :nullable-object) ($form :nullable-object) ($gf :nullable-object) ($args :nullable-object)) (:nullable-object)
   (:locals ($method :nullable-object) ($body :nullable-object) ($scan :nullable-object) ($next :nullable-object)
-           ($specialized :nullable-object) ($probe i32))
+           ($specialized :nullable-object) ($probe i32) ($keys i32))
   #@(local.set $probe (ref.is_null (local.get $function)))
   #@(if (local.get $probe)
     ;; This is an inert descriptor base, immediately wrapped by direct dispatch.
@@ -1358,8 +1399,15 @@
     (local.set $next (call $car (call $cdr (call $cdr (local.get $form)))))
     (local.set $method (call $car (call $cdr (local.get $form))))
     (br_if $ordinary (i32.ne (call $tag (local.get $method)) (i32.const 23)))
+    (local.set $scan (call $generic-property (local.get $gf) ,(clos-library-reference :lambda-list)))
+    (block $checked (loop $parameter (br_if $checked (ref.is_null (local.get $scan)))
+      (if (i32.or
+        (ref.eq (call $car (local.get $scan)) (call $symbol (i32.const ,(runtime-symbol-id '&key))))
+        (ref.eq (call $car (local.get $scan)) (call $symbol (i32.const ,(runtime-symbol-id '&rest)))))
+        (then (local.set $keys (i32.const 1)) (br $checked)))
+      (local.set $scan (call $cdr (local.get $scan))) (br $parameter)))
     (local.set $body (call $car (call $property-cell (struct.get $obj $b (ref.cast (ref $obj) (local.get $method))) ,(clos-library-reference :function))))
-    (if (ref.test (ref $direct-function) (local.get $body))
+    (if (i32.and (i32.eqz (local.get $keys)) (ref.test (ref $direct-function) (local.get $body)))
       (then
         (if (i32.or
               (i32.eq (struct.get $direct-function $mode (ref.cast (ref $direct-function) (local.get $body))) (i32.const 11))
@@ -1392,13 +1440,8 @@
         (then (return (call $direct-function (local.get $function) (ref.null eq)
           (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $body))) (i32.const 4)))))))
     ;; A CALL-METHOD plan can invoke the primary directly. Its next-method
-    ;; continuation is shared by the plan; keyword validation stays general.
-    (local.set $scan (call $generic-property (local.get $gf) ,(clos-library-reference :lambda-list)))
-    (block $checked (loop $parameter (br_if $checked (ref.is_null (local.get $scan)))
-      (br_if $ordinary (i32.or
-        (ref.eq (call $car (local.get $scan)) (call $symbol (i32.const ,(runtime-symbol-id '&key))))
-        (ref.eq (call $car (local.get $scan)) (call $symbol (i32.const ,(runtime-symbol-id '&rest))))))
-      (local.set $scan (call $cdr (local.get $scan))) (br $parameter)))
+    ;; continuation is shared by the plan. The caller wraps the jointly
+    ;; computed keyword contract when one is needed.
     (if (i32.eqz (ref.is_null (local.get $next)))
       (then
         (call $check-apply-list (local.get $next))
@@ -1476,7 +1519,7 @@
     (field $args (ref null eq)) (field $next (ref null eq)))))
   ($argument-context) ($argument-context-p) ($argument-context-arguments)
   ($context-argument) ($context-present) ($context-rest) ($context-check-keywords)
-  ($context-keyword-present) ($context-keyword-argument) ($effective-apply)
+  ($context-keyword-present) ($context-keyword-argument) ($effective-apply) ($keyword-effective-call)
   ($context-invoke-method) ($call-next-property-cell) ($call-next-property) ($call-next-small-count) ($call-next-small-list-count)
   ($call-next-argument-ready-p) ($call-next-replacement-ready-p) ($call-next-packet)
   ($dispatch-eql-key) ($generic-discriminator) ($generic-property) ($invoke-method) ($method-context-element) ($dispatch-class-known) ($dispatch-class) ($generic-key-match) ($generic-fixed-arity-p) ($generic-recent-call) ($generic-recent-plan-ready) ($generic-recent-context) ($generic-recent-scalar-call) ($generic-recent-call-ready) ($generic-cache-permitted-p) ($generic-cache-row) ($generic-apply)

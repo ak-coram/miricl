@@ -280,9 +280,12 @@ Generate only source forms here; the compiler-free guest needs no contract table
 
 (define-runtime-function $direct-function
     (($function :nullable-object) ($class :nullable-object) ($slot :nullable-object) ($mode i32)) (:object)
-  (wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 19)) :malformed-form)
+  (wat-fail-when #@(i32.gt_u (local.get $mode) (i32.const 21)) :malformed-form)
   (wat-fail-when #@(i32.ne (call $tag (local.get $function)) (i32.const 8)) :malformed-form)
-  #@(if (i32.ge_u (local.get $mode) (i32.const 17))
+  #@(if (i32.eq (local.get $mode) (i32.const 20))
+    (then (drop (call $boa-plan-data (local.get $class) (local.get $slot)))))
+  #@(if (i32.and (i32.ge_u (local.get $mode) (i32.const 17))
+                (i32.le_u (local.get $mode) (i32.const 19)))
     (then
       ,(wat-fail-when #@(i32.ne (call $tag (local.get $slot)) (i32.const 8)) :malformed-form)
       ;; Keep the actual protocol entry, including HIR/native closures, rather
@@ -303,6 +306,12 @@ Generate only source forms here; the compiler-free guest needs no contract table
   (:locals ($class :nullable-object) ($object :nullable-object) ($value :nullable-object) ($mode i32))
   #@(local.set $class (struct.get $direct-function $owner (local.get $function)))
   #@(local.set $mode (struct.get $direct-function $mode (local.get $function)))
+  #@(if (i32.eq (local.get $mode) (i32.const 20))
+    (then (return_call $boa-constructor-call (local.get $class)
+      (struct.get $direct-function $slot (local.get $function)) (local.get $args))))
+  #@(if (i32.eq (local.get $mode) (i32.const 21))
+    (then ,(wat-arity 1)
+      (return_call $keyword-effective-call (local.get $function) (call $car (local.get $args)))))
   #@(if (i32.eq (local.get $mode) (i32.const 19))
     (then ,(wat-arity 1)
       (return_call $effective-apply (local.get $function) (call $car (local.get $args)))))
@@ -388,6 +397,95 @@ Generate only source forms here; the compiler-free guest needs no contract table
       (local.set $object (call $car (local.get $args)))))
   #@(call $structure-access (local.get $object) (local.get $class)
     (struct.get $direct-function $slot (local.get $function)) (local.get $value) (local.get $mode)))
+
+(define-runtime-function $boa-plan-data
+    (($class :nullable-object) ($plan :nullable-object)) ((ref $objects))
+  (:locals ($data (ref $objects)) ($keys (ref $objects)) ($bindings (ref $objects))
+           ($scan :nullable-object) ($slot :nullable-object) ($names :nullable-object)
+           ($value :nullable-object) ($slots :nullable-object) ($count i32) ($size i32))
+  (wat-fail-when #@(i32.ne (call $tag (local.get $class)) (i32.const 23)) :malformed-form)
+  #@(call $check-apply-list (struct.get $obj $b (ref.cast (ref $obj) (local.get $class))))
+  ;; Class names may be removed or rebound without changing captured classes.
+  ;; Typed BOA constructors retain the general compiler's representation path.
+  (wat-fail-when #@(i32.or (call $value-n (local.get $class))
+    (i32.eqz (ref.eq (call $dispatch-class (local.get $class))
+      (call $named-class ,(clos-library-reference 'structure-class))))) :malformed-form)
+  #@(local.set $names (call $car (call $property-cell
+    (struct.get $obj $b (ref.cast (ref $obj) (local.get $class))) ,(clos-library-reference :struct-initargs))))
+  #@(call $check-apply-list (local.get $names))
+  #@(call $check-type (local.get $plan) (call $symbol (i32.const ,(runtime-symbol-id 'simple-vector))))
+  #@(local.set $data (call $vector-data (local.get $plan)))
+  (wat-fail-when #@(i32.ne (array.len (local.get $data)) (i32.const 4)) :malformed-form)
+  #@(local.set $count (call $natural-count (array.get $objects (local.get $data) (i32.const 0))))
+  #@(local.set $slots (array.get $objects (local.get $data) (i32.const 1)))
+  #@(call $check-apply-list (local.get $slots))
+  (wat-fail-when #@(i32.eqz (ref.eq (local.get $slots) (call $car (call $property-cell
+    (struct.get $obj $b (ref.cast (ref $obj) (local.get $class))) ,(clos-library-reference :slots))))) :malformed-form)
+  #@(local.set $scan (local.get $slots))
+  #@(block $checked (loop $slot
+    (br_if $checked (ref.is_null (local.get $scan)))
+    (local.set $slot (call $car (local.get $scan)))
+    ,(wat-fail-when #@(i32.ne (call $tag (local.get $slot)) (i32.const 23)) :malformed-form)
+    (call $check-apply-list (struct.get $obj $b (ref.cast (ref $obj) (local.get $slot))))
+    (local.set $value (call $car (call $property-cell
+      (struct.get $obj $b (ref.cast (ref $obj) (local.get $slot))) ,(clos-library-reference :initargs))))
+    (call $check-apply-list (local.get $value))
+    (local.set $value (call $car (call $property-cell
+      (struct.get $obj $b (ref.cast (ref $obj) (local.get $slot))) ,(clos-library-reference :initfunction))))
+    ,(wat-fail-when #@(i32.and (i32.eqz (ref.is_null (local.get $value)))
+      (i32.ne (call $tag (local.get $value)) (i32.const 8))) :malformed-form)
+    (local.set $scan (call $cdr (local.get $scan))) (br $slot)))
+  #@(call $check-type (array.get $objects (local.get $data) (i32.const 2))
+    (call $symbol (i32.const ,(runtime-symbol-id 'simple-vector))))
+  #@(call $check-type (array.get $objects (local.get $data) (i32.const 3))
+    (call $symbol (i32.const ,(runtime-symbol-id 'simple-vector))))
+  #@(local.set $keys (call $vector-data (array.get $objects (local.get $data) (i32.const 2))))
+  #@(local.set $bindings (call $vector-data (array.get $objects (local.get $data) (i32.const 3))))
+  #@(local.set $size (call $natural-count (call $list-length-native (local.get $slots))))
+  (wat-fail-when #@(i32.or (i32.ne (local.get $size) (array.len (local.get $keys)))
+    (i32.ne (local.get $size) (array.len (local.get $bindings)))) :malformed-form)
+  #@(local.get $data))
+
+(define-runtime-function $boa-constructor-call
+    (($class :nullable-object) ($plan :nullable-object) ($args :nullable-object)) (:nullable-object)
+  (:locals ($data (ref $objects)) ($keys (ref $objects)) ($bindings (ref $objects))
+           ($arguments (ref $objects))
+           ($slots :nullable-object) ($binding :nullable-object) ($key :nullable-object)
+           ($value :nullable-object) ($initargs :nullable-object) ($tail :nullable-object)
+           ($pair :nullable-object) ($count i32) ($index i32) ($position i32))
+  #@(local.set $data (call $boa-plan-data (local.get $class) (local.get $plan)))
+  #@(local.set $count (call $natural-count (array.get $objects (local.get $data) (i32.const 0))))
+  #@(call $arity (local.get $args) (local.get $count) (local.get $count))
+  ;; Ordinary required bindings are established before slot initfunctions run.
+  #@(local.set $arguments (call $vector-data (call $vector-from-list (local.get $args) (local.get $count))))
+  #@(local.set $slots (array.get $objects (local.get $data) (i32.const 1)))
+  #@(local.set $keys (call $vector-data (array.get $objects (local.get $data) (i32.const 2))))
+  #@(local.set $bindings (call $vector-data (array.get $objects (local.get $data) (i32.const 3))))
+  #@(block $done (loop $next
+    (br_if $done (i32.eq (local.get $index) (array.len (local.get $keys))))
+    (if (i32.eqz (i32.and (local.get $index) (i32.const 63))) (then (call $thread-checkpoint)))
+    (local.set $key (array.get $objects (local.get $keys) (local.get $index)))
+    (call $require-symbol (local.get $key))
+    (local.set $binding (array.get $objects (local.get $bindings) (local.get $index)))
+    (if (i32.eq (call $tag (local.get $binding)) (i32.const 1))
+      (then
+        (local.set $position (call $natural-count (local.get $binding)))
+        ,(wat-fail-when #@(i32.ge_u (local.get $position) (local.get $count)) :malformed-form)
+        (local.set $value (array.get $objects (local.get $arguments) (local.get $position))))
+      (else
+        (local.set $value (ref.null eq))
+        (if (i32.eqz (ref.is_null (local.get $binding)))
+          (then
+            ,(wat-fail-when #@(i32.ne (call $tag (local.get $binding)) (i32.const 8)) :malformed-form)
+            (local.set $value (call $apply (local.get $binding) (ref.null eq)))))))
+    (local.set $pair (call $cons (local.get $value) (ref.null eq)))
+    (if (ref.is_null (local.get $tail))
+      (then (local.set $initargs (call $cons (local.get $key) (local.get $pair))))
+      (else (struct.set $obj $b (ref.cast (ref $obj) (local.get $tail))
+        (call $cons (local.get $key) (local.get $pair)))))
+    (local.set $tail (local.get $pair))
+    (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $next)))
+  #@(return_call $structure-make (local.get $class) (local.get $slots) (local.get $initargs)))
 
 (define-runtime-function $structure-sequence-element
     (($object :nullable-object) ($index :nullable-object) ($value :nullable-object) ($write i32) ($list i32)) (:nullable-object)
@@ -1190,7 +1288,8 @@ Generate only source forms here; the compiler-free guest needs no contract table
               collect `(i32.const ,(runtime-library-prefix-value (and entry (cons 0 entry)))))))
   #@(global $class-bindings (ref $symbol-index) ,(empty-symbol-index-wat))
   #@(global $clos-library-symbols (mut (ref $objects)) (array.new_default $objects (i32.const 0)))
-  ($direct-function) ($direct-function-call) ($structure-sequence-element) ($typed-structure-p)
+  ($direct-function) ($direct-function-call) ($boa-plan-data) ($boa-constructor-call)
+  ($structure-sequence-element) ($typed-structure-p)
   ($structure-access) ($print-structure-default) ($structure-copy) ($structure-make)
   ($named-class) ($set-named-class) ($clos-primitive) ($clos-find-class) ($class-subclassp) ($clos-typep)
   ($read-library-byte) ($unpack-library-bytes) ($read-library-unsigned) ($read-library-integer) ($reset-library-reader) ($prepare-library-reader) ($read-library-string) ($library-symbol) ($read-library-literal) ($initialize-clos-symbols) ($initialize-clos))

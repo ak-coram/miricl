@@ -21,6 +21,21 @@ const section = (bytes, name, payload) => {
   output.set(bytes); output.set(prefix, bytes.length); output.set(body, bytes.length + prefix.length);
   return output;
 };
+// Exercise the current image graph boundary independently of the outer Wasm
+// validator. A runtime-owned layout supplies an immutable reference field.
+const malformedImmutableImage = (vm, bytes, reference) => {
+  const roots = Object.keys(vm.vm).find(name => name.startsWith('core-roots:')).split(':')[1];
+  const type = Object.keys(vm.vm).map(name => name.split(':')).find(([kind, , signature]) =>
+    kind === 'core-read' && signature?.includes('r') && !signature.includes('e'));
+  assert.ok(type, 'The runtime exposes an immutable reference layout.');
+  const slot = type[2].indexOf('r');
+  const count = new Uint8Array(4); new DataView(count.buffer).setUint32(0, 1, true);
+  // References are relative to object 1: 2 encodes itself; 6 encodes object 2.
+  return section(bytes, 'miricl.core', Uint8Array.from([
+    ...word(2), ...Array.from(roots, () => 0), ...count,
+    ...word(0), ...word(Number(type[1])), ...word(2 ** slot), ...word(reference),
+  ]));
+};
 const header = Uint8Array.from([0,97,115,109,1,0,0,0]);
 const fake = gzipSync('export const Miricl = {instantiate() {return {};}}');
 await assert.rejects(getMiriclAdapter(header), /embedded MIRICL JavaScript adapter/u);
@@ -47,16 +62,47 @@ for (const filename of [image, scripting]) {
     assert.equal(typeof vm.adapter.Miricl, 'function');
     assert.throws(() => vm.evaluate('(error "embedded adapter error")'), vm.adapter.MiriclError);
     assert.equal(vm.evaluate('(+ 19 23)').output, '42\n', 'Lisp errors leave the loaded image usable.');
-    vm.evaluate('(defparameter *embedded-image-value* 42) (values)');
-    if (filename === image) assert.equal(vm.evaluate(`(let ((f (miricl-compiler:compile-native
-      '(lambda (x) (declare (type integer x)) (+ x 2)))))
-      (and (compiled-function-p f) (= (funcall f 40) 42)))`).output, 'T\n');
+    vm.evaluate(`(progn (defparameter *embedded-image-value* 42)
+      (defparameter *embedded-image-key* (list :retained-key))
+      (defparameter *embedded-image-graph*
+        (let ((shared (list :shared)))
+          (setf (cdr shared) shared)
+          (vector shared shared *embedded-image-key*)))
+      (defparameter *embedded-image-weak-key*
+        (js:make-weak-hash-table :test #'eq :weakness :key))
+      (defparameter *embedded-image-weak-value*
+        (js:make-weak-hash-table :test #'eq :weakness :value))
+      (setf (gethash *embedded-image-key* *embedded-image-weak-key*) *embedded-image-graph*
+            (gethash :retained-value *embedded-image-weak-value*) *embedded-image-graph*)
+      (values))`, {eof: true});
+    if (filename === image) {
+      assert.equal(vm.evaluate(`(let ((f (miricl-compiler:compile-native
+        '(lambda (x) (declare (type integer x)) (+ x 2)))))
+        (and (compiled-function-p f) (= (funcall f 40) 42)))`).output, 'T\n');
+      const fixture = await fs.readFile(new URL('../fixtures/fasl-load-context.lisp', import.meta.url), 'utf8');
+      assert.equal((await vm.evaluateAsync(fixture, {eof: true})).output, 'T\n',
+        'Nested compiled LOAD preserves the outer reconstruction context and shared literal graph.');
+    }
+    for (const reference of [2, 6]) {
+      await assert.rejects(loadMiricl(malformedImmutableImage(vm, original, reference)),
+        /Invalid immutable reference/u);
+      assert.equal(vm.evaluate('(+ 19 23)').output, '42\n', 'A malformed image leaves the current worker usable.');
+    }
     const saved = vm.saveImage();
     assert.deepEqual(WebAssembly.Module.customSections(await WebAssembly.compile(saved), sectionName), sections,
       'Saving retains the matching adapter without duplicating it.');
     vm.close(); vm = null;
     vm = await loadMiricl(new Blob([gzipSync(saved)]));
     assert.equal(vm.evaluate('*embedded-image-value*').output, '42\n', 'The embedded adapter restores saved state.');
+    assert.equal(vm.evaluate(`(let ((graph *embedded-image-graph*))
+      (and (eq (svref graph 0) (svref graph 1))
+        (eq (cdr (svref graph 0)) (svref graph 0))
+        (eq (svref graph 2) *embedded-image-key*)
+        (eq (js:hash-table-weakness *embedded-image-weak-key*) :key)
+        (eq (js:hash-table-weakness *embedded-image-weak-value*) :value)
+        (eq (gethash *embedded-image-key* *embedded-image-weak-key*) graph)
+        (eq (gethash :retained-value *embedded-image-weak-value*) graph)))`, {eof: true}).output,
+      'T\n', 'Restoration preserves weak tables, sharing and mutable cycles.');
   } finally {vm?.close();}
 }
 
