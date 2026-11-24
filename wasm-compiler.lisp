@@ -34,7 +34,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-next-blocks*)
 (defvar *wasm-body-keys*)
 (defvar *wasm-function-plans* nil)
-(defvar *wasm-call-plans* nil)
 (defvar *wasm-direct-workers* nil)
 (defvar *wasm-local-call-functions* nil)
 (defvar *wasm-scoped-call-functions* nil)
@@ -95,10 +94,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-loop-regions*)
 (defvar *wasm-control-depth*)
 (defvar *wasm-optimization-barriers* nil)
-(defvar *wasm-generic-candidates* nil)
-(defvar *wasm-generic-candidate-function* nil)
-(defvar *wasm-generic-planner* nil)
-(defvar *wasm-generic-calls* nil)
 (defvar *wasm-result-arities* nil)
 (defvar *wasm-result-callees* nil)
 (defvar *wasm-multiple-result-functions* nil)
@@ -132,7 +127,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defparameter *native-imports*
   '(("native-literal" (:object :i32) :object)
     ("native-literal-function" (:object :i32) :object)
-    ("native-generic-call" (:object :object :object :i32) :object)
     ("native-tail-call" (:object :object) :object)
     ("native-tail-direct" (:object) :i32)
     ("native-tail-enter" (:object) :object)
@@ -243,6 +237,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-debug-close" (:object :object :i32) :object)
     ("native-capture" (:object :i32) :object)
     ("native-multiple-value-call" (:object :object :object) :object)
+    ("native-fixed-call" (:object :object :object :object :object :i32) :object)
     ("native-call0" (:object) :object)
     ("native-call1" (:object :object) :object)
     ("native-call-values1" (:object :object) (:object :object :object :object :i32))
@@ -1727,7 +1722,6 @@ exhausted work budgets keep every incoming value group."
          (not (native-value-slot *wasm-single-calls* output))
          (not (gethash instruction *wasm-inline-simple-calls*))
          (not (gethash instruction *wasm-inline-vector-calls*))
-         (not (gethash instruction *wasm-generic-calls*))
          (not (native-multiple-call-count (hir-instruction-inputs instruction) instruction))
          (not (member instruction *wasm-tail-calls* :test #'eq)))))
 
@@ -1971,6 +1965,22 @@ exhausted work budgets keep every incoming value group."
       (wasm-byte #x0b)
       t)))
 
+(defun emit-native-fixed-value-call (inputs output)
+  ;; Transport is independent of target identity, result cardinality and
+  ;; effects. The shared checked runtime selects the actual live callee.
+  (let ((arity (length (cddr inputs))))
+    (when (and (not *wasm-fixed-call-emitter*)
+               (not *wasm-closed-worker-functions*) (<= arity 4))
+      (let ((primary (or (native-value-slot *wasm-scalar-groups* output)
+                         (not (native-value-slot *wasm-live-values* output)))))
+        (compiler-statistic :optimization/fixed-value-transport
+          (if primary :primary :full))
+        (emit-native-call-operands inputs)
+        (dotimes (i (- 4 arity)) (wasm-null))
+        (wasm-integer (logior arity (if primary 8 0)))
+        (wasm-call "native-fixed-call")
+        t))))
+
 (defun emit-native-fixed-call (inputs)
   (when (and *wasm-fixed-call-emitter* (funcall *wasm-fixed-call-emitter* inputs))
     (return-from emit-native-fixed-call nil))
@@ -1980,101 +1990,6 @@ exhausted work budgets keep every incoming value group."
   (emit-native-call-operands inputs)
   (wasm-call (nth (length (cddr inputs))
                '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4"))))
-
-(defun native-generic-candidate (name)
-  (when *wasm-generic-candidate-function*
-    (multiple-value-bind (value present) (gethash name *wasm-generic-candidates*)
-      (if present value
-          (setf (gethash name *wasm-generic-candidates*)
-            (funcall *wasm-generic-candidate-function* name))))))
-
-(defun native-proven-generic-mask (inputs candidates facts)
-  (let ((mask 0))
-    (loop for value in (cddr inputs) for candidate in candidates for index from 0 do
-      (when (eq (car candidate) :eql)
-        (let ((origin (hir-value-producer value)))
-          (when (or (and (%hir-instruction-p origin)
-                         (eq (hir-instruction-opcode origin) :constant)
-                         (eql (first (hir-instruction-attributes origin)) (second candidate)))
-                    (let ((proof (and facts (hir-dispatch-candidate (gethash value facts t)))))
-                      (and (eq (car proof) :eql) (eql (second proof) (second candidate)))))
-            (setq mask (logior mask (ash 1 index)))))))
-    mask))
-
-(defun native-plan-generic-calls (unit &optional entries)
-  (unless *wasm-generic-planner* (return-from native-plan-generic-calls nil))
-  (let ((roots nil) (pending nil))
-    (dolist (function (hir-unit-functions unit))
-      (when (< (hir-function-debug-level function) 2)
-        (let ((call-plan nil))
-          (dolist (block (hir-function-blocks function))
-            (dolist (instruction (hir-block-instructions block))
-              (when (eq (hir-instruction-opcode instruction) :call)
-                (let* ((inputs (hir-instruction-inputs instruction))
-                       (producer (hir-value-producer (second inputs)))
-                       (name (when (and (%hir-instruction-p producer)
-                                        (eq (hir-instruction-opcode producer) :function-reference)
-                                        (not (eq (second (hir-instruction-attributes producer)) 'notinline)))
-                               (first (hir-instruction-attributes producer))))
-                       (gf (and name (native-generic-candidate name))))
-                  (when (and gf (<= (length (cddr inputs)) 4))
-                    ;; The same value-count and tail analysis is consumed by
-                    ;; function lowering. Inline plans and type facts are now
-                    ;; complete; no HIR changes before that lowering uses it.
-                    (unless call-plan
-                      (let* ((*wasm-scalar-groups* (native-scalar-groups function))
-                             (*wasm-single-calls* (native-single-calls function *wasm-scalar-groups*)))
-                        (setq call-plan (vector *wasm-scalar-groups* *wasm-single-calls*
-                                               (native-tail-calls function)))
-                        (when *wasm-call-plans*
-                          (setf (gethash function *wasm-call-plans*) call-plan))))
-                    ;; A tail call never emits a guarded generic-call plan.
-                    ;; Avoid constructing its effective method and EQL facts.
-                    (unless (member instruction (svref call-plan 2) :test #'eq)
-                      (let* ((candidates
-                               (mapcar (lambda (value)
-                                 (let ((origin (hir-value-producer value)))
-                                   (if (and (%hir-instruction-p origin)
-                                            (eq (hir-instruction-opcode origin) :constant))
-                                       (list :eql (first (hir-instruction-attributes origin)))
-                                       (hir-dispatch-candidate (gethash value *wasm-inferred-types* t)))))
-                                 (cddr inputs)))
-                             ;; Tell the target planner when the existing fixed
-                             ;; primary entry avoids the guarded plan's argument
-                             ;; list. It retains static plans for method chains
-                             ;; that the recent selector cannot execute directly.
-                             ;; Live guards and fallback still own dispatch.
-                             (plan (funcall *wasm-generic-planner* gf candidates
-                                     (and (<= (length candidates) 3)
-                                          (native-value-slot (svref call-plan 0)
-                                            (hir-instruction-output instruction))
-                                          (notany (lambda (candidate)
-                                                    (eq (car candidate) :eql)) candidates)))))
-                        (when plan
-                          (let ((needed nil))
-                            (loop for value in (cddr inputs) for candidate in candidates do
-                              (when (eq (car candidate) :eql)
-                                (let ((origin (hir-value-producer value)))
-                                  (unless (and (%hir-instruction-p origin)
-                                               (eq (hir-instruction-opcode origin) :constant))
-                                    (push value roots) (setq needed t)))))
-                            (setf (gethash instruction *wasm-generic-calls*)
-                              (cons plan (native-proven-generic-mask inputs candidates nil)))
-                            (when needed (push (cons instruction candidates) pending))))))))))))))
-    (when roots
-      (let ((proven (infer-hir-types-checked unit roots t entries t)))
-        (dolist (entry pending)
-          (setf (cdr (gethash (car entry) *wasm-generic-calls*))
-            (native-proven-generic-mask (hir-instruction-inputs (car entry)) (cdr entry) proven)))))))
-
-(defun emit-native-generic-call (instruction inputs output)
-  (let ((entry (gethash instruction *wasm-generic-calls*)))
-    (when entry
-      (compiler-statistic :optimization/generic-dispatch (cdr entry))
-      (wasm-literal (car entry)) (wasm-get (second inputs)) (wasm-list (cddr inputs) nil)
-      (wasm-integer (logior (if (native-value-slot *wasm-scalar-groups* output) 1 0) (ash (cdr entry) 1)))
-      (wasm-call "native-generic-call")
-      t)))
 
 (defun native-type-integer-width (type)
   ;; One target CL type domain drives declarations, module summaries and
@@ -3626,10 +3541,6 @@ exhausted work budgets keep every incoming value group."
            (wasm-null) (wasm-call "native-cons"))
          (wasm-set output)
          (return-from emit-native-instruction nil))
-       (when (and (not (member instruction *wasm-tail-calls* :test #'eq))
-                  (emit-native-generic-call instruction inputs output))
-         (wasm-set output)
-         (return-from emit-native-instruction nil))
        (when (emit-native-multiple-call inputs output instruction)
          (wasm-set output)
          (return-from emit-native-instruction nil))
@@ -3659,6 +3570,10 @@ exhausted work budgets keep every incoming value group."
                                   (not (native-value-slot *wasm-live-values* output))) 1 0)
                            (if (native-value-slot *wasm-single-calls* output) 2 0)))
          (wasm-call "native-apply-list")
+         (wasm-set output)
+         (return-from emit-native-instruction nil))
+       (when (and (not (native-value-slot *wasm-single-calls* output))
+                  (emit-native-fixed-value-call inputs output))
          (wasm-set output)
          (return-from emit-native-instruction nil))
        (if (native-value-slot *wasm-single-calls* output)
@@ -5055,8 +4970,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
   (declare (type simple-vector function))
   ;; Cache the lowering facts separately from the emitted literals, closure
   ;; objects and relocation offsets.
-  (let* ((call-plan (and *wasm-call-plans* (gethash function *wasm-call-plans*)))
-        (targets (native-block-targets function))
+  (let* ((targets (native-block-targets function))
         (forward (unless targets (native-forward-blocks function)))
         (blocks (or forward (native-reachable-blocks function targets)))
         (structured (unless (or forward targets) (native-loop-plan function blocks)))
@@ -5067,12 +4981,12 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           (some (lambda (instruction) (eq (hir-instruction-opcode instruction) :dynamic-bind))
             (hir-block-instructions block))) blocks)))
         (*wasm-entry-environment* (hir-function-environment function))
-        (*wasm-scalar-groups* (if call-plan (svref call-plan 0) (native-scalar-groups function)))
+        (*wasm-scalar-groups* (native-scalar-groups function))
         ;; Planning a callee can run while its caller is being emitted.
         ;; Width caches use function-local IDs and cannot cross that boundary.
         (*wasm-integer-widths* nil)
-        (*wasm-single-calls* (if call-plan (svref call-plan 1) (native-single-calls function *wasm-scalar-groups*)))
-        (*wasm-tail-calls* (if call-plan (svref call-plan 2) (native-tail-calls function)))
+        (*wasm-single-calls* (native-single-calls function *wasm-scalar-groups*))
+        (*wasm-tail-calls* (native-tail-calls function))
         (*wasm-branch-tests* (native-plan-branch-tests function blocks))
         (*wasm-reused-values* nil)
         (*wasm-hoisted-values* nil)
@@ -5085,7 +4999,6 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
         (next-blocks (make-array (hir-function-block-count function) :initial-element nil)))
     (declare (type (unsigned-byte 32) count) (type simple-vector next-blocks) (type list targets blocks literals)
              (type hash-table literal-locals) (type (or null simple-vector) locals))
-    (when call-plan (remhash function *wasm-call-plans*))
     (when reused
       (native-predicate-aliases function blocks reused)
       (setq *wasm-reused-values* reused
@@ -5967,8 +5880,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
               (when (and (%hir-instruction-p producer)
                          (eq (hir-instruction-opcode producer) :function-reference)
                          (not (eq (second (hir-instruction-attributes producer)) 'notinline))
-                         (or (native-generic-candidate (first (hir-instruction-attributes producer)))
-                             (member (first (hir-instruction-attributes producer))
+                         (or (member (first (hir-instruction-attributes producer))
                            '(1+ 1- + - * logand logior logxor lognot ash < > <= >= = /= eq eql zerop minusp plusp evenp oddp car first cdr rest endp rplaca rplacd length svref aref row-major-aref make-array make-string
                              (setf svref) (setf aref) (setf row-major-aref) (setf char)) :test #'equal)
                              (and (zerop (hir-instruction-safety-level instruction))
@@ -6126,18 +6038,6 @@ the named-entry format for hosts that translate individual Wasm workers."
          (*wasm-literal-index* (make-hash-table :test 'eq))
          (*wasm-literal-groups* (and entries (native-literal-groups entries)))
          (*native-functions* (hir-unit-functions unit))
-         (*wasm-generic-candidates* (make-hash-table :test 'equal))
-         ;; Keep native initializer recipe collection independent of transient
-         ;; plans. Final native file emission discards such caches through
-         ;; MAKE-LOAD-FORM and retains the ordinary call on a fresh load.
-         (*wasm-generic-candidate-function*
-           (unless (or *compiler-bootstrapping* *hir-load-time-recipes*)
-             (let ((name (compiler-primitive 10 1 "%GENERIC-CALL-CANDIDATE")))
-               (and name (fboundp name) (symbol-function name)))))
-         (*wasm-generic-planner*
-           (when *wasm-generic-candidate-function*
-             (symbol-function (compiler-primitive 10 1 "%PLAN-GENERIC-CALL"))))
-         (*wasm-generic-calls* (make-hash-table :test 'eq))
          (*wasm-optimization-barriers* (hir-optimization-barriers unit))
          (*wasm-result-callees* (hir-result-callees unit *wasm-optimization-barriers*))
          (*hir-standard-operations* (hir-standard-operations unit *wasm-optimization-barriers*))
@@ -6151,7 +6051,6 @@ the named-entry format for hosts that translate individual Wasm workers."
          (*wasm-function-plans* (make-hash-table :test 'eq))
          (*wasm-argument-usages* (make-hash-table :test 'eq))
          (*wasm-primary-functions* nil)
-         (*wasm-call-plans* (and *wasm-generic-planner* (make-hash-table :test 'eq)))
          ;; The host runtime linker currently accepts only single-result
          ;; workers. Its explicit closed-worker contract retains that lowering.
          (result-analysis (and *wasm-native-multiple-results* (not *wasm-closed-worker-functions*)
@@ -6190,7 +6089,6 @@ the named-entry format for hosts that translate individual Wasm workers."
     (native-plan-inline-vectors unit)
     (native-plan-inline-simple unit)
     (setq *wasm-dynamic-rests* (native-plan-dynamic-rests unit))
-    (native-plan-generic-calls unit analysis-entries)
     (native-keep-shared-references unit)
     (setq *wasm-proper-list-checks*
       (hir-proper-list-checks unit *wasm-inline-simple-calls*
@@ -6199,8 +6097,7 @@ the named-entry format for hosts that translate individual Wasm workers."
     (when *wasm-primary-functions*
       (maphash (lambda (function present)
                  (declare (ignore present))
-                 (remhash function *wasm-function-plans*)
-                 (when *wasm-call-plans* (remhash function *wasm-call-plans*)))
+                 (remhash function *wasm-function-plans*))
                *wasm-primary-functions*))
     (native-plan-argument-usages unit)
     (when *wasm-result-arities*
@@ -6421,8 +6318,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-scoped-call-functions native-scoped-call-target native-scoped-call-sites-p emit-native-scoped-call
                    native-captured-call-p native-captured-result-groups emit-native-captured-test emit-native-captured-list
                    native-result-signature emit-native-result emit-native-results native-local-result-groups native-call-frame-elidable-p native-multiple-call-count emit-native-multiple-call
-                   emit-native-fixed-call native-type-integer-width native-compute-integer-width native-integer-width emit-native-integer-box
-                   native-generic-candidate native-proven-generic-mask native-plan-generic-calls emit-native-generic-call
+                   emit-native-fixed-value-call emit-native-fixed-call native-type-integer-width native-compute-integer-width native-integer-width emit-native-integer-box
                    emit-native-unboxed-integer native-integer-result-fits-p native-inline-shift-opcode native-inline-nonnegative-division-opcode native-inline-integer-opcode emit-native-integer-chain emit-native-inline-integer emit-native-i31-operand emit-native-i31-step emit-native-i31-comparison emit-native-integer-call
                    native-simple-vector-value-p native-list-value-p emit-native-vector-call emit-native-list-call emit-native-character-call
                    native-plan-inline-simple native-plan-dynamic-rests native-cell-storage-roots native-plan-checked-integer-copies native-plan-proven-integers native-plan-proven-integer-arithmetic emit-native-proven-integer-arithmetic native-plan-proven-integer-comparisons emit-native-proven-integer-comparison

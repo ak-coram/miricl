@@ -277,30 +277,64 @@ helpers. The public and raw kernel ABIs remain scalar. Own-body tuple eligibilit
 authorize bypassing ordinary dispatch or omitting a frame. Primary/full/tail/join consumers use
 component locals where their actual lowering supplies tuples; ordinary calls retain scalar
 adapters. Failed signature-preserving rewriting falls back for the whole emission. General
-primary/discard calls use =native-primary-call= and clear secondary state after
-success; full consumers retain =native-call= .
+primary/discard calls use fixed =native-call0= through =native-call4= entries when
+their lowering supplies scalar transport. Other non-tail calls with at most four
+supplied operands use =native-fixed-call= after the private tuple and captured-result
+paths have been considered. This checked fixed-value transport is independent of
+callee identity, body effects and result cardinality. It admits the function and
+all operand slots, including padding, before unchecked internals. After the entry
+checkpoint it selects the actual native function's attached worker and exact arity.
+A matching worker needs no input packet even when its body signals, calls Lisp or
+changes dynamic state. Misses create owned argument storage and retain the ordinary
+binder, including optional, rest, keyword, wrong-arity and debugger behavior. Wider
+calls and host-linked closed-worker interfaces retain their general checked route.
 
-Generic-call planning accounts for the transport supported by the runtime entries.
-Class-only calls with at most three operands, primary or discarded results and
-one applicable primary method use the ordinary fixed entry and its recent-method
-selector, without constructing a proper argument list before selection. This is
-a transport choice rather than a weaker applicability proof: the
-selector checks live generic identity, dispatch epochs, protocol eligibility and
-argument classes, and falls back to ordinary dispatch when its plan is unavailable.
-Static guarded effective-method plans remain available for next-method chains, auxiliary methods,
-EQL candidates, wider calls and complete value groups. Their current entry transports a proper argument
-list and preserves effective-method context and all returned values.
+The ordinary shared full executor owns the Lisp backtrace frame, dynamic-state restoration,
+checked result admission and nonlocal-transfer cleanup. These obligations do not
+depend on a leaf-body certificate. Primary adapters clear secondary state only
+after successful return; full consumers capture the complete group before clearing,
+including zero and overflow values. Primary demand never proves exactly one result.
+The existing result-list representation can remain even when no input packet is
+needed. DEBUG policies are unchanged: a callee with DEBUG 2 or higher has no fixed
+worker and retains its checked public entry and debug descriptor.
 
-Fixed native entries with one through four arguments retain their scheduling
-checkpoint before checking the live native entry. Their direct hits and the
-callback-free recent generic selector enter shared ready executors without
-polling again between selection and worker entry. Readiness is private to this
-checked interval; a callback or further poll invalidates its live selection facts.
-Zero-argument and callback-capable guarded generic paths retain their polling
-entries. The common full executor owns the Lisp backtrace frame, dynamic-state
-restoration and nonlocal-transfer cleanup. Primary adapters clear secondary
-values only after successful return; full-value consumers retain the complete
-group, including zero values.
+Generic dispatch selects the actual live effective entry from the generic's owned
+runtime cache. The recent fixed selector supports at most three user operands:
+native primary/next-method adapters use the remaining worker slot for method
+context. It also admits a complete generated effective method whose native unary
+body consumes an opaque argument context. This preserves auxiliary methods, around
+methods and method combination without selecting an individual method from a
+caller-supplied proof claim. Native bodies retain their own checked contracts;
+applicable specializers are not unchecked body declarations.
+
+Recent selection checks the owned metadata and cache-history identities, current
+dispatch epoch, protocol eligibility, adapter ownership, actual native body and
+arity. Argument keys retain exact runtime class checks. A positive EQL key can use
+actual reference identity with the object stored by its specializer, followed by the class check;
+negative keys and numerically EQL but nonidentical objects retain ordinary dispatch.
+Unsupported adapter modes reject before key inspection, and nonmatching keys reject before
+method-function and native-body resolution. Bounded property reads, class matching
+and fixed-arity admission neither call Lisp nor poll.
+
+Method and effective contexts retain privately owned argument packets. Original
+operands remain available to escaped CALL-NEXT-METHOD functions independently of
+parameter rebinding and defaulting. Public context/list observations and custom
+effective functions retain their proper-list protocols. Replacement arguments
+preserve the ordered applicable-method set, and real dispatch misses can materialize
+lists for the ordinary MOP. A warm internal chain can avoid an argument cons spine while
+still allocating its packet and context. Four supplied operands retain ordinary
+packet dispatch when the recent selector's context convention cannot admit them;
+this does not widen the four-slot worker ABI.
+
+Checked transport owns its operation-entry checkpoint before selection. Native hits
+and the recent generic selector enter protected ready executors without another
+poll between selection, context assembly and entry. Readiness is private to this
+interval. Callback-capable cache matching and arity checks require final rereads of
+the epoch, cache root/token, metadata ownership, discriminator, lambda-list identity,
+applicable slot token and current argument classes before committing. A failed
+commit re-enters the live dispatcher, including a discriminator installed by the
+callback. Internal method calls retain the applicable operation-entry checkpoints, and debugger
+evaluation retains ordinary application handling.
 
 Scalar DEBUG 0 frame-omission certificates grow from eligible leaves through
 closed fixed-arity calls whose results have only primary or discarded demand.
@@ -375,8 +409,9 @@ body use its scalar adapter. Current body admission excludes dynamic state and a
 emissions containing DEBUG 2 or higher and host-linked closed kernels retain scalar lowering.
 These are lowering limits, and tuple admission does not change DEBUG or optimization policy.
 
-Direct closed calls and frame omission require the applicable effect/debug contract. Dynamic
-state, cleanup, captured exits and unknown calls retain ordinary dispatch. Global calls
+Target identity and arity select native transport independently of the effect/debug
+proofs needed for frame or cleanup omission. Dynamic state, cleanup, captured exits
+and unknown effects retain their protection through the shared executor. Global calls
 resolve live user bindings at the required point; operand effects cannot be moved across
 resolution. Standard primitive lowering retains argument, overflow and bounds checks without
 guarding forbidden redefinition of COMMON-LISP functions. Method specializers alone are not

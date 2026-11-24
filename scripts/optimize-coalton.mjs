@@ -13,10 +13,8 @@ const prefixPath = process.env.MIRICL_COALTON_BOOTSTRAP;
 const prefix = prefixPath ? await fs.readFile(prefixPath) : null;
 let bytes = await fs.readFile(input);
 const asdf = await fs.readFile('miricl-asdf.wasm');
-// Older probe outputs recorded LOAD calls only after ASDF was loaded. Keep
-// those build inputs usable while ensuring the standalone core includes ASDF.
 if (!prefix && !bytes.subarray(8, asdf.length).equals(asdf.subarray(8)))
-  bytes = Buffer.concat([asdf, bytes.subarray(8)]);
+  throw new Error('The portable Coalton build must begin with the current ASDF bundle; rebuild it with scripts/probe-coalton.mjs and matching runtime artifacts.');
 const runtime = await fs.readFile(image);
 const revision = execFileSync('git', ['-C', 'vendor/coalton', 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
 if (prefix) {

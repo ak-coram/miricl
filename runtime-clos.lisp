@@ -80,7 +80,6 @@
     ((setf standard-instance-access) . %%set-raw-instance-access)
     ((setf funcallable-standard-instance-access) . %%set-raw-instance-access)))
 (setf *clos-primitives* (append *clos-primitives* '(%%raw-instance-access %%set-raw-instance-access)))
-(setf *clos-primitives* (append *clos-primitives* '(%%generic-call-plan)))
 (setf *clos-primitives* (append *clos-primitives*
   '(%%package-node-ref %%package-present-entry %%package-inherited-entry)))
 (setf *clos-primitives* (append *clos-primitives* '(%%array-type-metadata)))
@@ -763,8 +762,6 @@ Generate only source forms here; the compiler-free guest needs no contract table
   #@(if (i32.le_u (i32.sub (local.get $op) (i32.const ,(clos-primitive-op '%%package-node-ref)))
         (i32.const ,(- (clos-primitive-op '%%package-inherited-entry) (clos-primitive-op '%%package-node-ref))))
     (then (return_call $package-entry-primitive (local.get $op) (local.get $args))))
-  #@(if (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%generic-call-plan)))
-    (then (return_call $make-generic-call-plan (local.get $args))))
   #@(if (i32.or (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%raw-instance-access)))
                 (i32.eq (local.get $op) (i32.const ,(clos-primitive-op '%%set-raw-instance-access))))
     (then (return_call $raw-instance-access (local.get $op) (local.get $args))))

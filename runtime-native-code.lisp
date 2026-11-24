@@ -2018,18 +2018,21 @@
           (then ,direct))))))))
 
 (defun native-generic-fast-call-wat (arity &optional ready)
-  (let* ((names (case arity (0 nil) (1 '($value)) (2 '($left $right)) (3 '($a $b $c))))
+  (let* ((names (case arity (0 nil) (1 '($value)) (2 '($left $right))
+                         (3 '($a $b $c)) (4 '($a $b $c $d))))
          (id (if (zerop arity) `(call $native-builtin-id ,(native-object '(local.get $function))) '(local.get $id)))
          (expected (if (= arity 3) -2147483646 2147483644)))
-    (wat-fragment #@(if (i32.eq ,id (i32.const ,expected))
+    (wat-fragment #@(if (i32.and (i32.eq ,id (i32.const ,expected))
+                                (i32.eqz (global.get $debug-evaluating)))
       (then
-        (call ,(if ready '$generic-recent-call-ready '$generic-recent-call)
-          ,(native-object '(local.get $function)) (i32.const ,arity)
+        ,@(unless ready '((if (global.get $thread-active) (then (call $thread-checkpoint)))))
+        (local.set $direct-result (call $native-fixed-apply-ready
+          (call $native-checked-value (local.get $function))
           ,@(loop for index below 4 collect (if (< index arity)
-               (native-object (list 'local.get (nth index names))) '(ref.null eq))))
-        (local.set $hit) (local.set $direct-result)
-        (if (local.get $hit)
-          (then (call $clear-values) (return (extern.convert_any (local.get $direct-result))))))))))
+               `(call $native-checked-value (local.get ,(nth index names))) '(ref.null eq)))
+          (i32.const ,arity)))
+        (call $clear-values)
+        (return (extern.convert_any (local.get $direct-result))))))))
 
 (defun native-fixed-builtin-functions (arity)
   "Conservative checked builtin capabilities of NATIVE-CALL0..4.
@@ -2163,6 +2166,79 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
         (call $clear-values)
         (return (extern.convert_any (local.get $direct-result))))))))
 
+;; Checked callers own the operation-entry checkpoint and fixed operands.
+;; Selection and protected invocation share this nonpolling ready interval.
+(define-runtime-function $native-fixed-apply-ready
+    (($name :nullable-object) ($a :nullable-object) ($b :nullable-object)
+     ($c :nullable-object) ($d :nullable-object) ($count i32)) (:nullable-object)
+  (:locals ($body (ref $native-function)) ($args (ref $objects))
+           ($result :nullable-object) ($hit i32) ($index i32))
+  #@(block $called
+    (block $direct-miss
+      (br_if $direct-miss (global.get $debug-evaluating))
+      (br_if $direct-miss (i32.eqz (ref.test (ref $native-function) (local.get $name))))
+      (br_if $direct-miss (ref.test (ref $native-debug-function) (local.get $name)))
+      (local.set $body (ref.cast (ref $native-function) (local.get $name)))
+      (br_if $direct-miss (f64.ne (struct.get $obj $f (local.get $body))
+        (f64.convert_i32_u (i32.add (local.get $count) (i32.const 2)))))
+      (br_if $direct-miss (ref.is_null (struct.get $native-function $direct (local.get $body))))
+      (local.set $result (ref.cast (ref null eq) (any.convert_extern
+        (call $native-direct-apply-ready (local.get $body)
+          (local.get $a) (local.get $b) (local.get $c) (local.get $d) (i32.const 0)))))
+      (br $called))
+    (block $generic-miss
+      (br_if $generic-miss (global.get $debug-evaluating))
+      (br_if $generic-miss (i32.ne (call $native-builtin-id (local.get $name)) (i32.const 2147483644)))
+      ;; A generic dispatch code alone does not validate its metadata. The
+      ;; checked property boundary may yield; select only after it returns.
+      (drop (call $generic-dispatch-metadata-value (call $int (i32.const 2))
+        (local.get $name) (ref.null eq)))
+      (call $generic-recent-call-ready (local.get $name) (local.get $count)
+        (local.get $a) (local.get $b) (local.get $c) (local.get $d))
+      (local.set $hit) (local.set $result)
+      (br_if $generic-miss (i32.eqz (local.get $hit)))
+      (br $called))
+    ;; Only misses materialize owned argument storage. Debugger calls retain
+    ;; ordinary entry handling; other callers already own the checkpoint.
+    (local.set $args (array.new_default $objects (local.get $count)))
+    (block $copied (loop $copy
+      (br_if $copied (i32.eq (local.get $index) (local.get $count)))
+      (array.set $objects (local.get $args) (local.get $index)
+        (if (result (ref null eq)) (i32.eq (local.get $index) (i32.const 0))
+          (then (local.get $a))
+          (else (if (result (ref null eq)) (i32.eq (local.get $index) (i32.const 1))
+            (then (local.get $b))
+            (else (if (result (ref null eq)) (i32.eq (local.get $index) (i32.const 2))
+              (then (local.get $c)) (else (local.get $d))))))))
+      (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy)))
+    (local.set $result (if (result (ref null eq)) (global.get $debug-evaluating)
+      (then (call $apply (local.get $name) (local.get $args)))
+      (else (call $apply0-ready (local.get $name) (local.get $args))))))
+  #@(local.get $result))
+
+(define-runtime-function $native-fixed-call
+    (($function externref) ($a externref) ($b externref) ($c externref) ($d externref) ($flags i32)) (externref)
+  (:export-raw "native-fixed-call")
+  (:locals ($name :nullable-object) ($left :nullable-object) ($right :nullable-object)
+           ($third :nullable-object) ($fourth :nullable-object) ($result :nullable-object))
+  ;; Validate every raw operand, including padding, independently of proofs.
+  (wat-fail-when #@(i32.or (i32.gt_u (local.get $flags) (i32.const 12))
+    (i32.gt_u (i32.and (local.get $flags) (i32.const 7)) (i32.const 4))) :malformed-form)
+  #@(local.set $name (call $native-checked-value (local.get $function)))
+  #@(local.set $left (call $native-checked-value (local.get $a)))
+  #@(local.set $right (call $native-checked-value (local.get $b)))
+  #@(local.set $third (call $native-checked-value (local.get $c)))
+  #@(local.set $fourth (call $native-checked-value (local.get $d)))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(local.set $result (call $native-fixed-apply-ready (local.get $name)
+    (local.get $left) (local.get $right) (local.get $third) (local.get $fourth)
+    (i32.and (local.get $flags) (i32.const 7))))
+  ;; Primary demand supplies no result-count proof. Capture before clearing.
+  #@(if (i32.eqz (i32.and (local.get $flags) (i32.const 8)))
+    (then (local.set $result (call $value-list (local.get $result)))))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
 (define-runtime-function $native-call0 (($function externref)) (externref)
   (:export-raw "native-call0")
   (:locals ($direct-result :nullable-object) ($hit i32))
@@ -2172,44 +2248,9 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   #@(extern.convert_any (call $native-primary-apply
     ,(native-object '(local.get $function)) (ref.null eq))))
 
-(define-runtime-function $native-generic-call
-    (($plan externref) ($function externref) ($args externref) ($primary i32)) (externref)
-  (:export-raw "native-generic-call")
-  (:locals ($effective :nullable-object) ($result :nullable-object) ($arguments :nullable-object))
-  ;; This older guarded-plan entry has a public list protocol. Adapt a foreign
-  ;; packet once, before its checkpoint or callback-capable guard evaluation.
-  #@(local.set $arguments (call $native-arguments-list
-    ,(native-object '(call $native-ingress-arguments (local.get $args)))))
-  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
-  #@(local.set $effective (call $generic-call-plan-function
-    ,(native-object '(local.get $plan)) ,(native-object '(local.get $function)) (local.get $arguments)
-    (i32.shr_u (local.get $primary) (i32.const 1))))
-  #@(if (ref.is_null (local.get $effective))
-    (then (local.set $result (call $apply ,(native-object '(local.get $function)) (local.get $arguments))))
-    (else
-      ;; The guarded plan selects the entire effective method, preserving
-      ;; method combination and next-method context. Its compiled unary
-      ;; entry accepts the original argument list directly.
-      (if (if (result i32) (ref.test (ref $native-function) (local.get $effective))
-            (then (i32.and
-              (f64.eq (struct.get $obj $f (ref.cast (ref $obj) (local.get $effective))) (f64.const 3))
-              (i32.eqz (ref.is_null (struct.get $native-function $direct
-                (ref.cast (ref $native-function) (local.get $effective)))))))
-            (else (i32.const 0)))
-        (then (local.set $result (ref.cast (ref null eq) (any.convert_extern (call $native-direct-apply
-          (ref.cast (ref $native-function) (local.get $effective))
-          (local.get $arguments) (ref.null eq) (ref.null eq) (ref.null eq) (i32.const 0))))))
-        (else (local.set $result (call $apply (local.get $effective)
-          (call $cons (local.get $arguments) (ref.null eq))))))))
-  #@(if (i32.eqz (i32.and (local.get $primary) (i32.const 1)))
-    (then (local.set $result (call $value-list (local.get $result)))))
-  #@(call $clear-values)
-  #@(extern.convert_any (local.get $result)))
-
 (defun native-fixed-fallback-arguments-wat (arity)
-  ;; Only actual HIR functions accept raw packets in this fallback. Keep
-  ;; ordinary callees' list protocol, and enter HIR through APPLY0 so slot
-  ;; validation, checkpoints, frames and dynamic cleanup remain in force.
+  ;; HIR and generic functions accept owned packets. Ordinary callees retain
+  ;; their list protocol; checked application still owns frames and cleanup.
   (let* ((arguments (ecase arity
                       (1 '((local.get $a)))
                       (2 '((local.get $a) (local.get $b)))
@@ -2217,7 +2258,8 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
                       (4 (mapcar (lambda (name) (native-object `(local.get ,name))) '($a $b $c $d)))))
          (id '(local.get $id))
          (hir-id (if (= arity 3) (- -2 2147483640) 2147483640)))
-    `(if (result (ref null eq)) (i32.eq ,id (i32.const ,hir-id))
+    `(if (result (ref null eq)) (i32.or (i32.eq ,id (i32.const ,hir-id))
+              (i32.eq ,id (i32.const ,(if (= arity 3) -2147483646 2147483644))))
        (then (array.new_fixed $objects ,arity ,@arguments))
        (else ,(reduce (lambda (argument tail) `(call $cons ,argument ,tail))
                       arguments :from-end t :initial-value '(ref.null eq))))))
@@ -2645,6 +2687,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
       (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
         (call $cons ,(native-object '(local.get $c)) (call $cons ,(native-object '(local.get $d)) (ref.null eq)))))))))
   (native-fixed-primitive-call-wat 4)
+  (native-generic-fast-call-wat 4 t)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
     ,(native-fixed-fallback-arguments-wat 4))))
 
@@ -2853,7 +2896,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-vector-set-inline)
   ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-frame-enter) ($native-frame-leave)
   ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
-  ($native-call0) ($native-call1) ($native-call-values1) ($native-call2) ($native-call3) ($native-call4) ($native-generic-call)
+  ($native-fixed-apply-ready) ($native-fixed-call) ($native-call0) ($native-call1) ($native-call-values1) ($native-call2) ($native-call3) ($native-call4)
   ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)
   ($native-generic-fixed-tail-call)

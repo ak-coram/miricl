@@ -16,7 +16,6 @@
 (defparameter %cache-permitted t)
 (defparameter %standard-dispatch-protocols nil)
 (defparameter %compiling-effective-function nil)
-(defparameter %planning-generic-call nil)
 
 (defun %remove (item items)
   ;; A generic function can have thousands of methods. Keep removal on the
@@ -1257,71 +1256,6 @@
           ;; runtime's private entry supplies an opaque owned-packet context.
           (%%structure-function entry gf entry 19)))))
 
-(defun %generic-call-candidate (name)
-  (when (and (not %booting) (not %planning-generic-call) (not %compiling-effective-function)
-             (fboundp name))
-    (let ((function (fdefinition name)))
-      (when (and (not (eq function (%%generic-info function)))
-                 (not (%member name '(compute-applicable-methods compute-effective-method compute-discriminating-function))))
-        (%%generic-call-plan function nil nil nil)))))
-
-(defun %plan-generic-call (gf candidates &optional fixed-primary-p)
-  ;; CANDIDATES comes from verified HIR and bounded type queries. Resolve
-  ;; nominal names against target metadata, never host classes or DEFTYPE.
-  (let ((%planning-generic-call t)
-        (version %dispatch-version) (token (%get gf :cache-token))
-        (slot-token (%%invalidate-slot-access))
-        (ll (%get gf :lambda-list)) (guards nil) (args nil) (mask 0) (position 0))
-    (unless (and (<= (%proper-list-length candidates "generic call candidates") 4)
-                 (= (length candidates) (length ll))
-                 (not (intersection ll lambda-list-keywords))
-                 (equal (%get gf :method-combination-name) '(standard))
-                 (%dispatch-cache-permitted-p gf))
-      (return-from %plan-generic-call nil))
-    (let ((profile (or (%get gf :dispatch-profile) (%compute-dispatch-profile gf))))
-      (dolist (candidate candidates)
-        (let ((flags (pop profile)))
-          (cond
-            ((and candidate (eq (car candidate) :eql))
-             (push (cadr candidate) guards) (push (cadr candidate) args)
-             (setq mask (logior mask (ash 1 position))))
-            ((zerop flags) (push nil guards) (push nil args))
-            ((and candidate (eq (car candidate) :class) (not (logbitp 1 flags)))
-             (let* ((name (cadr candidate))
-                    (class (and (symbolp name) (not (%%derived-type 0 name nil nil)) (%%named-class name))))
-               (unless (and class (%get class :finalized))
-                 (return-from %plan-generic-call nil))
-               (push class guards)
-               (push (%%allocate class nil) args)))
-            (t (return-from %plan-generic-call nil))))
-        (incf position)))
-    (setq args (reverse args))
-    (let ((methods (%compute-applicable gf args)))
-      ;; A nominal declaration admits subclasses. Its exact representative
-      ;; can have auxiliary methods but no primary, while a real subclass
-      ;; argument has a valid effective method. Keep invocation errors at the
-      ;; invocation; they are not evidence for an optimization while compiling.
-      (unless (and (%qualified methods nil)
-                   (every (lambda (method)
-                            (let ((qualifiers (%get method :qualifiers)))
-                              (or (null qualifiers)
-                                  (and (null (cdr qualifiers))
-                                       (%member (car qualifiers) '(:before :after :around))))))
-                          methods))
-        (return-from %plan-generic-call nil))
-      ;; Fixed primary calls can use the recent selector without constructing
-      ;; an argument list for a single primary method. Retain the guarded
-      ;; effective plan for next-method chains and auxiliary methods rather
-      ;; than adding their context assembly to the recent selector's work.
-      ;; This is a transport cost choice, not an applicability assumption.
-      (when (and fixed-primary-p (null (cdr methods))
-                 (null (%get (car methods) :qualifiers)))
-        (return-from %plan-generic-call nil))
-      (let ((function (%make-effective-function gf methods args)))
-        (when (and (= version %dispatch-version) (eq token (%get gf :cache-token))
-                   (eq slot-token (%%invalidate-slot-access)))
-          (%%generic-call-plan gf function (coerce (reverse guards) 'simple-vector) mask
-                              version token slot-token))))))
 (defun %invoke-effective (gf args &optional context)
   (if (%member (%get gf :name) '(compute-applicable-methods compute-effective-method compute-discriminating-function))
       (let ((methods (%compute-applicable gf args)))

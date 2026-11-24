@@ -962,6 +962,41 @@ try {
     assert.ok(function_, 'The Lisp callback bridge supplied its function.');
     return function_;
   };
+  // Fixed transport keeps ordinary checking and complete values even when
+  // its actual callee misses the native-worker path.
+  const knownCall = (function_, args, primary = false) => vm.vm['native-fixed-call'](
+    function_, ...Array.from({length: 4}, (_, index) => args[index] ?? null),
+    args.length | (primary ? 8 : 0));
+  const knownWorker = packetFunction(`(compile-native '(lambda (function value)
+    (declare (optimize (debug 1) (safety 1))) (funcall function value)))`);
+  const manyValues = packetFunction('(lambda (value) (values value nil :third 4 5 6 7 8 9))');
+  const noValues = packetFunction('(lambda (value) (declare (ignore value)) (values))');
+  const fallback = packetFunction('(lambda (left right) (values left right))');
+  for (const [function_, args, expected] of [
+    [knownWorker, [manyValues, elements[0]], [elements[0], null]],
+    [knownWorker, [noValues, elements[0]], []],
+    [fallback, elements, elements],
+  ]) {
+    const result = knownCall(function_, args);
+    expected.forEach((value, index) => assert.equal(vm.vm['native-argument'](result, index), value));
+    if (!expected.length) assert.equal(result, null);
+    assert.equal(knownCall(function_, args, true), expected[0] ?? null);
+  }
+  const completeKnownValues = knownCall(knownWorker, [manyValues, elements[0]]);
+  vm.vm['native-check-arguments'](completeKnownValues, 9, 9);
+  for (const flags of [-1, 5, 7, 13, 0x7fffffff])
+    rejectPacketOperation(() => vm.vm['native-fixed-call'](knownWorker, null, null, null, null, flags));
+  for (const invalid of [foreign, packets.empty()]) {
+    for (let index = 0; index < 5; index++) {
+      const operands = [knownWorker, manyValues, elements[0], null, null];
+      operands[index] = invalid;
+      rejectPacketOperation(() => vm.vm['native-fixed-call'](...operands, 2));
+    }
+  }
+  rejectPacketOperation(() => knownCall(knownWorker, [manyValues]));
+  rejectPacketOperation(() => knownCall(null, []));
+  assert.equal(knownCall(knownWorker, [manyValues, elements[0]], true), elements[0]);
+  console.log('Soundness: fixed native transport checks ingress, retains complete values and recovers from fallback errors.');
   // A loader proof belongs to one actual code object. Image constructors
   // cannot restore authority from an integer supplied by a saved payload.
   const coreFields = object => {
@@ -969,6 +1004,43 @@ try {
     const reader = Object.keys(vm.vm).find(name => name.startsWith(`core-read:${type}:`));
     return {type, signature: reader.split(':')[2], values: vm.vm[reader](object)};
   };
+  evaluate(`(defgeneric soundness-fixed-dispatch (function value))
+    (defvar *soundness-fixed-dispatch-events* nil)
+    (funcall (compile-native '(lambda ()
+      (defmethod soundness-fixed-dispatch ((function t) value)
+        (declare (optimize (debug 1))) (funcall function value))
+      (defmethod soundness-fixed-dispatch :before ((function function) value)
+        (declare (ignore function value)) (push :before *soundness-fixed-dispatch-events*))
+      (defmethod soundness-fixed-dispatch :after ((function function) value)
+        (declare (ignore function value)) (push :after *soundness-fixed-dispatch-events*))))) (values)`);
+  const knownGeneric = packetFunction("#'soundness-fixed-dispatch");
+  for (const callback of [manyValues, noValues, manyValues]) {
+    evaluate('(setq *soundness-fixed-dispatch-events* nil) (values)');
+    const values = knownCall(knownGeneric, [callback, elements[0]]);
+    if (callback === noValues) assert.equal(values, null);
+    else {
+      vm.vm['native-check-arguments'](values, 9, 9);
+      assert.equal(vm.vm['native-argument'](values, 0), elements[0]);
+    }
+    check("(equal *soundness-fixed-dispatch-events* '(:after :before))");
+  }
+  // Serialized metadata remains boundary data even when its function carries
+  // a generic dispatch code. Restore the same object after each rejection.
+  const genericFields = coreFields(knownGeneric);
+  const genericMetadata = genericFields.signature.indexOf('R');
+  assert.ok(genericMetadata >= 0);
+  const setGenericMetadata = metadata => vm.vm[`core-set:${genericFields.type}`](knownGeneric,
+    ...genericFields.values.map((value, index) => index === genericMetadata ? metadata : value)
+      .filter((_, index) => genericFields.signature[index] !== genericFields.signature[index].toLowerCase()));
+  try {
+    for (const invalid of [null, elements[0], integerOne, packets.empty()]) {
+      setGenericMetadata(invalid);
+      rejectPacketOperation(() => knownCall(knownGeneric, [manyValues, elements[0]]));
+      setGenericMetadata(genericFields.values[genericMetadata]);
+      assert.equal(knownCall(knownGeneric, [manyValues, elements[0]], true), elements[0]);
+    }
+  } finally {setGenericMetadata(genericFields.values[genericMetadata]);}
+  console.log('Soundness: fixed generic calls retain effective-method values, effects and checked metadata recovery.');
   const provedRoot = packetFunction(`(compile-native '(lambda (x)
     (declare (optimize (debug 1))) x) :name 'soundness-proof-replay)`);
   const checkedRoot = packetFunction(`(compile-native '(lambda (x)
@@ -990,13 +1062,16 @@ try {
       .filter((_, index) => provedFields.signature[index] !== provedFields.signature[index].toLowerCase()));
   try {
     setDirect(clonedCode);
-    assert.throws(() => {
-      try {vm.vm['native-call1'](provedRoot, elements[0]);}
-      catch (cause) {
-        assert.ok(cause instanceof WebAssembly.Exception);
-        throw vm.failure(cause);
-      }
-    }, error => /SOUNDNESS-PROOF-REPLAY/.test(error.backtrace ?? ''));
+    for (const invoke of [() => vm.vm['native-call1'](provedRoot, elements[0]),
+      () => knownCall(provedRoot, [elements[0]])]) {
+      assert.throws(() => {
+        try {invoke();}
+        catch (cause) {
+          assert.ok(cause instanceof WebAssembly.Exception);
+          throw vm.failure(cause);
+        }
+      }, error => /SOUNDNESS-PROOF-REPLAY/.test(error.backtrace ?? ''));
+    }
   } finally {setDirect(provedCode);}
   assert.equal(vm.vm['native-call1'](provedRoot, elements[0]), elements[0]);
   // An ordinary attached worker has no executable result proof. Reject
@@ -1016,7 +1091,9 @@ try {
     vm.vm['core-native-function'](rawEntries.entry, null, null, 0, null), rawEntries.direct, 1);
   for (const invalid of [foreign, packets.empty()]) {
     for (const invoke of [() => vm.vm['native-call1'](uncheckedResult, null),
-      () => vm.vm['native-call-values1'](uncheckedResult, null)]) {
+      () => vm.vm['native-call-values1'](uncheckedResult, null),
+      () => knownCall(uncheckedResult, [null]),
+      () => knownCall(uncheckedResult, [null], true)]) {
       rawResult.value = invalid;
       rejectPacketOperation(invoke);
       rawResult.value = elements[0];
@@ -1187,7 +1264,6 @@ try {
     (function_, args) => vm.vm['native-primary-call'](null, function_, args),
     (function_, args) => vm.javascript.link(0, vm.vm['native-call'](null, function_, args)),
     (function_, args) => vm.vm['native-tail-call'](function_, args),
-    (function_, args) => vm.vm['native-generic-call'](null, function_, args, 1),
     (function_, args) => vm.javascript.link(9, function_, args),
   ]) {
     // Repeat the same call so the escaped context also comes from a warm
@@ -1243,7 +1319,6 @@ try {
     args => vm.javascript.link(0, vm.vm['native-call'](null, initialized, args)),
     args => vm.vm['native-primary-call'](null, initialized, args),
     args => vm.vm['native-tail-call'](initialized, args),
-    args => vm.vm['native-generic-call'](null, initialized, args, 1),
     args => vm.javascript.link(9, initialized, args),
     args => initializedEntry(initialized, args),
   ]) {
@@ -2409,6 +2484,36 @@ try {
       (= (soundness-framed-recursion 0) 70))`);
   } finally {evaluate("(fmakunbound 'soundness-framed-recursion) (values)");}
   console.log('Soundness: framed recursive calls retain captures, primary boundaries, error frames, transfer cleanup and ring recovery.');
+
+  // Distinct captured workers may call arbitrary callbacks and own dynamic
+  // bindings. Full-value transport must retain their cleanup on every exit.
+  evaluate(`(defvar *soundness-known-scope* :outside)
+    (defvar *soundness-known-cleanup* nil) (values)`);
+  check(`(let* ((factory (compile-native '(lambda (capture)
+        (declare (optimize (space 3) (speed 1) (debug 1) (safety 1)))
+        (labels ((worker (function input)
+                   (let ((*soundness-known-scope* capture))
+                     (unwind-protect (funcall function input)
+                       (push *soundness-known-scope* *soundness-known-cleanup*)))))
+          (declare (notinline worker))
+          (lambda (function input) (multiple-value-list (worker function input)))))))
+      (object (list :capture)) (left (funcall factory object)) (right (funcall factory nil)))
+    (and
+      (null (funcall left (lambda (x) (declare (ignore x)) (values)) nil))
+      (equal (funcall right #'identity :one) '(:one))
+      (equal (funcall left (lambda (x) (values *soundness-known-scope* x nil 4 5 6 7 8 9)) :input)
+             (list object :input nil 4 5 6 7 8 9))
+      (equal (multiple-value-list
+        (catch 'soundness-known-exit
+          (funcall left (lambda (x) (throw 'soundness-known-exit (values *soundness-known-scope* x))) :escaped)))
+        (list object :escaped))
+      (handler-case (progn (funcall right #'car :invalid) nil) (type-error () t))
+      (handler-case (progn (funcall left #'identity) nil) (program-error () t))
+      (eq *soundness-known-scope* :outside)
+      (equal *soundness-known-cleanup* (list nil object object nil object))
+      (equal (funcall left #'identity :recovered) '(:recovered))
+      (eq *soundness-known-scope* :outside)))`);
+  console.log('Soundness: nonrecursive fixed calls retain captured workers, full values and callee-owned dynamic cleanup.');
 
   // Scalar forwarders keep each closure's capture and the primary-value
   // boundary, including checked effects in a discarded secondary value.
