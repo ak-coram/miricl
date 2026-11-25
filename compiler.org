@@ -362,6 +362,30 @@ active length during initialization, then reads current elements through
 checked AREF.
 General mutable list traversal supplies no list-length inference.
 
+*** Scheduler work in native code
+
+Interpreted evaluation, native function entries and loop checkpoints share
+the running thread's work allowance. The core checks scheduler activity,
+interrupt masking and synchronous host callback depth before charging work.
+A pending Lisp interrupt and an exhausted allowance independently enter the
+shared service. The service delivers queued work in the ordinary order,
+preserves ambient result values and checks the monotonic deadline when the
+allowance is exhausted. The nominal 4 ms slice uses the existing host
+suspension and thread-switching paths when it expires.
+
+Generated modules query a bounded allowance and report completed work through
+checked function imports. The query reads the current allowance and pending
+state without servicing either. A grant reserves no shared state. The runtime
+debits completed units and owns all interrupt delivery, refill and suspension.
+Both imports validate their raw counts. A caller must establish that its
+chunk can run without an intervening required observation, then recheck
+mutable facts after any service that can change them.
+
+The bounded internal list comparison charges matched pairs. It keeps checked
+cons access and reuses the advanced cursors across handoffs, checking each
+next cell before use. Pending work keeps an ordinary backedge observation.
+Early exits report the completed pairs and retain the original error order.
+
 ** Low-level Wasm optimization
 
 *** Function body passes
@@ -370,6 +394,15 @@ Lowering uses forward structured control for acyclic regions and Wasm
 loops for proved reducible natural loops. Irreducible control, captured
 landings and exhausted analysis retain dense dispatch. Block arguments,
 environments and backedge checkpoints survive either lowering.
+
+Speed-oriented native compilation can batch checkpoints in a bounded scalar
+loop. The compiler audits the emitted body after arity adaptation and local
+optimization. The eligible region has a single void exit, an ordinary latch
+poll and a bounded sequence of total integer instructions and private local
+operations. The ordinary and admitted paths share the loop body. Denied
+admission retains the original polls. A successful chunk settles at the
+latch or on the exit with exactly the work completed. Typed exit payloads,
+unknown calls and mutable storage access keep their ordinary lowering.
 
 =wasm-optimizer.lisp= runs a shared body pipeline over decoded Wasm.
 Its principal transformations are:

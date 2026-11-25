@@ -3,6 +3,9 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+;; Bound the size of one ABI report independently of the clock sample policy.
+(defconstant +thread-work-max-units+ 2048)
+
 (defparameter *thread-state*
   (append
     (loop for name in '($extra-values $secondary-value $tertiary-value $dynamic-package $dynamic-variables $handlers $restarts
@@ -128,7 +131,7 @@
   ;; Poll cheaply between clock samples, and yield by elapsed time rather than
   ;; taking a host round trip every few microseconds of native execution.
   #@(global.set $thread-slice-deadline
-    (f64.add (call $host-service (i32.const 1) (f64.const 0)) (f64.const 8)))
+    (f64.add (call $host-service (i32.const 1) (f64.const 0)) (f64.const 4)))
   #@(global.set $thread-pending (struct.get $green-thread $interrupts (local.get $thread))))
 
 (define-runtime-function $thread-callback-enter () (i32)
@@ -154,13 +157,44 @@
   #@(call_indirect $thread-services (type $thread-service-type) (i32.const 0)))
 
 (define-runtime-function $thread-checkpoint () ()
+  (miricl-cross::thread-checkpoint-wat))
+
+(define-runtime-function $thread-work-range-error (($units i32)) ()
+  #@(call $type-fail (call $int (local.get $units))
+    (call $cons (call $symbol (i32.const ,(runtime-symbol-id 'integer)))
+      (call $cons (call $int (i32.const 1))
+        (call $cons (call $int (i32.const ,+thread-work-max-units+)) (ref.null eq))))
+    (i32.const ,(runtime-error-code :expected-designator))))
+
+(defun thread-work-range-check-wat ()
+  ;; One unsigned comparison rejects zero, negatives and oversized counts.
+  #@(if (i32.ge_u (i32.sub (local.get $units) (i32.const 1)) (i32.const ,+thread-work-max-units+))
+    (then (call $thread-work-range-error (local.get $units)))))
+
+(define-runtime-function $native-work-limit (($units i32)) (i32)
+  (:export-raw "native-work-limit")
+  (thread-work-range-check-wat)
+  ;; A denied grant leaves pending delivery to the ordinary path. A grant
+  ;; neither reserves units nor authorizes bypassing an observation.
+  (miricl-cross::thread-work-gate-wat
+    '(if (i32.or (i32.le_s (global.get $thread-budget) (i32.const 0))
+                 (i32.eqz (ref.is_null (global.get $thread-pending))))
+       (then (return (i32.const 0))))
+    '(return (select (global.get $thread-budget) (local.get $units)
+                     (i32.lt_s (global.get $thread-budget) (local.get $units)))))
+  #@(local.get $units))
+
+(define-runtime-function $native-work-complete (($units i32)) ()
+  (:export-raw "native-work-complete")
+  (thread-work-range-check-wat)
+  ;; The service may suspend or transfer. Leave no debit below zero when a
+  ;; caller reports more than remains or a previous service exited nonlocally.
+  (apply #'miricl-cross::thread-work-gate-wat
+    (miricl-cross::thread-work-charge-forms '(local.get $units) :saturate t)))
+
+(define-runtime-function $thread-checkpoint-service () ()
   (:locals ($thread (ref $green-thread)) ($pending :nullable-object)
            ($values :nullable-object) ($count i32))
-  #@(if (i32.or (i32.eqz (global.get $thread-active))
-      (i32.or (global.get $thread-mask) (global.get $javascript-depth))) (then (return)))
-  #@(global.set $thread-budget (i32.sub (global.get $thread-budget) (i32.const 1)))
-  #@(if (i32.and (i32.gt_s (global.get $thread-budget) (i32.const 0))
-      (ref.is_null (global.get $thread-pending))) (then (return)))
   #@(local.set $values (call $extra-value-list))
   #@(local.set $count (global.get $value-count))
   #@(local.set $thread (call $thread-current))
@@ -399,6 +433,8 @@
   #@(global $thread-pending (mut (ref null eq)) (ref.null eq))
   #@(global $thread-slice-deadline (mut f64) (f64.const 0))
   ($thread-find) ($thread-create) ($thread-current) ($thread-free-scratch) ($thread-allocate-scratch) ($thread-save) ($thread-enter) ($thread-callback-enter)
-  ($thread-switch) ($thread-checkpoint) ($thread-park) ($thread-next) ($thread-delay)
+  ($thread-switch) ($thread-checkpoint) ($thread-checkpoint-service)
+  ($thread-work-range-error) ($native-work-limit) ($native-work-complete)
+  ($thread-park) ($thread-next) ($thread-delay)
   ($thread-run) ($thread-failed) ($thread-id) ($thread-main-state) ($thread-retire)
   ($thread-interrupt-scope) ($thread-operation))

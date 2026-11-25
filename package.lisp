@@ -5,7 +5,7 @@
 
 (defpackage #:miricl-runtime
   (:use #:cl)
-  (:export #:property-cell #:member-eq #:list-eq))
+  (:export #:property-cell #:member-eq))
 
 (defpackage #:miricl-debugger
   (:use #:cl)

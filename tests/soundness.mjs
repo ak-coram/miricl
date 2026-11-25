@@ -926,6 +926,15 @@ try {
     }, error => error.code > 0 && error.message.length > 0);
     recover();
   };
+  const workLimit = vm.vm['native-work-limit'];
+  const workComplete = vm.vm['native-work-complete'];
+  for (const invalid of [0, -1, 0x7fffffff]) {
+    rejectPacketOperation(() => workLimit(invalid));
+    rejectPacketOperation(() => workComplete(invalid));
+  }
+  assert.equal(workLimit(1), 1);
+  workComplete(1);
+  console.log('Soundness: scheduler work imports reject invalid counts and recover.');
   const rejectArgument = (arguments_, index) =>
     rejectPacketOperation(() => vm.vm['native-argument'](arguments_, index));
   for (const [arguments_, expected] of [[packets.make(...elements), elements],

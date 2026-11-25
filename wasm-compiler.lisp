@@ -284,7 +284,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-tail-call1" (:object :object) :object)
     ("native-tail-call2" (:object :object :object) :object)
     ("native-tail-call3" (:object :object :object :object) :object)
-    ("native-tail-call4" (:object :object :object :object :object) :object)))
+    ("native-tail-call4" (:object :object :object :object :object) :object)
+    ("native-work-limit" (:i32) :i32)
+    ("native-work-complete" (:i32) nil)))
 
 (defun wasm-byte (byte)
   (declare (type (unsigned-byte 8) byte))
@@ -6261,6 +6263,151 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
       (compiler-statistic :optimization/cell-folding nil pairs)
       t)))
 
+(defun native-scalar-work-loop (body ops poll)
+  ;; Match the final executable loop, after wrapper construction, arity
+  ;; copies and local optimization. The header has one exit and the body
+  ;; has a single latch. Candidate instructions cannot trap or change
+  ;; anything outside this activation except at the recorded polls.
+  (when (find #x1f ops :key (lambda (op) (native-op-code op)))
+    (return-from native-scalar-work-loop nil))
+  (let ((scopes nil))
+    (loop for op across ops for start from 0 do
+      (when (and (eql (native-op-code op) #x03) (eql (native-op-argument op) #x40)
+                 (= (- (native-op-end op) (native-op-start op)) 2)
+                 scopes (eql (native-op-code (first scopes)) #x02)
+                 (eql (native-op-argument (first scopes)) #x40)
+                 (= (- (native-op-end (first scopes)) (native-op-start (first scopes))) 2))
+        (let ((exit nil) (polls nil) (latch nil))
+          (loop for i from (1+ start) below (min (length ops) (+ start 48))
+                for instruction = (aref ops i)
+                for code = (native-op-code instruction) do
+            (unless (eql code (aref body (native-op-start instruction))) (return))
+            (case code
+              ((#x1a #x20 #x21 #x22 #x41 #x42
+                #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f
+                #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a
+                #x6a #x6b #x71 #x7c #x7d #x7e #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad))
+              (#x0d
+               ;; The rewritten IF cannot access branch operands beneath
+               ;; its stack floor. The immediately enclosing void BLOCK
+               ;; supplies a result-free destination.
+               (unless (and (null exit) (eql (native-op-argument instruction) 1)) (return))
+               (setq exit instruction))
+              (#x10
+               (unless (and exit (null latch) (eql (native-op-argument instruction) poll)
+                            (< (+ i 2) (length ops))) (return))
+               (let ((next (aref ops (1+ i))))
+                 (if (and (eql (native-op-code next) #x0c)
+                          (eql (native-op-argument next) 0)
+                          (eql (native-op-code (aref ops (+ i 2))) #x0b))
+                     (setq latch instruction)
+                     (push instruction polls))))
+              (#x0c
+               (when latch (return-from native-scalar-work-loop (list exit (nreverse polls) latch)))
+               (return))
+              (otherwise (return))))))
+      (case (native-op-code op)
+        ((#x02 #x03 #x04) (push op scopes))
+        (#x0b (pop scopes))))))
+
+(defun native-batch-scalar-work (body parameters poll)
+  (destructuring-bind (exit polls latch)
+      (or (native-scalar-work-loop body (native-read-ops body) poll)
+          (return-from native-batch-scalar-work body))
+    (let ((remaining parameters) (cursor 0)
+          (weight (1+ (length polls)))
+          (*wasm-last-local* nil))
+      (multiple-value-bind (groups first) (native-read-uleb body 0)
+        (setq cursor first)
+        (dotimes (i groups)
+          (multiple-value-bind (count type) (native-read-uleb body cursor)
+            (incf remaining count)
+            (setq cursor (1+ type))))
+        (unless (< remaining #xfffffffe) (return-from native-batch-scalar-work body))
+        (compiler-statistic :optimization/scalar-work-batch weight)
+        (decf (gethash "native-poll" *wasm-import-counts*) weight)
+        (let ((granted (1+ remaining)))
+         (with-wasm-bytes
+          (wasm-u32 (1+ groups))
+          (wasm-append body first cursor)
+          (wasm-u32 2) (wasm-type :i32)
+          (wasm-append body cursor (native-op-start exit))
+          ;; The scalar condition already ran. On exit, charge only the
+          ;; earlier completed trips since admission, then clear both locals
+          ;; before control can reenter the loop from an enclosing region.
+          (wasm-byte #x04) (wasm-byte #x40)
+          (wasm-local granted) (wasm-local remaining) (wasm-byte #x6b)
+          (wasm-byte #x22) (wasm-u32 remaining)
+          (wasm-byte #x04) (wasm-byte #x40)
+          (wasm-local remaining) (wasm-call "native-work-complete") (wasm-byte #x0b)
+          (wasm-integer 0) (wasm-byte #x22) (wasm-u32 remaining)
+          (wasm-byte #x21) (wasm-u32 granted)
+          (wasm-byte #x0c) (wasm-u32 (1+ (native-op-argument exit))) (wasm-byte #x0b)
+          (setq cursor (native-op-end exit))
+          (dolist (site polls)
+            (wasm-append body cursor (native-op-start site))
+            (wasm-local remaining) (wasm-byte #x45) (wasm-byte #x04) (wasm-byte #x40)
+            (wasm-call "native-poll") (wasm-byte #x0b)
+            (setq cursor (native-op-end site)))
+          (wasm-append body cursor (native-op-start latch))
+          ;; Zero on entry means the whole trip took its ordinary poll path.
+          ;; A positive countdown is an integral number of trips, capped by
+          ;; the checked grant. The last admitted latch settles at the same
+          ;; logical observation as its ordinary poll, before readmission.
+          (wasm-local remaining) (wasm-integer weight) (wasm-byte #x6b)
+          (wasm-byte #x22) (wasm-u32 remaining)
+          (wasm-integer 0) (wasm-byte #x4c)
+          (wasm-byte #x04) (wasm-byte #x40)
+          (wasm-local remaining) (wasm-byte #x04) (wasm-byte #x40)
+          (wasm-call "native-poll")
+          (wasm-byte #x05)
+          (wasm-local granted) (wasm-call "native-work-complete")
+          (wasm-byte #x0b)
+          (wasm-integer 2048) (wasm-call "native-work-limit")
+          ;; Keep only complete trips. The divisor is the nonzero compile-time
+          ;; count of observations in one trip. The grant is a bounded i32.
+          (when (> weight 1)
+            (if (zerop (logand weight (1- weight)))
+                (progn (wasm-integer (- weight)) (wasm-byte #x71))
+                (progn
+                  (wasm-byte #x22) (wasm-u32 remaining) (wasm-local remaining)
+                  ;; The native decoders support unsigned remainder at i64 width.
+                  (wasm-byte #xad) (wasm-byte #x42) (wasm-s64 weight)
+                  (wasm-byte #x82) (wasm-byte #xa7) (wasm-byte #x6b))))
+          (wasm-byte #x22) (wasm-u32 remaining)
+          (wasm-byte #x21) (wasm-u32 granted)
+          (wasm-byte #x0b)
+          (wasm-append body (native-op-end latch))))))))
+
+(defun native-batch-work-bodies (bodies)
+  ;; Leave sealed host kernels on their separately owned checkpoint ABI,
+  ;; and keep the default compact policy. Coalesced entries must all agree.
+  (when (or *wasm-debug* *compiler-bootstrapping*
+            *wasm-fixed-call-emitter* *wasm-closed-worker-functions*
+            (not (gethash "native-poll" *wasm-import-counts*)))
+    (return-from native-batch-work-bodies bodies))
+  (let ((candidates (make-array (length bodies) :initial-element nil))
+        (poll (position "native-poll" *native-imports* :key #'first :test #'equal))
+        (fuel 8192))
+    (dolist (function *native-functions*)
+      (let* ((source (or (gethash function *wasm-worker-origins*) function))
+             (plan (gethash source *wasm-function-plans*))
+             (policy (hir-function-optimization-policy source))
+             (index (gethash function *native-function-indices*))
+             (parameters (and plan (svref plan 20) (not (svref plan 4))
+                              (> (logand policy 3) (logand 3 (ash policy -2)))
+                              (length (first (native-result-signature function))))))
+        (setf (aref candidates index)
+              (if (and parameters (or (null (aref candidates index))
+                                      (eql parameters (aref candidates index))))
+                  parameters :ordinary))))
+    (loop for body in bodies for parameters across candidates
+          collect (if (and (integerp parameters) (<= (length body) 4096 fuel))
+                      (progn
+                        (decf fuel (length body))
+                        (native-batch-scalar-work body parameters poll))
+                      body))))
+
 (defun native-prune-module (bodies entries &optional (prune-functions t))
   ;; RemoveUnusedModuleElements after branch/DCE cleanup. No calls or closure
   ;; entries are renumbered until body sharing and function layout are final.
@@ -6747,7 +6894,7 @@ the named-entry format for hosts that translate individual Wasm workers."
     ;; emission of every instruction and literal in the application.
     (let* ((*native-imports* *native-imports*)
          (bodies (emit-native-bodies entries))
-         (bodies (native-prune-module bodies entries))
+         (bodies (native-prune-module (native-batch-work-bodies bodies) entries))
          (outlining (multiple-value-list (native-outline-bodies bodies)))
          (bodies (first outlining)) (outline-signatures (second outlining))
          (outline-policies (third outlining))
@@ -6909,6 +7056,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     native-vector-snapshot-value-p native-vector-snapshot-source
     native-vector-snapshot-call-p native-vector-snapshot-region
     native-private-i64-return-source native-plan-private-i64-site native-private-i64-edges-valid-p
+    native-scalar-work-loop native-batch-scalar-work
     native-simplify-ops-lisp native-op-liveness-lisp
     compilation-statistics-report compiler-input-summary
     hir-assert-form hir-correctable-place-form hir-restart-options
@@ -6983,7 +7131,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-body-declaration-base hir-body-macro-context hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-source-hir compile-to-hir compile-module-to-hir compile-native-module
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-scalar-call-effects native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-forward-locals native-result-blocks native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
-                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module native-outline-result native-outline-match-region native-outline-region native-outline-site native-outline-code native-outline-bodies
+                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module native-batch-work-bodies native-outline-result native-outline-match-region native-outline-region native-outline-site native-outline-code native-outline-bodies
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
                    definition-info namespace reachability-case-clauses form-written-variables form-references
                    miricl::%normalize-lambda-1 miricl::%normalize-lambda

@@ -2,7 +2,7 @@
 ;;;; for the target. Keep this first slice independent of bootstrap metadata.
 (defpackage #:miricl-runtime
   (:use #:cl)
-  (:export #:property-cell #:member-eq #:list-eq #:reverse-copy-onto #:reverse-mutate-onto
+  (:export #:property-cell #:member-eq #:reverse-copy-onto #:reverse-mutate-onto
            #:last-bounded #:copy-before-tail #:copy-butlast-bounded #:truncate-butlast-bounded
            #:copy-proper-list #:copy-list-onto #:remove-first-eq #:copy-list-spine #:copy-alist-spine #:nthcdr-bounded
            #:tail-member-p #:ensure-list #:property-set-location #:property-link-cell #:reverse-list-copy
@@ -689,25 +689,6 @@ key cons stays distinct from NIL so it retains the ordinary type diagnosis."
         (if (member-eq (car (the cons items)) indicators) (return-from done items))
         (setq items (cdr (the cons value))))
       (go next)))))
-
-(defun list-eq (left right)
-  "Internal pairwise identity comparison, retaining checked list access."
-  (declare (optimize (safety 0) (debug 0)) (inline car cdr eq consp))
-  (values (block done
-    (tagbody
-     next
-       (if left
-           (if (consp left) nil (return-from done (checked-car left)))
-           (return-from done (if right nil t)))
-       ;; The old primitive reads LEFT even when RIGHT is NIL. Keep that
-       ;; validation and error order before taking the unequal-length exit.
-       (let ((item (car (the cons left))))
-         (if right
-             (if (consp right) nil (return-from done (checked-car right)))
-             (return-from done nil))
-         (if (eq item (car (the cons right))) nil (return-from done nil)))
-       (setq left (cdr (the cons left)) right (cdr (the cons right)))
-       (go next)))))
 
 (defun reverse-copy-onto (items tail)
   "Copy and reverse a proper list onto an arbitrary, shared tail."

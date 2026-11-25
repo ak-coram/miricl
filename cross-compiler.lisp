@@ -282,6 +282,28 @@ host proclamations are not target declarations."
 (defvar *kernel-shared-workers* nil)
 (defvar *kernel-share-helpers* t)
 
+(defun thread-work-gate-wat (&rest forms)
+  (miricl:wat-string
+    `(if (global.get $thread-active)
+       (then
+         (if (i32.eqz (i32.or (global.get $thread-mask) (global.get $javascript-depth)))
+           (then ,@forms))))))
+
+(defun thread-work-charge-forms (units &key saturate)
+  (let ((remaining `(i32.sub (global.get $thread-budget) ,units)))
+    `((global.set $thread-budget
+        ,(if saturate
+             `(if (result i32) (i32.le_s (global.get $thread-budget) ,units)
+                (then (i32.const 0)) (else ,remaining))
+             remaining))
+      (if (i32.or (i32.le_s (global.get $thread-budget) (i32.const 0))
+                  (i32.eqz (ref.is_null (global.get $thread-pending))))
+        (then (call $thread-checkpoint-service))))))
+
+(defun thread-checkpoint-wat ()
+  ;; Trusted core and sealed workers inline the single-unit fast path.
+  (apply #'thread-work-gate-wat (thread-work-charge-forms '(i32.const 1))))
+
 (defun kernel-fixed-imports ()
   ;; Reuse the checked, primary-value ABI of the actual fixed-call dispatcher.
   ;; MIRICL/CROSS alone has no runtime registry and therefore no such adapters.
@@ -537,6 +559,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
   ;; stays unchanged. Cache against the actual host definitions, not a build
   ;; timestamp, and discard old generations instead of retaining their code.
   (list (fdefinition 'kernel-worker-wat) (fdefinition 'kernel-literal-plan)
+    (fdefinition 'thread-checkpoint-wat)
     (fdefinition 'kernel-import-name)
     (fdefinition 'kernel-closed-helper-unit) (fdefinition 'kernel-helper-group-wat)
     (fdefinition 'kernel-link-helper-group)
@@ -661,7 +684,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
     (values replacements skipped flow)))
 
 (defun kernel-worker-wat (bytes index name arity result interruptible &optional (literals #()))
-  (declare (notinline kernel-literal-plan))
+  (declare (notinline kernel-literal-plan thread-checkpoint-wat))
   (multiple-value-bind (body imports offset signature)
       (miricl-compiler::native-disassembly-body bytes index)
     (declare (ignore offset))
@@ -1135,18 +1158,21 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                      ;; No function object or closure survives the closed-group
                      ;; proof. Literals are resolved by KERNEL-WORKER-WAT before
                      ;; comparison, so equal pools never justify sharing.
-                     (let* ((key (when (and share (zerop debug)
+                     (let* ((worker-interruptible (if (= index selected-index)
+                                                      interruptible
+                                                      (and interruptible t)))
+                            (key (when (and share (zerop debug)
                                             (< (hash-table-count *kernel-shared-workers*) 4096))
                                    (setf (gethash index *kernel-module-workers*) "$kernel-sharing-self")
                                    (kernel-worker-wat bytes index "$kernel-sharing-self" arity
-                                     :object interruptible pool)))
+                                     :object worker-interruptible pool)))
                             (previous (and key (gethash key *kernel-shared-workers*))))
                        (setf (gethash index *kernel-module-workers*) (or previous original)
                              (gethash index done) t)
                        (miricl-compiler::record-wasm-outline-policy (or previous original) policy)
                        (unless previous
                          (setf (gethash index emitted)
-                           (kernel-worker-wat bytes index original arity :object interruptible pool))
+                           (kernel-worker-wat bytes index original arity :object worker-interruptible pool))
                          (when key (setf (gethash key *kernel-shared-workers*) original)))))))
           ;; Resolve callees first. Self recursion is normalized in the key;
           ;; other recursive components retain their ordinary distinct bodies.

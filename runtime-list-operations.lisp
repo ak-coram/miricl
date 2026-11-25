@@ -41,9 +41,59 @@
     (then (call $list-type-error (local.get $box) (i32.const ,(runtime-symbol-id 'cons)))))
   #@(call $pop-argument-cl (local.get $box) (local.get $required)))
 
-(defun $list-eq ()
-  (runtime-function-definition '$list-eq
-    (wat-fragment (miricl-cross:runtime-kernel-wat '$list-eq 'miricl-runtime:list-eq :interruptible t))))
+(define-runtime-function $list-eq (($left :nullable-object) ($right :nullable-object)) (:nullable-object)
+  (:locals ($left-cell (ref $obj)) ($right-cell (ref $obj)) ($item :nullable-object)
+           ($bad :nullable-object) ($allowance i32) ($remaining i32) ($completed i32))
+  ;; The first successful pair uses the ordinary backedge, so an empty,
+  ;; mismatching or singleton comparison needs no work-limit query.
+  #@(local.set $remaining (i32.const 1))
+  #@(block $done
+    (local.set $bad (block $list-end (result (ref null eq))
+      (loop $chunk
+        (loop $next
+          ;; Validate the left cell before observing the right. A null cast
+          ;; miss is a normal exit; all other misses preserve the offending tail.
+          (local.set $left-cell
+            (br_on_cast_fail $list-end (ref null eq) (ref $obj) (local.get $left)))
+          (if (i32.ne (i32.and (struct.get $obj $tag (local.get $left-cell)) (i32.const 63)) (i32.const 7))
+            (then (br $list-end (local.get $left))))
+          (local.set $item (struct.get $obj $a (local.get $left-cell)))
+          (local.set $right-cell
+            (br_on_cast_fail $list-end (ref null eq) (ref $obj) (local.get $right)))
+          (if (i32.ne (i32.and (struct.get $obj $tag (local.get $right-cell)) (i32.const 63)) (i32.const 7))
+            (then (br $list-end (local.get $right))))
+          (br_if $done (i32.eqz (ref.eq (local.get $item) (struct.get $obj $a (local.get $right-cell)))))
+          (local.set $left (struct.get $obj $b (local.get $left-cell)))
+          (local.set $right (struct.get $obj $b (local.get $right-cell)))
+          (br_if $next (local.tee $remaining (i32.sub (local.get $remaining) (i32.const 1)))))
+        ;; Both cursors have advanced. If service runs Lisp or suspends,
+        ;; only these cursors carry across it, and their cells are checked anew.
+        (if (local.get $allowance)
+          (then (call $native-work-complete (local.get $allowance)))
+          (else (call $thread-checkpoint)))
+        (local.set $allowance (if (result i32)
+          (i32.or (ref.is_null (local.get $left)) (ref.is_null (local.get $right)))
+          (then (i32.const 0))
+          (else (call $native-work-limit (i32.const 2048)))))
+        ;; Pending work or exhaustion requires one ordinary checked iteration.
+        (local.set $remaining (select (local.get $allowance) (i32.const 1) (local.get $allowance)))
+        (br $chunk))
+      (unreachable))))
+  ;; Settle matched pairs before returning or taking the signaling path. A
+  ;; failed comparison or cast did not advance and contributes no backedge.
+  #@(local.set $completed (i32.sub (local.get $allowance) (local.get $remaining)))
+  #@(if (i32.gt_s (local.get $completed) (i32.const 0))
+    (then (call $native-work-complete (local.get $completed))))
+  #@(if (i32.eqz (ref.is_null (local.get $bad)))
+    (then
+      ,(wat-fail-when #@(i32.eqz (i32.or (ref.test (ref i31) (local.get $bad))
+                                        (ref.test (ref $obj) (local.get $bad)))) :malformed-form)
+      ;; The legacy checked CAR call observed interrupts on entry for an
+      ;; ordinary Lisp atom before issuing the LIST type error.
+      (call $thread-checkpoint)
+      (call $list-type-error (local.get $bad) (i32.const ,(runtime-symbol-id 'list)))))
+  #@(call $clear-values)
+  #@(call $bool (i32.and (ref.is_null (local.get $left)) (ref.is_null (local.get $right)))))
 
 (define-runtime-function $find-method-list
     (($methods :nullable-object) ($qualifiers :nullable-object) ($specializers :nullable-object)) (:nullable-object)

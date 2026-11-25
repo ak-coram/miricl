@@ -106,6 +106,44 @@ for (const fixed of [true, false]) for (const repair of [false, true]) {
   }
 }
 console.log('PASS APPLY queued list validation, shared selection and packet snapshots');
+
+vm.evaluate(`(defparameter *thread-list-eq*
+    (symbol-function (miricl-compiler::compiler-primitive 10 1 "%LIST-EQ")))
+  (defparameter *thread-list-left* (list :head :middle :left-before))
+  (defparameter *thread-list-right* (list :head :middle :right-before))
+  (defvar *thread-list-mutated* nil)
+  (defparameter *thread-list-mutate*
+    (lambda ()
+      (setf (caddr *thread-list-left*) :after (caddr *thread-list-right*) :after
+            (cadr *thread-list-left*) :replayed (cddr *thread-list-left*) :stale)
+      (setq *thread-list-mutated* t)
+      (values :callback :noise))) (values)`, {eof: true});
+const listEq = applyObject('*thread-list-eq*'), listTrue = applyObject('t');
+const listLeft = applyObject('*thread-list-left*'), listRight = applyObject('*thread-list-right*');
+// Keep work pending past the first compared pair. The mutation changes the
+// second pair already compared and the third pair still to be read.
+vm.evaluate(`(funcall *thread-apply-queue* 16 nil nil)
+  (funcall *thread-apply-queue* 12 (funcall *thread-apply-queue* 0 nil nil) *thread-list-mutate*)
+  (dotimes (i 2)
+    (funcall *thread-apply-queue* 12 (funcall *thread-apply-queue* 0 nil nil) (lambda ())))
+  (funcall *thread-apply-queue* 13 0 nil) (values)`, {eof: true});
+vm.vm['thread-enter'](0); vm.vm['thread-main-state'](0);
+vm.vm['thread-active'].value = 1;
+try {
+  assert.equal(vm.vm['native-call2'](listEq, listLeft, listRight), listTrue);
+} finally {
+  vm.vm['thread-active'].value = 0;
+  vm.vm['thread-save'](); vm.vm['thread-main-state'](1);
+}
+assert.equal(vm.evaluate(`(and *thread-list-mutated*
+  (handler-case (progn (funcall *thread-list-eq* '(:same . :left) '(:same . :right)) nil)
+    (type-error (condition) (eq (type-error-datum condition) :left)))
+  (handler-case (progn (funcall *thread-list-eq* '(:same :next) '(:same . :right)) nil)
+    (type-error (condition) (eq (type-error-datum condition) :right)))
+  (equal (multiple-value-list (funcall *thread-list-eq* '(:same :after) '(:same :after))) '(t)))`,
+  {eof: true}).output, 'T\n', 'List comparison resumes on live tails and recovers from ordered type errors.');
+console.log('PASS list comparison retains progress across queued mutation and recovers from dotted input');
+
 // A symbol's binding is selected after the application checkpoint. Keep the
 // symbol and operand fixed while queued work replaces the actual callee.
 vm.evaluate(`(defvar *thread-fixed-fired* nil)

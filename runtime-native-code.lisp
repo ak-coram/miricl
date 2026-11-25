@@ -1624,7 +1624,7 @@
 
 (define-runtime-function $native-poll () ()
   (:export-raw "native-poll")
-  #@(call $thread-checkpoint))
+  (miricl-cross::thread-checkpoint-wat))
 
 (define-runtime-function $native-frame-enter (($function externref)) (i32 externref)
   (:export-raw "native-frame-enter")
@@ -2932,7 +2932,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
       (call $array-check-raw-read-miss (local.get $a))
       (return_call $native-call2 (extern.convert_any (local.get $function))
         (local.get $array) (extern.convert_any (call $native-aref-scalar-index (local.get $subscript) (local.get $normalize))))))
-  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  (miricl-cross::thread-checkpoint-wat)
   ;; The checkpoint can change array shape or backing. Read both live.
   #@(local.set $result (call $array-owned-rank1-fixnum-element64
     (local.get $a) (local.get $subscript) (ref.null eq) (i32.const 0)))
