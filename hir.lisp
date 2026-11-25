@@ -69,6 +69,9 @@
 (defvar *hir-specials*)
 (defvar *hir-types* nil)
 (defvar *hir-inline-policy* nil)
+(defvar *hir-named-definition* nil)
+(defvar *hir-named-unit* nil)
+(defvar miricl::%global-inline-policy nil)
 (defvar *hir-function-index* nil)
 (defvar *hir-inlining* nil)
 (defvar *hir-inline-small-functions* nil)
@@ -192,6 +195,10 @@
     (setf (hir-instruction-output instruction) output)
     (when (and *hir-inline-policy* output (eq opcode :call) (not (eq (hir-value-type (second inputs)) t)))
       (setf (hir-value-type output) (hir-function-result-type (hir-value-type (second inputs)))))
+    (when (and (eq opcode :call) (cdr *hir-named-definition*))
+      (let ((references (cdr *hir-named-definition*)) (reference (second inputs)))
+        (when (eq (gethash reference references) :pending)
+          (setf (gethash reference references) instruction))))
     (push instruction (hir-block-instructions *hir-block*)) output))
 
 (defun hir-terminate (opcode inputs attributes)
@@ -640,6 +647,22 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
           (type (and *hir-inline-policy* (assoc (list :ftype (or binding name)) *hir-inline-policy* :test #'equal))))
       (when type (setf (hir-value-type value) (cdr type)))
       value)))
+
+(defun hir-direct-function-reference (name functions)
+  (let ((value (hir-function-reference name functions)))
+    (when (and *hir-named-definition* (eq name (car *hir-named-definition*))
+               (eq *hir-unit* *hir-named-unit*)
+               (null (hir-function-parent *hir-function*)) (null *hir-inlining*))
+      (let ((producer (hir-value-producer value)))
+        (when (and (eq (hir-instruction-opcode producer) :function-reference)
+                   (not (eq (or (second (hir-instruction-attributes producer))
+                                (and miricl::%global-inline-policy
+                                     (gethash name miricl::%global-inline-policy)))
+                            'notinline)))
+          (unless (cdr *hir-named-definition*)
+            (setf (cdr *hir-named-definition*) (make-hash-table :test 'eq)))
+          (setf (gethash value (cdr *hir-named-definition*)) :pending))))
+    value))
 
 (defun hir-close (lambda variables functions targets &optional implicit-block)
   (declare (type list lambda variables functions targets implicit-block))
@@ -1308,7 +1331,9 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
       (return-from hir-application-form
         (hir-small-membership (hir-single (hir-form (car membership) variables functions targets)) (cdr membership)))))
   (hir-call-arguments
-    (if (symbolp (car form)) (hir-function-reference (car form) functions)
+    (if (symbolp (car form))
+        (if (eq (car form) (car *hir-named-definition*)) (hir-direct-function-reference (car form) functions)
+            (hir-function-reference (car form) functions))
         (hir-single (hir-form (car form) variables functions targets)))
     (cdr form) variables functions targets))
 
@@ -1534,7 +1559,11 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                         ((symbolp (car form))
                          (let ((inline (and (or *hir-inline-small-functions* *hir-inline-policy*)
                                          (hir-inline-candidate (car form) (cdr form) functions))))
-                           (arguments (cdr form) nil (unless inline (hir-function-reference (car form) functions))
+                           (arguments (cdr form) nil
+                             (unless inline
+                               (if (eq (car form) (car *hir-named-definition*))
+                                   (hir-direct-function-reference (car form) functions)
+                                   (hir-function-reference (car form) functions)))
                              variables functions targets nil inline)))
                         (t
                          (defer (lambda ()
@@ -1847,6 +1876,9 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
 (defun compile-to-hir (lambda-expression &key name global-specials)
   "Lower a lambda to object-level control/data flow without executing its body.
 Unsupported special operators and parameter syntax signal an error."
+  (compile-source-hir lambda-expression name global-specials nil))
+
+(defun compile-source-hir (lambda-expression name global-specials named-definition)
   (declare (optimize (safety 3)))
   (let ((*compiling-evaluation* t))
     (compiler-source-form lambda-expression)
@@ -1855,8 +1887,10 @@ Unsupported special operators and parameter syntax signal an error."
     (dolist (variable global-specials) (compiler-variable-name variable "global special variable"))
     (if (fboundp 'ensure-compiler)
         (progn (ensure-compiler)
-          (optimize-hir-checked (lower-source-to-hir lambda-expression name global-specials)))
-        (lower-source-to-hir lambda-expression name global-specials))))
+          (let* ((unit (lower-source-to-hir lambda-expression name global-specials nil named-definition))
+                 (*hir-named-definition* named-definition))
+            (optimize-hir-checked unit)))
+        (lower-source-to-hir lambda-expression name global-specials nil named-definition))))
 
 (defun hir-refresh-predecessors (function)
   ;; Construct analysis metadata for compiler-owned or validated blocks.
@@ -1871,14 +1905,18 @@ Unsupported special operators and parameter syntax signal an error."
           (push block (hir-block-predecessors successor)) (setq previous successor)))))
   function)
 
-(defun lower-source-to-hir (lambda-expression &optional name global-specials environment)
+(defun lower-source-to-hir (lambda-expression &optional name global-specials environment named-definition)
   ;; Internal lowering stage for validated source. The full compiler follows
   ;; it with optimization; the small image emits executable HIR directly.
-  (let ((*hir-unit* (make-hir-unit-record)) (*hir-specials* global-specials)
+  (let* ((*hir-unit* (make-hir-unit-record)) (*hir-specials* global-specials)
         (*hir-debug-level* (or (compiler-primitive 33 nil) 1)) (*hir-types* nil)
         (*hir-safety-level* (or (compiler-primitive 36 nil) 1))
         (*hir-size-policy* (or (compiler-primitive 52 nil) 29))
         (*hir-inline-policy* nil) (*hir-inlining* nil) (*hir-function-index* nil)
+        ;; This invocation owns the reference table. Reentrant source
+        ;; compilation establishes its own contour before emitting HIR.
+        (*hir-named-definition* named-definition)
+        (*hir-named-unit* (and named-definition *hir-unit*))
         (*hir-source-path* (and (consp lambda-expression) (list lambda-expression)))
         (*hir-debug-sites* nil)
         (*hir-macro-context* (hir-import-macro-context environment nil nil)))

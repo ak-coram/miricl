@@ -1,6 +1,6 @@
 ;;;; Browser/Node evaluation policy; forms and literals stay in the local heap.
 (defvar miricl-compiler::*compiling-evaluation* nil)
-(defun %compile-evaluation (form name)
+(defun %compile-evaluation (form name &optional named-definition)
   ;; Interpretation uses the same checked source lowering and compact HIR as
   ;; minimal COMPILE. The dynamic guard covers preparation, not user execution.
   (let* ((interpreted (or (not miricl-compiler:*compile-evaluations*)
@@ -18,7 +18,7 @@
                (expanded (miricl-compiler::lower-source-to-hir form name)))
           (miricl-compiler::hir-unit-function expanded))
         (let ((miricl-compiler::*wasm-single-use-entry* (null name)))
-          (miricl-compiler:compile-native form :name name)))))
+          (miricl-compiler::compile-native-source form name named-definition)))))
 
 (defun %compiler-evaluate (form &optional path)
   ;; Keep the validated source route for bootstrap/compiler preparation and
@@ -67,7 +67,7 @@
          (let ((function (%compile-evaluation
                            (list* 'lambda (third form)
                              (append (nreverse prefix)
-                               (list (list* 'block (if (consp name) (second name) name) body)))) name)))
+                               (list (list* 'block (if (consp name) (second name) name) body)))) name t)))
            (setf (fdefinition name) function)
            (when (and (symbolp name) (macro-function name)) (setf (macro-function name) nil))
            (setf (documentation name 'function) documentation

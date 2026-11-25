@@ -849,6 +849,7 @@
 (defvar %debug-default-level 1)
 (defvar %safety-default-level 1)
 (defvar %size-default-policy 29)
+(defvar %global-inline-policy nil)
 (defparameter %debug-declaration '(declare (optimize (debug 3))))
 
 (defun %optimize-debug-level (qualities inherited)
@@ -954,6 +955,14 @@
         (special
           (let ((names (cdr spec)))
             (%%while names (%%proclaim-variable (pop names)))))
+        ((inline notinline)
+         (dolist (name (cdr spec))
+           (miricl-compiler::compiler-function-name name "function proclamation"))
+         (dolist (name (cdr spec))
+           (unless %global-inline-policy
+             (setq %global-inline-policy (make-hash-table :test 'equal)))
+           (setf (gethash (if (consp name) (list 'setf (second name)) name) %global-inline-policy)
+                 (car spec))))
         (declaration
           (dolist (name (cdr spec))
             (unless (symbolp name) (error 'type-error :datum name :expected-type 'symbol))

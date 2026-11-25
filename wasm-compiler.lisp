@@ -37,6 +37,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-direct-workers* nil)
 (defvar *wasm-local-call-functions* nil)
 (defvar *wasm-scoped-call-functions* nil)
+(defvar *wasm-named-recursion* nil)
 (defvar *wasm-call-frame-locals* nil)
 ;; Host runtime linkage may erase call-only references to verified closed
 ;; workers. Ordinary guest/application emission never enables this contract.
@@ -1475,6 +1476,17 @@ exhausted work budgets keep every incoming value group."
           (setf (native-value-slot scalar value) t))))
     scalar))
 
+(defun native-named-call-p (inputs function)
+  (when (and *wasm-named-recursion* (eq function (car *wasm-named-recursion*)))
+    (let* ((reference (second inputs))
+           (call (gethash reference (cdr *wasm-named-recursion*))))
+      (and (%hir-instruction-p call) (eq (hir-instruction-opcode call) :call)
+           (eq inputs (hir-instruction-inputs call))
+           (let ((producer (hir-value-producer reference)))
+             (and (%hir-instruction-p producer)
+                  (eq (hir-instruction-opcode producer) :function-reference)
+                  (eq (first (hir-instruction-attributes producer)) (hir-function-name function))))))))
+
 (defun native-simple-body-p (function &optional multiple-callees scalar-callees scoped-callees)
   ;; Bound tuple body lowering independently of permission to omit a frame.
   ;; These bodies neither establish dynamic scope nor use scalar tail paths.
@@ -1494,7 +1506,8 @@ exhausted work budgets keep every incoming value group."
            ;; arbitrary call could replace the caller's backtrace frame with
            ;; NATIVE-TAIL-ENTER when this callee's own frame was omitted. A
            ;; certified tuple call lowers before that tail-frame setup.
-           (let ((kind (gethash instruction *wasm-inline-simple-calls*)))
+           (let ((kind (gethash instruction *wasm-inline-simple-calls*))
+                 (inputs (hir-instruction-inputs instruction)))
              (unless (or (gethash instruction *wasm-inline-vector-calls*)
                          (integerp kind)
                          (member kind '(:eq :eql :consp :simple-vector-p :vectorp :stringp :symbolp :integerp :null :true :false
@@ -1508,8 +1521,14 @@ exhausted work budgets keep every incoming value group."
                                   (and (eq kind :standard-call)
                                        (member (native-standard-operation
                                                  (second (hir-instruction-inputs instruction))) '(+ -)))))
-                         (let* ((inputs (hir-instruction-inputs instruction))
-                                (target (and (or multiple-callees scalar-callees scoped-callees)
+                         (and scoped-callees (native-named-call-p inputs function)
+                              (eql (length (cddr inputs)) (gethash function scoped-callees))
+                              (let ((plan (or (gethash function *wasm-function-plans*)
+                                              (setf (gethash function *wasm-function-plans*)
+                                                    (native-function-plan function)))))
+                                (and (native-value-slot (svref plan 8) (hir-instruction-output instruction))
+                                     (not (member instruction (svref plan 13) :test #'eq)))))
+                         (let* ((target (and (or multiple-callees scalar-callees scoped-callees)
                                              (hir-result-callee (second inputs) *wasm-result-callees*)))
                                 (tuple (and target multiple-callees (gethash target multiple-callees)))
                                 (mode (and target scalar-callees (gethash target scalar-callees))))
@@ -1692,14 +1711,22 @@ exhausted work budgets keep every incoming value group."
             (dolist (capture (hir-function-captures function))
               (declare (ignore capture))
               (when (minusp (decf fuel)) (return-from native-scoped-call-functions nil)))
-            (dolist (block (hir-function-blocks function))
-              (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
-                (when (minusp (decf fuel)) (return-from native-scoped-call-functions nil))
-                (dolist (input (hir-instruction-inputs instruction))
-                  (declare (ignore input))
-                  (when (minusp (decf fuel)) (return-from native-scoped-call-functions nil)))))
-            (unless (native-simple-body-p function nil nil functions)
-              (remhash function functions) (setq changed t)))))
+            (let ((named (and *wasm-named-recursion* (eq function (car *wasm-named-recursion*))
+                              (cdr *wasm-named-recursion*)))
+                  (valid t))
+              (dolist (block (hir-function-blocks function))
+                (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+                  (when (minusp (decf fuel)) (return-from native-scoped-call-functions nil))
+                  (loop for input in (hir-instruction-inputs instruction) for index from 0 do
+                    (when (minusp (decf fuel)) (return-from native-scoped-call-functions nil))
+                    (when named
+                      (let ((original-call (gethash input named)))
+                        (when (and original-call
+                                   (not (and (= index 1) (eq instruction original-call)
+                                             (eq (hir-instruction-opcode instruction) :call))))
+                          (setq valid nil)))))))
+              (unless (and valid (native-simple-body-p function nil nil functions))
+                (remhash function functions) (setq changed t))))))
       functions)))
 
 (defun native-result-signature (function)
@@ -1912,7 +1939,9 @@ exhausted work budgets keep every incoming value group."
       t)))
 
 (defun native-scoped-call-target (inputs)
-  (let ((target (and *wasm-scoped-call-functions* (native-known-callee (second inputs)))))
+  (let ((target (and *wasm-scoped-call-functions*
+                     (if (native-named-call-p inputs *wasm-current-function*) *wasm-current-function*
+                         (native-known-callee (second inputs))))))
     (and target (gethash target *wasm-scoped-call-functions*)
          ;; Keep the compact default selective: recursive sites repay this
          ;; retained-frame envelope without cloning workers or growing leaves.
@@ -3283,11 +3312,18 @@ exhausted work budgets keep every incoming value group."
        (wasm-get (first inputs))
        (when (hir-target-captured-p (first attributes)) (wasm-call "native-block-environment")))
       (:function-reference
-       (wasm-literal (first attributes))
-       ;; Host kernel adapters own early-bootstrap reference resolution.
-       (wasm-call (if (and (null *wasm-fixed-call-emitter*)
-                           (native-standard-function-name-p (first attributes)))
-                      "native-standard-function-reference" "native-function-reference")))
+       (if (and *wasm-call-frame-locals* *wasm-named-recursion*
+                (eq *wasm-current-function* (car *wasm-named-recursion*))
+                (%hir-instruction-p (gethash output (cdr *wasm-named-recursion*))))
+           ;; The same current function owns the frame and the literal bank.
+           ;; All surviving uses were checked against their original CALL.
+           (wasm-local 0)
+           (progn
+             (wasm-literal (first attributes))
+             ;; Host kernel adapters own early-bootstrap reference resolution.
+             (wasm-call (if (and (null *wasm-fixed-call-emitter*)
+                                 (native-standard-function-name-p (first attributes)))
+                            "native-standard-function-reference" "native-function-reference")))))
       (:global-read
        (emit-native-unused-context (first inputs))
        (wasm-literal (first attributes)) (wasm-call "native-global-read"))
@@ -5581,6 +5617,12 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                        ;; Unsupported checked-entry shapes retain the ordinary
                        ;; ABI for this emission, including already emitted callers.
                        (throw 'native-multiple-result-fallback :retry))
+                     (when (and (null body) *wasm-named-recursion* *wasm-scoped-call-functions*
+                                (eq source (car *wasm-named-recursion*))
+                                (gethash source *wasm-scoped-call-functions*))
+                       ;; Retrying through a generic worker would invalidate
+                       ;; the scoped body proof, even with the same arity.
+                       (throw 'native-multiple-result-fallback :retry-named-recursion))
                      (unless body
                        ;; A failed rewrite retains the checked generic entry.
                        ;; Its argument error can invoke Lisp handlers, so it
@@ -5977,13 +6019,16 @@ the named-entry format for hosts that translate individual Wasm workers."
       (if (< (+ (length table) (length compact)) (length named))
           (values table compact) (values nil named)))))
 
-(defun emit-native-module-checked (unit entries &optional (entry-tables t))
-  (let ((result (catch 'native-multiple-result-fallback
-                  (multiple-value-list (emit-native-module-with-results unit entries entry-tables)))))
-    (if (eq result :retry)
-        (let ((*wasm-native-multiple-results* nil))
-          (emit-native-module-with-results unit entries entry-tables))
-        (values-list result))))
+(defun emit-native-module-checked (unit entries &optional (entry-tables t) named-recursion)
+  (let ((*wasm-native-multiple-results* *wasm-native-multiple-results*))
+    (loop
+      (let ((result (catch 'native-multiple-result-fallback
+                      (multiple-value-list
+                        (emit-native-module-with-results unit entries entry-tables named-recursion)))))
+        (case result
+          (:retry (setq *wasm-native-multiple-results* nil))
+          (:retry-named-recursion (setq named-recursion nil))
+          (otherwise (return (values-list result))))))))
 
 (defun native-outline-bodies (bodies)
   ;; Final function/import numbers are stable here. Helpers stay private and
@@ -6031,10 +6076,11 @@ the named-entry format for hosts that translate individual Wasm workers."
                 (mapcar (lambda (helper) (list (mapcar #'native-type (second helper)) (mapcar #'native-type (third helper)))) helpers)
                 (concatenate 'vector eligible (make-array (length helpers) :initial-element 0)))))))
 
-(defun emit-native-module-with-results (unit entries entry-tables)
+(defun emit-native-module-with-results (unit entries entry-tables named-recursion)
   "Emit a verified unit. Internal callers must retain ownership until emission."
   (declare (type hir-unit unit) (type list entries))
-  (let* ((*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
+  (let* ((*wasm-named-recursion* named-recursion)
+         (*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
          (*wasm-literal-index* (make-hash-table :test 'eq))
          (*wasm-literal-groups* (and entries (native-literal-groups entries)))
          (*native-functions* (hir-unit-functions unit))
@@ -6227,14 +6273,21 @@ the named-entry format for hosts that translate individual Wasm workers."
 
 (defun compile-native (lambda-expression &key name)
   "Compile a lambda to native Wasm using the current host's module loader."
+  (compile-native-source lambda-expression name nil))
+
+(defun compile-native-source (lambda-expression name named-definition)
   ;; Restrict the caller's one-use promise to this entry. Macroexpansion and
   ;; bootstrap may explicitly compile other, persistent functions.
   (let ((single-use *wasm-single-use-entry*) (*wasm-single-use-entry* nil))
    (ensure-compiler)
-   (let ((unit (compile-to-hir lambda-expression :name name)))
+   (let* ((definition (and named-definition name (symbolp name) (list name)))
+          (unit (compile-source-hir lambda-expression name nil definition))
+          (references (cdr definition)))
     (multiple-value-bind (bytes literals debug)
         ;; Lowering and emission retain exclusive ownership of this unit.
-        (let ((*wasm-single-use-entry* single-use)) (emit-native-module-checked unit nil))
+        (let ((*wasm-single-use-entry* single-use))
+          (emit-native-module-checked unit nil t
+            (when references (cons (first (hir-unit-functions unit)) references))))
       (multiple-value-bind (function native) (compiler-primitive 17 bytes literals name)
         (unless native (error "This host cannot instantiate compiled Wasm modules."))
         (let ((arity (native-fixed-arity (first (hir-unit-functions unit)))))
@@ -6315,7 +6368,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-active-branch-test native-removable-p native-live-inputs native-direct-cells native-forward-blocks native-reachable-blocks native-loop-region-order native-loop-plan native-live-values native-local-layout native-single-calls native-full-groups native-proven-truth native-proof-reachable-blocks native-scalar-groups native-plan-branch-tests native-stable-predicate-p native-predicate-source native-predicate-key native-plan-cons-forwarding native-plan-predicate-reuse native-predicate-aliases native-block-targets native-single-return-target-p
                    native-argument-usage native-primary-functions native-plan-argument-usages native-call-usage emit-native-call-operands native-direct-workers native-direct-worker-body native-optimize-typed-body native-direct-wrapper native-boxed-result-worker native-direct-fallback native-direct-relocations
                    native-simple-body-p native-simple-callee-p native-multiple-result-functions native-multiple-result-bodies native-local-call-functions emit-native-local-call
-                   native-scoped-call-functions native-scoped-call-target native-scoped-call-sites-p emit-native-scoped-call
+                   native-named-call-p native-scoped-call-functions native-scoped-call-target native-scoped-call-sites-p emit-native-scoped-call
                    native-captured-call-p native-captured-result-groups emit-native-captured-test emit-native-captured-list
                    native-result-signature emit-native-result emit-native-results native-local-result-groups native-call-frame-elidable-p native-multiple-call-count emit-native-multiple-call
                    emit-native-fixed-value-call emit-native-fixed-call native-type-integer-width native-compute-integer-width native-integer-width emit-native-integer-box
@@ -6335,7 +6388,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-tail-pair-p hir-share-branch-tails hir-refresh-predecessors hir-proper-list-checks optimize-hir-checked optimize-hir
                    hir-lexical-function-entry hir-inline-environment hir-function-result-type hir-inline-size hir-inline-cost hir-inline-candidate hir-inline-body hir-shadow-specials
                    compiler-source-policy native-entry-sections
-                   hir-bind-value hir-read-variable hir-write-variable hir-function-reference
+                   hir-bind-value hir-read-variable hir-write-variable hir-function-reference hir-direct-function-reference
                    hir-small-membership hir-membership-branches hir-call-arguments hir-literal-apply-form hir-case-form hir-macro-environment hir-assert-form
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
                    hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir verify-hir-contents
@@ -6349,7 +6402,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-multiple-value-bind-form hir-block-form hir-simple-restart-form
                    hir-restart-signal-form hir-symbol-iterate-form hir-while-form
                    hir-multiple-value-call-form hir-return-from-form
-                   hir-body-declaration-base hir-body-macro-context hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-to-hir compile-module-to-hir compile-native-module
+                   hir-body-declaration-base hir-body-macro-context hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-source-hir compile-to-hir compile-module-to-hir compile-native-module
                    make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-scalar-call-effects native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-forward-locals native-result-blocks native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
                    native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module native-outline-result native-outline-match-region native-outline-region native-outline-site native-outline-code native-outline-bodies
@@ -6383,7 +6436,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    ;; Externalizing large constant graphs repeatedly uses
                    ;; these shared slot and load-form operations.
                    miricl::%slot-cell miricl::%cpl make-load-form-saving-slots
-                   compile-native record-edges pool-record-less-p layout-records compact-unit compile-linker ensure-compiler compile-compiler
+                   compile-native compile-native-source record-edges pool-record-less-p layout-records compact-unit compile-linker ensure-compiler compile-compiler
                    ;; Traverse large initializer and literal graphs natively.
                    prepare-native-unit native-unit-records compile-native-bundle
                    hir-code-parameters hir-code-name hir-code-debug-info hir-code-cell-aliases hir-code-register hir-code-single-calls

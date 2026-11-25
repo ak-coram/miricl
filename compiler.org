@@ -262,6 +262,16 @@ and restoration owners remain independent of the callee's certificate.
 Ordinary calls retain the frames and cleanup needed by signaling,
 debugging, polling and dynamic-state changes.
 
+The native source evaluator can bind apparent recursion in a DEFUN to its
+own fixed worker under the Common Lisp recursive-call consistency rule.
+Source lowering records the identity of directly resolved call operands
+after macro and lexical resolution. Emission checks their surviving uses
+against the originating calls. Local and proclaimed NOTINLINE preserve live
+lookup. A scoped body proof admits matching-arity, primary-result calls
+with retained frames. The executing function supplies the recursive context,
+and the framed call retains the entry checkpoint, checked result and
+transfer cleanup.
+
 A narrower exception independently audits final executable bytes for
 straight-line leaves that normalize exactly one value and cannot signal,
 trap, allocate, poll, call back or observe dynamic state. The host binds

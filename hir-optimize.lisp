@@ -315,6 +315,12 @@
   (declare (type simple-vector left right))
   (let ((a (hir-instruction-output left)) (b (hir-instruction-output right)))
     (and (eq (hir-instruction-opcode left) (hir-instruction-opcode right))
+         ;; A direct recursive reference and a live FUNCTION designator may
+         ;; have identical HIR attributes. Preserve their source distinctions.
+         (or (not (eq (hir-instruction-opcode left) :function-reference))
+             (let ((references (cdr *hir-named-definition*)))
+               (or (null references)
+                   (eq (null (gethash a references)) (null (gethash b references))))))
          (eq (hir-instruction-effect left) (hir-instruction-effect right))
          (= (hir-instruction-safety-level left) (hir-instruction-safety-level right))
          (= (length (hir-instruction-attributes left)) (length (hir-instruction-attributes right)))

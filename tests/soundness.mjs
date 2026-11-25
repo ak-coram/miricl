@@ -2817,6 +2817,19 @@ try {
   } finally {evaluate("(fmakunbound 'soundness-framed-recursion) (values)");}
   console.log('Soundness: framed recursive calls retain captures, primary boundaries, error frames, transfer cleanup and ring recovery.');
 
+  await vm.mountFile('/soundness-named-recursion.lisp',
+    await fs.readFile(new URL('./soundness-named-recursion.lisp', import.meta.url), 'utf8'));
+  try {
+    check('(load "/soundness-named-recursion.lisp")');
+    assert.throws(() => evaluate('(soundness-named-frame 5 :invalid)'), error =>
+      (error.backtrace?.match(/\bSOUNDNESS-NAMED-FRAME\b/g) ?? []).length >= 3);
+    assert.equal(evaluate('(soundness-named-frame 5 0)'), '5\n');
+  } finally {
+    evaluate(`(mapc #'fmakunbound
+      '(soundness-named-frame soundness-named-values soundness-named-shadow)) (values)`);
+  }
+  console.log('Soundness: named recursive calls preserve binding scope, multiple values and owned frames across errors and transfers.');
+
   // Distinct captured workers may call arbitrary callbacks and own dynamic
   // bindings. Full-value transport must retain their cleanup on every exit.
   evaluate(`(defvar *soundness-known-scope* :outside)
