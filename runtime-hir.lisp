@@ -429,7 +429,7 @@
       (:truth (setf result `(call $bool (i32.eqz (ref.is_null ,(hir-input 0))))))
       (:copy (setf result (hir-input 0)))
       ((:function-reference :function-reference-inline :function-reference-notinline)
-       (setf result (hir-native '$native-function-reference (hir-literal))))
+       (setf result `(call $fdefinition ,(hir-literal))))
       (:global-read (setf result `(call $symbol-value ,(hir-literal))))
       (:global-write (setf result `(call $set-symbol-value ,(hir-literal) ,(hir-input 1))))
       (:dynamic-bind (setf result (native-object `(call $native-bind ,(hir-context-input)

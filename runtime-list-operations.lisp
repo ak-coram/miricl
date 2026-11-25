@@ -593,10 +593,24 @@
   (runtime-function-definition '$check-keyword-pairs
     (wat-fragment (miricl-cross:runtime-kernel-wat '$check-keyword-pairs 'miricl-runtime:check-keyword-pairs))))
 
+(define-runtime-function $keyword-single-pair-valid-p
+    (($name :nullable-object) ($allowed :nullable-object) ($allow i32)) (i32)
+  #@(if (i32.eqz (call $symbolp (local.get $name))) (then (return (i32.const 0))))
+  #@(if (i32.or (local.get $allow) (ref.eq (local.get $name)
+        (call $symbol (i32.const ,(runtime-symbol-id :allow-other-keys)))))
+    (then (return (i32.const 1))))
+  #@(call $member-eq (local.get $name) (local.get $allowed)))
+
 (define-runtime-function $check-keywords-native
     (($args :nullable-object) ($allowed :nullable-object) ($allow i32)) (:nullable-object)
-  #@(call $check-apply-list (local.get $args))
+  (:locals ($count :nullable-object))
+  #@(local.set $count (call $checked-apply-list-length (local.get $args)))
   #@(call $check-apply-list (local.get $allowed))
+  #@(if (ref.is_null (local.get $args)) (then (return (ref.null eq))))
+  #@(if (ref.eq (local.get $count) (ref.i31 (i32.const 2)))
+    (then (if (call $keyword-single-pair-valid-p (call $car (local.get $args))
+                (local.get $allowed) (local.get $allow))
+            (then (return (ref.null eq))))))
   #@(call $check-keyword-pairs (local.get $args) (local.get $allowed) (call $bool (local.get $allow))))
 
 ;; One descriptor table and operand decoder serve the ordinary APPLY dispatcher
@@ -819,7 +833,7 @@
 (define-runtime-section list-operations-runtime-wat ()
   ($check-apply-list) ($checked-apply-list-length) ($check-apply-arguments) ($list-star-cl) ($list-star-native) ($pop-argument-cl) ($pop-argument) ($list-eq) ($find-method-list)
   ($check-generic-arguments) ($check-generic-arity)
-  ($check-keyword-pairs) ($check-keywords-native)
+  ($check-keyword-pairs) ($keyword-single-pair-valid-p) ($check-keywords-native)
   ($list-type-error) ($require-list-cl) ($require-list) ($natural-count-cl) ($natural-count) ($copy-list-spine) ($copy-alist-spine) ($copy-tree-value-cl) ($copy-spine)
   ($reverse-copy-onto) ($reverse-mutate-onto) ($reverse-onto) ($reverse-sequence)
   ($make-list-bounded) ($make-list-native) ($nthcdr-bounded) ($nthcdr-general) ($nthcdr-native) ($public-nth-cl) ($last-bounded) ($last-native)

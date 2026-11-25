@@ -187,6 +187,97 @@
   (wat-fail-when #@(i32.ne (call $tag (local.get $value)) (i32.const 1)) :malformed-form)
   #@(call $scalar-integer-value (ref.as_non_null (local.get $value))))
 
+;; Probe live owned storage after the caller's entry checkpoint. A successful
+;; access returns a fixnum, so NIL leaves all general checks and errors to the
+;; caller. The dimension bounds AREF independently of the fill pointer.
+(define-runtime-function $array-owned-rank1-fixnum-element
+    (($array :nullable-object) ($subscript :nullable-object) ($value :nullable-object) ($write i32))
+    (:nullable-object)
+  (:locals ($header (ref $array)) ($shape :digits) ($storage :nullable-object)
+           ($data (ref $array-i64-data)) ($dimension i32) ($index i32))
+  #@(if (i32.eqz (i32.and (ref.test (ref $array) (local.get $array))
+                          (ref.test (ref i31) (local.get $subscript))))
+    (then (return (ref.null eq))))
+  #@(local.set $header (ref.cast (ref $array) (local.get $array)))
+  ;; Kind 4 is encoded as flag 16. Only the adjustable flag may also be set.
+  #@(if (i32.or
+      (i32.ne (i32.and (struct.get $obj $tag (local.get $header)) (i32.const 63)) (i32.const 35))
+      (i32.or (i32.ne (i32.and (struct.get $obj $n (local.get $header)) (i32.const -5)) (i32.const 16))
+              (struct.get $array $offset (local.get $header))))
+    (then (return (ref.null eq))))
+  #@(local.set $shape (struct.get $array $shape (local.get $header)))
+  #@(if (i32.ne (array.len (local.get $shape)) (i32.const 1))
+    (then (return (ref.null eq))))
+  #@(local.set $dimension (array.get $digits (local.get $shape) (i32.const 0)))
+  #@(local.set $index (i31.get_s (ref.cast (ref i31) (local.get $subscript))))
+  #@(if (i32.or (i32.gt_u (local.get $dimension) (i32.const 536870910))
+                (i32.ge_u (local.get $index) (local.get $dimension)))
+    (then (return (ref.null eq))))
+  #@(local.set $storage (struct.get $obj $a (local.get $header)))
+  #@(if (i32.eqz (ref.test (ref $array-i64-data) (local.get $storage)))
+    (then (return (ref.null eq))))
+  #@(local.set $data (ref.cast (ref $array-i64-data) (local.get $storage)))
+  #@(if (i32.gt_u (local.get $dimension) (array.len (local.get $data)))
+    (then (return (ref.null eq))))
+  #@(if (local.get $write)
+    (then
+      (if (i32.eqz (call $scalar-integer-p (local.get $value)))
+        (then (return (ref.null eq))))
+      (if (i32.ne (call $tag (local.get $value)) (i32.const 1))
+        (then (return (ref.null eq))))
+      (array.set $array-i64-data (local.get $data) (local.get $index)
+        (call $scalar-integer-value (ref.as_non_null (local.get $value))))
+      (return (local.get $value))))
+  #@(call $int64 (array.get $array-i64-data (local.get $data) (local.get $index))))
+
+;; Fixed AREF entries have admitted their operands and performed the entry
+;; checkpoint. Probe the live rank-one dimension without allocating subscripts.
+;; Return a logical index; ARRAY-RAW-ELEMENT checks/resolves backing and views.
+(define-runtime-function $array-rank1-index
+    (($array :nullable-object) ($index :nullable-object)) (i32)
+  (:locals ($shape :digits) ($dimension i32) ($wide i64) ($tag i32))
+  #@(if (i32.eqz (ref.test (ref $obj) (local.get $array)))
+    (then (return (i32.const -1))))
+  #@(local.set $tag (call $tag (local.get $array)))
+  #@(block $dimension-ready
+    (if (i32.eq (local.get $tag) (i32.const 35))
+      (then
+        (if (i32.eqz (ref.test (ref $array) (local.get $array)))
+          (then (return (i32.const -1))))
+        (local.set $shape (call $array-shape (local.get $array)))
+        (if (i32.ne (array.len (local.get $shape)) (i32.const 1))
+          (then (return (i32.const -1))))
+        (local.set $dimension (array.get $digits (local.get $shape) (i32.const 0)))
+        (br $dimension-ready)))
+    (if (i32.eq (local.get $tag) (i32.const 34))
+      (then
+        (if (i32.eqz (ref.test (ref $vector) (local.get $array)))
+          (then (return (i32.const -1))))
+        (local.set $dimension (array.len (call $vector-data (local.get $array))))
+        (br $dimension-ready)))
+    (if (i32.eq (local.get $tag) (i32.const 10))
+      (then
+        ;; Missing string storage must signal before ARRAY.LEN, including when
+        ;; the subscript would otherwise miss into the general array path.
+        ,(wat-fail-when #@(ref.is_null
+          (struct.get $obj $digits (ref.cast (ref $obj) (local.get $array)))) :malformed-form)
+        (local.set $dimension (array.len
+          (struct.get $obj $digits (ref.cast (ref $obj) (local.get $array)))))
+        (br $dimension-ready)))
+    (if (i32.eq (local.get $tag) (i32.const 36))
+      (then
+        (local.set $dimension (call $value-n (local.get $array)))
+        (br $dimension-ready)))
+    (return (i32.const -1)))
+  #@(if (i32.gt_u (local.get $dimension) (i32.const 536870910))
+    (then (return (i32.const -1))))
+  #@(if (i32.eqz (call $scalar-integer-p (local.get $index)))
+    (then (return (i32.const -1))))
+  #@(local.set $wide (call $scalar-integer-value (ref.as_non_null (local.get $index))))
+  #@(if (i64.ge_u (local.get $wide) (i64.extend_i32_u (local.get $dimension)))
+    (then (return (i32.const -1))))
+  #@(i32.wrap_i64 (local.get $wide)))
+
 ;; Probe the common rank-two object-storage case without signaling. Callers
 ;; perform their entry checkpoint first, then use these live bounds and backing.
 ;; Return a logical index: ARRAY-RAW-ELEMENT adds the view's offset exactly once.
@@ -921,8 +1012,8 @@
   ($array-flags-kind) ($array-kind-flags) ($array-kind)
   ($array-simple-p) ($stringp-native) ($upgraded-array-kind)
   ($array-length) ($array-dimension-value) ($array-sequence-length)
-  ($bit-value-cl) ($bit-value) ($make-bit-vector) ($array-fixnum-value)
-  ($array-rank2-index) ($array-raw-element) ($array-element) ($sequence-value)
+  ($bit-value-cl) ($bit-value) ($make-bit-vector) ($array-fixnum-value) ($array-owned-rank1-fixnum-element)
+  ($array-rank1-index) ($array-rank2-index) ($array-raw-element) ($array-element) ($sequence-value)
   ($array-construction-apply) ($array-subscript-index-cl) ($array-subscript-index) ($array-new) ($array-contents-length-cl) ($array-contents-length) ($array-initialize-contents) ($make-array-native)
   ($index-error) ($elt-element) ($character-element) ($array-bit-check-cl) ($array-bit-check) ($array-kind-type)
   ($array-equal-native) ($hash-array-code) ($string-contents)

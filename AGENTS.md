@@ -275,6 +275,15 @@ implementation, review and validation. Use one source writer per area and an
 explicit serial token for heavy workloads. Waiting roles can investigate future
 questions without launching competing workloads.
 
+Only the coordinator may create or restart agents. Workers must not spawn
+sub-agents or delegate work to other agents. Keep the team bounded and retire
+roles when their work is complete. Finish worker contexts at the end of each
+optimization iteration and use fresh contexts for the next, without inherited
+conversation history (fork_turns=none where available). Give replacement workers
+concise task packets and evidence paths rather than the full accumulated
+transcript: include the project instructions, current user overrides, source
+ownership, session endpoints and loaded state, and workload-token ownership.
+
 Check worker status when handing off work. A message to a completed worker does
 not restart it; use a dispatch operation that starts a turn, such as
 followup_task. Across conversation handoffs, verify advancing REPL heartbeats
@@ -362,6 +371,18 @@ declarations from actual dispatch classes, and measure genuine guard hits as
 well as subclass misses. Match native helper coverage, helper sealing domains
 and policies between candidates, not just the outer drivers.
 
+For optimization work use a quick feedback loop: analyze the actual
+code and disassembly, reproduce the gap with a small representative
+benchmark, then iterate on one generic mechanism using persistent
+sessions. Preserve the original workload and its success criterion. At
+significant milestones, rerun the original unscaled workloads,
+matching precompiled compiler and relevant applications, with the
+appropriate semantic checks and complete image-size measurements. A
+diagnostic gain does not establish an improvement to the original
+workload. Use large remaining gaps to investigate structural
+calling-convention, representation or lowering costs rather than only
+accumulating narrow fast paths.
+
 Optimize broadly useful common paths rather than requiring every microcase to
 improve. Disclose slower paths and judge their importance with workload and
 application evidence; do not add narrow specializations merely to erase a
@@ -448,17 +469,29 @@ actually occurred. Check that the hook fired and the required lazy state still
 exists immediately before the observation; setup or class lookup can eagerly
 consume it. Distinguish a callback that never ran from a stale-dispatch defect.
 
-Do not add benchmarks or benchmark infrastructure to the repository. The
-applications and their existing benchmarks are sufficient for now. Keep
-one-off measurement scripts and results in temporary directories; continue
-reporting runtime/application performance and raw/compressed image sizes
-without restoring the removed compiler/interpreter microbenchmark suite.
+Maintain reusable compiler/runtime benchmark programs and their minimal runner
+in benchmarks/. Prefer extending the shared corpus over duplicating harnesses.
+Keep Lisp benchmark programs in Lisp source files, compare equivalent inputs
+and policies, and verify actual retained calls when measuring out-of-line call
+performance. Keep input construction outside traversal/application timings
+unless construction is the operation being measured. Record compilation modes,
+inlining settings, complete results, raw samples and artifact/source provenance.
+Small diagnostic cases complement the original workloads and application
+benchmarks; performance measurements are not semantic proofs or conformance
+thresholds. Keep one-off scripts, generated artifacts and per-run measurements
+in temporary or ignored build directories. Continue reporting raw/compressed
+complete image sizes and JavaScript adapter growth separately.
 
 # Documentation
 
 Keep compiler.org focused on how the current compiler works: architecture,
 interfaces, representations, algorithms, semantic contracts and implementation
-limits. Consolidate related mechanisms and write in the present tense.
+limits. Group optimizations into broad categories that reflect their scope and
+mechanism, such as whole-program and local optimizations. Update the relevant
+section when a mechanism changes. Explain what each optimization does, when it
+applies, and what behavior it preserves. Put individual opcode sequences, guard
+ordering and helper interactions in comments beside the relevant source.
+Consolidate related mechanisms and write in the present tense.
 Do not add development chronology, batch records, benchmark results, size or memory
 measurements, test pass/fail or coverage reports, application validation status,
 or per-run artifact/session handoffs. Report validation and measurements to the

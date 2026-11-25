@@ -98,13 +98,21 @@
 ;; copy the public tail in one nonpolling interval, before the selected call.
 (define-runtime-function $native-spread-list
     (($source (ref null $objects)) ($prefix i32) ($tail :nullable-object)) (:nullable-object)
-  (:locals ($data (ref null $objects)) ($tail-count :nullable-object) ($index i32) ($total i32))
+  (:locals ($tail-count :nullable-object) ($total i32))
   ;; Reuse the proper-list walk's count immediately, before any callback or
   ;; checkpoint can mutate the public final spine. A cycle keeps the same
   ;; CHECK-APPLY-LIST condition; dotted tails fail inside the checked walker.
   #@(local.set $tail-count (call $checked-apply-list-length (local.get $tail)))
   #@(local.set $total (i32.add (local.get $prefix) (call $natural-count (local.get $tail-count))))
   (wat-fail-when #@(i32.ge_u (local.get $total) (i32.const 65536)) :malformed-form)
+  #@(return_call $copy-apply-arguments
+    (local.get $source) (local.get $prefix) (local.get $tail) (local.get $total)))
+
+;; The caller admitted exactly TOTAL minus PREFIX conses and owns the interval
+;; until this copy ends. A dotted tail leaves callers on their list path.
+(define-runtime-function $copy-apply-arguments
+    (($source (ref null $objects)) ($prefix i32) ($tail :nullable-object) ($total i32)) ((ref null $objects))
+  (:locals ($data (ref $objects)) ($index i32))
   #@(local.set $data (array.new_default $objects (local.get $total)))
   #@(block $prefix-done (loop $copy-prefix
     (br_if $prefix-done (i32.eq (local.get $index) (local.get $prefix)))
@@ -113,10 +121,12 @@
     (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy-prefix)))
   #@(block $done (loop $copy-tail
     (br_if $done (i32.eq (local.get $index) (local.get $total)))
-    (array.set $objects (local.get $data) (local.get $index) (call $car (local.get $tail)))
-    (local.set $tail (call $cdr (local.get $tail)))
+    (array.set $objects (local.get $data) (local.get $index)
+      (struct.get $obj $a (ref.cast (ref $obj) (local.get $tail))))
+    (local.set $tail (struct.get $obj $b (ref.cast (ref $obj) (local.get $tail))))
     (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $copy-tail)))
-  #@(local.get $data))
+  #@(if (result (ref null $objects)) (ref.is_null (local.get $tail))
+    (then (local.get $data)) (else (ref.null $objects))))
 
 ;; Select only after P3: a public list may have changed since validation, while
 ;; a packet snapshot is privately owned. Failed bounded extraction keeps the
@@ -170,16 +180,28 @@
     (return (ref.cast (ref null eq) (any.convert_extern
       (call $native-direct-apply-ready (local.get $function)
         (local.get $a) (local.get $b) (local.get $c) (local.get $d) (i32.const 0))))))
-  ;; Successful extraction admitted every value after the poll. All other
-  ;; shared-list paths need the same representation boundary before ordinary
-  ;; binders, even when their selected function never reads an argument. Keep
-  ;; finite dotted private REST tails; this is not another public proper check.
+  ;; A short proper spine can use the boxed native binder's indexed packet
+  ;; after P3, when the shared input's current values have been observed.
   #@(if (i32.eqz (ref.test (ref $objects) (local.get $args)))
     (then
+      ;; The postcheckpoint boundary admits finite dotted private REST tails.
+      ;; The packet copy below declines those tails and keeps the original.
       (local.set $count (call $checked-list-length (local.get $args) (i32.const 3)))
       (if (i64.lt_s (call $scalar-integer-value (ref.as_non_null (local.get $count))) (i64.const 0))
         (then (call $type-fail (local.get $args) (call $symbol-value ,(clos-library-reference '%proper-list-type))
-          (i32.const ,(runtime-error-code :expected-designator)))))))
+          (i32.const ,(runtime-error-code :expected-designator)))))
+      (block $ordinary-spine
+        (br_if $ordinary-spine (global.get $debug-evaluating))
+        (br_if $ordinary-spine (i64.gt_u
+          (call $scalar-integer-value (ref.as_non_null (local.get $count))) (i64.const 8)))
+        (br_if $ordinary-spine (i32.eqz (ref.test (ref $native-function) (local.get $name))))
+        (br_if $ordinary-spine (ref.test (ref $native-debug-function) (local.get $name)))
+        (br_if $ordinary-spine (i32.eqz (ref.is_null
+          (struct.get $native-function $direct (ref.cast (ref $native-function) (local.get $name))))))
+        (local.set $data (call $copy-apply-arguments (ref.null $objects) (i32.const 0)
+          (local.get $args) (call $natural-count (local.get $count))))
+        (br_if $ordinary-spine (ref.is_null (local.get $data)))
+        (local.set $args (local.get $data)))))
   #@(return_call $apply0-ready (local.get $name) (local.get $args)))
 
 ;; No-prefix APPLY has two existing transport observations: fixed CALL2 shares
@@ -596,5 +618,5 @@
 (define-runtime-section apply-runtime-wat ()
   ($apply0) ($apply0-ready)
   (if *source-bootstrap-p* ($apply-source) "")
-  ($spread-arguments) ($native-spread-arguments) ($native-spread-list) ($native-apply-list-selected) ($native-apply-list)
+  ($spread-arguments) ($native-spread-arguments) ($native-spread-list) ($copy-apply-arguments) ($native-apply-list-selected) ($native-apply-list)
   ($apply1))

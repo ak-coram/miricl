@@ -4,7 +4,7 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {gzipSync} from 'node:zlib';
-import {examples} from '../coalton/examples.mjs';
+import {examples, documentationSource} from '../coalton/examples.mjs';
 import {versionAssets} from './version-assets.mjs';
 const root = path.resolve(import.meta.dirname, '..');
 const [imagePath = 'miricl.wasm', corePath = 'build/coalton/coalton.wasm',
@@ -13,7 +13,7 @@ const initialized = options.length === 3 && options[0] === '--initialized-image'
 if (options.length && !initialized) throw new Error('Expected --initialized-image IMAGE TEST-REPORT.');
 const [image, core, markdown, template, exampleSource] = await Promise.all([
   fs.readFile(imagePath), fs.readFile(corePath),
-  fs.readFile(path.join(root, 'vendor/coalton/docs/manual/site/topics/whirlwind-tour.md'), 'utf8'),
+  fs.readFile(path.join(root, 'vendor/coalton', documentationSource), 'utf8'),
   fs.readFile(path.join(root, 'coalton/index.html'), 'utf8'),
   fs.readFile(path.join(root, 'coalton/examples.mjs'), 'utf8')]);
 new WebAssembly.Module(image); new WebAssembly.Module(core);

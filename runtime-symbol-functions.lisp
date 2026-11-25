@@ -414,13 +414,34 @@
   #@(call $symbol-index-get (local.get $table) (local.get $id)))
 
 (define-runtime-function $fdefinition (($name :nullable-object)) (:nullable-object)
-  (:locals ($binding :nullable-object))
-  #@(local.set $binding (call $function-binding (local.get $name)))
-  #@(if (ref.is_null (local.get $binding))
-      (then (global.set $undefined-name (local.get $name)) ,(wat-fail :undefined-function)))
-  #@(if (ref.is_null (call $binding-value (local.get $binding)))
-      (then (global.set $undefined-name (local.get $name)) ,(wat-fail :undefined-function)))
-  #@(call $binding-value (local.get $binding)))
+  (:locals ($symbol (ref $obj)) ($binding :nullable-object) ($value :nullable-object))
+  #@(block $found
+    (block $other
+      (block $heap (result (ref $obj))
+        (br_on_cast $heap (ref null eq) (ref $obj) (local.get $name))
+        (drop)
+        (if (ref.is_null (local.get $name))
+          (then
+            (local.set $binding (call $symbol-index-get (global.get $function-bindings) (i32.const 0)))
+            (br $found)))
+        ,(wat-fail-when #@(i32.eqz (ref.test (ref i31) (local.get $name))) :malformed-form)
+        (br $other))
+      (local.set $symbol)
+      (if (i32.eq (i32.and (struct.get $obj $tag (local.get $symbol)) (i32.const 63)) (i32.const 6))
+        (then
+          (local.set $binding (call $symbol-index-get (global.get $function-bindings)
+            (struct.get $obj $n (local.get $symbol))))
+          (br $found))))
+    (local.set $binding (call $function-binding (local.get $name))))
+  ;; A binding can survive FMAKUNBOUND. Read the current value once.
+  #@(if (ref.test (ref $obj) (local.get $binding))
+    (then
+      (local.set $value (struct.get $obj $a (ref.cast (ref $obj)
+        (struct.get $obj $a (ref.cast (ref $obj) (local.get $binding))))))
+      (if (i32.eqz (ref.is_null (local.get $value))) (then (return (local.get $value))))))
+  #@(global.set $undefined-name (local.get $name))
+  (wat-fail :undefined-function)
+  #@(unreachable))
 
 (define-runtime-function $canonical-builtin-function (($id i32) ($setf i32)) (:nullable-object)
   (:locals ($slot i32) ($function :nullable-object))
@@ -462,7 +483,7 @@
       (local.get $id) (local.get $value)))))
 
 (define-runtime-function $standard-function-code (($code i32)) (:nullable-object)
-  (:locals ($id i32) ($setf i32) ($value :nullable-object))
+  (:locals ($id i32) ($setf i32) ($table (ref $symbol-index)) ($value :nullable-object))
   ;; The signed code is an identity, never a promise of builtin availability.
   ;; Check it before indexing; -1-CODE is safe even for the least i32 value.
   #@(local.set $setf (i32.lt_s (local.get $code) (i32.const 0)))
@@ -471,10 +492,11 @@
     (else (i32.sub (local.get $code) (i32.const 1)))))
   (wat-fail-when #@(i32.eqz (i32.and (call $standard-function-flags (local.get $id))
     (i32.shl (i32.const 1) (local.get $setf)))) :malformed-form)
-  #@(local.set $value (call $symbol-index-get
-    (if (result (ref $symbol-index)) (local.get $setf)
-      (then (global.get $standard-setf-bindings))
-      (else (global.get $standard-function-bindings))) (local.get $id)))
+  ;; Admission bounds the ID to the dense bootstrap symbol inventory.
+  #@(local.set $table (if (result (ref $symbol-index)) (local.get $setf)
+    (then (global.get $standard-setf-bindings))
+    (else (global.get $standard-function-bindings))))
+  #@(local.set $value (array.get $objects (struct.get $symbol-index $dense (local.get $table)) (local.get $id)))
   ;; Sealed kernels can execute during bootstrap before public builtin
   ;; installation. Only genuine dispatch-supported builtin identities have
   ;; an early entry; Lisp bodies and generic protocols must be installed.
@@ -492,7 +514,25 @@
   #@(local.get $value))
 
 (define-runtime-function $standard-function-reference (($name :nullable-object)) (:nullable-object)
-  (:locals ($id i32) ($setf i32))
+  (:locals ($symbol (ref $obj)) ($id i32) ($setf i32) ($value :nullable-object))
+  ;; Ordinary standard names are heap symbols with dense bootstrap IDs.
+  ;; Read their exact installed entry, leaving SETF and bootstrap fallback
+  ;; to the same checked path used for other names.
+  #@(block $ordinary
+    (block $heap (result (ref $obj))
+      (br_on_cast $heap (ref null eq) (ref $obj) (local.get $name))
+      (drop)
+      (br $ordinary))
+    (local.set $symbol)
+    (br_if $ordinary (i32.ne (i32.and (struct.get $obj $tag (local.get $symbol))
+      (i32.const 63)) (i32.const 6)))
+    (local.set $id (struct.get $obj $n (local.get $symbol)))
+    (if (i32.eqz (i32.and (call $standard-function-flags (local.get $id)) (i32.const 1)))
+      (then (return_call $fdefinition (local.get $name))))
+    (local.set $value (array.get $objects
+      (struct.get $symbol-index $dense (global.get $standard-function-bindings)) (local.get $id)))
+    (if (i32.eqz (ref.is_null (local.get $value))) (then (return (local.get $value))))
+    (return_call $standard-function-code (i32.add (local.get $id) (i32.const 1))))
   #@(local.set $setf (i32.eqz (call $symbolp (local.get $name))))
   #@(local.set $id (call $id (call $function-name-symbol (local.get $name))))
   #@(if (i32.and (call $standard-function-flags (local.get $id))

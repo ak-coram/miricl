@@ -52,6 +52,12 @@ if (action === 'submit') {
       host.stdout.on('data', report);
       host.stderr.on('data', report);
       host.on('exit', code => { console.error(`SBCL exited: ${code}`); process.exitCode = code ?? 1; });
+    } else if (kind === 'native') {
+      if (!imagePath) throw Error('Supply an existing native compiler image path');
+      const {loadMiricl} = await import('./miricl-loader.mjs');
+      vm = await loadMiricl(await fs.readFile(imagePath));
+      filesystem = new HostFilesystem(vm, project);
+      vm.evaluate('(unless (eq miricl-compiler::*compiler-state* :ready) (error "Native queue requires a precompiled compiler image.")) (values)');
     } else if (kind === 'wasm') {
       if (!imagePath) throw Error('Supply the interpreter or cold image path');
       vm = await Miricl.instantiate(await fs.readFile(imagePath));
@@ -65,7 +71,7 @@ if (action === 'submit') {
       for (const source of sources)
         await vm.evaluateAsync(await fs.readFile(path.join(project, source + '.lisp'), 'utf8'), {eof: true});
       vm.evaluate('(in-package :cl-user)');
-    } else throw Error('Session kind must be host or wasm');
+    } else throw Error('Session kind must be host, wasm, or native');
     console.log(`Queue REPL ready: ${name} (${kind})`);
     while (!host || host.exitCode === null) {
       const requests = (await fs.readdir(directory)).filter(file => file.endsWith('.lisp')).sort();
@@ -104,4 +110,4 @@ if (action === 'submit') {
     await serverLock.close();
     await fs.unlink(path.join(directory, 'server.lock'));
   }
-} else throw Error('Usage: kernel-repl.mjs start NAME host|wasm [IMAGE], submit NAME FILE, result NAME REQUEST');
+} else throw Error('Usage: kernel-repl.mjs start NAME host|wasm|native [IMAGE], submit NAME FILE, result NAME REQUEST');

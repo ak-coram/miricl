@@ -314,6 +314,53 @@ try {
               (setf (symbol-function name) original))))
           (list (cons tail-name tail) (cons copy-name copy) (cons slot-name slot)))
         (recover))))`);
+  // A warmed symbol designator must select its live binding at each fixed
+  // call, including changes that leave the native fast path entirely.
+  check(`(let* ((name (gensym "SOUNDNESS-FIXED-DESIGNATOR-"))
+      (native (compile-native '(lambda (x)
+        (declare (optimize (debug 1) (safety 1)))
+        (case x (0 (values)) (1 (values nil)) (otherwise (values x nil :native))))))
+      (full (compile-native '(lambda (function x effect)
+        (declare (optimize (debug 1) (safety 1)))
+        (multiple-value-list
+          (funcall (progn (funcall effect :function) function)
+            (progn (funcall effect :argument) (values x :ignored)))))))
+      (primary (compile-native '(lambda (function x)
+        (declare (optimize (debug 1) (safety 1)))
+        (list (funcall function x) :done))))
+      (discard (compile-native '(lambda (function x)
+        (declare (optimize (debug 1) (safety 1)))
+        (funcall function x) :done)))
+      (events nil))
+    (labels ((observe (event) (push event events) (values :noise :extra))
+             (recover ()
+               (setf (symbol-function name) native)
+               (equal (funcall full name 2 #'observe) '(2 nil :native))))
+      (unwind-protect
+        (and (recover)
+          (progn (dotimes (i 8) (funcall full name 2 #'observe)) t)
+          (progn (setq events nil)
+            (and (null (funcall full name 0 #'observe))
+              (equal (reverse events) '(:function :argument))))
+          (equal (funcall full name 1 #'observe) '(nil))
+          (equal (funcall primary name 0) '(nil :done))
+          (equal (funcall primary name 2) '(2 :done))
+          (eq (funcall discard name 2) :done)
+          (progn (setf (symbol-function name) (lambda (x) (values x :interpreted)))
+            (equal (funcall full name 2 #'observe) '(2 :interpreted)))
+          (progn (setf (symbol-function name) #'identity)
+            (equal (funcall full name 2 #'observe) '(2)))
+          (progn (setf (symbol-function name) (compile-native '(lambda () :wrong-arity)))
+            (and (handler-case (progn (funcall full name 2 #'observe) nil)
+                   (program-error (condition) (plusp (length (princ-to-string condition)))))
+              (recover)))
+          (progn (fmakunbound name)
+            (and (handler-case (progn (funcall full name 2 #'observe) nil)
+                   (undefined-function (condition) (eq (cell-error-name condition) name)))
+              (recover)))
+          (equal (funcall full native 2 #'observe) '(2 nil :native)))
+        (fmakunbound name))))`);
+  console.log('Soundness: warmed symbol calls preserve live binding changes, value demand, effects and rejection recovery.');
   evaluate(`(defvar *soundness-slot-calls* 0)
     (defmethod miricl-mop:slot-value-using-class :around
         ((class soundness-mop-meta) (object soundness-mop-record) slot)
@@ -951,7 +998,7 @@ try {
     for (const invalid of [foreign, packets.empty()])
       rejectPacketOperation(() => vm.vm['native-standard-call1'](code, invalid));
   }
-  for (const name of ['+', '-']) {
+  for (const name of ['+', '-', '*']) {
     const code = canonicalCode(name);
     for (const invalid of [foreign, packets.empty()]) {
       rejectPacketOperation(() => vm.vm['native-standard-call2'](code, invalid, integerOne));
@@ -974,6 +1021,143 @@ try {
     assert.ok(function_, 'The Lisp callback bridge supplied its function.');
     return function_;
   };
+  // Fixed array adapters use live dimensions and retain checked storage access.
+  const rank1Read = packetFunction("#'aref");
+  const rank1Write = packetFunction("(fdefinition '(setf aref))");
+  const rank1Svref = packetFunction("#'svref");
+  const rank1Svset = packetFunction("(fdefinition '(setf svref))");
+  const rank1Eql = packetFunction("#'eql");
+  const rank1Value = source => vm.vm['native-call0'](packetFunction(`(lambda () ${source})`));
+  const rank1Index = rank1Value('1');
+  const rank1BoxedIndex = vm.vm['native-int64'](1n);
+  const rank1Equal = (actual, expected) => assert.notEqual(vm.vm['native-call2'](rank1Eql, actual, expected), null);
+  const rank1Fixtures = [
+    ["(make-array 3 :element-type 'fixnum :adjustable t :fill-pointer 0 :initial-contents '(0 -9223372036854775808 2))", '-9223372036854775808', '9223372036854775807'],
+    ["(make-array 3 :adjustable t :fill-pointer 0 :initial-contents '(a b c))", "'b", "'(new value)"],
+    ["(make-array 3 :element-type 'character :adjustable t :fill-pointer 0 :initial-contents \"abc\")", '#\\b', '#\\z'],
+    ["(make-array 3 :element-type 'bit :adjustable t :fill-pointer 0 :initial-contents '(0 1 0))", '1', '0'],
+    ['(copy-seq "abc")', '#\\b', '#\\z'],
+    ["(make-string 3 :initial-element (code-char 955))", '(code-char 955)', '(code-char 956)'],
+    ['(copy-seq #*010)', '1', '0'],
+  ];
+  let rank1Numeric;
+  for (const [source, expectedSource, replacementSource] of rank1Fixtures) {
+    const array = rank1Value(source), expected = rank1Value(expectedSource), replacement = rank1Value(replacementSource);
+    rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1Index), expected);
+    rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1BoxedIndex), expected);
+    assert.equal(vm.vm['native-call3'](rank1Write, replacement, array, rank1Index), replacement);
+    rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1BoxedIndex), replacement);
+    if (!rank1Numeric) rank1Numeric = array;
+  }
+  evaluate(`(defparameter *soundness-rank1-base*
+    (make-array 4 :element-type 'fixnum :adjustable t :initial-contents '(10 11 12 13)))
+    (defparameter *soundness-rank1-view*
+      (make-array 2 :element-type 'fixnum :displaced-to *soundness-rank1-base* :displaced-index-offset 1))
+    (values)`);
+  const rank1Base = rank1Value('*soundness-rank1-base*'), rank1View = rank1Value('*soundness-rank1-view*');
+  rank1Equal(vm.vm['native-call2'](rank1Read, rank1View, rank1Index), rank1Value('12'));
+  evaluate("(adjust-array *soundness-rank1-base* 6 :initial-contents '(100 101 102 103 104 105)) (values)");
+  rank1Equal(vm.vm['native-call2'](rank1Read, rank1View, rank1Index), rank1Value('102'));
+  const rank1New = rank1Value('9007199254740993');
+  assert.equal(vm.vm['native-call3'](rank1Write, rank1New, rank1View, rank1Index), rank1New);
+  rank1Equal(vm.vm['native-call2'](rank1Read, rank1Base, rank1Value('2')), rank1New);
+  const rank1Empty = rank1Value("(make-array 0 :element-type 'fixnum)");
+  const rank1Matrix = rank1Value("(make-array '(1 1) :element-type 'fixnum :initial-element 7)");
+  for (const [array, index] of [
+    [rank1Numeric, rank1Value('-1')], [rank1Numeric, rank1Value('3')],
+    [rank1Numeric, rank1Value('1208925819614629174706176')], [rank1Numeric, rank1Value('1d0')],
+    [rank1Empty, rank1Value('0')], [rank1Matrix, rank1Value('0')],
+  ]) {
+    rejectPacketOperation(() => vm.vm['native-call2'](rank1Read, array, index));
+    rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, rank1New, array, index));
+  }
+  for (const value of [rank1Value('9223372036854775808'), rank1Value('1/2')])
+    rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, value, rank1Numeric, rank1Index));
+  // Construct malformed flat storage through this image's actual core layout.
+  // Immutable fields go to CORE-NEW; mutable fields go to CORE-SET.
+  const rank1Clone = (object, change) => {
+    const type = vm.vm['core-object-type'](object);
+    const reader = Object.keys(vm.vm).find(name => name.startsWith(`core-read:${type}:`));
+    assert.ok(reader, 'The fixture has a physical struct reader.');
+    const signature = reader.split(':')[2], fields = vm.vm[reader](object);
+    change(fields);
+    const mutable = index => signature[index] === signature[index].toUpperCase();
+    const copy = vm.vm[`core-new:${type}`](...fields.filter((_, i) => !mutable(i)));
+    vm.vm[`core-set:${type}`](copy, ...fields.filter((_, i) => mutable(i)));
+    return copy;
+  };
+  const rank1FlatString = rank1Value('(copy-seq "abc")'), rank1FlatBits = rank1Value('(copy-seq #*010)');
+  const rank1BrokenString = rank1Clone(rank1FlatString, fields => {fields[3] = null;});
+  const rank1ShortBits = rank1Clone(rank1FlatBits, fields => {fields[1] = 33;});
+  const rank1BrokenBits = rank1Clone(rank1FlatBits, fields => {fields[3] = null;});
+  for (const [array, index, value] of [
+    [rank1BrokenString, rank1Index, rank1Value('#\\z')],
+    [rank1BrokenString, rank1Value('-1'), rank1Value('#\\z')],
+    [rank1ShortBits, rank1Value('32'), rank1Value('1')],
+    [rank1BrokenBits, rank1Index, rank1Value('1')],
+    [rank1Value('""'), rank1Value('0'), rank1Value('#\\a')],
+    [rank1Value('#*'), rank1Value('0'), rank1Value('1')],
+  ]) {
+    rejectPacketOperation(() => vm.vm['native-call2'](rank1Read, array, index));
+    rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, value, array, index));
+  }
+  for (const [array, invalidValue, expected] of [
+    [rank1FlatString, rank1Value('1'), rank1Value('#\\b')],
+    [rank1FlatBits, rank1Value('2'), rank1Value('1')],
+  ]) {
+    rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, invalidValue, array, rank1Index));
+    rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1Index), expected);
+    rejectPacketOperation(() => vm.vm['native-call2'](rank1Svref, array, rank1Index));
+    rejectPacketOperation(() => vm.vm['native-call3'](rank1Svset, invalidValue, array, rank1Index));
+    for (const index of [rank1Value('-1'), rank1Value('3'), vm.vm['native-int64'](4294967297n), rank1Value('1d0')]) {
+      rejectPacketOperation(() => vm.vm['native-call2'](rank1Read, array, index));
+      rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, expected, array, index));
+    }
+  }
+  rejectPacketOperation(() => vm.vm['native-call2'](rank1Svref, rank1Numeric, rank1Index));
+  rejectPacketOperation(() => vm.vm['native-call3'](rank1Svset, rank1New, rank1Numeric, rank1Index));
+  const rank1Type = vm.vm['core-object-type'](rank1Numeric);
+  const rank1Reader = Object.keys(vm.vm).find(name => name.startsWith(`core-read:${rank1Type}:`));
+  const rank1Private = vm.vm[rank1Reader](rank1Numeric).find(value => {
+    if (value === null || typeof value !== 'object') return false;
+    const type = vm.vm['core-object-type'](value);
+    return Object.keys(vm.vm).some(name => name.startsWith(`core-array:${type}:l`));
+  });
+  assert.ok(rank1Private, 'The fixture includes the actual private i64 array payload.');
+  const rank1BackingSlot = vm.vm[rank1Reader](rank1Numeric).indexOf(rank1Private);
+  const rank1ShortBacking = vm.vm[rank1Reader](rank1Value("(make-array 1 :element-type 'fixnum)"))[rank1BackingSlot];
+  const rank1BrokenNumeric = rank1Clone(rank1Numeric, fields => {fields[rank1BackingSlot] = rank1ShortBacking;});
+  rejectPacketOperation(() => vm.vm['native-call2'](rank1Read, rank1BrokenNumeric, rank1Index));
+  rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, rank1New, rank1BrokenNumeric, rank1Index));
+  rank1Equal(vm.vm['native-call2'](rank1Read, rank1Numeric, rank1Index), rank1Value('9223372036854775807'));
+  for (const invalid of [foreign, packets.empty(), rank1Private]) {
+    rejectPacketOperation(() => vm.vm['native-call2'](rank1Read, invalid, rank1Index));
+    rejectPacketOperation(() => vm.vm['native-call2'](rank1Read, rank1Numeric, invalid));
+    rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, invalid, rank1Numeric, rank1Index));
+    rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, rank1New, invalid, rank1Index));
+    rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, rank1New, rank1Numeric, invalid));
+  }
+  rank1Equal(vm.vm['native-call2'](rank1Read, rank1Numeric, rank1Index), rank1Value('9223372036854775807'));
+  console.log('Soundness: fixed rank-one array access preserves live dimensions, backing, element checks and rejection recovery.');
+  check(`(let* ((worker (compile-native '(lambda (vector)
+                    (loop for value across vector collect value))))
+                (cycle (list :cycle)))
+      (setf (cdr cycle) cycle)
+      (and (every (lambda (input)
+                    (and (handler-case (progn (funcall worker input) nil)
+                           (type-error (condition)
+                             (and (eq (type-error-datum condition) input)
+                                  (eq (type-error-expected-type condition) 'vector))))
+                         (equal (funcall worker #(1 2 3)) '(1 2 3))))
+                  (list nil '(1 2) cycle 42
+                        (make-array nil :initial-element 0)
+                        (make-array '(0 2)) (make-array '(2 2))))))`);
+  const across = rank1Value("(compile-native '(lambda (vector) (loop for value across vector count value)))");
+  for (const invalid of [foreign, packets.empty(), rank1Private]) {
+    rejectPacketOperation(() => vm.vm['native-call1'](across, invalid));
+  }
+  console.log('Soundness: ACROSS rejects nonvectors and malformed raw values and recovers after rejection.');
+
   // Scalar native imports admit every supplied operand before builtin
   // constructors or workers can discard it, just like full-value transport.
   await vm.mountFile('/soundness-scalar-calls.lisp',
@@ -1216,6 +1400,50 @@ try {
     vm.vm['native-call1'](lookupUnset, lookupAbsent);
   }
   console.log('Soundness: native name lookup observes warmed cell mutation and rejects malformed names with recovery.');
+  // Exercise the scalar imports themselves: a compiled unknown-call driver
+  // can choose full-value transport instead and miss these primary entries.
+  const primarySymbol = vm.vm['native-call0'](packetFunction("(lambda () 'soundness-primary-designator)"));
+  const primaryRebound = vm.vm['native-call0'](packetFunction('(lambda () :rebound)'));
+  const primaryIdentity = packetFunction("#'identity");
+  try {
+    for (const arity of [1, 2, 3, 4]) {
+      const parameters = ['a', 'b', 'c', 'd'].slice(0, arity);
+      const original = packetFunction(`(compile-native '(lambda (${parameters.join(' ')})
+        (declare (optimize (debug 1) (safety 1)) ${arity > 1 ? `(ignore ${parameters.slice(1).join(' ')})` : ''})
+        (values a nil :original)))`);
+      const replacement = packetFunction(`(compile-native '(lambda (${parameters.join(' ')})
+        (declare (ignore ${parameters.join(' ')}) (optimize (debug 1) (safety 1)))
+        (values :rebound nil :replacement)))`);
+      const arguments_ = Array(arity).fill(elements[0]);
+      const invoke = () => vm.vm[`native-call${arity}`](primarySymbol, ...arguments_);
+      installLookup(primarySymbol, original);
+      assert.equal(invoke(), elements[0]);
+      assert.equal(invoke(), elements[0]);
+      installLookup(primarySymbol, replacement);
+      assert.equal(invoke(), primaryRebound, 'A warmed scalar symbol call selects its current native binding.');
+      assert.equal(vm.vm[`native-call${arity}`](original, ...arguments_), elements[0],
+        'The saved callable retains its own identity after rebinding.');
+    }
+    for (const [expression, expected] of [
+      ["(compile-native '(lambda (x) (declare (ignore x)) (values)))", null],
+      ["(compile-native '(lambda (x) (declare (ignore x)) (values nil)))", null],
+      ['(lambda (x) (values x :interpreted))', elements[0]],
+    ]) {
+      installLookup(primarySymbol, packetFunction(expression));
+      assert.equal(vm.vm['native-call1'](primarySymbol, elements[0]), expected);
+    }
+    installLookup(primarySymbol, primaryIdentity);
+    assert.equal(vm.vm['native-call1'](primarySymbol, elements[0]), elements[0]);
+    installLookup(primarySymbol, packetFunction("(compile-native '(lambda () :wrong-arity))"));
+    rejectPacketOperation(() => vm.vm['native-call1'](primarySymbol, elements[0]));
+    installLookup(primarySymbol, primaryIdentity);
+    assert.equal(vm.vm['native-call1'](primarySymbol, elements[0]), elements[0]);
+    vm.vm['native-call1'](lookupUnset, primarySymbol);
+    rejectPacketOperation(() => vm.vm['native-call1'](primarySymbol, elements[0]));
+    installLookup(primarySymbol, primaryIdentity);
+    assert.equal(vm.vm['native-call1'](primarySymbol, elements[0]), elements[0]);
+  } finally {vm.vm['native-call1'](lookupUnset, primarySymbol);}
+  console.log('Soundness: scalar symbol entries retain live native bindings, primary demand and fallback recovery.');
   // Canonical cons layouts do not authenticate their children. Function-name
   // admission checks the bounded (SETF symbol) grammar before reading tags.
   const setterName = vm.vm['native-call0'](packetFunction("(lambda () '(setf soundness-shaped-lookup))"));
@@ -1223,6 +1451,11 @@ try {
   const targetSymbol = vm.vm['native-argument'](setterName, 1);
   const digits = coreFields(elements[0]).values[3];
   assert.ok(digits);
+  const literalPool = vm.vm['native-call0'](packetFunction(
+    "(lambda () (vector '(setf soundness-shaped-lookup) 23))"));
+  const literalOwner = pool => vm.vm['core-native-function'](rawEntries.entry, pool, null, 0, null);
+  const lookupLiteral = vm.vm['native-literal-function'];
+  const setterOwner = literalOwner(literalPool);
   try {
     installLookup(setterName, lookupFunctions[0]);
     for (const invalid of [packets.empty(), digits]) {
@@ -1236,8 +1469,29 @@ try {
         assert.equal(lookup(setterName), lookupFunctions[0]);
       }
     }
+    assert.equal(lookupLiteral(setterOwner, 0), lookupFunctions[0]);
+    installLookup(setterName, lookupFunctions[1]);
+    assert.equal(lookupLiteral(setterOwner, 0), lookupFunctions[1]);
+    vm.vm['native-call1'](lookupUnset, setterName);
+    rejectPacketOperation(() => lookupLiteral(setterOwner, 0));
+    installLookup(setterName, lookupFunctions[0]);
+    for (const invalid of [null, foreign, packets.empty(), digits, literalPool, literalOwner(digits)]) {
+      rejectPacketOperation(() => lookupLiteral(invalid, 0));
+      assert.equal(lookupLiteral(setterOwner, 0), lookupFunctions[0]);
+    }
+    for (const index of [-1, 1, 2]) {
+      rejectPacketOperation(() => lookupLiteral(setterOwner, index));
+      assert.equal(lookupLiteral(setterOwner, 0), lookupFunctions[0]);
+    }
+    const poolData = coreFields(literalPool).values.at(-1);
+    for (const invalid of [packets.empty(), digits]) {
+      packets.set(poolData, 0, invalid);
+      rejectPacketOperation(() => lookupLiteral(setterOwner, 0));
+      packets.set(poolData, 0, setterName);
+      assert.equal(lookupLiteral(setterOwner, 0), lookupFunctions[0]);
+    }
   } finally {vm.vm['native-call1'](lookupUnset, setterName);}
-  console.log('Soundness: forged function-name children signal conditions and preserve subsequent SETF lookup.');
+  console.log('Soundness: checked names and literal lookups preserve live SETF bindings and recover from malformed inputs.');
   const applyArguments = vm.vm['native-cons'](elements[0], null);
   for (const mode of [0, 1, 2, 3]) {
     const result = vm.vm['native-apply-list'](provedRoot, applyArguments, mode);
@@ -1359,6 +1613,20 @@ try {
   const keywordList = vm.vm['native-primary-call'](null,
     packetFunction("(lambda () (list :later :third :allow-other-keys))"), packets.empty());
   const [later, third, allowOtherKeys] = vm.javascript.list(keywordList, value => value);
+  const allowedKeyword = vm.vm['native-cons'](later, null);
+  for (const invalid of [packets.empty(), digits]) {
+    const invalidName = packets.make(invalid, null);
+    const invalidValue = packets.make(later, invalid);
+    rejectPacketOperation(() => vm.vm['native-keyword-present'](invalidName, 0, later));
+    rejectPacketOperation(() => vm.vm['native-keyword-argument'](invalidValue, 0, later));
+    rejectPacketOperation(() => vm.vm['native-check-keywords'](invalidName, 0, allowedKeyword, 1));
+    rejectPacketOperation(() => vm.vm['native-check-keywords'](invalidValue, 0, allowedKeyword, 0));
+  }
+  const suppliedNil = packets.make(later, null);
+  assert.ok(vm.vm['native-keyword-present'](suppliedNil, 0, later));
+  assert.equal(vm.vm['native-keyword-argument'](suppliedNil, 0, later), null);
+  assert.equal(vm.vm['native-keyword-present'](suppliedNil, 0x7fffffff, later), null);
+  vm.vm['native-check-keywords'](suppliedNil, 0, allowedKeyword, 0);
   const initialized = packetFunction(`(compile-native '(lambda (a &key
       (first (soundness-packet-mutate)) later third)
     (declare (optimize (debug 0)) (ignore first)) (list a later third)))`);
@@ -1550,6 +1818,20 @@ try {
     wideInteger(vm.vm['native-standard-call2'](code, a, b), expected);
     assert.equal(vm.javascript.integer(a), left, 'Arithmetic preserves shared input snapshots.');
     assert.equal(vm.javascript.integer(b), right);
+  }
+  for (const [left, right] of [
+    [-(1n << 30n), -(1n << 30n)], [(1n << 30n) - 1n, (1n << 30n) - 1n],
+    [-(1n << 30n), (1n << 30n) - 1n], [-(1n << 30n), -1n],
+    [(1n << 30n) - 1n, 1n], [0n, -(1n << 30n)], [-5n, 7n],
+  ]) {
+    const a = freshInteger(left), b = freshInteger(right);
+    assert.equal(vm.javascript.integer(vm.vm['native-standard-call2'](canonicalCode('*'), a, b)), left * right);
+    assert.equal(vm.javascript.integer(a), left, 'Immediate products preserve shared input snapshots.');
+    assert.equal(vm.javascript.integer(b), right);
+  }
+  for (const invalid of [foreign, packets.empty(), null]) {
+    rejectPacketOperation(() => vm.vm['native-standard-call2'](canonicalCode('*'), freshZero, invalid));
+    rejectPacketOperation(() => vm.vm['native-standard-call2'](canonicalCode('*'), invalid, freshZero));
   }
   for (const [name, expected] of [['1+', 1n], ['1-', -1n], ['-', 0n]])
     wideInteger(vm.vm['native-standard-call1'](canonicalCode(name), boxedInteger(0n)), expected);

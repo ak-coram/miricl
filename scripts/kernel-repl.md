@@ -5,6 +5,7 @@ the host REPL and its clients have separate sandbox `/tmp` directories.
 ```sh
 node scripts/kernel-repl.mjs start runtime-host host
 node scripts/kernel-repl.mjs start runtime-source wasm miricl-interpreter.wasm
+node scripts/kernel-repl.mjs start compiler-measurement native miricl.wasm
 node scripts/kernel-repl.mjs submit runtime-host build/kernel-migration/experiment.lisp
 node scripts/kernel-repl.mjs result runtime-host REQUEST-ID
 ```
@@ -35,3 +36,9 @@ matching fresh image after native runtime/import/representation changes.
 Explicit COMPILE-NATIVE still emits real Wasm. Host requests can call
 MIRICL-CROSS:COMPILE-LAMBDA, COMPILE-MODULE or RUNTIME-KERNEL-WAT directly and
 reload edited backend definitions without bootstrapping the guest compiler.
+
+The `native` session loads an existing precompiled compiler image with its embedded
+adapter and preserves its installed compiler and evaluation policy. It rejects
+an image whose compiler is not ready, and does not load source compiler overrides
+or bootstrap another generation. Use it for compiler throughput measurements and
+matching precompiled-image validation.

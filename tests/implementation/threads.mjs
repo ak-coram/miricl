@@ -60,10 +60,14 @@ const captureApplyObject = expression => {
   return object;
 };
 const applyObject = expression => vm.vm['native-call0'](captureApplyObject(`(lambda () ${expression})`));
-const applySelected = captureApplyObject("(miricl-compiler:compile-native '(lambda (x) x))");
+const applyTargets = [
+  captureApplyObject("(miricl-compiler:compile-native '(lambda (x) x))"),
+  captureApplyObject("(miricl-compiler:compile-native '(lambda (x &optional y) (declare (ignore y)) x))"),
+];
 const applyBuiltin = applyObject("#'apply"), applyBefore = applyObject(':before'), applyAfter = applyObject(':after');
 vm.evaluate(`(defparameter *thread-apply-queue*
   (symbol-function (miricl-compiler::compiler-primitive 10 1 "%%THREAD"))) (values)`, {eof: true});
+for (const applySelected of applyTargets)
 for (const fixed of [true, false]) for (const repair of [false, true]) {
   vm.evaluate(`(defparameter *thread-apply-arguments* (cons :before ${repair ? ':dotted' : 'nil'}))
     (defparameter *thread-apply-mutate* (miricl-compiler:compile-native '(lambda ()
@@ -102,6 +106,83 @@ for (const fixed of [true, false]) for (const repair of [false, true]) {
   }
 }
 console.log('PASS APPLY queued list validation, shared selection and packet snapshots');
+// A symbol's binding is selected after the application checkpoint. Keep the
+// symbol and operand fixed while queued work replaces the actual callee.
+vm.evaluate(`(defvar *thread-fixed-fired* nil)
+  (defparameter *thread-fixed-before*
+    (miricl-compiler:compile-native '(lambda (x) (declare (ignore x)) (values :before nil :tail))))
+  (defparameter *thread-fixed-after*
+    (miricl-compiler:compile-native '(lambda (x) (declare (ignore x)) (values :after nil :tail))))
+  (defparameter *thread-fixed-rebind*
+    (miricl-compiler:compile-native '(lambda ()
+      (setq *thread-fixed-fired* t)
+      (setf (symbol-function 'thread-fixed-designator) *thread-fixed-after*)
+      (values :callback :noise)))) (values)`, {eof: true});
+const fixedDesignator = applyObject("'thread-fixed-designator");
+const fixedAfter = applyObject(':after'), fixedExpected = applyObject("'(:after nil :tail)");
+const fixedEqual = applyObject("#'equal"), fixedTrue = applyObject('t');
+for (const route of ['full', 'primary', 'scalar']) {
+  const primary = route !== 'full';
+  vm.evaluate(`(setq *thread-fixed-fired* nil)
+    (setf (symbol-function 'thread-fixed-designator) *thread-fixed-before*)
+    (funcall *thread-apply-queue* 16 nil nil)
+    (funcall *thread-apply-queue* 12 (funcall *thread-apply-queue* 0 nil nil) *thread-fixed-rebind*)
+    (funcall *thread-apply-queue* 13 0 nil) (values)`, {eof: true});
+  vm.vm['thread-enter'](0); vm.vm['thread-main-state'](0);
+  vm.vm['thread-active'].value = 1;
+  let result;
+  try {
+    result = route === 'scalar' ? vm.vm['native-call1'](fixedDesignator, null)
+      : vm.vm['native-fixed-call'](fixedDesignator, null, null, null, null, primary ? 9 : 1);
+  } finally {
+    vm.vm['thread-active'].value = 0;
+    vm.vm['thread-save'](); vm.vm['thread-main-state'](1);
+  }
+  assert.equal(primary ? result : vm.vm['native-call2'](fixedEqual, result, fixedExpected),
+    primary ? fixedAfter : fixedTrue,
+    'The application selects the rebound native callee and preserves its demanded values.');
+  assert.equal(vm.evaluate('(and *thread-fixed-fired* (eq (symbol-function \'thread-fixed-designator) *thread-fixed-after*))').output,
+    'T\n', 'The queued rebinding actually ran during the observed application.');
+}
+vm.evaluate("(fmakunbound 'thread-fixed-designator) (values)");
+console.log('PASS fixed and scalar symbol calls select live bindings after queued work and preserve values');
+// Fixed array access observes adjustment before reading dimensions or backing.
+vm.evaluate(`(defvar *thread-rank1-fired* nil)
+  (defvar *thread-rank1-base* nil)
+  (defparameter *thread-rank1-adjust*
+    (miricl-compiler:compile-native '(lambda ()
+      (adjust-array *thread-rank1-base* 4 :initial-contents '(91 92 93 94))
+      (setq *thread-rank1-fired* t)
+      (values :callback :noise)))) (values)`, {eof: true});
+const rank1Aref = applyObject("#'aref"), rank1Setter = applyObject("(fdefinition '(setf aref))");
+const rank1Index = applyObject('3'), rank1Value = applyObject('-9');
+for (const write of [false, true]) {
+  vm.evaluate(`(setq *thread-rank1-fired* nil
+      *thread-rank1-base* (make-array 2 :element-type 'fixnum :adjustable t :initial-contents '(10 20)))
+    (values)`, {eof: true});
+  const rank1Array = applyObject('*thread-rank1-base*');
+  vm.evaluate(`(funcall *thread-apply-queue* 16 nil nil)
+    (funcall *thread-apply-queue* 12 (funcall *thread-apply-queue* 0 nil nil) *thread-rank1-adjust*)
+    (funcall *thread-apply-queue* 13 0 nil) (values)`, {eof: true});
+  vm.vm['thread-enter'](0); vm.vm['thread-main-state'](0);
+  vm.vm['thread-active'].value = 1;
+  let result;
+  try {
+    result = write ? vm.vm['native-call3'](rank1Setter, rank1Value, rank1Array, rank1Index)
+      : vm.vm['native-call2'](rank1Aref, rank1Array, rank1Index);
+  } finally {
+    vm.vm['thread-active'].value = 0;
+    vm.vm['thread-save'](); vm.vm['thread-main-state'](1);
+  }
+  assert.equal(vm.javascript.integer(result), write ? -9n : 94n,
+    'The fixed array operation uses the dimension and backing installed at its checkpoint.');
+  assert.equal(vm.javascript.integer(vm.vm['native-call2'](rank1Aref, rank1Array, rank1Index)),
+    write ? -9n : 94n, 'The observed store reaches the actual current backing.');
+  assert.equal(vm.evaluate(`(and *thread-rank1-fired*
+    (= (array-dimension *thread-rank1-base* 0) 4))`).output, 'T\n',
+    'The queued adjustment fired before the observed operation.');
+}
+console.log('PASS fixed rank-one array access observes queued dimension and backing replacement');
 assert.equal(vm.evaluate('(+ 20 22)').output, '42\n', 'Synchronous evaluation remains usable.');
 await vm.evaluateAsync('(defparameter *background-worker* (miricl-threads:make-thread (lambda () (sleep 0.01) 17)))');
 assert.equal(vm.evaluate('(+ 20 22)').output, '42\n');

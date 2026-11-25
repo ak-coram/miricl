@@ -154,7 +154,11 @@
   ;; A function-object hit is non-NIL; the default NIL local marks a symbol.
   ;; Whitelist membership proves the canonical factory's bounded builtin ID.
   #@(if (ref.is_null (local.get $function))
-    (then (local.set $function (call $canonical-builtin-function (local.get $id) (i32.const 0)))))
+    (then
+      (local.set $function (array.get $objects (global.get $canonical-builtin-functions)
+        (i32.shl (local.get $id) (i32.const 1))))
+      (if (ref.is_null (local.get $function))
+        (then (local.set $function (call $canonical-builtin-function (local.get $id) (i32.const 0)))))))
   #@(local.set $backtrace-depth (global.get $backtrace-depth))
   #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
   #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))

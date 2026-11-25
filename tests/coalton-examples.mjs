@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
-import {examples, config} from '../coalton/examples.mjs';
+import fs from 'node:fs/promises';
+import {examples, config, documentationSource} from '../coalton/examples.mjs';
 import {coaltonInput} from '../scripts/coalton.mjs';
 
+// Check the packaged manual before the expensive compiler/library build.
+const documentation = await fs.readFile(new URL(`../vendor/coalton/${documentationSource}`, import.meta.url), 'utf8');
+assert.ok(documentation.trim(), 'The pinned manual packaged with the REPL is present.');
 assert.ok(examples.length >= 6);
 assert.equal(new Set(examples.map(example => example.id)).size, examples.length);
 for (const example of examples) {

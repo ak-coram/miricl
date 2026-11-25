@@ -1,4 +1,5 @@
 // Self-contained adaptations of examples in the pinned Coalton manual.
+export const documentationSource = 'docs/manual/site/topics/language-guide.md';
 export const config = {name: 'Lisp + Coalton', storageKey: 'miricl.coalton.sessions.v1',
   draftKey: 'miricl.coalton.draft.v1', defaultMode: 'lisp',
   modes: ['lisp', 'expression', 'definitions'],
