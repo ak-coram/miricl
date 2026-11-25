@@ -31,6 +31,12 @@ DEBUG 3 use checked HIR execution. NIL selects source evaluation, including
 bootstrap and lexical adapters. Expansion and load-time evaluation use
 target objects and dynamic bindings.
 
+When native evaluation is enabled, =CL:COMPILE= can compile an explicit
+lambda expression directly using an already ready compiler and the host
+module loader. =:interpreted=, NIL, DEBUG 3 and recursive preparation use
+minimal compilation. Existing function objects follow the minimal path,
+which preserves their lexical environments and previously compiled code.
+
 =miricl.wasm= starts with a precompiled compiler in =:ready= state and
 =:image= origin. =miricl-cold.wasm= carries the source compiler.
 =miricl-interpreter.wasm= runs source and portable code and can load existing
@@ -159,6 +165,13 @@ prove a quoted-list cursor or a traversal counter invariant. Mutation,
 aliasing, captures, unresolved calls and unknown effects can invalidate
 such facts. A LIST fact permits NIL or CONS and gives no proper-spine proof.
 
+Source-owned sealed modules can propagate executable argument facts through
+audited lexical function cells. The audit identifies the actual initializer
+and every read, and requires used snapshots to feed known calls directly.
+An exposed closure, a used write result or an unresolved use keeps the
+function's arguments open. Explicit entries also keep open ingress. The
+audit belongs to one emission and excludes debugger-visible modules.
+
 =standard-contracts.lisp= records exact ANSI operation identities and
 separate facts about arity, keywords, types, successful value counts,
 effects, callbacks, signaling, allocation and sharing. Method-local
@@ -217,6 +230,17 @@ ordinary adapters preserve zero, secondary and overflow values across
 calls, callbacks, and cleanup. FTYPE and primary demand supply no exact
 count proof. Tuple transport and frame omission require independent
 admission.
+
+In a source-owned sealed module, a retained non-tail DEBUG 0 call can use a
+private fixed worker that returns i64 directly to an existing scalar
+arithmetic consumer. SPEED must exceed SPACE at the caller. The compiler
+requires an exact one-value proof, a nonescaping frameless leaf, a checked
+range proof for its arithmetic result and a result with only scalar uses.
+The ordinary object entry remains available for closure attachment. Both
+operation-entry polling and one-value cleanup remain in place. The emitter
+bounds duplication and checks the relocated worker's final call edges and
+entry references before publishing the module. A failed plan restarts
+emission with the ordinary calling convention.
 
 Shared fixed-call adapters cover up to four operands. A matching worker can
 avoid the input packet while the shared executor still owns frames, dynamic
@@ -295,7 +319,10 @@ selected widths based on both operand and result bounds.
 
 A checked argument snapshot can seed an executable fact at the actual
 check. Admission discards tentative checks, facts and consumers together
-when the plan fails. Private raw cells need proofs for the initial value,
+when the plan fails. A live structured-loop comparison can read an i64
+local initialized at its dominating argument check. Copy chains can share
+that local, while the original checked object remains available to other
+uses. Private raw cells need proofs for the initial value,
 each write and every relevant use, and reads retain independent snapshots.
 Speed-oriented policy can also select guarded arithmetic or tiered storage
 for some private counters. The ordinary numeric path handles unsupported
@@ -311,7 +338,15 @@ and ASSOC searches with known comparison controls. These plans preserve
 intermediate list checks, array backing bounds, displaced storage,
 mutation, sharing and freshness. Fixed AREF reads and writes can access
 owned rank-one fixnum backing after checking its live dimension, layout
-and bounds at the operation entry. The runtime LOOP ACROSS expander
+and bounds after the operation-entry checkpoint. A direct canonical AREF
+read can pass an existing raw i64 arithmetic result or cell snapshot to
+the checked rank-one reader. It checks the full subscript before narrowing
+and resolves displaced storage through the ordinary live backing path.
+The raw entry validates external references and checks physical backing
+extents when that path follows a displaced view.
+General dispatch and rank or bounds errors reconstruct the original i64
+box. Out-of-line NOTINLINE calls and other boxed consumers keep their
+ordinary calling convention. The runtime LOOP ACROSS expander
 validates the vector and captures its active length
 during initialization, then reads current elements through checked AREF.
 General mutable list traversal supplies no list-length inference.

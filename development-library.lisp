@@ -1069,17 +1069,26 @@
     (miricl-compiler::compiler-source-form definition))
   (%%function-name-symbol name)
   (let* ((macro (and (symbolp name) (macro-function name)))
+         (lambda-source-p (and suppliedp (consp definition) (eq (car definition) 'lambda)))
          (function
-           (if suppliedp
-               (progn
-                 (unless (or (functionp definition)
-                             (and (consp definition) (eq (car definition) 'lambda)))
-                   (error 'type-error :datum definition :expected-type '(or function cons)))
-                 (coerce definition 'function))
-               (or macro (fdefinition name)))))
-    (setq function (if (fboundp 'miricl-compiler::compile-minimal-function)
-                       (miricl-compiler::compile-minimal-function function name)
-                       (%%compile 0 function)))
+           (or (and lambda-source-p (fboundp '%compile-evaluation)
+                    (%compile-evaluation definition name nil t))
+               (let ((function
+                       (cond ((not suppliedp) (or macro (fdefinition name)))
+                             (lambda-source-p
+                              ;; COERCE evaluates FUNCTION. Reuse the source
+                              ;; preparation guard if native mode was declined.
+                              (if (and (boundp 'miricl-compiler:*compile-evaluations*)
+                                       miricl-compiler:*compile-evaluations*
+                                       (not (eq miricl-compiler:*compile-evaluations* :interpreted)))
+                                  (let ((miricl-compiler::*compiling-evaluation* t))
+                                    (coerce definition 'function))
+                                  (coerce definition 'function)))
+                             ((functionp definition) definition)
+                             (t (error 'type-error :datum definition :expected-type '(or function cons))))))
+                 (if (fboundp 'miricl-compiler::compile-minimal-function)
+                     (miricl-compiler::compile-minimal-function function name)
+                     (%%compile 0 function))))))
     (when name
       (if macro (setf (macro-function name) function)
           (setf (fdefinition name) function)))

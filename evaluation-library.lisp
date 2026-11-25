@@ -1,23 +1,31 @@
 ;;;; Browser/Node evaluation policy; forms and literals stay in the local heap.
 (defvar miricl-compiler::*compiling-evaluation* nil)
-(defun %compile-evaluation (form name &optional named-definition)
+(defun %compile-evaluation (form name &optional named-definition retained-entry)
   ;; Interpretation uses the same checked source lowering and compact HIR as
   ;; minimal COMPILE. The dynamic guard covers preparation, not user execution.
+  ;; A retained entry requested by COMPILE can use an already ready compiler.
   (let* ((interpreted (or (not miricl-compiler:*compile-evaluations*)
                           miricl-compiler::*compiling-evaluation*
                           (eq miricl-compiler:*compile-evaluations* :interpreted)))
          (miricl-compiler::*compiling-evaluation* t))
+    (when (and retained-entry
+               (or interpreted
+                   (not (boundp 'miricl-compiler::*compiler-state*))
+                   (not (eq miricl-compiler::*compiler-state* :ready))
+                   (not (miricl-compiler::compiler-primitive 21 nil))))
+      (return-from %compile-evaluation nil))
     (miricl-compiler::compiler-source-form form)
     (miricl-compiler::compiler-function-name name "function name")
     (if (or interpreted
             (not (fboundp 'miricl-compiler:compile-native))
             (%debug-form-p form)
             (= (or (%body-debug-level (cddr form) %debug-default-level) 1) 3))
-        (let* ((miricl-compiler::*hir-debug-info-enabled* t)
-               (miricl-compiler::*hir-debug-write-types* t)
-               (expanded (miricl-compiler::lower-source-to-hir form name)))
-          (miricl-compiler::hir-unit-function expanded))
-        (let ((miricl-compiler::*wasm-single-use-entry* (null name)))
+        (unless retained-entry
+          (let* ((miricl-compiler::*hir-debug-info-enabled* t)
+                 (miricl-compiler::*hir-debug-write-types* t)
+                 (expanded (miricl-compiler::lower-source-to-hir form name)))
+            (miricl-compiler::hir-unit-function expanded)))
+        (let ((miricl-compiler::*wasm-single-use-entry* (and (null name) (not retained-entry))))
           (miricl-compiler::compile-native-source form name named-definition)))))
 
 (defun %compiler-evaluate (form &optional path)

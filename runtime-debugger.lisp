@@ -113,15 +113,25 @@
 
 (define-runtime-function $apply (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
   #@(if (global.get $debug-evaluating)
-    (then (return_call $debug-apply (local.get $name) (local.get $args))))
+    (then (return_call $debug-apply (local.get $name) (local.get $args) (i32.const 0))))
   #@(return_call $apply0 (local.get $name) (local.get $args)))
 
-(define-runtime-function $debug-apply (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
+;; Like APPLY0-READY, this requires checked internal arguments and an entry
+;; checkpoint already performed by the caller.
+(define-runtime-function $apply-ready (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
+  #@(if (global.get $debug-evaluating)
+    (then (return_call $debug-apply (local.get $name) (local.get $args) (i32.const 1))))
+  #@(return_call $apply0-ready (local.get $name) (local.get $args)))
+
+(define-runtime-function $debug-apply
+    (($name :nullable-object) ($args :nullable-object) ($ready i32)) (:nullable-object)
   (:locals ($result :nullable-object) ($thrown i32))
   ;; Callees select their own lexical policy. Debugger/library/native calls do
   ;; not inherit stepping dynamically from their interpreted caller.
   #@(global.set $debug-evaluating (i32.const 0))
-  (debug-protected-call #@(call $apply0 (local.get $name) (local.get $args))
+  (debug-protected-call #@(if (result (ref null eq)) (local.get $ready)
+    (then (call $apply0-ready (local.get $name) (local.get $args)))
+    (else (call $apply0 (local.get $name) (local.get $args))))
     #@(global.set $debug-evaluating (i32.const 1))))
 
 (define-runtime-function $debug-stack-string () (:nullable-object)
@@ -227,4 +237,4 @@
   #@(global $debug-frames (mut (ref null eq)) (ref.null eq))
   ($optimization-quality-level-cl) ($optimize-debug-level)
   (if *source-bootstrap-p* (source-debugger-runtime-wat) "")
-  ($apply) ($debug-apply) ($debug-stack-string) ($debug-operation))
+  ($apply) ($apply-ready) ($debug-apply) ($debug-stack-string) ($debug-operation))

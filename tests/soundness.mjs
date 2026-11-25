@@ -1023,6 +1023,7 @@ try {
   };
   // Fixed array adapters use live dimensions and retain checked storage access.
   const rank1Read = packetFunction("#'aref");
+  const rank1ReadRaw = vm.vm['native-aref-int64'];
   const rank1Write = packetFunction("(fdefinition '(setf aref))");
   const rank1Svref = packetFunction("#'svref");
   const rank1Svset = packetFunction("(fdefinition '(setf svref))");
@@ -1045,6 +1046,7 @@ try {
     const array = rank1Value(source), expected = rank1Value(expectedSource), replacement = rank1Value(replacementSource);
     rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1Index), expected);
     rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1BoxedIndex), expected);
+    rank1Equal(rank1ReadRaw(array, 1n), expected);
     assert.equal(vm.vm['native-call3'](rank1Write, replacement, array, rank1Index), replacement);
     rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1BoxedIndex), replacement);
     if (!rank1Numeric) rank1Numeric = array;
@@ -1056,8 +1058,12 @@ try {
     (values)`);
   const rank1Base = rank1Value('*soundness-rank1-base*'), rank1View = rank1Value('*soundness-rank1-view*');
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1View, rank1Index), rank1Value('12'));
+  rank1Equal(rank1ReadRaw(rank1View, 1n), rank1Value('12'));
   evaluate("(adjust-array *soundness-rank1-base* 6 :initial-contents '(100 101 102 103 104 105)) (values)");
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1View, rank1Index), rank1Value('102'));
+  rank1Equal(rank1ReadRaw(rank1View, 1n), rank1Value('102'));
+  const rank1MatrixView = rank1Value("(let ((base (make-array '(2 2) :element-type 'fixnum :initial-contents '((1 2) (3 4))))) (make-array 4 :element-type 'fixnum :displaced-to base))");
+  rank1Equal(rank1ReadRaw(rank1MatrixView, 2n), rank1Value('3'));
   const rank1New = rank1Value('9007199254740993');
   assert.equal(vm.vm['native-call3'](rank1Write, rank1New, rank1View, rank1Index), rank1New);
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1Base, rank1Value('2')), rank1New);
@@ -1073,6 +1079,10 @@ try {
   }
   for (const value of [rank1Value('9223372036854775808'), rank1Value('1/2')])
     rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, value, rank1Numeric, rank1Index));
+  for (const index of [-1n, 3n, 4294967297n, -(1n << 63n), (1n << 63n) - 1n])
+    rejectPacketOperation(() => rank1ReadRaw(rank1Numeric, index));
+  rejectPacketOperation(() => rank1ReadRaw(rank1Empty, 0n));
+  rejectPacketOperation(() => rank1ReadRaw(rank1Matrix, 0n));
   // Construct malformed flat storage through this image's actual core layout.
   // Immutable fields go to CORE-NEW; mutable fields go to CORE-SET.
   const rank1Clone = (object, change) => {
@@ -1127,6 +1137,20 @@ try {
   const rank1BackingSlot = vm.vm[rank1Reader](rank1Numeric).indexOf(rank1Private);
   const rank1ShortBacking = vm.vm[rank1Reader](rank1Value("(make-array 1 :element-type 'fixnum)"))[rank1BackingSlot];
   const rank1BrokenNumeric = rank1Clone(rank1Numeric, fields => {fields[rank1BackingSlot] = rank1ShortBacking;});
+  const rank1WrongNumericBacking = rank1Clone(rank1Numeric, fields => {fields[rank1BackingSlot] = rank1Base;});
+  const rank1FalseHeaders = [34, 35].map(tag => rank1Clone(rank1FlatString, fields => {
+    fields[0] = (fields[0] & ~63) | tag;
+  }));
+  // A zero-offset view exposes index zero of malformed backing unless the
+  // resolver checks the target's whole layout, even when this index fits.
+  const rank1BadTargets = [rank1BrokenNumeric, rank1WrongNumericBacking].map(target =>
+    rank1Clone(rank1MatrixView, fields => {fields[rank1BackingSlot] = target;}));
+  const rank1Cycle = rank1Clone(rank1MatrixView, () => {});
+  const rank1CycleFields = vm.vm[rank1Reader](rank1Cycle);
+  rank1CycleFields[rank1BackingSlot] = rank1Cycle;
+  const rank1Signature = rank1Reader.split(':')[2];
+  vm.vm[`core-set:${rank1Type}`](rank1Cycle, ...rank1CycleFields.filter((_, i) =>
+    rank1Signature[i] === rank1Signature[i].toUpperCase()));
   rejectPacketOperation(() => vm.vm['native-call2'](rank1Read, rank1BrokenNumeric, rank1Index));
   rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, rank1New, rank1BrokenNumeric, rank1Index));
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1Numeric, rank1Index), rank1Value('9223372036854775807'));
@@ -1137,8 +1161,30 @@ try {
     rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, rank1New, invalid, rank1Index));
     rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, rank1New, rank1Numeric, invalid));
   }
+  for (const invalid of [foreign, packets.empty(), rank1Private, ...rank1FalseHeaders,
+    rank1BrokenString, rank1BrokenBits, rank1ShortBits, rank1BrokenNumeric, rank1WrongNumericBacking,
+    ...rank1BadTargets, rank1Cycle]) {
+    rejectPacketOperation(() => rank1ReadRaw(invalid, 0n));
+    rank1Equal(rank1ReadRaw(rank1Numeric, 1n), rank1Value('9223372036854775807'));
+  }
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1Numeric, rank1Index), rank1Value('9223372036854775807'));
   console.log('Soundness: fixed rank-one array access preserves live dimensions, backing, element checks and rejection recovery.');
+  check(`(let* ((worker (compile-native '(lambda (array)
+                  (declare (optimize (safety 1) (debug 0) (space 3) (speed 1)))
+                  (let ((index 0) (seen nil))
+                    (dolist (step '(a b c) (nreverse seen))
+                      (incf index)
+                      (push (multiple-value-list (aref array index)) seen))))))
+                (array (make-array 4 :element-type 'fixnum :fill-pointer 0
+                          :initial-contents '(5 7 9223372036854775807 13)))
+                (expected '((7) (9223372036854775807) (13))))
+           (and (equal (funcall worker array) expected)
+                (handler-case (progn (funcall worker (make-array 2)) nil)
+                  (type-error (condition)
+                    (and (eql (type-error-datum condition) 2)
+                         (typep 1 (type-error-expected-type condition))
+                         (not (typep 2 (type-error-expected-type condition))))))
+                (equal (funcall worker array) expected)))`);
   check(`(let* ((worker (compile-native '(lambda (vector)
                     (loop for value across vector collect value))))
                 (cycle (list :cycle)))
@@ -2070,6 +2116,53 @@ try {
       (block (first (hir-function-blocks function)))
       (instruction (first (hir-block-instructions block))))
     ${mutation} (${consumer} unit))`, reason);
+  // Native scalar admission depends on the definition dominating its uses.
+  reject(`(let* ((unit (lower-source-to-hir '(lambda () (values 7 9))))
+      (function (first (hir-unit-functions unit)))
+      (block (hir-function-entry function))
+      (instructions (hir-block-instructions block))
+      (group (find :values instructions :key (lambda (instruction) (hir-instruction-opcode instruction))))
+      (producer (hir-value-producer (first (hir-instruction-inputs group)))))
+    (setf (hir-block-instructions block)
+      (append (remove producer instructions) (list producer)))
+    (emit-native-module unit))`, /used before its definition/, 'hir-code-input-error');
+  reject(`(let* ((unit (lower-source-to-hir '(lambda (flag)
+                      (if flag (values 17 29) (values 47 61)))))
+      (function (first (hir-unit-functions unit)))
+      (groups (loop for block in (hir-function-blocks function)
+        for group = (find :values (hir-block-instructions block)
+                      :key (lambda (instruction) (hir-instruction-opcode instruction)))
+        when (and group (= 2 (length (hir-instruction-inputs group)))) collect group)))
+    (setf (first (hir-instruction-inputs (first groups)))
+          (first (hir-instruction-inputs (second groups))))
+    (emit-native-module unit))`, /does not dominate/, 'hir-code-input-error');
+  reject(`(let* ((unit (lower-source-to-hir '(lambda (x) (values x *soundness-context*))))
+      (function (first (hir-unit-functions unit)))
+      (instructions (hir-block-instructions (hir-function-entry function)))
+      (access (find :global-read instructions :key (lambda (instruction) (hir-instruction-opcode instruction))))
+      (argument (find :argument instructions :key (lambda (instruction) (hir-instruction-opcode instruction)))))
+    (setf (first (hir-instruction-inputs access)) (hir-instruction-output argument))
+    (emit-native-module unit))`, /dynamic environment/, 'hir-code-input-error');
+  for (const mutation of [
+    '(setf (hir-instruction-attributes enter) (hir-instruction-attributes (block-entry child)))',
+    '(setf (hir-target-token (first (hir-instruction-attributes enter))) (hir-function-environment root))',
+  ]) reject(`(flet ((block-entry (function)
+      (loop for block in (hir-function-blocks function) thereis
+        (find :block-enter (hir-block-instructions block)
+          :key (lambda (instruction) (hir-instruction-opcode instruction))))))
+    (let* ((unit (lower-source-to-hir '(lambda ()
+                   (block outer (values 1 (lambda () (block inner (values 2 3))))))))
+           (root (first (hir-unit-functions unit)))
+           (child (second (hir-unit-functions unit)))
+           (enter (block-entry root)))
+      ${mutation}
+      (emit-native-module unit)))`, /target owner or token/, 'hir-code-input-error');
+  check(`(multiple-value-bind (bytes literals)
+      (emit-native-module (lower-source-to-hir '(lambda (flag)
+                            (if flag (values 17 29) (values 47 61)))))
+    (let ((function (compiler-primitive 17 bytes literals nil)))
+      (and (equal (multiple-value-list (funcall function t)) '(17 29))
+           (equal (multiple-value-list (funcall function nil)) '(47 61)))))`);
   // Public CALL metadata is validated before compiler internals or retained-code
   // serialization; malformed policy data must leave the compiler usable.
   for (const attributes of [':speed', '17', "'(:unknown)", "'(:speed :speed)",
@@ -2513,6 +2606,64 @@ try {
         ${entries === '' ? `(let ((worker (cdr (assoc 'soundness-ipcp-worker module))))
           (and (eq :true (funcall worker t)) (eq :false (funcall worker nil))))` : 't'})`})`);
   }
+
+  // The retained leaf can feed a raw consumer only while its ingress and
+  // successful value count are closed. Boxed fallback retains ordinary CL.
+  for (const [input, expected] of [
+    ['1073741824', '1073741829'], ['-2', '3'],
+    ['9223372036854775807', '9223372036854775812'],
+  ]) {
+    check(`(let* ((module (compile-native-module
+        '((defun soundness-scalar-entry ()
+            (declare (optimize (debug 0) (safety 1) (speed 3) (space 1)))
+            (locally (declare (notinline soundness-scalar-leaf))
+              (+ (soundness-scalar-leaf ${input}) 3)))
+          (defun soundness-scalar-leaf (argument)
+            (declare (optimize (debug 0) (safety 1))) (+ argument 2)))
+        :entry-points '(soundness-scalar-entry) :inline nil)))
+      (equal (multiple-value-list (funcall (cdr (assoc 'soundness-scalar-entry module))))
+        '(${expected})))`);
+  }
+  for (const [body, expected] of [
+    ['(values)', 'nil'], ['(values (+ argument 2) :extra)', '(1073741826 :extra)'],
+  ]) {
+    check(`(let* ((module (compile-native-module
+        '((defun soundness-scalar-entry (full)
+            (declare (optimize (debug 0) (safety 1) (speed 3) (space 1)))
+            (if full (soundness-scalar-leaf 1073741824)
+                (list (soundness-scalar-leaf 1073741824))))
+          (defun soundness-scalar-leaf (argument)
+            (declare (ignorable argument) (optimize (debug 0) (safety 1))) ${body}))
+        :entry-points '(soundness-scalar-entry) :inline nil))
+        (entry (cdr (assoc 'soundness-scalar-entry module))))
+      (and (equal (multiple-value-list (funcall entry t)) '${expected})
+           (equal (funcall entry nil) (list (first '${expected})))))`);
+  }
+  for (const debug of [0, 2]) check(`(let ((package (make-package "SOUNDNESS-SCALAR-CALLS" :use nil)))
+    (unwind-protect
+      (let ((leaf (intern "LEAF" package)))
+        (export leaf package)
+        (setf (symbol-function leaf) (lambda (x) (values x :before)))
+        (let* ((module (compile-native-module
+                  \`((defun soundness-scalar-entry (mode)
+                      (declare (optimize (debug 0) (safety 1) (speed 3) (space 1)))
+                      (case mode (:escape (function ,leaf))
+                        (:global (funcall ',leaf 7))
+                        (otherwise (+ (,leaf 1073741824) 3))))
+                    (defun ,leaf (argument)
+                      (declare (optimize (debug ${debug}) (safety 1))) (+ argument 2)))
+                  :entry-points '(soundness-scalar-entry) :inline nil))
+               (entry (cdr (assoc 'soundness-scalar-entry module)))
+               (escaped (funcall entry :escape)))
+          (and (equal (multiple-value-list (funcall entry :global)) '(7 :before))
+               (progn (setf (symbol-function leaf) (lambda (x) (values x :after))) t)
+               (equal (multiple-value-list (funcall entry :global)) '(7 :after))
+               (equal (multiple-value-list (funcall entry :direct)) '(1073741829))
+               (eql (funcall escaped 0.5d0) 2.5d0)
+               (= (funcall escaped 9223372036854775808) 9223372036854775810)
+               (handler-case (progn (funcall escaped "invalid") nil) (type-error () t))
+               (= (funcall escaped 40) 42))))
+      (delete-package package)))`);
 
   // Primary truth cannot discard an ordinary worker call, its argument
   // effects, a secondary VALUES error, or the distinction between groups.
@@ -4498,6 +4649,17 @@ try {
       (compilation-speed ${savedSize >> 4})
       (debug ${savedDebug}))) (values)`);
   }
+
+// Explicit lambda compilation checks input and can recover without starting
+// the optimized compiler on an otherwise loader-equipped runtime.
+check(`(let ((*compile-evaluations* t) (*compiler-state* :cold)
+             (source (list 'lambda nil 42)))
+  (setf (cdddr source) source)
+  (and (handler-case (progn (compile nil source) nil)
+         (compiler-input-error (condition) (eq (compiler-error-datum condition) source)))
+       (eq *compiler-state* :cold)
+       (= (funcall (compile nil '(lambda () (declare (optimize (debug 1))) 42))) 42)
+       (eq *compiler-state* :cold)))`);
 
 // Ordinary COMPILE must inherit the current global preference even when the
 // source function has a live lexical environment and retains no debug source.

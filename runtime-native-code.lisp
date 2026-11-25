@@ -2904,6 +2904,38 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (extern.convert_any (call $standard-function-code (local.get $code)))
     (local.get $a) (local.get $b) (local.get $c)))
 
+(define-runtime-function $native-aref-int64 (($array externref) ($subscript i64)) (externref)
+  (:export-raw "native-aref-int64")
+  (:locals ($a :nullable-object) ($function :nullable-object) ($result :nullable-object) ($index i32))
+  #@(local.set $a (call $native-checked-value (local.get $array)))
+  #@(local.set $function (call $standard-function-code (i32.const ,(1+ (runtime-symbol-id 'aref)))))
+  #@(if (i32.ne (call $native-builtin-id (local.get $function)) (i32.const ,(runtime-symbol-id 'aref)))
+    (then
+      (call $array-check-raw-read-miss (local.get $a))
+      (return_call $native-call2 (extern.convert_any (local.get $function))
+        (local.get $array) (extern.convert_any (call $box-int64 (local.get $subscript))))))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  ;; The checkpoint can change array shape or backing. Read both live.
+  #@(local.set $result (call $array-owned-rank1-fixnum-element64
+    (local.get $a) (local.get $subscript) (ref.null eq) (i32.const 0)))
+  #@(if (ref.is_null (local.get $result))
+    (then
+      (local.set $index (call $array-rank1-index64
+        (call $array-rank1-dimension (local.get $a)) (local.get $subscript)))
+      (if (i32.ge_s (local.get $index) (i32.const 0))
+        (then (local.set $result
+          (call $array-resolve-element (local.get $a) (local.get $index)
+            (ref.null eq) (i32.const 0) (i32.const 1))))
+        (else
+          ;; Ordinary application owns the rank/index errors and the frame.
+          ;; Only here does the original scalar snapshot need its Lisp box.
+          (call $array-check-raw-read-miss (local.get $a))
+          (local.set $result (call $apply-ready (local.get $function)
+            (call $cons (local.get $a) (call $cons (call $box-int64 (local.get $subscript)) (ref.null eq)))))))
+      (drop (call $native-checked-value (extern.convert_any (local.get $result))))))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
 (define-runtime-function $native-standard-call4
     (($code i32) ($a externref) ($b externref) ($c externref) ($d externref)) (externref)
   (:export-raw "native-standard-call4")
@@ -3017,6 +3049,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
   ($native-symbol-fixed-function) ($native-fixed-apply-ready) ($native-fixed-call) ($native-call0) ($native-call1) ($native-call-values1) ($native-call2) ($native-call3) ($native-call4)
   ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
+  ($native-aref-int64)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)
   ($native-generic-fixed-tail-call)
   ($native-tail-call0) ($native-tail-call1) ($native-tail-call2) ($native-tail-call3) ($native-tail-call4))

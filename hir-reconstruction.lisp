@@ -239,6 +239,13 @@
             (case opcode
               (:function-reference
                (compiler-function-name (first (hir-instruction-attributes instruction)) "HIR function name"))
+              (:block-enter
+               (let ((target (first (hir-instruction-attributes instruction))))
+                 (unless (and (%hir-target-p target)
+                              (eq (hir-target-owner target) function)
+                              (hir-instruction-output instruction)
+                              (eq (hir-target-token target) (hir-instruction-output instruction)))
+                   (hir-code-error opcode "lexical target owner or token does not match its block entry"))))
               (:values
                (unless (every (lambda (input) (eq (hir-value-kind input) :single)) inputs)
                  (hir-code-error opcode "VALUES operands must be single values")))
