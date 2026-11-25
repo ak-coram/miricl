@@ -1,4 +1,4 @@
-;;;; Wasmtime 50 C API. Keep store-owned handles within their originating store.
+;;;; Wasmtime 51 C API. Keep store-owned handles within their originating store.
 (in-package #:wasmtime)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -150,16 +150,19 @@
                 ,@body)
            (wasm-byte-vec-delete ,vector))))))
 
-;;; These layouts match the Wasmtime 50 headers (including GC root metadata).
+;;; These layouts match the Wasmtime 51 headers (including GC root metadata).
 (defcstruct wasmtime-func (store-id :uint64) (private :pointer))
 (defctype p-wasmtime-func (:pointer (:struct wasmtime-func)))
-(defmacro define-index-handle (name &optional extra)
-  `(defcstruct ,name (store-id :uint64) (private1 :uint32) (private2 :uint32)
-     ,@(when extra '((private3 :uint32)))))
+(defcstruct wasmtime-index (store-id :uint64) (private1 :uint32))
+(defmacro define-index-handle (name)
+  ;; The C headers nest the store/index pair in an anonymous struct. Preserve
+  ;; that struct's tail padding before the outer private field.
+  `(defcstruct ,name (index (:struct wasmtime-index)) (private2 :uint32)))
 (define-index-handle wasmtime-memory)
 (define-index-handle wasmtime-table)
 (define-index-handle wasmtime-tag)
-(define-index-handle wasmtime-global t)
+(defcstruct wasmtime-global
+  (store-id :uint64) (private1 :uint32) (private2 :uint32) (private3 :uint32))
 (defcstruct wasmtime-ref (store-id :uint64) (private1 :uint32) (private2 :uint32) (private3 :pointer))
 (defcunion wasmtime-valunion
   (i32 :int32) (i64 :int64) (f32 :float) (f64 :double)

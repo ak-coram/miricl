@@ -115,14 +115,14 @@ use =error instanceof lisp.adapter.MiriclError= when inspecting Lisp errors.
 
 - A host Common Lisp implementation and Quicklisp. The commands below use
   SBCL and expect Quicklisp at =~/quicklisp/setup.lisp=.
-- The [[https://github.com/bytecodealliance/wasmtime/releases/][Wasmtime C API shared library]], version 50 (CI uses 50.0.1).
+- The [[https://github.com/bytecodealliance/wasmtime/releases/][Wasmtime C API shared library]], version 51 (CI uses 51.0.0).
   Install the C API library separately from the Wasmtime CLI. Make
   =libwasmtime.so=, =libwasmtime.dylib= or =wasmtime.dll= discoverable by
   your system's library loader; use =LD_LIBRARY_PATH= on Linux,
   =DYLD_LIBRARY_PATH= on macOS or =PATH= on Windows for a custom location.
 - Git and [[https://just.systems/][just]] for the checkout and build commands.
 - Node.js 26 (used by CI) for the Node REPL and size reports.
-- The Wasmtime 50 CLI and =rlwrap= for the terminal examples below.
+- The Wasmtime 51 CLI and =rlwrap= for the terminal examples below.
 - A browser supporting WasmGC and Wasm exception handling. Async filesystem
   access and green threads also require JavaScript Promise Integration (JSPI).
   Browser tests use Chromium (=CHROMIUM= selects the executable).
