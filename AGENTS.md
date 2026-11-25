@@ -173,6 +173,11 @@ final code after rewriting and outlining, audit wrappers and arity copies, and
 strip transient permissions during serialization unless loading reestablishes
 their authority. Ordinary structural validation remains independent.
 
+Check the physical WasmGC shape before reading an object header or using an
+unchecked tag extractor. Include private arrays and other non-object GC values
+in malformed-boundary checks; rejection must produce a useful Lisp condition
+and leave the runtime usable.
+
 # Performance
 
 On shared development machines, preserve ample memory and CPU headroom for
@@ -311,6 +316,13 @@ identities. Successful small emissions do not establish that linker and
 bootstrap registrations were reloaded consistently; check those paths in a
 fresh compiled image before changing their tests.
 
+Host backend reloads do not refresh packed guest compiler sources. Refresh
+their source, symbol and code tables coherently; use a fresh host when removed
+layouts or registrations could survive a reload. Transfer private symbols
+between sessions with the current namespace-aware codec, not printed names.
+Verify restored identities against the destination runtime. Retain matching
+native bytes and literal graphs together for reuse in runtime-only iterations.
+
 Send host REPL requests as files LOADed inside HANDLER-CASE, so reader errors
 (including unknown package nicknames) are caught rather than terminating SBCL.
 Preserve baseline callable objects and matching emitted bytes before reloading
@@ -343,11 +355,33 @@ ordinary fallback paths as well as favorable hits; a small hit gain does not
 justify a large common-path regression. Structural simplification is not evidence
 of a speedup without measurement.
 
+Choose small diagnostic cases from observed workload patterns before running
+expensive checkpoints. A convenient numeric example does not establish that
+integer-specialized generic dispatch is common. Distinguish nominal type
+declarations from actual dispatch classes, and measure genuine guard hits as
+well as subclass misses. Match native helper coverage, helper sealing domains
+and policies between candidates, not just the outer drivers.
+
+Optimize broadly useful common paths rather than requiring every microcase to
+improve. Disclose slower paths and judge their importance with workload and
+application evidence; do not add narrow specializations merely to erase a
+synthetic regression. Rerun the relevant existing cases on the exact final
+implementation before attributing earlier measurements to it. When broader
+validation is deferred to CI, report it as pending rather than treating cold
+image size or focused native executions as complete compiler validation.
+
 Caches over mutable state must distinguish a location from its current value.
 Account for replacement of backing tables or roots, including initialization
 before image restoration. Shallow copying a literal container does not freeze
 its elements or establish ownership for every constructor path. Preserve quoted
 data, sharing and serialization semantics when considering cached references.
+
+Keep dispatch selection and invocation in a valid interval. After callbacks or
+polls, recheck the actual owner, backing roots, epochs and applicable hooks
+before committing. A failed check must return to live dispatch, including a
+replacement custom discriminator, rather than continuing through an earlier
+default branch. Prefer runtime-owned selection to unauthenticated stored
+targets or caller-supplied skip masks.
 
 Do full compiler builds at meaningful checkpoints and full application rebuilds
 less frequently. Reuse an existing native application bundle for runtime-only
@@ -408,6 +442,11 @@ In REPL save/restore tests, keep host callbacks and other unsaveable host values
 out of retained REPL history. Warm the intended state immediately before the
 observation or save, without intervening helpers that invalidate it. Diagnose
 harness and history-retention failures before changing runtime contracts.
+
+Callback and invalidation fixtures must establish that the intended transition
+actually occurred. Check that the hook fired and the required lazy state still
+exists immediately before the observation; setup or class lookup can eagerly
+consume it. Distinguish a callback that never ran from a stale-dispatch defect.
 
 Do not add benchmarks or benchmark infrastructure to the repository. The
 applications and their existing benchmarks are sufficient for now. Keep

@@ -12,6 +12,18 @@ const check = source => assert.equal(evaluate(source), 'T\n', source);
 const recover = () => assert.equal(evaluate("(funcall (compile-native '(lambda (x) (+ x 1))) 41)"), '42\n');
 try {
   evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
+  // Lazy builtin condition classes can invoke Lisp during a cache lookup.
+  // Isolate the fixture so earlier tests cannot materialize every candidate.
+  {
+    const dispatch = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
+    try {
+      await dispatch.mountFile('/soundness-discriminator-callback.lisp',
+        await fs.readFile(new URL('./soundness-discriminator-callback.lisp', import.meta.url), 'utf8'));
+      assert.equal(dispatch.evaluate('(load "/soundness-discriminator-callback.lisp")',
+        {eof: true}).output, 'T\n');
+    } finally {dispatch.close();}
+  }
+  console.log('Soundness: an in-flight lazy-class callback selects the live discriminator and retains all values.');
   // Shared generated functions retain checked descriptor boundaries and
   // captured state across an actual image restore.
   {
@@ -962,6 +974,44 @@ try {
     assert.ok(function_, 'The Lisp callback bridge supplied its function.');
     return function_;
   };
+  // Scalar native imports admit every supplied operand before builtin
+  // constructors or workers can discard it, just like full-value transport.
+  await vm.mountFile('/soundness-scalar-calls.lisp',
+    await fs.readFile(new URL('./soundness-scalar-calls.lisp', import.meta.url), 'utf8'));
+  evaluate('(load "/soundness-scalar-calls.lisp") (values)');
+  const scalarWorkers = Array.from({length: 5}, (_, arity) =>
+    packetFunction(`(svref *soundness-scalar-workers* ${arity})`));
+  const scalarList = packetFunction("#'list");
+  const scalarEql = packetFunction("#'eql");
+  const scalarExpected = vm.vm['native-int64'](42n);
+  const checkScalarResult = value =>
+    assert.notEqual(vm.vm['native-call2'](scalarEql, value, scalarExpected), null);
+  for (const [arity, worker] of scalarWorkers.entries()) {
+    const call = (function_, args) => vm.vm[`native-call${arity}`](function_, ...args);
+    const tail = (function_, args) => vm.vm[`native-tail-call${arity}`](function_, ...args);
+    const valid = Array(arity).fill(null);
+    checkScalarResult(call(worker, valid));
+    const validTail = tail(scalarList, valid);
+    vm.vm['native-check-arguments'](validTail, arity, arity);
+    valid.forEach((value, index) => assert.equal(vm.vm['native-argument'](validTail, index), value));
+    for (const invalid of [foreign, packets.empty()]) {
+      rejectPacketOperation(() => call(invalid, valid));
+      rejectPacketOperation(() => tail(invalid, valid));
+      for (let index = 0; index < arity; index++) {
+        const args = valid.with(index, invalid);
+        rejectPacketOperation(() => call(worker, args));
+        rejectPacketOperation(() => call(scalarList, args));
+        rejectPacketOperation(() => tail(worker, args));
+        rejectPacketOperation(() => tail(scalarList, args));
+      }
+    }
+    checkScalarResult(call(worker, valid));
+  }
+  for (const name of ['native-tail-enter', 'native-tail-direct']) {
+    for (const invalid of [foreign, packets.empty()])
+      rejectPacketOperation(() => vm.vm[name](invalid));
+  }
+  console.log('Soundness: scalar and fixed tail calls reject malformed functions and ignored operands with recovery.');
   // Fixed transport keeps ordinary checking and complete values even when
   // its actual callee misses the native-worker path.
   const knownCall = (function_, args, primary = false) => vm.vm['native-fixed-call'](

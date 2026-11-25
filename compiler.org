@@ -278,8 +278,12 @@ authorize bypassing ordinary dispatch or omitting a frame. Primary/full/tail/joi
 component locals where their actual lowering supplies tuples; ordinary calls retain scalar
 adapters. Failed signature-preserving rewriting falls back for the whole emission. General
 primary/discard calls use fixed =native-call0= through =native-call4= entries when
-their lowering supplies scalar transport. Other non-tail calls with at most four
-supplied operands use =native-fixed-call= after the private tuple and captured-result
+their lowering supplies scalar transport. These raw scalar entries admit the function
+and every supplied operand as a Lisp value before unchecked tags, builtin constructors
+or attached workers, including operands ignored by the worker. Exact binary native
+calls do not read operand tags needed only by builtin dispatch. Structural admission
+does not depend on argument-use masks or optimization proofs. Other non-tail calls
+with at most four supplied operands use =native-fixed-call= after the private tuple and captured-result
 paths have been considered. This checked fixed-value transport is independent of
 callee identity, body effects and result cardinality. It admits the function and
 all operand slots, including padding, before unchecked internals. After the entry
@@ -326,8 +330,12 @@ still allocating its packet and context. Four supplied operands retain ordinary
 packet dispatch when the recent selector's context convention cannot admit them;
 this does not widen the four-slot worker ABI.
 
-Checked transport owns its operation-entry checkpoint before selection. Native hits
-and the recent generic selector enter protected ready executors without another
+Checked transport owns its operation-entry checkpoint before selection. Fixed tail
+wrappers admit the function and every supplied operand before unchecked dispatch,
+retaining the internal entry checkpoint and NIL padding. Raw tail preparation
+entries also admit their context as a Lisp value before debugger selection or frame
+setup; ordinary builtin contexts remain valid. Native hits and the recent
+generic selector enter protected ready executors without another
 poll between selection, context assembly and entry. Readiness is private to this
 interval. Callback-capable cache matching and arity checks require final rereads of
 the epoch, cache root/token, metadata ownership, discriminator, lambda-list identity,

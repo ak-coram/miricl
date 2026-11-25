@@ -278,10 +278,12 @@
   #@(ref.cast (ref null eq) (local.get $object)))
 
 (define-runtime-function $native-checked-value (($value externref)) (:nullable-object)
-  (:locals ($object :nullable-object))
-  #@(local.set $object (call $native-checked-object (local.get $value)))
-  (wat-fail-when #@(ref.test (ref $objects) (local.get $object)) :malformed-form)
-  #@(local.get $object))
+  (:locals ($object (ref null any)))
+  #@(local.set $object (any.convert_extern (local.get $value)))
+  (wat-fail-when #@(i32.eqz (i32.or
+    (ref.test (ref null i31) (local.get $object))
+    (ref.test (ref $obj) (local.get $object)))) :malformed-form)
+  #@(ref.cast (ref null eq) (local.get $object)))
 
 (define-runtime-function $native-arguments (($count i32)) (externref)
   (:export-raw "native-arguments")
@@ -1636,6 +1638,7 @@
 
 (define-runtime-function $native-tail-enter (($function externref)) (externref)
   (:export-raw "native-tail-enter")
+  #@(drop (call $native-checked-value (local.get $function)))
   ;; Match the dispatcher's checkpoint, frame and multiple-value setup.
   #@(call $thread-checkpoint)
   #@(if (global.get $backtrace-depth)
@@ -1647,6 +1650,7 @@
 
 (define-runtime-function $native-tail-direct (($function externref)) (i32)
   (:export-raw "native-tail-direct")
+  #@(drop (call $native-checked-value (local.get $function)))
   #@(if (i32.or (global.get $debug-evaluating)
                 (ref.test (ref $native-debug-function) ,(native-object '(local.get $function))))
     (then (return (i32.const 0))))
@@ -1825,32 +1829,32 @@
 (define-runtime-function $native-tail-call0
     (($function externref)) (externref)
   (:export-raw "native-tail-call0")
-  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 0)
+  #@(return_call $native-fixed-tail-call (call $native-checked-value (local.get $function)) (i32.const 0)
     (ref.null eq) (ref.null eq) (ref.null eq) (ref.null eq)))
 
 (define-runtime-function $native-tail-call1
     (($function externref) ($a externref)) (externref)
   (:export-raw "native-tail-call1")
-  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 1)
-    ,(native-object '(local.get $a)) (ref.null eq) (ref.null eq) (ref.null eq)))
+  #@(return_call $native-fixed-tail-call (call $native-checked-value (local.get $function)) (i32.const 1)
+    (call $native-checked-value (local.get $a)) (ref.null eq) (ref.null eq) (ref.null eq)))
 
 (define-runtime-function $native-tail-call2
     (($function externref) ($a externref) ($b externref)) (externref)
   (:export-raw "native-tail-call2")
-  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 2)
-    ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) (ref.null eq) (ref.null eq)))
+  #@(return_call $native-fixed-tail-call (call $native-checked-value (local.get $function)) (i32.const 2)
+    (call $native-checked-value (local.get $a)) (call $native-checked-value (local.get $b)) (ref.null eq) (ref.null eq)))
 
 (define-runtime-function $native-tail-call3
     (($function externref) ($a externref) ($b externref) ($c externref)) (externref)
   (:export-raw "native-tail-call3")
-  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 3)
-    ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) ,(native-object '(local.get $c)) (ref.null eq)))
+  #@(return_call $native-fixed-tail-call (call $native-checked-value (local.get $function)) (i32.const 3)
+    (call $native-checked-value (local.get $a)) (call $native-checked-value (local.get $b)) (call $native-checked-value (local.get $c)) (ref.null eq)))
 
 (define-runtime-function $native-tail-call4
     (($function externref) ($a externref) ($b externref) ($c externref) ($d externref)) (externref)
   (:export-raw "native-tail-call4")
-  #@(return_call $native-fixed-tail-call ,(native-object '(local.get $function)) (i32.const 4)
-    ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) ,(native-object '(local.get $c)) ,(native-object '(local.get $d))))
+  #@(return_call $native-fixed-tail-call (call $native-checked-value (local.get $function)) (i32.const 4)
+    (call $native-checked-value (local.get $a)) (call $native-checked-value (local.get $b)) (call $native-checked-value (local.get $c)) (call $native-checked-value (local.get $d))))
 
 (define-runtime-function $native-attach-direct (($function externref) ($entry funcref)) (externref)
   (:export-raw "native-attach-direct")
@@ -2242,6 +2246,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
 (define-runtime-function $native-call0 (($function externref)) (externref)
   (:export-raw "native-call0")
   (:locals ($direct-result :nullable-object) ($hit i32))
+  #@(drop (call $native-checked-value (local.get $function)))
   (native-direct-call-wat 0)
   (native-generic-fast-call-wat 0)
   (native-fixed-vector-call-wat 0)
@@ -2333,8 +2338,8 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   (:export-raw "native-call1")
   (:locals ($direct-result :nullable-object) ($hit i32) ($id i32) ($tag i32) ($accessor i32)
            ($a :nullable-object) ($function-object :nullable-object) ($native-function (ref $native-function)))
-  #@(local.set $a ,(native-object '(local.get $value)))
-  #@(local.set $function-object ,(native-object '(local.get $function)))
+  #@(local.set $a (call $native-checked-value (local.get $value)))
+  #@(local.set $function-object (call $native-checked-value (local.get $function)))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(if (ref.test (ref $native-function) (local.get $function-object))
     (then (if (f64.eq (struct.get $obj $f
@@ -2469,19 +2474,21 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   (:export-raw "native-call2")
   (:locals ($direct-result :nullable-object) ($hit i32) ($id i32) ($at i32) ($bt i32) ($index i32) ($cmp i32)
            ($a :nullable-object) ($b :nullable-object) ($cell :nullable-object) ($vector (ref $array))
-           ($small-left (ref i31)) ($small-right (ref i31)))
-  #@(local.set $a ,(native-object '(local.get $left)))
-  #@(local.set $b ,(native-object '(local.get $right)))
-  #@(local.set $id (call $native-builtin-id ,(native-object '(local.get $function))))
+           ($small-left (ref i31)) ($small-right (ref i31)) ($function-object :nullable-object))
+  #@(local.set $function-object (call $native-checked-value (local.get $function)))
+  #@(local.set $a (call $native-checked-value (local.get $left)))
+  #@(local.set $b (call $native-checked-value (local.get $right)))
+  #@(local.set $id (call $native-builtin-id (local.get $function-object)))
   (native-small-number-call-wat)
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(if (ref.test (ref $native-function) (local.get $function-object))
+    (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) (local.get $function-object))) (f64.const 4))
+      (then ,(native-direct-call-wat 2 t '(local.get $function-object) '((local.get $a) (local.get $b)) nil t)
+        (return (extern.convert_any (call $native-primary-apply
+        (local.get $function-object) (array.new_fixed $objects 2 (local.get $a) (local.get $b)))))))))
+  ;; Exact native workers need only checked Lisp values, not builtin tags.
   #@(local.set $at (call $tag (local.get $a)))
   #@(local.set $bt (call $tag (local.get $b)))
-  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
-  #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
-    (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 4))
-      (then ,(native-direct-call-wat 2 t nil nil nil t)
-        (return (extern.convert_any (call $native-primary-apply
-        ,(native-object '(local.get $function)) (array.new_fixed $objects 2 (local.get $a) (local.get $b)))))))))
   (native-fixed-vector-call-wat 2)
   (wat-symbol-case #@(local.get $id)
     (eq #@(return (extern.convert_any (call $bool (ref.eq (local.get $a) (local.get $b))))))
@@ -2591,6 +2598,9 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
            ($array :nullable-object) ($subscript :nullable-object) ($function-object :nullable-object))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(local.set $function-object (call $native-checked-value (local.get $function)))
+  #@(drop (call $native-checked-value (local.get $a)))
+  #@(drop (call $native-checked-value (local.get $b)))
+  #@(drop (call $native-checked-value (local.get $c)))
   #@(local.set $id (i32.sub (i32.const -2)
     (call $native-builtin-id (local.get $function-object))))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
@@ -2605,9 +2615,6 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ;; dimensions and backing storage there. Misses keep the complete old path.
   #@(if (i32.eq (local.get $id) (i32.const ,(- -2 (runtime-symbol-id 'aref))))
     (then
-      (drop (call $native-checked-value (local.get $a)))
-      (drop (call $native-checked-value (local.get $b)))
-      (drop (call $native-checked-value (local.get $c)))
       (local.set $index (call $array-rank2-index ,(native-object '(local.get $a))
         ,(native-object '(local.get $b)) ,(native-object '(local.get $c))))
       (if (i32.ge_s (local.get $index) (i32.const 0))
@@ -2620,10 +2627,9 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (then (return (extern.convert_any
       (call $cons ,(native-object '(local.get $a)) (call $cons ,(native-object '(local.get $b))
         (call $cons ,(native-object '(local.get $c)) (ref.null eq))))))))
-  ;; These aliases serve the older setter cases. Do not cast arbitrary raw
-  ;; operands before the checked rank-two branch has admitted them.
-  #@(local.set $array (call $native-checked-value (local.get $b)))
-  #@(local.set $subscript (call $native-checked-value (local.get $c)))
+  ;; All raw operands were admitted before any fixed worker or builtin path.
+  #@(local.set $array ,(native-object '(local.get $b)))
+  #@(local.set $subscript ,(native-object '(local.get $c)))
   (wat-symbol-case #@(local.get $id)
     ((bit sbit)
       #@(if (i32.and (i32.eq (call $tag (local.get $array)) (i32.const 36))
@@ -2656,6 +2662,10 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   (:locals ($direct-result :nullable-object) ($id i32) ($index i32) ($function-object :nullable-object))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(local.set $function-object (call $native-checked-value (local.get $function)))
+  #@(drop (call $native-checked-value (local.get $a)))
+  #@(drop (call $native-checked-value (local.get $b)))
+  #@(drop (call $native-checked-value (local.get $c)))
+  #@(drop (call $native-checked-value (local.get $d)))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
     (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 6))
       (then ,(native-direct-call-wat 4 t nil nil nil t)
@@ -2669,10 +2679,6 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   (native-fixed-vector-call-wat 4)
   #@(if (i32.eq (local.get $id) (i32.const ,(- -2 (runtime-symbol-id 'aref))))
     (then
-      (drop (call $native-checked-value (local.get $a)))
-      (drop (call $native-checked-value (local.get $b)))
-      (drop (call $native-checked-value (local.get $c)))
-      (drop (call $native-checked-value (local.get $d)))
       (local.set $index (call $array-rank2-index ,(native-object '(local.get $b))
         ,(native-object '(local.get $c)) ,(native-object '(local.get $d))))
       (if (i32.ge_s (local.get $index) (i32.const 0))
