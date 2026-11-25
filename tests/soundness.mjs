@@ -1024,6 +1024,7 @@ try {
   // Fixed array adapters use live dimensions and retain checked storage access.
   const rank1Read = packetFunction("#'aref");
   const rank1ReadRaw = vm.vm['native-aref-int64'];
+  const rank1ReadI32 = vm.vm['native-aref-i31-index'];
   const rank1Write = packetFunction("(fdefinition '(setf aref))");
   const rank1Svref = packetFunction("#'svref");
   const rank1Svset = packetFunction("(fdefinition '(setf svref))");
@@ -1047,6 +1048,7 @@ try {
     rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1Index), expected);
     rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1BoxedIndex), expected);
     rank1Equal(rank1ReadRaw(array, 1n), expected);
+    rank1Equal(rank1ReadI32(array, 1), expected);
     assert.equal(vm.vm['native-call3'](rank1Write, replacement, array, rank1Index), replacement);
     rank1Equal(vm.vm['native-call2'](rank1Read, array, rank1BoxedIndex), replacement);
     if (!rank1Numeric) rank1Numeric = array;
@@ -1059,11 +1061,16 @@ try {
   const rank1Base = rank1Value('*soundness-rank1-base*'), rank1View = rank1Value('*soundness-rank1-view*');
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1View, rank1Index), rank1Value('12'));
   rank1Equal(rank1ReadRaw(rank1View, 1n), rank1Value('12'));
+  rank1Equal(rank1ReadI32(rank1View, 1), rank1Value('12'));
   evaluate("(adjust-array *soundness-rank1-base* 6 :initial-contents '(100 101 102 103 104 105)) (values)");
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1View, rank1Index), rank1Value('102'));
   rank1Equal(rank1ReadRaw(rank1View, 1n), rank1Value('102'));
+  rank1Equal(rank1ReadI32(rank1View, 1), rank1Value('102'));
   const rank1MatrixView = rank1Value("(let ((base (make-array '(2 2) :element-type 'fixnum :initial-contents '((1 2) (3 4))))) (make-array 4 :element-type 'fixnum :displaced-to base))");
   rank1Equal(rank1ReadRaw(rank1MatrixView, 2n), rank1Value('3'));
+  const rank1ObjectMatrixView = rank1Value("(let ((base (make-array '(2 2) :initial-contents '((a b) (c d))))) (make-array 2 :displaced-to base :displaced-index-offset 1))");
+  rank1Equal(rank1ReadRaw(rank1ObjectMatrixView, 1n), rank1Value("'c"));
+  rank1Equal(rank1ReadI32(rank1ObjectMatrixView, 1), rank1Value("'c"));
   const rank1New = rank1Value('9007199254740993');
   assert.equal(vm.vm['native-call3'](rank1Write, rank1New, rank1View, rank1Index), rank1New);
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1Base, rank1Value('2')), rank1New);
@@ -1083,6 +1090,10 @@ try {
     rejectPacketOperation(() => rank1ReadRaw(rank1Numeric, index));
   rejectPacketOperation(() => rank1ReadRaw(rank1Empty, 0n));
   rejectPacketOperation(() => rank1ReadRaw(rank1Matrix, 0n));
+  for (const index of [-0x80000000, -1, 3, 0x40000000, 0x7fffffff])
+    rejectPacketOperation(() => rank1ReadI32(rank1Numeric, index));
+  rejectPacketOperation(() => rank1ReadI32(rank1Empty, 0));
+  rejectPacketOperation(() => rank1ReadI32(rank1Matrix, 0));
   // Construct malformed flat storage through this image's actual core layout.
   // Immutable fields go to CORE-NEW; mutable fields go to CORE-SET.
   const rank1Clone = (object, change) => {
@@ -1145,6 +1156,15 @@ try {
   // resolver checks the target's whole layout, even when this index fits.
   const rank1BadTargets = [rank1BrokenNumeric, rank1WrongNumericBacking].map(target =>
     rank1Clone(rank1MatrixView, fields => {fields[rank1BackingSlot] = target;}));
+  // Each replacement has a valid first slot but cannot hold the declared extent.
+  for (const kind of ['t', 'character', 'bit']) {
+    const base = rank1Value(`(make-array 48 :element-type '${kind} :adjustable t)`);
+    const short = rank1Value(`(make-array 1 :element-type '${kind})`);
+    const malformed = rank1Clone(base, fields => {fields[rank1BackingSlot] = short;});
+    const view = rank1Value(`(make-array 1 :element-type '${kind}
+      :displaced-to (make-array 48 :element-type '${kind} :adjustable t))`);
+    rank1BadTargets.push(malformed, rank1Clone(view, fields => {fields[rank1BackingSlot] = malformed;}));
+  }
   const rank1Cycle = rank1Clone(rank1MatrixView, () => {});
   const rank1CycleFields = vm.vm[rank1Reader](rank1Cycle);
   rank1CycleFields[rank1BackingSlot] = rank1Cycle;
@@ -1161,14 +1181,30 @@ try {
     rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, rank1New, invalid, rank1Index));
     rejectPacketOperation(() => vm.vm['native-call3'](rank1Write, rank1New, rank1Numeric, invalid));
   }
-  for (const invalid of [foreign, packets.empty(), rank1Private, ...rank1FalseHeaders,
+  const rank1Updated = rank1Value('9223372036854775807');
+  for (const invalid of [foreign, packets.empty(), rank1Private, pair, ...rank1FalseHeaders,
     rank1BrokenString, rank1BrokenBits, rank1ShortBits, rank1BrokenNumeric, rank1WrongNumericBacking,
     ...rank1BadTargets, rank1Cycle]) {
     rejectPacketOperation(() => rank1ReadRaw(invalid, 0n));
-    rank1Equal(rank1ReadRaw(rank1Numeric, 1n), rank1Value('9223372036854775807'));
+    rank1Equal(rank1ReadRaw(rank1Numeric, 1n), rank1Updated);
+    rejectPacketOperation(() => rank1ReadI32(invalid, 0));
+    rank1Equal(rank1ReadI32(rank1Numeric, 1), rank1Updated);
   }
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1Numeric, rank1Index), rank1Value('9223372036854775807'));
   console.log('Soundness: fixed rank-one array access preserves live dimensions, backing, element checks and rejection recovery.');
+  check(`(let* ((worker (compile-native '(lambda (array limit)
+                  (declare (optimize (safety 1) (debug 1) (space 3) (speed 1)))
+                  (do ((index 0 (1+ index)) (sum 0 (+ sum (aref array index))))
+                      ((>= index limit) (values sum :done))))))
+                (base (make-array 4 :element-type 'fixnum :initial-contents '(9 3 -5 11)))
+                (view (make-array 3 :element-type 'fixnum :displaced-to base :displaced-index-offset 1)))
+           (and (equal (multiple-value-list (funcall worker base 4)) '(18 :done))
+                (equal (multiple-value-list (funcall worker view 3)) '(9 :done))
+                (equal (multiple-value-list (funcall worker view 2.5d0)) '(9 :done))
+                (equal (multiple-value-list (funcall worker view 0)) '(0 :done))
+                (handler-case (progn (funcall worker view 4) nil)
+                  (type-error (condition) (eql (type-error-datum condition) 3)))
+                (equal (multiple-value-list (funcall worker view 1)) '(3 :done))))`);
   check(`(let* ((worker (compile-native '(lambda (array)
                   (declare (optimize (safety 1) (debug 0) (space 3) (speed 1)))
                   (let ((index 0) (seen nil))

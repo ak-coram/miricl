@@ -93,6 +93,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-cons-forward-blocks* nil)
 (defvar *wasm-proper-list-checks* nil)
 (defvar *wasm-unboxed-values* nil)
+(defvar *wasm-vector-snapshot-prefixes* nil)
+(defvar *wasm-vector-snapshot-operations* nil)
 (defvar *wasm-tiered-values* nil)
 (defvar *wasm-tiered-comparisons* nil)
 (defvar *wasm-hoisted-values* nil)
@@ -258,6 +260,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-standard-call3" (:i32 :object :object :object) :object)
     ("native-standard-call4" (:i32 :object :object :object :object) :object)
     ("native-aref-int64" (:object :i64) :object)
+    ("native-aref-i31-index" (:object :i32) :object)
     ("native-search-list" (:object :object :i32) :object)
     ("native-poll" nil nil)
     ("native-frame-enter" (:object) (:i32 :object))
@@ -3261,6 +3264,22 @@ exhausted work budgets keep every incoming value group."
               (and *wasm-inline-constants* (native-value-slot *wasm-inline-constants* source)))
       (wasm-get value) (wasm-byte #x1a))))
 
+(defun emit-native-vector-snapshot-operation (record instruction inputs)
+  (emit-native-vector-snapshot-mode record :object)
+  (cond ((eq instruction (svref record 3))
+         (compiler-statistic :optimization/vector-snapshot :step)
+         (wasm-call "native-poll")
+         (wasm-local (svref record 6)) (wasm-integer 1) (wasm-byte #x6a)
+         (wasm-gc #x1c) (wasm-gc #x1b))
+        (t
+         (compiler-statistic :optimization/vector-snapshot :aref)
+         ;; Array and original index have executed. Only the proven
+         ;; current snapshot changes transport. The worker resolves and
+         ;; checks the array at the existing operation entry.
+         (wasm-get (third inputs)) (wasm-local (svref record 6))
+         (wasm-call "native-aref-i31-index")))
+  (wasm-byte #x05))
+
 (defun emit-native-instruction (instruction &optional end)
   (declare (type simple-vector instruction) (type (or null simple-vector) end))
   ;; Suppress only exact calls consumed by the active branch plan. In
@@ -3501,22 +3520,26 @@ exhausted work budgets keep every incoming value group."
              ((eq kind :symbolp)
               (emit-native-tag-test (third inputs) 6 nil t) (wasm-call "native-boolean"))
              ((eq kind :standard-call)
-              ;; Retain proven typed workers before the general checked
-              ;; linkage. Their ABI no longer transports a function object.
-              (let ((raw (native-raw-aref-index instruction inputs kind *wasm-unboxed-values*)))
-                (cond (raw
-                       (wasm-get (third inputs)) (wasm-local (svref raw 0))
-                       (compiler-statistic :optimization/raw-aref-index)
-                       (wasm-call "native-aref-int64"))
-                      ((or (emit-native-integer-call inputs output (hir-instruction-safety-level instruction))
-                           (emit-native-i31-step inputs)))
-                      (t
-                       (let ((name (native-standard-operation (second inputs))))
-                         (wasm-integer (native-canonical-builtin-code name))
-                         (dolist (input (cddr inputs)) (wasm-get input))
-                         (wasm-call (nth (- (length inputs) 2)
-                           '("native-standard-call0" "native-standard-call1" "native-standard-call2"
-                             "native-standard-call3" "native-standard-call4"))))))))
+              (let ((snapshot (and *wasm-vector-snapshot-operations*
+                                   (gethash instruction *wasm-vector-snapshot-operations*))))
+                (when snapshot (emit-native-vector-snapshot-operation snapshot instruction inputs))
+                ;; Retain proven typed workers before the general checked
+                ;; linkage. Their ABI no longer transports a function object.
+                (let ((raw (native-raw-aref-index instruction inputs kind *wasm-unboxed-values*)))
+                  (cond (raw
+                         (wasm-get (third inputs)) (wasm-local (svref raw 0))
+                         (compiler-statistic :optimization/raw-aref-index)
+                         (wasm-call "native-aref-int64"))
+                        ((or (emit-native-integer-call inputs output (hir-instruction-safety-level instruction))
+                             (emit-native-i31-step inputs)))
+                        (t
+                         (let ((name (native-standard-operation (second inputs))))
+                           (wasm-integer (native-canonical-builtin-code name))
+                           (dolist (input (cddr inputs)) (wasm-get input))
+                           (wasm-call (nth (- (length inputs) 2)
+                             '("native-standard-call0" "native-standard-call1" "native-standard-call2"
+                               "native-standard-call3" "native-standard-call4")))))))
+                (when snapshot (wasm-byte #x0b))))
              ((eq kind :search-list)
               (wasm-get (third inputs)) (wasm-get (fourth inputs))
               (wasm-integer (native-search-list-code
@@ -3854,6 +3877,8 @@ exhausted work budgets keep every incoming value group."
               (progn (wasm-local (svref record 6)) (unless truep (wasm-byte #x45)))
         (let ((inputs (hir-instruction-inputs call)))
           (cond
+            ((and *wasm-vector-snapshot-operations*
+                  (emit-native-vector-snapshot-comparison call inputs kind)))
             ((emit-native-tiered-comparison call t))
             ((integerp kind) (emit-native-inline-integer inputs kind t))
             ((member kind '(:less-real :greater-real :not-greater-real :not-less-real))
@@ -4081,6 +4106,9 @@ exhausted work budgets keep every incoming value group."
           (when *wasm-loop-hoists*
             (dolist (record (svref *wasm-loop-hoists* (the (unsigned-byte 32) (hir-block-id block))))
               (emit-native-hoisted-primitive record)))
+          (when *wasm-vector-snapshot-prefixes*
+            (let ((record (gethash block *wasm-vector-snapshot-prefixes*)))
+              (when record (emit-native-vector-snapshot-prefix record))))
           (setf (svref *wasm-structured-labels* (the (unsigned-byte 32) (hir-block-id block))) *wasm-control-depth*)
           (wasm-byte #x03) (wasm-byte #x40) (incf *wasm-control-depth*)
           (emit-native-structured-region (svref region 3) block)
@@ -5131,6 +5159,239 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
         (setf (native-value-slot table (car candidate)) record))))
   (values table count))
 
+(defun native-vector-snapshot-value-p (value raw tiered &optional cellp)
+  ;; These observations keep their ordinary reference representation.
+  (when value
+    (let ((slot (1+ (hir-value-id value))))
+      (and (not (or (and raw (svref raw slot))
+                    (and tiered (svref tiered slot))
+                    (and *wasm-optimization-barriers* (gethash value *wasm-optimization-barriers*))))
+           (if cellp
+               (and (svref *wasm-local-cells* slot) (svref *wasm-live-values* slot))
+               (and (or (eq (hir-value-kind value) :single) (svref *wasm-scalar-groups* slot))
+                    (not (or (and *wasm-reused-values* (svref *wasm-reused-values* slot))
+                             (and *wasm-hoisted-values* (svref *wasm-hoisted-values* slot))
+                             (and *wasm-checked-integer-copies*
+                                  (gethash value *wasm-checked-integer-copies*))))))))))
+
+(defun native-vector-snapshot-source (value raw tiered)
+  ;; Reference copies and scalar PRIMARY preserve identity. A checked copy,
+  ;; independent read, or unknown path does not prove the same snapshot.
+  (loop repeat 16 do
+    (unless (native-vector-snapshot-value-p value raw tiered) (return nil))
+    (let ((producer (hir-value-producer value)))
+      (unless (and (%hir-instruction-p producer)
+                   (case (hir-instruction-opcode producer)
+                     (:copy t)
+                     (:primary (native-value-slot *wasm-scalar-groups*
+                                  (first (hir-instruction-inputs producer))))))
+        (return value))
+      (setq value (first (hir-instruction-inputs producer))))))
+
+(defun native-vector-snapshot-call-p (instruction name arity kind)
+  (when (and (%hir-instruction-p instruction)
+             (eq (hir-instruction-opcode instruction) :call)
+             (eql (hir-instruction-safety-level instruction) 1)
+             (eq (gethash instruction *wasm-inline-simple-calls*) kind))
+    (let* ((inputs (hir-instruction-inputs instruction))
+           (reference (hir-value-producer (second inputs))))
+      (and (null (nthcdr (+ 2 arity) inputs)) (nth (1+ arity) inputs)
+           (%hir-instruction-p reference)
+           (eq (hir-instruction-opcode reference) :function-reference)
+           (eq (first (hir-instruction-attributes reference)) name)
+           (not (eq (second (hir-instruction-attributes reference)) 'notinline))
+           (not (member instruction *wasm-tail-calls*))
+           (not (gethash instruction *wasm-inline-vector-calls*))
+           (eql (standard-function-result-count name arity) 1)))))
+
+(defun native-vector-snapshot-region (function header body test raw tiered budget)
+  ;; The only loop entry initializes this private boxed cell to immediate zero.
+  ;; A strict continuation under the physical i31 bound then admits an i31
+  ;; snapshot in [0, 1073741822]. Its sole successor and write preserve i31
+  ;; through the next header, even if that header exits the loop.
+  (flet ((charge (amount)
+           (when (minusp (decf (car budget) amount))
+             (return-from native-vector-snapshot-region)))
+         (first-input (instruction opcode)
+           (when (and (%hir-instruction-p instruction)
+                      (eq (hir-instruction-opcode instruction) opcode))
+             (first (hir-instruction-inputs instruction))))
+         (slot (table value) (native-value-slot table value))
+         (jump-p (block target)
+           (let ((end (hir-block-terminator block)))
+             (and (eq (hir-instruction-opcode end) :jump)
+                  (eq (first (hir-instruction-attributes end)) target)))))
+   (let* ((end (hir-block-terminator header))
+         (successors (hir-instruction-attributes end))
+         (kind (third test)) (compare (second test))
+         (name (if (eq kind :less-real) '< '>=))
+         (previous (hir-block-predecessors header))
+         (setup (if (eq (first previous) body) (second previous) (first previous)))
+         (entry (hir-function-entry function)))
+    (unless (and setup (not (eq setup body)) (not (eq setup header))
+                 (eq (if (eq setup (first previous)) (second previous) (first previous)) body)
+                 (null (cddr previous))
+                 (eq (first (hir-block-predecessors body)) header)
+                 (null (rest (hir-block-predecessors body)))
+                 (null (hir-block-parameters header)) (null (hir-block-parameters body))
+                 (jump-p setup header) (jump-p body header)
+                 (member body successors)
+                 (eq (eq kind :less-real)
+                     (eq (if (fourth test) (second successors) (first successors)) body))
+                 (native-vector-snapshot-call-p compare name 2 kind)
+                 (not (and *wasm-hoisted-values*
+                           (slot *wasm-hoisted-values* (hir-instruction-output compare)))))
+      (return-from native-vector-snapshot-region))
+    ;; Check every operand path that can supply the same snapshot.
+    ;; Each path is limited to 16 ordinary reference aliases.
+    (charge 48)
+    (let* ((inputs (hir-instruction-inputs compare))
+           (current (native-vector-snapshot-source (third inputs) raw tiered))
+           (read (and current (hir-value-producer current)))
+           (cell (first-input read :cell-read))
+           (new (and cell (hir-value-producer cell)))
+           (zero (first-input new :cell-new))
+           (literal (and zero (hir-value-producer zero)))
+           (bound (fourth inputs)) (copy (hir-value-producer bound))
+           ;; Use the nearest ordinary cross-block producer. This original
+           ;; COPY use already pins its reference local across loop entry.
+           (root (first-input copy :copy))
+           (root-producer (and root (hir-value-producer root)))
+           (write nil) (access nil) (binding nil) (read-seen nil) (new-seen nil)
+           (copy-seen nil) (root-seen nil))
+      (unless (and (native-vector-snapshot-value-p cell raw tiered t)
+                   (native-vector-snapshot-value-p zero raw tiered)
+                   (%hir-instruction-p literal) (eq (hir-instruction-opcode literal) :constant)
+                   (eql (first (hir-instruction-attributes literal)) 0)
+                   (native-vector-snapshot-value-p bound raw tiered)
+                   (native-vector-snapshot-value-p root raw tiered)
+                   (eq (hir-value-kind root) :single) (slot *wasm-live-values* root)
+                   (slot *wasm-live-values* bound)
+                   (not (slot *wasm-inline-constants* root))
+                   (%hir-instruction-p root-producer)
+                   (member (hir-instruction-opcode root-producer) '(:argument :copy)))
+        (return-from native-vector-snapshot-region))
+      (dolist (candidate (hir-function-bindings function))
+        (charge 1)
+        (when (eq (hir-binding-cell candidate) cell)
+          (when (or binding (hir-binding-captured-p candidate))
+            (return-from native-vector-snapshot-region))
+          (setq binding candidate)))
+      ;; Include all validated blocks and operands, even when outside the
+      ;; emitted region. The only actual uses of the cell are read and write.
+      (dolist (block (hir-function-blocks function))
+        (charge 1)
+        (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+          (charge 1)
+          (cond ((eq instruction new) (setq new-seen (eq block setup)))
+                ((eq instruction copy) (setq copy-seen (eq block header)))
+                ((eq instruction root-producer)
+                 (setq root-seen (or (eq block setup)
+                                     (and (eq block entry)
+                                          (eq (hir-instruction-opcode root-producer) :argument)))))
+                ((eq instruction read) (setq read-seen (eq block header))))
+          (let ((arguments (hir-instruction-inputs instruction)))
+            (loop for operand in arguments for index from 0 do
+              (charge 1)
+              (when (eq operand cell)
+                (cond ((and (zerop index) (eq instruction read) (eq block header)))
+                      ((and (zerop index) (eq block body) (null write)
+                            (eq (hir-instruction-opcode instruction) :cell-write))
+                       (setq write instruction))
+                      (t (return-from native-vector-snapshot-region)))))
+            (when (and (eq block body)
+                       (native-vector-snapshot-call-p instruction 'aref 2 :standard-call)
+                       (progn (charge 16)
+                              (eq (native-vector-snapshot-source (fourth arguments) raw tiered) current)))
+              (when access (return-from native-vector-snapshot-region))
+              (setq access instruction)))))
+      (unless (and binding read-seen new-seen copy-seen root-seen write access)
+        (return-from native-vector-snapshot-region))
+      (let* ((next (native-vector-snapshot-source (second (hir-instruction-inputs write)) raw tiered))
+             (step (and next (hir-value-producer next))))
+        (unless (and (native-vector-snapshot-call-p step '1+ 1 :standard-call)
+                     (slot *wasm-scalar-groups* next)
+                     (native-vector-snapshot-value-p (hir-instruction-output write) raw tiered)
+                     (native-vector-snapshot-value-p (hir-instruction-output access) raw tiered)
+                     (slot *wasm-scalar-groups* (hir-instruction-output access))
+                     (eq (native-vector-snapshot-source (third (hir-instruction-inputs step)) raw tiered) current)
+                     (member step (hir-block-instructions body)))
+          (return-from native-vector-snapshot-region))
+        ;; The total physical bound check and strict body edge establish the
+        ;; comparison's integer domain and successor's operand interval.
+        (let ((facts (make-hash-table :test 'eq)))
+          (setf (gethash (third inputs) facts) 'integer (gethash bound facts) 'integer)
+          (unless (and (hir-standard-property-negative-p name (cddr inputs) :may-signal facts)
+                       (hir-type-proves-p (hir-inline-result-type '1+ '((integer 0 1073741822)))
+                                          '(integer 1 1073741823)))
+            (return-from native-vector-snapshot-region)))
+        (vector header root compare step access nil nil))))))
+
+(defun native-plan-vector-snapshots (function structured raw tiered tiered-comparisons offset)
+  (declare (type simple-vector function) (type (unsigned-byte 32) offset))
+  ;; Keep the common path native and enter the full audit only for an
+  ;; active ordered comparison in a two-block loop. Bound the tail-call
+  ;; membership checks and sparse region traversal before visiting operands.
+  (unless (and structured *wasm-branch-tests* *wasm-optimization-barriers* (not *wasm-fixed-call-emitter*)
+               (null (hir-block-predecessors (hir-function-entry function)))
+               (null (nthcdr 16 *wasm-tail-calls*))
+               (<= (length (cdr structured)) 4096))
+    (return-from native-plan-vector-snapshots (values nil nil 0)))
+  (let ((regions (cdr structured)) (budget nil) (candidates nil))
+    (declare (type simple-vector regions))
+    (loop for region across regions when region do
+      (let* ((header (svref region 0)) (nodes (svref region 3)) (body (second nodes))
+             (test (and (eq (first nodes) header) body (null (cddr nodes))
+                        (not (svref regions (hir-block-id body)))
+                        (let ((end (hir-block-terminator header)))
+                          (when (member (third (gethash end *wasm-branch-tests*))
+                                        '(:less-real :not-less-real))
+                            (native-active-branch-test end))))))
+        (when (and test (not (and tiered-comparisons (gethash (second test) tiered-comparisons))))
+          (unless budget (setq budget (list (- 4096 (length regions)))))
+          (let ((record (native-vector-snapshot-region function header body test raw tiered budget)))
+            (when (minusp (car budget)) (return-from native-plan-vector-snapshots (values nil nil 0)))
+            (when record (push record candidates))))))
+    (when candidates
+      (let ((prefixes (make-hash-table :test 'eq)) (operations (make-hash-table :test 'eq))
+            (count 0))
+        (dolist (record (nreverse candidates))
+          (setf (svref record 5) (+ offset count) (svref record 6) (+ offset count 1)
+                (gethash (svref record 0) prefixes) record
+                (gethash (svref record 2) operations) record
+                (gethash (svref record 3) operations) record
+                (gethash (svref record 4) operations) record)
+          (incf count 2)
+          (compiler-statistic :planning/vector-snapshot :raw-aref))
+        (return-from native-plan-vector-snapshots (values prefixes operations count))))
+    (values nil nil 0)))
+
+(defun emit-native-vector-snapshot-prefix (record)
+  (let ((bound (svref record 1)))
+    (emit-native-i31-operand bound t)
+    (wasm-byte #x04) (wasm-type :i32)
+    (emit-native-i31-operand bound)
+    (wasm-byte #x05) (wasm-integer -2147483648)
+    (wasm-byte #x0b)
+    (wasm-byte #x21) (wasm-u32 (svref record 5))))
+
+(defun emit-native-vector-snapshot-mode (record type)
+  (wasm-local (svref record 5)) (wasm-integer -2147483648) (wasm-byte #x47)
+  (wasm-byte #x04) (wasm-type type))
+
+(defun emit-native-vector-snapshot-comparison (call inputs kind)
+  (let ((record (and *wasm-vector-snapshot-operations* (gethash call *wasm-vector-snapshot-operations*))))
+    (when record
+      (compiler-statistic :optimization/vector-snapshot :comparison)
+      (emit-native-vector-snapshot-mode record :i32)
+      (emit-native-i31-operand (third inputs))
+      (wasm-byte #x22) (wasm-u32 (svref record 6))
+      (wasm-local (svref record 5)) (wasm-byte (if (eq kind :less-real) #x48 #x4e))
+      (wasm-byte #x05)
+      (emit-native-i31-comparison inputs kind t)
+      (wasm-byte #x0b)
+      t)))
+
 (defun native-function-plan (function)
   (declare (type simple-vector function))
   ;; Cache the lowering facts separately from the emitted literals, closure
@@ -5159,6 +5420,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
         (reused (native-plan-predicate-reuse function blocks))
         (locals nil) (count 0) (literals nil) (prefixes nil) (raw-count 0) (unboxed nil) (wide-count 0)
         (tiered nil) (tiered-comparisons nil)
+        (snapshot-prefixes nil) (snapshot-operations nil)
         (literal-locals (make-hash-table :test 'eq))
         (dispatch (unless direct (native-dispatch-targets function targets blocks)))
         (next-blocks (make-array (hir-function-block-count function) :initial-element nil)))
@@ -5195,6 +5457,18 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
     (multiple-value-setq (unboxed wide-count)
       (native-plan-unboxed-checked-copies function structured unboxed wide-count
         (+ (if direct 2 3) raw-count) tiered-comparisons))
+    (when structured
+      (let ((added 0))
+        (multiple-value-setq (snapshot-prefixes snapshot-operations added)
+          (native-plan-vector-snapshots function structured unboxed tiered tiered-comparisons
+            (+ 2 raw-count)))
+        (when snapshot-prefixes
+          ;; Raw records can have multiple SSA aliases. Relocate each once.
+          (when unboxed
+            (let ((shifted (make-hash-table :test 'eq)))
+              (loop for record across unboxed when (and record (not (gethash record shifted))) do
+                (setf (gethash record shifted) t) (incf (svref record 0) added))))
+          (incf raw-count added))))
     ;; Preserve the shared active branch plan. Consumed comparisons emit a
     ;; raw predicate from tiered snapshots at EMIT-NATIVE-CONDITION; checked
     ;; comparisons on backward edges retain their original instruction position.
@@ -5215,7 +5489,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
             *wasm-dynamic-bindings* *wasm-entry-environment* *wasm-live-values*
             *wasm-scalar-groups* *wasm-single-calls* locals count literal-locals literals
             *wasm-tail-calls* (native-value-table function :unknown)
-            dispatch (native-block-label-depths function blocks (cdr dispatch)) blocks next-blocks *wasm-branch-tests* structured reused *wasm-hoisted-values* prefixes raw-count unboxed wide-count tiered tiered-comparisons)))
+            dispatch (native-block-label-depths function blocks (cdr dispatch)) blocks next-blocks *wasm-branch-tests* structured reused *wasm-hoisted-values* prefixes raw-count unboxed wide-count tiered tiered-comparisons
+            snapshot-prefixes snapshot-operations)))
 
 (defun emit-native-function-body (function)
   (declare (type simple-vector function))
@@ -5253,6 +5528,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
         (wide-count (svref plan 26))
         (*wasm-tiered-values* (svref plan 27))
         (*wasm-tiered-comparisons* (svref plan 28))
+        (*wasm-vector-snapshot-prefixes* (svref plan 29))
+        (*wasm-vector-snapshot-operations* (svref plan 30))
         (*wasm-dispatch-indices* (car dispatch))
         (*wasm-inline-constants* (svref plan 2)) (*wasm-local-cells* (svref plan 3))
         (*wasm-dynamic-bindings* (svref plan 4)) (*wasm-entry-environment* (svref plan 5))
@@ -6249,6 +6526,14 @@ the named-entry format for hosts that translate individual Wasm workers."
 (defun native-plan-private-i64-site (unit certificates escaped)
   ;; Admit one call to a straight-line producer using a checked-policy
   ;; executable arithmetic proof and the ordinary raw materialization recipe.
+  ;; The full scan charges at least one unit per function, so a caller
+  ;; beyond this prefix cannot fit in its budget.
+  (unless (loop for function in (hir-unit-functions unit) repeat 4096
+                for policy = (hir-function-optimization-policy function)
+                thereis (and (zerop (hir-function-debug-level function))
+                             (> (logand policy 3) (logand 3 (ash policy -2)))
+                             (gethash function *wasm-function-plans*)))
+    (return-from native-plan-private-i64-site nil))
   (let ((fuel 4096) (targets (make-hash-table :test 'eq)))
     (dolist (function (hir-unit-functions unit))
       (when (minusp (decf fuel (+ 1 (hir-function-value-count function)
@@ -6621,6 +6906,8 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     emit-native-tiered-copy emit-native-tiered-small emit-native-tiered-i64
     emit-native-tiered-materialize emit-native-tiered-classify emit-native-tiered-update
     emit-native-tiered-instruction-worker emit-native-tiered-comparison-worker
+    native-vector-snapshot-value-p native-vector-snapshot-source
+    native-vector-snapshot-call-p native-vector-snapshot-region
     native-private-i64-return-source native-plan-private-i64-site native-private-i64-edges-valid-p
     native-simplify-ops-lisp native-op-liveness-lisp
     compilation-statistics-report compiler-input-summary
@@ -6685,6 +6972,8 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-assign-tiered-locals emit-native-tiered-copy emit-native-tiered-small emit-native-tiered-i64
                    emit-native-tiered-materialize emit-native-tiered-classify emit-native-tiered-update
                    emit-native-tiered-instruction emit-native-tiered-comparison
+                   native-plan-vector-snapshots emit-native-vector-snapshot-prefix emit-native-vector-snapshot-mode
+                   emit-native-vector-snapshot-comparison emit-native-vector-snapshot-operation
                    native-plan-unboxed-arguments native-plan-unboxed-cell-values native-plan-unboxed-values native-checked-integer-bound-root native-plan-unboxed-checked-copies native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-with-results emit-native-module-checked emit-native-module
                    hir-body hir-close hir-local-macros-form hir-lambda
                    hir-tagbody-form hir-setq-form hir-local-functions-form

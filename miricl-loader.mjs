@@ -24,9 +24,10 @@ async function gunzip(bytes) {
     .pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
 }
 
-function componentCore(bytes) {
-  if (!headerIs(bytes, componentHeader)) return bytes;
+export function extractComponentCore(bytes, section, source = 'Wasm component') {
+  if (!headerIs(bytes, componentHeader)) throw new Error(`Expected a Wasm component in ${source}.`);
   let position = 8, core;
+  const decoder = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true});
   const word = limit => {
     let value = 0;
     for (let shift = 0; shift < 35; shift += 7) {
@@ -44,23 +45,24 @@ function componentCore(bytes) {
     if (kind === 0) {
       const size = word(end);
       if (size > end - position) throw new Error('Truncated image custom section name.');
-      const name = new TextDecoder('utf-8', {fatal: true}).decode(bytes.subarray(position, position + size));
+      const name = decoder.decode(bytes.subarray(position, position + size));
       position += size;
-      if (name === 'miricl.node-compiler') {
-        if (core) throw new Error('Duplicate embedded Node image sections.');
+      if (name === section) {
+        if (core) throw new Error(`Duplicate ${section} sections in ${source}.`);
         core = bytes.subarray(position, end);
       }
     }
     position = end;
   }
-  if (!core || !headerIs(core, coreHeader)) throw new Error('Missing embedded Node core image.');
+  if (!core) throw new Error(`Missing ${section} section in ${source}.`);
+  if (!headerIs(core, coreHeader)) throw new Error(`Expected a core Wasm image in the ${section} section of ${source}.`);
   return core;
 }
 
 export async function getMiriclAdapter(source) {
   let bytes = await imageBytes(source);
   if (bytes[0] === 0x1f && bytes[1] === 0x8b) bytes = await gunzip(bytes);
-  bytes = componentCore(bytes);
+  if (headerIs(bytes, componentHeader)) bytes = extractComponentCore(bytes, 'miricl.node-compiler');
   if (!headerIs(bytes, coreHeader)) throw new Error('Expected a core Wasm image.');
   const module = await WebAssembly.compile(bytes);
   const sections = WebAssembly.Module.customSections(module, 'miricl.adapter.gz');

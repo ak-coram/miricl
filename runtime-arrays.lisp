@@ -295,19 +295,23 @@
   #@(return_call $array-rank1-index64 (local.get $dimension)
     (call $scalar-integer-value (ref.as_non_null (local.get $index)))))
 
-(define-runtime-function $array-check-fixnum-layout
-    (($header (ref $array)) ($storage :nullable-object)) (i32)
-  (:locals ($shape :digits) ($rank i32) ($axis i32) ($dimension i32) ($total i64) ($ceiling i64))
-  #@(if (i32.and (struct.get $obj $n (local.get $header)) (i32.const 8))
-    (then
-      ,(wat-fail-when #@(i32.eqz (ref.test (ref $array) (local.get $storage))) :malformed-form)
-      (return (i32.const -1))))
-  (wat-fail-when #@(i32.or (struct.get $array $offset (local.get $header))
-    (i32.eqz (ref.test (ref $array-i64-data) (local.get $storage)))) :malformed-form)
+(define-runtime-function $array-check-bit-capacity (($length i32) ($words i32)) ()
+  (wat-fail-when #@(i32.or (i32.gt_u (local.get $length) (i32.const 536870910))
+    (i32.gt_u (i32.shr_u (i32.add (local.get $length) (i32.const 31)) (i32.const 5))
+      (local.get $words))) :malformed-form))
+
+;; Check the entire logical extent of an owned header at raw AREF ingress.
+;; A view's target is live. Validate each target when the resolver reaches it,
+;; without requiring the entire view to fit a target that has since shrunk.
+(define-runtime-function $array-check-header-layout
+    (($header (ref $array)) ($storage :nullable-object) ($kind i32)) (i32)
+  (:locals ($shape :digits) ($rank i32) ($axis i32) ($dimension i32) ($total i64) ($extent i32)
+           ($flags i32) ($offset i32) ($capacity i32) ($data (ref null $digits)))
+  #@(local.set $flags (struct.get $obj $n (local.get $header)))
+  (wat-fail-when #@(i32.and (local.get $flags) (i32.const -32)) :malformed-form)
   #@(local.set $shape (struct.get $array $shape (local.get $header)))
   #@(local.set $rank (array.len (local.get $shape)))
   (wat-fail-when #@(i32.ge_u (local.get $rank) (i32.const 256)) :malformed-form)
-  #@(local.set $ceiling (i64.const 536870911))
   #@(local.set $total (i64.const 1))
   #@(block $sized (loop $next
     (br_if $sized (i32.eq (local.get $axis) (local.get $rank)))
@@ -316,19 +320,52 @@
     ;; Saturate above the implementation limit without overflow. A later
     ;; zero dimension can still bring the size back to zero.
     (local.set $total (i64.mul (local.get $total) (i64.extend_i32_u (local.get $dimension))))
-    (local.set $total (select (local.get $ceiling) (local.get $total)
-      (i64.gt_u (local.get $total) (local.get $ceiling))))
+    (local.set $total (select (i64.const 536870911) (local.get $total)
+      (i64.gt_u (local.get $total) (i64.const 536870911))))
     (local.set $axis (i32.add (local.get $axis) (i32.const 1)))
     (br $next)))
-  (wat-fail-when #@(i32.or (i64.eq (local.get $total) (local.get $ceiling))
-    (i64.gt_u (local.get $total) (i64.extend_i32_u
-      (array.len (ref.cast (ref $array-i64-data) (local.get $storage)))))) :malformed-form)
-  #@(i32.wrap_i64 (local.get $total)))
-
-(define-runtime-function $array-check-bit-capacity (($length i32) ($words i32)) ()
-  (wat-fail-when #@(i32.or (i32.gt_u (local.get $length) (i32.const 536870910))
-    (i32.gt_u (i32.shr_u (i32.add (local.get $length) (i32.const 31)) (i32.const 5))
-      (local.get $words))) :malformed-form))
+  (wat-fail-when #@(i64.eq (local.get $total) (i64.const 536870911)) :malformed-form)
+  #@(local.set $extent (i32.wrap_i64 (local.get $total)))
+  #@(local.set $offset (struct.get $array $offset (local.get $header)))
+  #@(if (i32.and (local.get $flags) (i32.const 8))
+    (then
+      ,(wat-fail-when #@(i32.or
+        (i32.gt_u (local.get $offset) (i32.const 536870910))
+        (i32.eqz (ref.test (ref $obj) (local.get $storage)))) :malformed-form)
+      ,(wat-fail-when #@(i32.or (i32.eqz (call $arrayp-native (local.get $storage)))
+        (i32.ne (call $array-kind (local.get $storage)) (local.get $kind))) :malformed-form)
+      (return (local.get $extent))))
+  (wat-fail-when #@(local.get $offset) :malformed-form)
+  #@(if (i32.eq (local.get $kind) (i32.const 3))
+    (then
+      ,(wat-fail-when #@(i32.eqz (ref.is_null (local.get $storage))) :malformed-form)
+      (return (local.get $extent))))
+  #@(block $capacity-ready
+    (if (i32.eq (local.get $kind) (i32.const 4))
+      (then
+        ,(wat-fail-when #@(i32.eqz (ref.test (ref $array-i64-data) (local.get $storage))) :malformed-form)
+        (local.set $capacity (array.len (ref.cast (ref $array-i64-data) (local.get $storage))))
+        (br $capacity-ready)))
+    (if (i32.eqz (local.get $kind))
+      (then
+        ,(wat-fail-when #@(i32.eqz (ref.test (ref $vector) (local.get $storage))) :malformed-form)
+        ,(wat-fail-when #@(i32.ne (call $tag (local.get $storage)) (i32.const 34)) :malformed-form)
+        (local.set $capacity (array.len (call $vector-data (local.get $storage))))
+        (br $capacity-ready)))
+    ,(wat-fail-when #@(i32.eqz (ref.test (ref $obj) (local.get $storage))) :malformed-form)
+    ,(wat-fail-when #@(i32.ne (call $tag (local.get $storage))
+      (select (i32.const 10) (i32.const 36) (i32.eq (local.get $kind) (i32.const 1)))) :malformed-form)
+    (local.set $data (struct.get $obj $digits (ref.cast (ref $obj) (local.get $storage))))
+    ,(wat-fail-when #@(ref.is_null (local.get $data)) :malformed-form)
+    (if (i32.eq (local.get $kind) (i32.const 2))
+      (then
+        (local.set $capacity (call $value-n (local.get $storage)))
+        (call $array-check-bit-capacity (local.get $capacity) (array.len (local.get $data)))
+        (br $capacity-ready)))
+    ,(wat-fail-when #@(call $value-n (local.get $storage)) :malformed-form)
+    (local.set $capacity (array.len (local.get $data))))
+  (wat-fail-when #@(i32.gt_u (local.get $extent) (local.get $capacity)) :malformed-form)
+  #@(local.get $extent))
 
 ;; Admit top-level headers before a raw read falls back to general AREF.
 (define-runtime-function $array-check-raw-read-miss (($array :nullable-object)) ()
@@ -338,9 +375,8 @@
     (then
       ,(wat-fail-when #@(i32.eqz (ref.test (ref $array) (local.get $array))) :malformed-form)
       (local.set $header (ref.cast (ref $array) (local.get $array)))
-      (if (i32.eq (call $array-kind (local.get $array)) (i32.const 4))
-        (then (drop (call $array-check-fixnum-layout (local.get $header)
-          (struct.get $obj $a (local.get $header))))))
+      (drop (call $array-check-header-layout (local.get $header)
+        (struct.get $obj $a (local.get $header)) (call $array-kind (local.get $array))))
       (return)))
   #@(if (i32.eq (local.get $tag) (i32.const 34))
     (then ,(wat-fail-when #@(i32.eqz (ref.test (ref $vector) (local.get $array))) :malformed-form)))
@@ -416,29 +452,28 @@
     (($array :nullable-object) ($index i32) ($value :nullable-object) ($write i32) ($checked i32)) (:nullable-object)
   (:locals ($data :digits) ($word i32) ($mask i32) ($bit i32)
            ($storage :nullable-object) ($numeric (ref $array-i64-data)) ($wide i64) ($offset i32)
-           ($anchor :nullable-object) ($distance i64) ($power i64) ($extent i32))
+           ($anchor :nullable-object) ($distance i64) ($power i64) ($kind i32))
   #@(local.set $anchor (local.get $array))
   #@(local.set $power (i64.const 1))
   #@(block $resolved (loop $resolve
     ,(wat-fail-when #@(i32.eqz (ref.test (ref $obj) (local.get $array))) :malformed-form)
     (br_if $resolved (i32.ne (call $tag (local.get $array)) (i32.const 35)))
     ,(wat-fail-when #@(i32.eqz (ref.test (ref $array) (local.get $array))) :malformed-form)
-    (if (i32.eq (call $array-kind (local.get $array)) (i32.const 3))
+    (local.set $kind (call $array-kind (local.get $array)))
+    (local.set $storage (struct.get $obj $a (ref.cast (ref $obj) (local.get $array))))
+    (if (local.get $checked)
+      (then
+        ,(wat-fail-when #@(i32.ge_u (local.get $index) (call $array-check-header-layout
+          (ref.cast (ref $array) (local.get $array)) (local.get $storage) (local.get $kind))) :malformed-form)))
+    (if (i32.eq (local.get $kind) (i32.const 3))
       (then (call $type-fail (local.get $value) (ref.null eq) (i32.const ,(runtime-error-code :expected-designator)))))
     (local.set $offset (struct.get $array $offset (ref.cast (ref $array) (local.get $array))))
     (local.set $wide (i64.add (i64.extend_i32_u (local.get $index)) (i64.extend_i32_s (local.get $offset))))
     ,(wat-fail-when #@(i32.or (i32.lt_s (local.get $offset) (i32.const 0))
       (i64.gt_u (local.get $wide) (i64.const 536870910))) :malformed-form)
     (local.set $index (i32.wrap_i64 (local.get $wide)))
-    (local.set $storage (struct.get $obj $a (ref.cast (ref $obj) (local.get $array))))
-    (if (i32.eq (call $array-kind (local.get $array)) (i32.const 4))
+    (if (i32.eq (local.get $kind) (i32.const 4))
       (then
-        (if (local.get $checked)
-          (then
-            (local.set $extent (call $array-check-fixnum-layout
-              (ref.cast (ref $array) (local.get $array)) (local.get $storage)))
-            ;; A displaced header returns -1 and is resolved by the loop.
-            ,(wat-fail-when #@(i32.ge_u (local.get $index) (local.get $extent)) :malformed-form)))
         (if (ref.test (ref $array-i64-data) (local.get $storage))
           (then
             (local.set $numeric (ref.cast (ref $array-i64-data) (local.get $storage)))
@@ -1103,7 +1138,7 @@
   ($bit-value-cl) ($bit-value) ($make-bit-vector) ($array-fixnum-value)
   ($array-owned-rank1-fixnum-element) ($array-owned-rank1-fixnum-element64)
   ($array-rank1-dimension) ($array-rank1-index) ($array-rank1-index64)
-  ($array-check-raw-read-miss) ($array-check-fixnum-layout) ($array-check-bit-capacity)
+  ($array-check-raw-read-miss) ($array-check-header-layout) ($array-check-bit-capacity)
   ($array-rank2-index) ($array-raw-element) ($array-resolve-element) ($array-element) ($sequence-value)
   ($array-construction-apply) ($array-subscript-index-cl) ($array-subscript-index) ($array-new) ($array-contents-length-cl) ($array-contents-length) ($array-initialize-contents) ($make-array-native)
   ($index-error) ($elt-element) ($character-element) ($array-bit-check-cl) ($array-bit-check) ($array-kind-type)

@@ -129,14 +129,14 @@ repl-wasi: build
 
 # Connect the terminal to an interpreter in a webapp, without HTTP or TCP REPL.
 browser-repl: build
-    {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }} --browser-repl
+    {{ quote(node) }} scripts/repl.mjs {{ quote(wasi_repl) }} --browser-repl
 
 browser-repl-wasi: build
     {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y -S inherit-network=y {{ quote(wasi_repl) }} --browser-repl
 
 # Relay a TCP REPL to an interpreter inside a webapp (Node's built-in sockets).
 repl-bridge: build
-    {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }} --repl-bridge
+    {{ quote(node) }} scripts/repl.mjs {{ quote(wasi_repl) }} --repl-bridge
 
 # The same relay using WASI 0.3 sockets, with no Node dependency.
 repl-bridge-wasi: build
@@ -144,7 +144,7 @@ repl-bridge-wasi: build
 
 # Connect the terminal and serve a local webapp at http://127.0.0.1:8000/.
 dev-server directory='.' : build
-    {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }} --dev-server --directory={{ quote(directory) }}
+    {{ quote(node) }} scripts/repl.mjs {{ quote(wasi_repl) }} --dev-server --directory={{ quote(directory) }}
 
 # Serve a directory with WASI 0.3 filesystem and socket capabilities.
 dev-server-wasi directory='.' : build
@@ -152,7 +152,7 @@ dev-server-wasi directory='.' : build
 
 # Serve local files and enable the TCP REPL listener together.
 dev-server-repl-bridge directory='.' : build
-    {{ quote(node) }} scripts/repl.mjs {{ quote(interpreter) }} --dev-server --repl-bridge --directory={{ quote(directory) }}
+    {{ quote(node) }} scripts/repl.mjs {{ quote(wasi_repl) }} --dev-server --repl-bridge --directory={{ quote(directory) }}
 
 dev-server-repl-bridge-wasi directory='.' : build
     {{ quote(wasmtime) }} run -W stack-switching=y -S p3=y -S inherit-network=y --dir {{ quote(directory + '::.') }} {{ quote(wasi_repl) }} --dev-server --repl-bridge

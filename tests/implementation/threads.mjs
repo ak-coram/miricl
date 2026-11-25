@@ -156,7 +156,11 @@ vm.evaluate(`(defvar *thread-rank1-fired* nil)
       (values :callback :noise)))) (values)`, {eof: true});
 const rank1Aref = applyObject("#'aref"), rank1Setter = applyObject("(fdefinition '(setf aref))");
 const rank1Index = applyObject('3'), rank1Value = applyObject('-9');
-for (const write of [false, true]) {
+for (const [access, expected] of [
+  [array => vm.vm['native-call2'](rank1Aref, array, rank1Index), 94n],
+  [array => vm.vm['native-aref-i31-index'](array, 3), 94n],
+  [array => vm.vm['native-call3'](rank1Setter, rank1Value, array, rank1Index), -9n],
+]) {
   vm.evaluate(`(setq *thread-rank1-fired* nil
       *thread-rank1-base* (make-array 2 :element-type 'fixnum :adjustable t :initial-contents '(10 20)))
     (values)`, {eof: true});
@@ -168,16 +172,15 @@ for (const write of [false, true]) {
   vm.vm['thread-active'].value = 1;
   let result;
   try {
-    result = write ? vm.vm['native-call3'](rank1Setter, rank1Value, rank1Array, rank1Index)
-      : vm.vm['native-call2'](rank1Aref, rank1Array, rank1Index);
+    result = access(rank1Array);
   } finally {
     vm.vm['thread-active'].value = 0;
     vm.vm['thread-save'](); vm.vm['thread-main-state'](1);
   }
-  assert.equal(vm.javascript.integer(result), write ? -9n : 94n,
+  assert.equal(vm.javascript.integer(result), expected,
     'The fixed array operation uses the dimension and backing installed at its checkpoint.');
   assert.equal(vm.javascript.integer(vm.vm['native-call2'](rank1Aref, rank1Array, rank1Index)),
-    write ? -9n : 94n, 'The observed store reaches the actual current backing.');
+    expected, 'The current backing retains the expected element.');
   assert.equal(vm.evaluate(`(and *thread-rank1-fired*
     (= (array-dimension *thread-rank1-base* 0) 4))`).output, 'T\n',
     'The queued adjustment fired before the observed operation.');

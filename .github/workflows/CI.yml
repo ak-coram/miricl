@@ -640,6 +640,24 @@ jobs:
             ${{ matrix.page }}.html
           if-no-files-found: error
 
+  ansi-wasi:
+    name: ANSI / wasi
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout the upstream ANSI suite
+        run: git submodule update --init -- tests/ansi-test
+      - uses: ./.github/actions/setup-miricl
+        with:
+          cli: 'true'
+      - uses: actions/download-artifact@v4
+        with:
+          name: miricl-runtime
+      - name: Run the full ANSI suite in Wasmtime
+        run: node tests/ansi-wasi.mjs miricl-repl.wasm
+
   ansi-reports:
     name: Collect ANSI reports
     needs: ansi

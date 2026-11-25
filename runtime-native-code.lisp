@@ -2904,8 +2904,26 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (extern.convert_any (call $standard-function-code (local.get $code)))
     (local.get $a) (local.get $b) (local.get $c)))
 
+(define-runtime-function $native-aref-scalar-index (($subscript i64) ($normalize i32)) (:object)
+  ;; The raw i64 result tier keeps its box on a miss. The separate i32
+  ;; entry preserves the immediate tier whenever the full value fits i31.
+  #@(if (local.get $normalize)
+    (then (return_call $int64 (local.get $subscript))))
+  #@(return_call $box-int64 (local.get $subscript)))
+
 (define-runtime-function $native-aref-int64 (($array externref) ($subscript i64)) (externref)
   (:export-raw "native-aref-int64")
+  #@(return_call $native-aref-scalar (local.get $array) (local.get $subscript) (i32.const 0)))
+
+(define-runtime-function $native-aref-i31-index (($array externref) ($subscript i32)) (externref)
+  (:export-raw "native-aref-i31-index")
+  ;; Treat every incoming signed i32 as its full integer, including values
+  ;; outside the intended i31 range. The shared worker owns checked ingress.
+  #@(return_call $native-aref-scalar (local.get $array)
+    (i64.extend_i32_s (local.get $subscript)) (i32.const 1)))
+
+(define-runtime-function $native-aref-scalar
+    (($array externref) ($subscript i64) ($normalize i32)) (externref)
   (:locals ($a :nullable-object) ($function :nullable-object) ($result :nullable-object) ($index i32))
   #@(local.set $a (call $native-checked-value (local.get $array)))
   #@(local.set $function (call $standard-function-code (i32.const ,(1+ (runtime-symbol-id 'aref)))))
@@ -2913,7 +2931,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (then
       (call $array-check-raw-read-miss (local.get $a))
       (return_call $native-call2 (extern.convert_any (local.get $function))
-        (local.get $array) (extern.convert_any (call $box-int64 (local.get $subscript))))))
+        (local.get $array) (extern.convert_any (call $native-aref-scalar-index (local.get $subscript) (local.get $normalize))))))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   ;; The checkpoint can change array shape or backing. Read both live.
   #@(local.set $result (call $array-owned-rank1-fixnum-element64
@@ -2931,7 +2949,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
           ;; Only here does the original scalar snapshot need its Lisp box.
           (call $array-check-raw-read-miss (local.get $a))
           (local.set $result (call $apply-ready (local.get $function)
-            (call $cons (local.get $a) (call $cons (call $box-int64 (local.get $subscript)) (ref.null eq)))))))
+            (call $cons (local.get $a) (call $cons (call $native-aref-scalar-index (local.get $subscript) (local.get $normalize)) (ref.null eq)))))))
       (drop (call $native-checked-value (extern.convert_any (local.get $result))))))
   #@(call $clear-values)
   #@(extern.convert_any (local.get $result)))
@@ -3049,7 +3067,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
   ($native-symbol-fixed-function) ($native-fixed-apply-ready) ($native-fixed-call) ($native-call0) ($native-call1) ($native-call-values1) ($native-call2) ($native-call3) ($native-call4)
   ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
-  ($native-aref-int64)
+  ($native-aref-scalar-index) ($native-aref-scalar) ($native-aref-int64) ($native-aref-i31-index)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)
   ($native-generic-fixed-tail-call)
   ($native-tail-call0) ($native-tail-call1) ($native-tail-call2) ($native-tail-call3) ($native-tail-call4))

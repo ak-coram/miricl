@@ -233,7 +233,9 @@ admission.
 
 In a source-owned sealed module, a retained non-tail DEBUG 0 call can use a
 private fixed worker that returns i64 directly to an existing scalar
-arithmetic consumer. SPEED must exceed SPACE at the caller. The compiler
+arithmetic consumer. A bounded function scan skips instruction analysis
+when no DEBUG 0 caller with a frame plan has SPEED greater than SPACE. When
+a caller qualifies, the work budget covers the full unit. The compiler
 requires an exact one-value proof, a nonescaping frameless leaf, a checked
 range proof for its arithmetic result and a result with only scalar uses.
 The ordinary object entry remains available for closure attachment. Both
@@ -344,11 +346,20 @@ the checked rank-one reader. It checks the full subscript before narrowing
 and resolves displaced storage through the ordinary live backing path.
 The raw entry validates external references and checks physical backing
 extents when that path follows a displaced view.
-General dispatch and rank or bounds errors reconstruct the original i64
-box. Out-of-line NOTINLINE calls and other boxed consumers keep their
-ordinary calling convention. The runtime LOOP ACROSS expander
-validates the vector and captures its active length
-during initialization, then reads current elements through checked AREF.
+General dispatch and rank or bounds errors reconstruct the original index.
+An untyped loop can use the same reader with an immediate index when its
+private counter starts at zero, advances by one at its only write, and
+continues strictly below an invariant bound. A total representation test at
+loop entry admits an i31 bound. Each continued iteration takes a scalar
+snapshot at the comparison and reuses it for the successor and AREF at
+their original instruction positions. The successor and read keep their
+operation-entry checkpoints, and the read resolves the current array
+backing after its checkpoint. A bound outside the immediate representation
+keeps the ordinary comparison, successor and read. Out-of-line NOTINLINE
+calls and other boxed consumers keep their ordinary calling convention.
+The runtime LOOP ACROSS expander validates the vector and captures its
+active length during initialization, then reads current elements through
+checked AREF.
 General mutable list traversal supplies no list-length inference.
 
 ** Low-level Wasm optimization
@@ -463,9 +474,11 @@ from =miricl-loader.mjs= accepts image bytes and host source types, handles
 outer download compression, and instantiates with the embedded adapter.
 =getMiriclAdapter= exposes the checked bytes and adapter module.
 =Miricl.instantiate= leaves adapter loading explicit. Saved images retain
-the same adapter. Browser distributions use the generic loader, and a WASI
-development component can expose its embedded Node core. The complete
-default browser image has a 1 MiB raw budget, including its adapter.
+the same adapter. The WASI terminal component provides its executable relay
+to Wasmtime and carries the Node compiler image and relay core in separate
+top-level custom sections. The Node launcher validates the enclosing section
+bounds and extracts the core for the selected operation. The complete default
+browser image has a 1 MiB raw budget, including its adapter.
 
 Saved images retain reachable state, native code and captures. The loader
 validates field layouts, reference bounds and graphs against exported

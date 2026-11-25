@@ -9,7 +9,7 @@ const artifacts = [
   {file: 'miricl-cold.wasm', description: 'Cold interpreter and compiler for bootstrapping', kind: 'wasm'},
   {file: 'miricl-interpreter.wasm', description: 'Import-free interpreter with the compact HIR compiler', kind: 'wasm'},
   {file: 'miricl.wasm', description: 'Import-free interpreter with bootstrapped native compiler', kind: 'wasm'},
-  {file: 'miricl-repl.wasm', description: 'Terminal REPL and precompiled compiler for Node and WASI', kind: 'wasm'},
+  {file: 'miricl-repl.wasm', description: 'Terminal REPL, precompiled compiler and development relay for Node and WASI', kind: 'wasm'},
   {file: 'miricl-asdf.wasm', description: 'Optional ASDF and UIOP library', kind: 'wasm'},
   {file: 'miricl.html', description: 'Complete browser REPL page', kind: 'html'},
   {file: 'todo.html', description: 'Complete Common Lisp + CLOS TODO page', kind: 'html'},

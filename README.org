@@ -67,7 +67,8 @@ The =miricl-runtime= build artifact includes:
   the optimizing Wasm compiler.
 - =miricl.wasm=: import-free interpreter with the size-optimized,
   bootstrapped native compiler ready at startup, for browsers and Node.
-- =miricl-repl.wasm=: Wasmtime terminal command and precompiled compiler for Node.
+- =miricl-repl.wasm=: Wasmtime terminal command, with a precompiled compiler
+  and development relay for Node.
 - =miricl-asdf.wasm=: optional ASDF/UIOP library.
 
 Each runtime image contains its matching gzip-compressed JavaScript adapter,
@@ -145,9 +146,9 @@ CRLF conversion can break multiline =FORMAT= strings in upstream ASDF.
 This produces =miricl.wasm=, the import-free interpreter with its compiler
 already compiled to native Wasm; =miricl-cold.wasm=, the cold bootstrap image;
 =miricl-interpreter.wasm=, the smaller compiler-free scripting image;
-and =miricl-repl.wasm=, the WASI 0.3 terminal
-REPL and development command. The adapter and WASI command provide the
-development bridge. It also writes =miricl-loader.mjs=, the optional full
+and =miricl-repl.wasm=, the WASI 0.3 terminal REPL and development command.
+The terminal artifact also supplies the relay for Node's browser and TCP
+listener modes. The build writes =miricl-loader.mjs=, the optional full
 =miricl.js= command and the optional
 =miricl-asdf.wasm=.
 
@@ -249,7 +250,7 @@ Serve the current directory so the browser can load the JavaScript
 module and Wasm file:
 
 #+begin_src sh
-node miricl.js miricl.wasm --dev-server
+node miricl.js miricl-repl.wasm --dev-server
 #+end_src
 
 Open [[http://127.0.0.1:8000/hello.html][hello.html]] and check the browser's developer console for =Hello,
@@ -270,7 +271,7 @@ either Node or Wasmtime. These commands enable HTTP and WebSocket;
 the TCP REPL listener is disabled unless =--repl-bridge= is also supplied:
 
 #+begin_src sh
-node miricl.js miricl.wasm --dev-server
+node miricl.js miricl-repl.wasm --dev-server
 
 wasmtime run -W stack-switching=y -S p3=y -S inherit-network=y \
   --dir .::. miricl-repl.wasm --dev-server

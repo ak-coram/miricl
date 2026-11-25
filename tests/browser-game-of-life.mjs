@@ -23,7 +23,7 @@ const server = http.createServer(async (request, response) => {
   } catch { response.writeHead(404).end(); }
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-const host = development ? await startHost('node', path.resolve('miricl.wasm'), 'dev-server', root) : undefined;
+const host = development ? await startHost('node', path.join(root, 'miricl-repl.wasm'), 'dev-server', root) : undefined;
 const origin = `http://127.0.0.1:${host ? testPorts.http : server.address().port}`;
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'miricl-life-browser-'));
 const browser = spawn(process.env.CHROMIUM ?? 'chromium', [

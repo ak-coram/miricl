@@ -48,13 +48,15 @@ if (options.optimize && !options.noStrip && !options.entryPoints.length)
 if (!options.optimize && (options.entryPoints.length || options.keep.length || options.report || options.noStrip || options.native))
   throw new Error('--entry, --keep, --report, --native and --no-strip require --optimize.');
 if (help) {
-  console.log(`Usage: node scripts/repl.mjs [miricl.wasm] [options]
+  console.log(`Usage: node scripts/repl.mjs [image.wasm] [options]
 
   (default)                  Local terminal REPL, without listeners
   --browser-repl             Browser REPL over WebSocket
   --dev-server               Browser REPL and local HTTP server
   --repl-bridge              Browser REPL and TCP listener
   --dev-server --repl-bridge  Browser REPL, HTTP server, and TCP listener
+
+  Local evaluation defaults to miricl.wasm. Listener modes default to miricl-repl.wasm.
 
   --bundle SYSTEM            Compile one ASDF system and its dependencies, then exit
   --optimize SYSTEM          Remove unreachable definitions from an ASDF FASL bundle
@@ -71,7 +73,7 @@ if (help) {
   --directory PATH           Served directory (current directory)`);
 } else if (browserRepl || options.devServer || options.tcpBridge) {
   const {startReplBridge} = await import('./repl-bridge.mjs');
-  const bridge = await startReplBridge(await fs.readFile(image ?? 'miricl.wasm'), options);
+  const bridge = await startReplBridge(image ?? 'miricl-repl.wasm', options);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => bridge.close());
 } else {
   function report(error) {

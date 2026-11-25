@@ -163,21 +163,21 @@ DEBUG-NAMES retains native debugging names."
           (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
             (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw)))))))))))
 (defun write-interpreter-wasm (pathname &key wasi native-compiler debug-names (compiler t))
-  "Write an interpreter image with the bridge, or the WASI 0.3 development command.
+  "Write a standalone interpreter image or the WASI 0.3 terminal command.
 NATIVE-COMPILER includes the bootstrapped compiler in the import-free image.
 COMPILER NIL writes the smaller interpreter-only image."
   ;; Complete compilation before opening the destination: a build failure must
   ;; not truncate an existing working image.
   (let ((bytes (if wasi
-                       (wasm-with-custom-section
-                         (repl-command-wasm (interpreter-wasm :wasi t :debug-names debug-names :compiler compiler))
-                         "miricl.node-compiler"
-                         (image-with-javascript-adapter
-                           (interpreter-wasm :native-compiler t :debug-names debug-names)))
+                   (wasm-with-custom-section
+                     (wasm-with-custom-section
+                       (repl-command-wasm (interpreter-wasm :wasi t :debug-names debug-names :compiler compiler))
+                       "miricl.node-compiler"
                        (image-with-javascript-adapter
-                         (wasm-with-custom-section
-                           (interpreter-wasm :native-compiler native-compiler :debug-names debug-names :compiler compiler)
-                           "miricl.repl-bridge" (repl-bridge-core-wasm))))))
+                         (interpreter-wasm :native-compiler t :debug-names debug-names)))
+                     "miricl.repl-bridge" (repl-bridge-core-wasm))
+                   (image-with-javascript-adapter
+                     (interpreter-wasm :native-compiler native-compiler :debug-names debug-names :compiler compiler)))))
     (with-open-file (stream pathname :direction :output :if-exists :supersede
                                     :element-type '(unsigned-byte 8))
       (write-sequence bytes stream)))
