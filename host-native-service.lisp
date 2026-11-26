@@ -96,14 +96,29 @@
            (dotimes (i (native-link-integer section))
              (let ((namespace (native-link-name section)) (name (native-link-name section))
                    (kind (native-link-byte section)))
-               (unless (string= namespace "m") (host-native-fail "unsupported import namespace ~S" namespace))
-               (case kind
-                 (0 (native-link-integer section) (push (cons (concatenate 'string "native-" name) 0) imports))
-                 (4 (unless (and (string= name "transfer") (zerop (native-link-byte section)))
-                      (host-native-fail "unsupported exception tag"))
-                    (native-link-integer section) (push (cons "native-transfer" 5) imports))
-                 (1 (setq table-import t) (host-native-fail "imported tables are not permitted"))
-                 (otherwise (host-native-fail "unsupported runtime import kind ~D" kind))))))
+               (cond
+                 ((string= namespace "m")
+                  (case kind
+                    (0 (native-link-integer section)
+                       (push (cons (concatenate 'string "native-" name) 0) imports))
+                    (4 (unless (and (string= name "transfer") (zerop (native-link-byte section)))
+                         (host-native-fail "unsupported exception tag"))
+                       (native-link-integer section) (push (cons "native-transfer" 5) imports))
+                    (1 (setq table-import t) (host-native-fail "imported tables are not permitted"))
+                    (otherwise (host-native-fail "unsupported runtime import kind ~D" kind))))
+                 ((string= namespace "p")
+                  ;; Wasmtime binds the immutable ordinary values. The poll
+                  ;; token is zero on this lane and cannot bypass a poll.
+                  (unless (= 3 kind) (host-native-fail "expected a poll global"))
+                  (let ((type (native-link-byte section)) (mutability (native-link-byte section)))
+                    (unless (zerop mutability) (host-native-fail "mutable poll global"))
+                    (cond ((and (string= name "epoch") (= type #x7e))
+                           (push (cons "poll-epoch-ordinary" 1) imports))
+                          ((and (string= name "active") (= type #x7f))
+                           (push (cons "poll-active-ordinary" 1) imports))
+                          (t (host-native-fail "unsupported poll global ~S with type ~X" name type)))))
+                 (t (host-native-fail "unsupported import namespace ~S" namespace)))))
+           (native-link-finished section))
           (4
            (when table (host-native-fail "duplicate table section"))
            (unless (and (= 1 (native-link-integer section)) (= #x70 (native-link-byte section))

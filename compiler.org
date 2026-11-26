@@ -453,6 +453,23 @@ work performed, including the polls already traversed on a partially completed
 trip. A denied or short grant keeps the ordinary checkpoints. Typed exit
 payloads, unknown calls and mutable storage accesses retain ordinary lowering.
 
+Structured native loops that keep ordinary polls can use epoch polling at
+their existing poll sites. Each invocation holds a token combining the
+scheduler epoch and prepaid work credit. A matching token with credit pays
+for the observation inline. The slow path performs the ordinary checkpoint
+and reserves bounded credit from the live budget after any service. The
+scheduler advances the epoch on interrupt enqueue to the running thread,
+segment and external callback entry, and budget refill. Credit expires on
+an epoch change, and the runtime retains one unit for the service boundary.
+
+The source evaluator and HIR interpreter share a private runtime token at
+their existing evaluation and periodic instruction checkpoints. Native
+modules encode immutable poll globals that support ordinary checkpointing.
+The browser installer validates the final module before binding live globals
+and checks that the module cannot write or re-export them. The loader
+reestablishes read access when restoring code. Wasmtime binds the ordinary
+constants and checkpoint helper.
+
 =wasm-optimizer.lisp= runs a shared body pipeline over decoded Wasm.
 Its principal transformations are:
 

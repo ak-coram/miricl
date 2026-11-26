@@ -89,10 +89,12 @@
       (local.set $position (i32.add (local.get $position) (i32.const 1)))
       (local.set $argument (ref.null eq))
       (block $decoded
-        (if ,(wat-native-op-member '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x41 #x42 #xd0 #xd2))
+        (if ,(wat-native-op-member '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x23 #x41 #x42 #xd0 #xd2))
           (then
             ,(wat-native-op-operand '(i32.or (i32.eq (local.get $code) (i32.const 65))
                                            (i32.eq (local.get $code) (i32.const 66))))
+            (br_if $unsupported (i32.and (i32.eq (local.get $code) (i32.const 35))
+                                        (i64.gt_u (local.get $value) (i64.const 4294967295))))
             (local.set $argument (call $int64 (local.get $value))) (br $decoded)))
         (if (i32.eq (local.get $code) (i32.const 14))
           (then
@@ -249,7 +251,7 @@
         (then (array.set $digits (local.get $epochs) (local.get $local) (i32.const 0))))
       (local.set $consumed (i32.const 0)) (local.set $produced (i32.const 0))
       (block $effect-done
-        (if ,(wat-native-op-member '(#x20 #x41 #x42 #xd0 #xd2))
+        (if ,(wat-native-op-member '(#x20 #x23 #x41 #x42 #xd0 #xd2))
           (then (local.set $produced (i32.const 1)) (br $effect-done)))
         (if ,(wat-native-op-member '(#x21 #x1a))
           (then (local.set $consumed (i32.const 1)) (br $effect-done)))

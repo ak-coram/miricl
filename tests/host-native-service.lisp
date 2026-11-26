@@ -48,6 +48,37 @@
       (format nil "(handler-case (progn (miricl-compiler::compiler-primitive 17 (cons ~S \"bad index\") #() nil) nil)
                     (type-error () t))" named)))
     (assert (= 44 (evaluate-string vm "(funcall *host-native-test-closure* 4)"))))
+  ;; Wasmtime installs the same canonical bytes using ordinary, immutable
+  ;; globals and a token function that performs the poll and returns zero.
+  (let ((ordinary (wt:wat-to-wasm
+                    "(module
+                       (import \"p\" \"epoch\" (global $epoch i64))
+                       (import \"p\" \"active\" (global $active i32))
+                       (import \"m\" \"poll-token\" (func $poll (result i64)))
+                       (func (export \"entry\") (param externref externref) (result externref)
+                         i32.const 42 i32.const -1
+                         global.get $epoch i64.eqz
+                         global.get $active i32.const 1 i32.eq i32.and
+                         call $poll i64.eqz i32.and
+                         select ref.i31 extern.convert_any))")))
+    (flet ((run-ordinary ()
+             (evaluate-string vm
+               (format nil "(funcall (miricl-compiler::compiler-primitive 17 ~S #() nil))"
+                       ordinary))))
+      (assert (= 42 (run-ordinary)))
+      (dolist (import '(("epoch" "(mut i64)") ("active" "(mut i32)")
+                        ("epoch" "i32") ("active" "i64") ("unknown" "i64")))
+        (destructuring-bind (name type) import
+          (let ((bytes (wt:wat-to-wasm
+                         (format nil "(module (import \"p\" ~S (global ~A))
+                                        (func (export \"entry\") (param externref externref)
+                                          (result externref) ref.null extern))" name type))))
+            (assert (evaluate-string vm
+              (format nil "(handler-case
+                               (progn (miricl-compiler::compiler-primitive 17 ~S #() nil) nil)
+                             (error (condition) (search \"poll global\" (princ-to-string condition))))"
+                      bytes))))))
+      (assert (= 42 (run-ordinary)))))
   (close-interpreter vm)
   (close-interpreter vm))
 (format t "~&Common Lisp native-module service checks passed.~%")

@@ -6,13 +6,16 @@ import fs from 'node:fs/promises';
 import {Script, createContext} from 'node:vm';
 import {Miricl} from '../scripts/miricl.mjs';
 import {checkCountedResults} from './soundness-counted-results.mjs';
+import {checkPollImports} from './soundness-poll-imports.mjs';
 
-const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
+const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
+const vm = await Miricl.instantiate(image);
 const evaluate = source => vm.evaluate(source, {eof: true}).output;
 const check = source => assert.equal(evaluate(source), 'T\n', source);
 const recover = () => assert.equal(evaluate("(funcall (compile-native '(lambda (x) (+ x 1))) 41)"), '42\n');
 try {
   evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
+  await checkPollImports(image);
   // Lazy builtin condition classes can invoke Lisp during a cache lookup.
   // Isolate the fixture so earlier tests cannot materialize every candidate.
   {

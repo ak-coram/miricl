@@ -113,7 +113,7 @@
         (declare (type (unsigned-byte 32) start) (type (unsigned-byte 8) code))
         (incf position)
         (cond
-          ((member code '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x41 #x42 #xd0 #xd2))
+          ((member code '(#x02 #x03 #x04 #x08 #x0c #x0d #x10 #x12 #x20 #x21 #x22 #x23 #x41 #x42 #xd0 #xd2))
            ;; Constants and heap types only need their encoded extent here.
            ;; Decode the common one-byte case here, avoiding a helper call
            ;; and multiple-value packet for nearly every instruction operand.
@@ -128,7 +128,9 @@
                    (case code
                      ((#x41 #x42) (native-read-sleb bytes position))
                      (#xd0 (native-read-heap-type bytes position))
-                     (otherwise (native-read-uleb bytes position)))))))
+                     (otherwise (native-read-uleb bytes position)))))
+             (when (and (= code #x23) (or (> argument #xffffffff) (> (- position start) 6)))
+               (compiler-input-fail "native global.get" bytes "global index exceeds unsigned 32 bits"))))
           ((= code #x0e)
            (let ((count nil))
              (multiple-value-setq (count position) (native-read-uleb bytes position))
@@ -343,7 +345,7 @@
         (unless effect (error "Missing module instruction stack effect."))
         (return-from native-op-stack (values (car effect) (cdr effect)))))
     (case code
-      ((#x20 #x41 #x42 #xd0 #xd2) (values 0 1))
+      ((#x20 #x23 #x41 #x42 #xd0 #xd2) (values 0 1))
       ((#x21 #x1a) (values 1 0))
       ((#x22 #x45 #x50 #xa7 #xac #xad #xd1) (values 1 1))
       (#xfb (if (= (native-op-argument op) 5) (values 2 0) (values 1 1)))

@@ -298,7 +298,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-tail-call3" (:object :object :object :object) :object)
     ("native-tail-call4" (:object :object :object :object :object) :object)
     ("native-work-limit" (:i32) :i32)
-    ("native-work-complete" (:i32) nil)))
+    ("native-work-complete" (:i32) nil)
+    ("native-poll-token" nil :i64)))
 
 (defun wasm-byte (byte)
   (declare (type (unsigned-byte 8) byte))
@@ -6460,9 +6461,9 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
         ((#x02 #x03 #x04) (push op scopes))
         (#x0b (pop scopes))))))
 
-(defun native-batch-scalar-work (body parameters poll)
+(defun native-batch-scalar-work (body parameters poll ops)
   (destructuring-bind (sites latch weight)
-      (or (native-scalar-work-loop body (native-read-ops body) poll)
+      (or (native-scalar-work-loop body ops poll)
           (return-from native-batch-scalar-work body))
     (let ((remaining parameters) (cursor 0)
           (*wasm-last-local* nil))
@@ -6541,7 +6542,47 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           (wasm-byte #x0b)
           (wasm-append body (native-op-end latch))))))))
 
-(defun native-batch-work-bodies (bodies)
+(defun native-epoch-poll-body (body ops poll local)
+  ;; Replace only calls in the structured loop paths of the final body.
+  ;; Each replacement consumes and produces no operands and leaves the
+  ;; enclosing label stack unchanged.
+  (when (>= local #xffffffff) (return-from native-epoch-poll-body body))
+  (let ((scopes nil) (loops 0) (sites nil))
+    (loop for op across ops for code = (native-op-code op) do
+      (case code
+        ((#x02 #x04) (push nil scopes))
+        (#x03
+         (unless (and (eql (native-op-argument op) #x40)
+                      (= (- (native-op-end op) (native-op-start op)) 2))
+           (return-from native-epoch-poll-body body))
+         (push t scopes) (incf loops))
+        (#x0b (when (pop scopes) (decf loops)))
+        (#x1f (return-from native-epoch-poll-body body))
+        (#x10
+         (when (and (plusp loops) (eql (native-op-argument op) poll))
+           (push op sites)))))
+    (unless (and sites (null scopes)) (return-from native-epoch-poll-body body))
+    (let ((cursor (native-op-start (aref ops 0))) (count (length sites)))
+      (compiler-statistic :optimization/epoch-poll nil count)
+      (decf (gethash "native-poll" *wasm-import-counts*) count)
+      (with-wasm-bytes
+        (multiple-value-bind (groups first) (native-read-uleb body 0)
+          (wasm-u32 (1+ groups)) (wasm-append body first cursor))
+        (wasm-u32 1) (wasm-type :i64)
+        (dolist (site (nreverse sites))
+          (wasm-append body cursor (native-op-start site))
+          ;; If active, debit reserved credit only while it exceeds the
+          ;; live epoch base. The slow call performs the original poll and
+          ;; returns a token after any callback or suspension.
+          (dolist (byte '(#x23 1 #x04 #x40 #x20)) (wasm-byte byte)) (wasm-u32 local)
+          (dolist (byte '(#x23 0 #x55 #x04 #x7e #x20)) (wasm-byte byte)) (wasm-u32 local)
+          (dolist (byte '(#x42 1 #x7d #x05)) (wasm-byte byte))
+          (wasm-call "native-poll-token")
+          (wasm-byte #x0b) (wasm-byte #x21) (wasm-u32 local) (wasm-byte #x0b)
+          (setq cursor (native-op-end site)))
+        (wasm-append body cursor)))))
+
+(defun native-batch-work-bodies (bodies epoch-polling)
   ;; Leave sealed host kernels on their separately owned checkpoint ABI,
   ;; and keep maximum-space or zero-speed workers compact. Coalesced
   ;; entries must all agree.
@@ -6570,7 +6611,11 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           collect (if (and (integerp parameters) (<= (length body) 4096 fuel))
                       (progn
                         (decf fuel (length body))
-                        (native-batch-scalar-work body parameters poll))
+                        (multiple-value-bind (ops offset locals) (native-read-ops body)
+                          (let ((batched (native-batch-scalar-work body parameters poll ops)))
+                            (if (and epoch-polling (eq body batched))
+                                (native-epoch-poll-body body ops poll (+ parameters (- offset 2) locals))
+                                batched))))
                       body))))
 
 (defun native-prune-module (bodies entries &optional (prune-functions t))
@@ -6694,7 +6739,7 @@ the named-entry format for hosts that translate individual Wasm workers."
       (compiler-input-fail "native entry point" entry "entry requires a closure environment")))
   (emit-native-module-checked unit entries entry-tables))
 
-(defun native-entry-sections (entries direct-exports argument-usages entry-tables)
+(defun native-entry-sections (entries direct-exports argument-usages entry-tables imported-globals)
   ;; Physical entry layout never changes the definitions or their order.
   ;; Named factories and small bundles use the same current entry convention.
   (let* ((offset (length *native-imports*))
@@ -6719,7 +6764,8 @@ the named-entry format for hosts that translate individual Wasm workers."
                  (wasm-name (first entry)) (wasm-byte 0)
                  (wasm-u32 (+ offset (gethash (second entry) *native-function-indices*))))
                (loop for usage in argument-usages for i from 0 do
-                 (wasm-name (first usage)) (wasm-byte 3) (wasm-u32 i))))
+                 (wasm-name (first usage)) (wasm-byte 3)
+                 (wasm-u32 (+ imported-globals i)))))
              (when references
                (wasm-section 9 (with-wasm-bytes
                  (wasm-u32 1) (wasm-u32 3) (wasm-byte 0) (wasm-u32 (length references))
@@ -6758,12 +6804,12 @@ the named-entry format for hosts that translate individual Wasm workers."
       (if (< (+ (length table) (length compact)) (length named))
           (values table compact) (values nil named)))))
 
-(defun emit-native-module-checked (unit entries &optional (entry-tables t) named-recursion sealed)
+(defun emit-native-module-checked (unit entries &optional (entry-tables t) named-recursion sealed epoch-polling)
   (let ((*wasm-native-multiple-results* *wasm-native-multiple-results*))
     (loop
       (let ((result (catch 'native-multiple-result-fallback
                       (multiple-value-list
-                        (emit-native-module-with-results unit entries entry-tables named-recursion sealed)))))
+                        (emit-native-module-with-results unit entries entry-tables named-recursion sealed epoch-polling)))))
         (case result
           (:retry (setq *wasm-native-multiple-results* nil))
           (:retry-named-recursion
@@ -7030,7 +7076,7 @@ the named-entry format for hosts that translate individual Wasm workers."
             (return-from native-named-worker-edges-valid-p nil))))
       (native-named-worker-protocol-p (nth index bodies) (+ imports index) sites))))
 
-(defun emit-native-module-with-results (unit entries entry-tables named-recursion &optional sealed-unit)
+(defun emit-native-module-with-results (unit entries entry-tables named-recursion sealed-unit epoch-polling)
   "Emit a verified unit. Internal callers must retain ownership until emission."
   (declare (type hir-unit unit) (type list entries))
   (let* ((*wasm-named-recursion* named-recursion)
@@ -7168,7 +7214,8 @@ the named-entry format for hosts that translate individual Wasm workers."
     ;; emission of every instruction and literal in the application.
     (let* ((*native-imports* *native-imports*)
          (bodies (emit-native-bodies entries))
-         (bodies (native-prune-module (native-batch-work-bodies bodies) entries))
+         (bodies (native-prune-module (native-batch-work-bodies bodies epoch-polling) entries))
+         (imported-globals (if (assoc "native-poll-token" *native-imports* :test #'equal) 2 0))
          (outlining (multiple-value-list (native-outline-bodies bodies)))
          (bodies (first outlining)) (outline-signatures (second outlining))
          (outline-policies (third outlining))
@@ -7192,7 +7239,8 @@ the named-entry format for hosts that translate individual Wasm workers."
              (when (and *wasm-private-i64-worker*
                         (not (native-private-i64-edges-valid-p bodies direct-exports entries)))
                (throw 'native-multiple-result-fallback :retry-sealed-i64))
-             (multiple-value-list (native-entry-sections entries direct-exports argument-usages entry-tables))))
+             (multiple-value-list
+               (native-entry-sections entries direct-exports argument-usages entry-tables imported-globals))))
          (body-types (make-array (length bodies) :initial-element nil))
          (type-prefix (if *wasm-object-types* 2 0))
          (signatures (remove-duplicates
@@ -7219,7 +7267,7 @@ the named-entry format for hosts that translate individual Wasm workers."
                      (progn (wasm-u32 (length results)) (dolist (type results) (wasm-type type)))
                      (progn (wasm-u32 1) (wasm-type results)))))))
            (wasm-section 2 (with-wasm-bytes
-             (wasm-u32 (+ (length *native-imports*) (if *wasm-exceptions* 1 0)))
+             (wasm-u32 (+ (length *native-imports*) (if *wasm-exceptions* 1 0) imported-globals))
              (dolist (import *native-imports*)
                (wasm-name "m")
                ;; Runtime helper names have the ASCII prefix NATIVE-. Skip
@@ -7228,6 +7276,13 @@ the named-entry format for hosts that translate individual Wasm workers."
                  (wasm-u32 (- (length name) 7)) (wasm-append name 7))
                (wasm-byte 0)
                (wasm-u32 (+ type-prefix (position (cdr import) signatures :test #'equal))))
+             (when (plusp imported-globals)
+               ;; Canonical modules grant read-only access. The installer
+               ;; checks these exact bytes before binding the live globals.
+               (wasm-name "p") (wasm-name "epoch")
+               (wasm-byte 3) (wasm-type :i64) (wasm-byte 0)
+               (wasm-name "p") (wasm-name "active")
+               (wasm-byte 3) (wasm-type :i32) (wasm-byte 0))
              (when *wasm-exceptions*
                (wasm-name "m") (wasm-name "transfer") (wasm-byte 4) (wasm-byte 0)
                (wasm-u32 (+ type-prefix (position '(nil nil) signatures :test #'equal))))))
@@ -7262,7 +7317,7 @@ the named-entry format for hosts that translate individual Wasm workers."
   (ensure-compiler)
   (let* ((unit (hir-code-to-unit payload)) (root (first (hir-unit-functions unit))))
     (when name (setf (hir-function-name root) name))
-    (multiple-value-bind (bytes literals debug) (emit-native-module-checked unit nil)
+    (multiple-value-bind (bytes literals debug) (emit-native-module-checked unit nil t nil nil t)
       (multiple-value-bind (function native) (compiler-primitive 17 bytes literals name)
         (unless native (error "This host cannot instantiate compiled Wasm modules."))
         (let ((arity (native-fixed-arity root)))
@@ -7285,7 +7340,7 @@ the named-entry format for hosts that translate individual Wasm workers."
         ;; Lowering and emission retain exclusive ownership of this unit.
         (let ((*wasm-single-use-entry* single-use))
           (emit-native-module-checked unit nil t
-            (when references (cons (first (hir-unit-functions unit)) references))))
+            (when references (cons (first (hir-unit-functions unit)) references)) nil t))
       (multiple-value-bind (function native) (compiler-primitive 17 bytes literals name)
         (unless native (error "This host cannot instantiate compiled Wasm modules."))
         (let ((arity (native-fixed-arity (first (hir-unit-functions unit)))))
@@ -7305,7 +7360,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
         (compiler-input-fail "module definition" definition "expected (DEFUN name lambda-list body...)")))
     (setq entry-points (mapcar #'second definitions)))
   (let ((unit (compile-module-to-hir definitions :entry-points entry-points :inline inline)))
-    (multiple-value-bind (bytes literals debug) (emit-native-module-checked unit nil t nil unit)
+    (multiple-value-bind (bytes literals debug) (emit-native-module-checked unit nil t nil unit t)
       (multiple-value-bind (factory native) (compiler-primitive 17 bytes literals nil)
         (unless native (error "This host cannot instantiate compiled Wasm modules."))
         (when debug (setq factory (compiler-primitive 34 factory debug 0)))
@@ -7334,7 +7389,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     native-vector-snapshot-value-p native-vector-snapshot-source
     native-vector-snapshot-call-p native-vector-snapshot-region
     native-private-i64-return-source native-plan-private-i64-site native-private-i64-edges-valid-p
-    native-scalar-work-loop native-batch-scalar-work
+    native-scalar-work-loop native-batch-scalar-work native-epoch-poll-body
     native-simplify-ops-lisp native-op-liveness-lisp
     compilation-statistics-report compiler-input-summary
     hir-assert-form hir-correctable-place-form hir-restart-options

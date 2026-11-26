@@ -554,7 +554,7 @@
         (loop $next
           (local.set $ticks (i32.add (local.get $ticks) (i32.const 1)))
           (if (i32.eqz (i32.and (local.get $ticks) (i32.const 255)))
-            (then (if (global.get $thread-active) (then (call $thread-checkpoint)))))
+            (then ,(interpreter-checkpoint-wat)))
           (if (local.get $enter)
             (then
               (local.set $block-data (call $vector-data (array.get $objects (local.get $blocks) (local.get $block))))

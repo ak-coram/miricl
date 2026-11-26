@@ -6,6 +6,10 @@
 ;; Bound the size of one ABI report independently of the clock sample policy.
 (defconstant +thread-work-max-units+ 2048)
 
+(defconstant +poll-epoch-stride+ 64)
+(defconstant +poll-epoch-max-credit+ 31)
+(defconstant +poll-epoch-exhausted+ (1- (ash 1 63)))
+
 (defparameter *thread-state*
   (append
     (loop for name in '($extra-values $secondary-value $tertiary-value $dynamic-package $dynamic-variables $handlers $restarts
@@ -115,10 +119,22 @@
   #@(memory.copy $thread-memory 0 (struct.get $green-thread $memory-offset (local.get $thread))
     (i32.const 0) (local.get $bytes)))
 
+(define-runtime-function $poll-epoch-advance () ()
+  ;; Every grant is in [base+1, base+31]. A stride of 64 invalidates all
+  ;; outstanding grants with a signed comparison, including on saturation.
+  ;; The sentinel is greater than the last possible token and stays fixed.
+  #@(global.set $poll-epoch-base
+    (if (result i64)
+      (i64.ge_s (global.get $poll-epoch-base)
+        (i64.const ,(- (1+ +poll-epoch-exhausted+) +poll-epoch-stride+)))
+      (then (i64.const ,+poll-epoch-exhausted+))
+      (else (i64.add (global.get $poll-epoch-base) (i64.const ,+poll-epoch-stride+))))))
+
 (define-runtime-function $thread-enter (($id i32)) ()
   (:export-raw "thread-enter")
   (:locals ($thread (ref $green-thread)) ($context (ref $thread-context)))
   #@(local.set $thread (call $thread-find (local.get $id)))
+  #@(call $poll-epoch-advance)
   #@(global.set $current-thread (local.get $thread))
   #@(local.set $context (ref.as_non_null (struct.get $green-thread $context (local.get $thread))))
   (runtime-wat-forms
@@ -141,6 +157,7 @@
   ;; synchronous callback must not inherit its in-flight transfers, handlers,
   ;; reader state or scratch buffers. THREAD-ENTER restores that saved state
   ;; after the host has converted the callback's result and output.
+  #@(call $poll-epoch-advance)
   #@(local.set $id (call $thread-id))
   (runtime-wat-forms
     (loop for (name type initial) in *thread-state* collect
@@ -158,6 +175,49 @@
 
 (define-runtime-function $thread-checkpoint () ()
   (miricl-cross::thread-checkpoint-wat))
+
+(define-runtime-function $native-poll-token () (i64)
+  (:export-raw "native-poll-token")
+  #@(call $thread-checkpoint)
+  #@(i64.const 0))
+
+(define-runtime-function $poll-epoch-token () (i64)
+  (:export-raw "poll-epoch-token")
+  (:locals ($base i64) ($remaining i32) ($credit i32))
+  ;; The ordinary observation can run callbacks, suspend, or transfer.
+  ;; Read the live scheduler state after it returns.
+  #@(call $thread-checkpoint)
+  #@(if (i32.eqz (global.get $thread-active)) (then (return (i64.const 0))))
+  #@(if (i32.or (global.get $thread-mask) (global.get $javascript-depth))
+    (then (return (i64.const 0))))
+  #@(if (i32.eqz (ref.is_null (global.get $thread-pending)))
+    (then (return (i64.const 0))))
+  #@(local.set $base (global.get $poll-epoch-base))
+  #@(if (i64.eq (local.get $base) (i64.const ,+poll-epoch-exhausted+))
+    (then (return (i64.const 0))))
+  #@(local.set $remaining (global.get $thread-budget))
+  #@(if (i32.le_s (local.get $remaining) (i32.const 1))
+    (then (return (i64.const 0))))
+  ;; Reserve credit before issuing it and leave one unit to trigger the next
+  ;; service. Refills invalidate old grants, bounding work even across calls.
+  #@(local.set $credit (i32.sub (local.get $remaining) (i32.const 1)))
+  #@(local.set $credit (select (local.get $credit) (i32.const ,+poll-epoch-max-credit+)
+    (i32.lt_s (local.get $credit) (i32.const ,+poll-epoch-max-credit+))))
+  #@(global.set $thread-budget (i32.sub (local.get $remaining) (local.get $credit)))
+  #@(i64.add (local.get $base) (i64.extend_i32_u (local.get $credit))))
+
+(defun interpreter-checkpoint-wat ()
+  ;; Both interpreter entry points spend the same credit. Read it from live
+  ;; state each time. If service reenters, replacing the reentrant token can
+  ;; discard its unused credit but cannot spend it twice.
+  (wat-fragment
+    #@(if (global.get $thread-active)
+      (then
+        (global.set $interpreter-poll-token
+          (if (result i64)
+            (i64.gt_s (global.get $interpreter-poll-token) (global.get $poll-epoch-base))
+            (then (i64.sub (global.get $interpreter-poll-token) (i64.const 1)))
+            (else (call $poll-epoch-token))))))))
 
 (define-runtime-function $thread-work-range-error (($units i32)) ()
   #@(call $type-fail (call $int (local.get $units))
@@ -214,6 +274,7 @@
       (drop (call $thread-interrupt-scope (call $car (local.get $pending)) (i32.const 0)))))
   #@(if (i32.le_s (global.get $thread-budget) (i32.const 0))
     (then
+      (call $poll-epoch-advance)
       (global.set $thread-budget (i32.const 2048))
       (if (f64.ge (call $host-service (i32.const 1) (f64.const 0)) (global.get $thread-slice-deadline))
         (then (call $thread-switch)))))
@@ -398,7 +459,9 @@
       (struct.set $green-thread $interrupts (local.get $thread)
         (call $cons (local.get $b) (struct.get $green-thread $interrupts (local.get $thread))))
       (if (ref.eq (local.get $thread) (global.get $current-thread))
-        (then (global.set $thread-pending (struct.get $green-thread $interrupts (local.get $thread)))))
+        (then
+          (call $poll-epoch-advance)
+          (global.set $thread-pending (struct.get $green-thread $interrupts (local.get $thread)))))
       (if (i32.eq (struct.get $green-thread $state (local.get $thread)) (i32.const 1))
         (then (struct.set $green-thread $state (local.get $thread) (i32.const 0))))
       (return (ref.null eq))))
@@ -431,12 +494,21 @@
   #@(global $thread-active (export "thread-active") (mut i32) (i32.const 0))
   #@(global $thread-mask (mut i32) (i32.const 0))
   #@(global $thread-budget (mut i32) (i32.const 2048))
+  ;; Live bindings are private to the installer and verified consumers. The
+  ;; immutable ordinary bindings always run the real observation via token 0.
+  #@(global $poll-epoch-base (export "poll-epoch-base") (mut i64)
+    (i64.const ,+poll-epoch-stride+))
+  #@(global $poll-epoch-ordinary (export "poll-epoch-ordinary") i64 (i64.const 0))
+  #@(global $poll-active-ordinary (export "poll-active-ordinary") i32 (i32.const 1))
+  ;; Credit belongs to the active epoch. Never save it in a thread or image.
+  #@(global $interpreter-poll-token (mut i64) (i64.const 0))
   ;; Derived from the current thread on entry, never restored from a stale
   ;; saved context: another thread can enqueue an interrupt while it sleeps.
   #@(global $thread-pending (mut (ref null eq)) (ref.null eq))
   #@(global $thread-slice-deadline (mut f64) (f64.const 0))
   ($thread-find) ($thread-create) ($thread-current) ($thread-free-scratch) ($thread-allocate-scratch) ($thread-save) ($thread-enter) ($thread-callback-enter)
   ($thread-switch) ($thread-checkpoint) ($thread-checkpoint-service)
+  ($poll-epoch-advance) ($native-poll-token) ($poll-epoch-token)
   ($thread-work-range-error) ($native-work-limit) ($native-work-complete)
   ($thread-park) ($thread-next) ($thread-delay)
   ($thread-run) ($thread-failed) ($thread-id) ($thread-main-state) ($thread-retire)
