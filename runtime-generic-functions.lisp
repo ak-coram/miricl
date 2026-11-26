@@ -643,7 +643,7 @@
     (then (call $type-fail (local.get $properties)
       (call $symbol-value ,(clos-library-reference '%proper-list-type))
       (i32.const ,(runtime-error-code :expected-designator)))))
-  #@(if (i32.and (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $length)))) (i32.const 1))
+  #@(if (i32.and (i32.wrap_i64 (call $scalar-integer-value (local.get $length))) (i32.const 1))
     (then (call $generic-dispatch-invalid (local.get $gf)
       ,(wat-text-literal "Generic metadata property list must contain key/value pairs."))))
   ;; Checked workers may yield. Do not promote detached or borrowed storage.
@@ -742,7 +742,7 @@
         (then (call $type-fail (local.get $properties)
           (call $symbol-value ,(clos-library-reference '%proper-list-type))
           (i32.const ,(runtime-error-code :expected-designator)))))
-      (if (i32.and (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $length)))) (i32.const 1))
+      (if (i32.and (i32.wrap_i64 (call $scalar-integer-value (local.get $length))) (i32.const 1))
         (then (call $generic-dispatch-invalid (local.get $object) ,(wat-text-literal "Generic metadata property list must contain key/value pairs."))))))
       (if (i32.eq (local.get $selector) (i32.const 1))
         (then (return (call $car (call $property-cell (local.get $properties) ,(clos-library-reference :object))))))

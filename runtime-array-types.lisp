@@ -64,8 +64,8 @@
   #@(local.set $rank (array.get $objects (local.get $parts) (i32.const 1)))
   (wat-fail-when #@(i32.or (i32.eqz (call $scalar-integer-p (local.get $flags)))
     (i32.eqz (call $scalar-integer-p (local.get $rank)))) :malformed-type)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $flags))))
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $rank))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (local.get $flags)))
+  #@(i32.wrap_i64 (call $scalar-integer-value (local.get $rank)))
   #@(array.get $objects (local.get $parts) (i32.const 2)))
 
 (define-runtime-function $array-type-info (($type :nullable-object) ($env :nullable-object)) (i32 i32 :nullable-object)
@@ -81,8 +81,8 @@
     (i32.const 2) (i32.const 0) (i32.const -1) (local.get $env))))
 
 (define-runtime-function $array-subtypep (($a :nullable-object) ($b :nullable-object) ($env :nullable-object)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $array-query (local.get $a) (local.get $b) (i32.const 3) (i32.const 0) (i32.const -1) (local.get $env))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value
+    (call $array-query (local.get $a) (local.get $b) (i32.const 3) (i32.const 0) (i32.const -1) (local.get $env)))))
 
 ;; One checked private callback exposes existing target services. No array
 ;; parsing, shape scan, intersection or subtype algorithm lives in this glue.
@@ -106,7 +106,7 @@
     (($selector :nullable-object) ($type :nullable-object) ($environment :nullable-object)) (:nullable-object)
   (:locals ($tail :nullable-object) ($class :nullable-object) ($code i64))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :malformed-type)
-  #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
+  #@(local.set $code (call $scalar-integer-value (local.get $selector)))
   (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 4)) :malformed-type)
   #@(call $clear-values)
   #@(if (i64.eqz (local.get $code))

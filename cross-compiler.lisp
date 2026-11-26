@@ -573,10 +573,13 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
     (copy-tree (kernel-fixed-imports))
     (fdefinition 'kernel-macroexpand-hook)
     (copy-tree miricl-compiler::*native-imports*)
-    ;; Portable passes remain active on the host even when their Wasm
-    ;; accelerators let the shipped compiler retain only interpreted sources.
+    ;; Portable passes remain active on the host. Track their definitions
+    ;; independently of which passes ship in the guest compiler.
     (loop for name in (append miricl-compiler::*native-compiler-seeds*
-                             miricl-compiler::*native-compiler-cold-functions*)
+                             miricl-compiler::*native-compiler-cold-functions*
+                             '(miricl-compiler::native-op-liveness-lisp
+                               miricl-compiler::native-simplify-ops-lisp
+                               miricl-compiler::native-i32 miricl-compiler::native-fold-i32))
           when (and (fboundp name) (not (macro-function name)))
             collect (cons name (fdefinition name)))))
 
@@ -906,7 +909,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                     (dotimes (slot count) (format out "local.get ~D extern.convert_any~%" (+ call-base slot)))
                     (format out "call $~A any.convert_extern ref.cast (ref null eq)~%" target)))
                  ((string= target "native-int64") (write-line "call $box-int64" out))
-                 ((string= target "native-unbox-int64") (write-line "ref.as_non_null call $scalar-integer-value" out))
+                 ((string= target "native-unbox-int64") (write-line "call $scalar-integer-value" out))
                  ;; These imports already represent proven simple-vector
                  ;; operations. Lower their access directly in the core ABI;
                  ;; extra helper calls substantially slow the swap loop.

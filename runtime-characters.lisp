@@ -181,9 +181,9 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$character-digit-code-cl 'miricl-runtime:character-digit-code-value))))
 
 (define-runtime-function $character-digit-weight (($code i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+  #@(i32.wrap_i64 (call $scalar-integer-value
     (call $character-digit-code-cl (call $int (local.get $code))
-      (global.get $character-digit-table))))))
+      (global.get $character-digit-table)))))
 
 (define-runtime-function $character-digit-apply (($id i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($x :nullable-object) ($radix :nullable-object) ($base i32) ($weight i32))
@@ -290,8 +290,8 @@
     (then (return (i32.const 0))))
   ;; The CL parser handles the target's Unicode-name extension after table
   ;; aliases have had priority. NAME has already been made a simple string.
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $unicode-character-name-code-cl (local.get $name))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value
+    (call $unicode-character-name-code-cl (local.get $name)))))
 
 (defun $unicode-character-name-code-cl ()
   (runtime-function-definition '$unicode-character-name-code-cl

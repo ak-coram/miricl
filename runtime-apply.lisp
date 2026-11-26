@@ -187,13 +187,13 @@
       ;; The postcheckpoint boundary admits finite dotted private REST tails.
       ;; The packet copy below declines those tails and keeps the original.
       (local.set $count (call $checked-list-length (local.get $args) (i32.const 3)))
-      (if (i64.lt_s (call $scalar-integer-value (ref.as_non_null (local.get $count))) (i64.const 0))
+      (if (i64.lt_s (call $scalar-integer-value (local.get $count)) (i64.const 0))
         (then (call $type-fail (local.get $args) (call $symbol-value ,(clos-library-reference '%proper-list-type))
           (i32.const ,(runtime-error-code :expected-designator)))))
       (block $ordinary-spine
         (br_if $ordinary-spine (global.get $debug-evaluating))
         (br_if $ordinary-spine (i64.gt_u
-          (call $scalar-integer-value (ref.as_non_null (local.get $count))) (i64.const 8)))
+          (call $scalar-integer-value (local.get $count)) (i64.const 8)))
         (br_if $ordinary-spine (i32.eqz (ref.test (ref $native-function) (local.get $name))))
         (br_if $ordinary-spine (ref.test (ref $native-debug-function) (local.get $name)))
         (br_if $ordinary-spine (i32.eqz (ref.is_null

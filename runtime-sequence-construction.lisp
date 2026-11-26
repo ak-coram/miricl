@@ -34,13 +34,13 @@
   ;; now calls Lisp through the primary-value ABI, so preserve the caller's.
   #@(local.set $saved-extra (call $extra-value-list))
   #@(local.set $saved-count (global.get $value-count))
-  #@(local.set $result (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+  #@(local.set $result (i32.wrap_i64 (call $scalar-integer-value
     (call $sequence-character-scan-cl (call $text (local.get $data))
       (call $vector-new (array.new_fixed $objects 5
         (call $int (local.get $first)) (call $int (local.get $stop)) (call $int (local.get $needle))
         (call $int (i32.or (local.get $negate)
           (i32.or (i32.shl (local.get $from-end) (i32.const 1)) (i32.shl (local.get $count-result) (i32.const 2)))))
-        (call $sequence-character-fold-function (local.get $fold)))))))))
+        (call $sequence-character-fold-function (local.get $fold))))))))
   #@(global.set $extra-values (local.get $saved-extra))
   #@(global.set $value-count (local.get $saved-count))
   #@(local.get $result))

@@ -49,6 +49,12 @@ kernels and definitions to obtain a disposable native compiler, using a
 speed-oriented policy for that stage. After restoring the original policy,
 the native compiler emits a sealed shipping payload from the saved source
 corpus. =*native-compiler-seeds*= identifies its native definitions.
+The main startup factory builds closures in the sealed group and pairs
+them with a literal vector of names in entry order. It returns fresh
+binding pairs for installation. The bootstrap checks their order and
+identity before recording their symbol namespaces. For passive startup
+graphs, the host uses these entries to omit source for private file
+preparation and FASL writing helpers that run after installation.
 =*native-compiler-cold-functions*= identifies opt-in planning, portable pass
 and infrequently used helpers retained in the interpreted library. Shared
 Wasm kernels serve common passes in the shipped compiler. =ensure-compiler=
@@ -177,6 +183,8 @@ be complete before excluding an edge. Bounded private-use analyses can also
 prove a quoted-list cursor or a traversal counter invariant. Mutation,
 aliasing, captures, unresolved calls and unknown effects can invalidate
 such facts. A LIST fact permits NIL or CONS and gives no proper-spine proof.
+Checked inference invokes the interpreted literal-counter proof worker
+only when it has a certified cursor length.
 
 A bounded audit of private integer cells joins the successful result ranges
 of the initializer and every store. A literal-initialized counter that
@@ -490,6 +498,12 @@ support the same logical passes. =optimize-wasm-module= applies these
 passes before component packaging, keeps only smaller encodings, and
 leaves unsupported bodies intact. It preserves the module ABI.
 
+Compiler guests use the runtime liveness and instruction simplification
+kernels directly, with scope cleanup and opcode filtering in the shared
+Lisp pipeline. The host retains portable implementations of those passes.
+The guest decoder and stackifier keep portable paths for cases outside
+the native kernels' supported inputs.
+
 *** Module passes
 
 Module processing pools literals, merges equal code bodies, removes
@@ -517,6 +531,35 @@ argument/result and section costs fit size policy. Exact comparison
 establishes matches. Unknown types, unsupported control and exhausted
 work leave ordinary code.
 
+The host uses a lower minimum saving per helper and a larger helper
+limit when outlining the final import-free image with the precompiled
+compiler. Discovery retains its work bounds and caller policies. A second pass
+in that image shares adjacent direct calls to two runtime transport
+entries when the first result exactly matches the last parameter of the
+second call. The first body must be short, straight-line and read-only,
+including its direct callees. The private helper copies the first body
+and tail-calls the second entry with the original operands, preserving
+traps, live effects and handler continuations. Explicit caller policies
+and helper costs limit site selection. The host validates the finished
+Wasm module before packaging. The Node core embedded in the WASI REPL uses
+the same image.
+
+For the stripped precompiled image, the host tries one more local
+optimization pass on the outlined code. It accepts that pass when the
+final compact module validates and shrinks.
+The compact layout assigns short function indices to frequently called
+appended helpers. It swaps private function bodies and their type entries
+and relocates direct calls and tail calls. Exports, table entries, and
+targets of function references retain the indices used by snapshot
+restoration.
+The same compact pass combines an adjacent local null test, branch, and
+reread into a null branch that carries the reference on fallthrough.
+The branch depth and local assignment are preserved.
+The host validates fallthrough simplifications with the original scopes
+in place. It then removes unused void wrappers and merges adjacent
+blocks with matching signatures, adjusting branch and catch depths.
+Each stage keeps the previous bytes when validation rejects its candidate.
+
 ** Runtime optimization and extensions
 
 *** Shared kernels and dispatch
@@ -528,6 +571,8 @@ inputs before unchecked traversal. Fixed callback linkage requires a
 privately established identity and preserves callback effects. Host kernel
 caching tracks live backend definitions so changes to passes reach
 recompiled kernels.
+Linked scalar integer extraction shares its null check at the private
+helper entry before dispatching on the WasmGC integer representation.
 
 Generic dispatch caches method selection under runtime ownership, with
 checks on the actual discriminator, type and method state, argument

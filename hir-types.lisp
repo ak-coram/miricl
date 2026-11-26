@@ -850,8 +850,6 @@ certify a spine; every actual use and write must pass the private-cell audit."
 (defun hir-literal-counter-cells (unit lengths)
   "Bound private integer updates in one linear, freshly guarded literal traversal.
 This is a local certificate, not a runtime length or general loop analysis."
-  (unless (and lengths (plusp (hash-table-count lengths)))
-    (return-from hir-literal-counter-cells nil))
   (let ((proofs (make-hash-table :test 'eq)) (fuel 65536))
     (labels ((charge ()
                (when (minusp (decf fuel)) (return-from hir-literal-counter-cells nil)))
@@ -1848,8 +1846,10 @@ be discarded after mutation. The public inference boundary accepts no maps."
         (guards (or guard-facts (hir-type-branch-guards unit)))
         (literal-certificates (multiple-value-list (hir-literal-list-cells unit)))
         (literal-cells (first literal-certificates))
+        (literal-lengths (second literal-certificates))
         (integer-cells (hir-bounded-integer-cells unit
-                         (hir-literal-counter-cells unit (second literal-certificates))))
+                         (when (and literal-lengths (plusp (hash-table-count literal-lengths)))
+                           (hir-literal-counter-cells unit literal-lengths))))
         (callees (or callee-facts (hir-result-callees unit (hir-optimization-barriers unit)))))
     (declare (type hash-table facts sources users calls references candidates escaped
                    sites opaque queued required growth guards)

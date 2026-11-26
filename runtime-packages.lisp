@@ -177,7 +177,7 @@
       (if (i32.eq (local.get $selector) (i32.const 1))
         (then
           ,(wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $index))) :invalid-package)
-          (local.set $slot (call $scalar-integer-value (ref.as_non_null (local.get $index))))
+          (local.set $slot (call $scalar-integer-value (local.get $index)))
           ,(wat-fail-when #@(i64.ge_u (local.get $slot) (i64.extend_i32_u (array.len (ref.as_non_null (local.get $table))))) :invalid-package)
           (return (array.get $objects (ref.as_non_null (local.get $table)) (i32.wrap_i64 (local.get $slot))))))
       (local.set $meta (struct.get $obj $c (ref.cast (ref $obj) (local.get $node))))
@@ -198,7 +198,7 @@
     (($node :nullable-object) ($selector :nullable-object) ($index :nullable-object)) (:nullable-object)
   (:locals ($code i64))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :invalid-package)
-  #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
+  #@(local.set $code (call $scalar-integer-value (local.get $selector)))
   (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 14)) :invalid-package)
   #@(return_call $package-node-ref (local.get $node) (i32.wrap_i64 (local.get $code)) (local.get $index)))
 
@@ -255,7 +255,7 @@
   #@(local.set $result (call $present-entry-cl (local.get $name)
     (call $package-node-ref (local.get $p) (i32.const 1)
       (call $int (call $package-name-bucket (local.get $name)
-        (i32.sub (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $size)))) (i32.const 1)))))
+        (i32.sub (i32.wrap_i64 (call $scalar-integer-value (local.get $size))) (i32.const 1)))))
     (call $package-entry-function (i32.const 0)) (call $package-entry-function (i32.const 3))))
   #@(global.set $extra-values (local.get $values))
   #@(global.set $value-count (local.get $count))
@@ -266,8 +266,8 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$package-name-hash-cl 'miricl-runtime:package-name-hash))))
 
 (define-runtime-function $package-name-bucket (($name :nullable-object) ($mask i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $package-name-hash-cl (call $string-contents (local.get $name)) (call $int (local.get $mask)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value
+    (call $package-name-hash-cl (call $string-contents (local.get $name)) (call $int (local.get $mask))))))
 
 (define-runtime-function $initialize-package-index (($id i32)) ()
   (:locals ($new (ref $package-indexes)) ($names (ref $objects)))
@@ -951,7 +951,7 @@
   #@(if (ref.is_null (local.get $result)) (then (return (ref.null eq))))
   #@(local.set $data (call $vector-data (local.get $result)))
   #@(local.set $status (i32.wrap_i64 (call $scalar-integer-value
-    (ref.as_non_null (array.get $objects (local.get $data) (i32.const 1))))))
+    (array.get $objects (local.get $data) (i32.const 1)))))
   #@(global.set $extra-values (call $cons (array.get $objects (local.get $data) (i32.const 0))
     (call $cons (call $symbol
       (if (result i32) (i32.eq (local.get $status) (i32.const 1))

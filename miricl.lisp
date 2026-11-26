@@ -124,10 +124,58 @@
 (defparameter *interpreter-wasm-compact* nil)
 (defparameter *interpreter-native-compiler-wasm* nil)
 (defparameter *interpreter-only-wasm* nil)
-(defun optimize-runtime-wat (wat &key layout-functions)
-  (miricl-compiler::optimize-wasm-module
-    (wt:wat-to-wasm (runtime-prune-wat wat :layout-functions layout-functions))
-    :default-outline-policy 29))
+(defun compact-runtime-code (engine bytes first-helper)
+  (let ((compact (miricl-compiler::compact-linked-wasm-code bytes first-helper)))
+    (unless (eq bytes compact) (native-link-validate engine compact))
+    (dolist (rewrite '(miricl-compiler::module-terminal-branches
+                       miricl-compiler::module-untargeted-scopes)
+                    compact)
+      (let ((candidate (miricl-compiler::rewrite-linked-wasm-control compact rewrite)))
+        ;; Admit fallthrough with its original frames. Removing the frames
+        ;; first can make a previously rejected operand stack validate with
+        ;; a different result. Each stage falls back independently.
+        (unless (eq candidate compact)
+          (handler-case
+              (progn (native-link-validate engine candidate) (setf compact candidate))
+            (miricl-compiler::compiler-input-error () nil)))))))
+
+(defun compact-outlined-runtime-code (engine outlined first-helper)
+  (let ((compact (compact-runtime-code engine (wasm-without-debug-names outlined)
+                                       first-helper)))
+    ;; Outlining changes local uses and exposes new simplifications. Keep the
+    ;; existing helper indices until compact-runtime-code can relocate them.
+    (or (handler-case
+            (let* ((miricl-compiler::*native-outlining-budget* 0)
+                   (optimized (miricl-compiler::optimize-wasm-module outlined
+                                :default-outline-policy 29)))
+              (unless (eq optimized outlined)
+                (let ((raw (coerce optimized '(simple-array (unsigned-byte 8) (*)))))
+                  (native-link-validate engine raw)
+                  (let ((candidate (compact-runtime-code engine (wasm-without-debug-names raw)
+                                                         first-helper)))
+                    (when (< (length candidate) (length compact))
+                      (native-link-validate engine candidate)
+                      candidate)))))
+          (miricl-compiler::compiler-input-error () nil))
+        compact)))
+
+(defun optimize-runtime-wat (wat &key layout-functions runtime-call-pairs)
+  (let ((bytes (wt:wat-to-wasm (runtime-prune-wat wat :layout-functions layout-functions))))
+    (if runtime-call-pairs
+        (wt:with-engine (engine)
+          ;; This is the host-owned, fully linked runtime and compiler. Check
+          ;; the original module before deriving its call and stack facts.
+          (native-link-validate engine bytes)
+          (multiple-value-bind (optimized changed unsupported first-helper)
+              (miricl-compiler::optimize-wasm-module bytes
+                :default-outline-policy 29 :runtime-call-pairs t)
+            (declare (ignore changed unsupported))
+            (let ((raw (coerce optimized '(simple-array (unsigned-byte 8) (*)))))
+              (native-link-validate engine raw)
+              (if layout-functions
+                  (values raw (compact-outlined-runtime-code engine raw first-helper))
+                  raw))))
+        (miricl-compiler::optimize-wasm-module bytes :default-outline-policy 29))))
 
 (defun interpreter-wasm (&key wasi native-compiler debug-names (compiler t))
   "Return the interpreter binary. NATIVE-COMPILER includes the bootstrapped
@@ -152,9 +200,12 @@ DEBUG-NAMES retains native debugging names."
         ;; these bytes. Invalidate the cache when the bootstrap image changes.
         (unless (eq image (car *interpreter-native-compiler-wasm*))
           (let* ((*native-compiler-image* image)
-                 (raw (optimize-runtime-wat (interpreter-wat) :layout-functions t)))
-            (setf *interpreter-native-compiler-wasm*
-              (list image raw (wasm-without-debug-names raw)))))
+                 (wat (interpreter-wat))
+                 (miricl-compiler::*native-outlining-minimum-saving* 16)
+                 (miricl-compiler::*native-outlining-helper-limit* 192))
+            (multiple-value-bind (raw compact)
+                (optimize-runtime-wat wat :layout-functions t :runtime-call-pairs t)
+              (setf *interpreter-native-compiler-wasm* (list image raw compact)))))
         (copy-seq (if debug-names (second *interpreter-native-compiler-wasm*)
                                 (third *interpreter-native-compiler-wasm*)))))
     (t (let* ((*native-compiler-image* nil)

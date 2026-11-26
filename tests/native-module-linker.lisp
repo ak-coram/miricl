@@ -123,4 +123,127 @@
         (uiop:run-program (list "node" (namestring script)
                                 (format nil "verify-~A" fixture) (namestring original) (namestring plain)
                                 (namestring shared) (princ-to-string operands))
-                          :output *standard-output* :error-output *error-output*)))))
+                          :output *standard-output* :error-output *error-output*))))
+  (let ((source (merge-pathnames "call-pairs.wat" directory))
+        (plain (merge-pathnames "call-pairs-plain.wasm" directory))
+        (shared (merge-pathnames "call-pairs-shared.wasm" directory)))
+    (uiop:run-program (list "node" (namestring script) "prepare-call-pairs" (namestring source))
+                      :output *standard-output* :error-output *error-output*)
+    (let ((wat (uiop:read-file-string source))
+          (miricl-compiler::*native-outlining-minimum-saving* 128))
+      (loop for pathname in (list plain shared) for pairs in '(nil t) do
+        (with-open-file (output pathname :direction :output :element-type '(unsigned-byte 8))
+          (write-sequence (miricl::optimize-runtime-wat wat :runtime-call-pairs pairs) output))))
+    (uiop:run-program (list "node" (namestring script)
+                            "verify-call-pairs" (namestring plain) (namestring shared))
+                      :output *standard-output* :error-output *error-output*))
+  (dolist (fixture '("linked-control" "rejected-control"))
+    (let ((source (merge-pathnames (format nil "~A.wat" fixture) directory))
+          (original (merge-pathnames (format nil "~A-original.wasm" fixture) directory))
+          (optimized (merge-pathnames (format nil "~A-optimized.wasm" fixture) directory)))
+      (uiop:run-program (list "node" (namestring script) (format nil "prepare-~A" fixture)
+                              (namestring source))
+                        :output *standard-output* :error-output *error-output*)
+      (let* ((bytes (miricl::wasm-without-debug-names (wasmtime:wat-to-wasm (uiop:read-file-string source))))
+             (result (wasmtime:with-engine (engine)
+                       (miricl::native-link-validate engine bytes)
+                       (miricl::compact-runtime-code engine bytes nil))))
+        (loop for file in (list original optimized) for contents in (list bytes result) do
+          (with-open-file (output file :direction :output :element-type '(unsigned-byte 8))
+            (write-sequence contents output))))
+      (uiop:run-program (list "node" (namestring script) (format nil "verify-~A" fixture)
+                              (namestring original) (namestring optimized))
+                        :output *standard-output* :error-output *error-output*)))
+  (let* ((original (merge-pathnames "helper-layout-original.wasm" directory))
+         (compact (merge-pathnames "helper-layout-compact.wasm" directory))
+         (first-helper 128)
+         (padding (loop for i below (- first-helper 5) collect (format nil "$pad~D" i)))
+         (wat (with-output-to-string (out)
+                (format out "(module
+                  (table 0 funcref)
+                  (table $table (export \"table\") ~D funcref)
+                  (elem (table $table) (i32.const 0) func $table-entry ~{~A~^ ~})
+                  (global (export \"held\") funcref (ref.func $held))
+                  (global (export \"minimum\") i64 (i64.const -9223372036854775808))
+                  (func $table-entry (result i32) i32.const 77)
+                  (func $held (result i32) i32.const 88)
+                  (func $cold (result i32) i32.const 17)
+                  (func (export \"call\") (param i32) (result i32)"
+                  (1+ (length padding)) padding)
+                (dotimes (i 8) (write-string " local.get 0 call $helper drop" out))
+                (write-string " local.get 0 call $helper call $cold i32.add)
+                   (func (export \"tail\") (param i32) (result i32) local.get 0 return_call $helper)" out)
+                (dolist (name padding) (format out " (func ~A)" name))
+                (write-string "
+                  (func $helper (param i32) (result i32) local.get 0 i32.const 3 i32.add)
+                  (func $keep (param externref) (result externref) local.get 0)
+                  (func (export \"nullGet\") (param $ref externref) (result i32 externref)
+                    (local $kept externref)
+                    block $exit (result i32)
+                      block
+                        i32.const 37
+                        local.get $ref
+                        ref.is_null
+                        br_if $exit
+                        local.get $ref
+                        call $keep
+                        local.set $kept
+                        drop
+                      end
+                      i32.const 41
+                    end
+                    local.get $kept)
+                  (func (export \"nullTee\") (param $ref externref) (param $old externref)
+                    (result i32 externref externref)
+                    (local $kept externref)
+                    block $exit (result i32)
+                      block
+                        i32.const 43
+                        local.get $ref
+                        local.tee $old
+                        ref.is_null
+                        br_if $exit
+                        local.get $old
+                        call $keep
+                        local.set $kept
+                        drop
+                      end
+                      i32.const 47
+                    end
+                    call $helper
+                    local.get $kept
+                    local.get $old)
+                  (func (export \"nullDifferent\") (param $tested externref) (param $selected externref)
+                    (result i32 externref)
+                    (local $kept externref)
+                    block $exit (result i32)
+                      i32.const 51
+                      local.get $tested
+                      ref.is_null
+                      br_if $exit
+                      local.get $selected
+                      call $keep
+                      local.set $kept
+                      drop
+                      i32.const 53
+                    end
+                    local.get $kept))" out)))
+         (bytes (miricl::wasm-without-debug-names (wasmtime:wat-to-wasm wat))))
+    (wasmtime:with-engine (engine)
+      (miricl::native-link-validate engine bytes)
+      (let* ((result (miricl::compact-runtime-code engine bytes first-helper))
+             (branches (miricl-compiler::compact-linked-wasm-code bytes nil))
+             (custom (coerce (miricl::wasm-with-custom-section bytes "unknown.fixture" #(0))
+                             '(simple-array (unsigned-byte 8) (*)))))
+        (miricl::native-link-validate engine result)
+        (miricl::native-link-validate engine branches)
+        (assert (< (length result) (length bytes)))
+        (assert (< (length branches) (length bytes)))
+        (miricl::native-link-validate engine custom)
+        (assert (equalp custom (miricl::compact-runtime-code engine custom first-helper)))
+        (loop for file in (list original compact) for contents in (list bytes result) do
+          (with-open-file (output file :direction :output :element-type '(unsigned-byte 8))
+            (write-sequence contents output)))))
+    (uiop:run-program (list "node" (namestring script)
+                            "verify-helper-layout" (namestring original) (namestring compact))
+                      :output *standard-output* :error-output *error-output*)))

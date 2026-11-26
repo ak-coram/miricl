@@ -534,6 +534,41 @@ const outliningLoopFixture = count => `(module
         call $hook local.set 0 br $again))
       local.get 1 i32.const ${i})`).join('\n')})`;
 
+const callPairRepetitions = 160;
+const callPair = 'local.get 0 local.get 1 call $divide call $subtract';
+const callPairFixture = `(module
+  (@custom "miricl.policy" "\\04\\00\\00\\19\\00")
+  (tag $transfer (param i32))
+  (global $counter (export "counter") (mut i32) (i32.const 0))
+  (func $divide (export "native-literal") (param i32) (result i32)
+    i32.const 10 local.get 0 i32.div_s)
+  (func $subtract (export "native-eq-test") (param i32 i32) (result i32)
+    global.get $counter i32.const 1 i32.add global.set $counter
+    local.get 0 i32.const -1 i32.eq
+    if local.get 1 throw $transfer end
+    local.get 0 local.get 1 i32.sub)
+  (func $caller (export "caller") (param i32 i32) (result i32)
+    ${`local.get 0 if ${callPair} drop end\n`.repeat(callPairRepetitions - 1)}
+    ${callPair})
+  (func (export "catch") (param i32 i32) (result i32)
+    (block $caught (result i32)
+      (try_table (catch $transfer $caught)
+        local.get 0 local.get 1 call $caller return)
+      unreachable)))
+`;
+
+function checkCallPairs(bytes) {
+  const {caller, catch: catchTransfer, counter} = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+  assert.equal(caller(12, 2), 7);
+  assert.equal(counter.value, callPairRepetitions);
+  assert.throws(() => caller(12, 0), WebAssembly.RuntimeError);
+  assert.equal(counter.value, callPairRepetitions);
+  assert.equal(catchTransfer(-1, 2), 5);
+  assert.equal(counter.value, callPairRepetitions + 1);
+  assert.equal(caller(-12, 5), -14);
+  assert.equal(counter.value, 2 * callPairRepetitions + 1);
+}
+
 const checkOutliningLoops = (bytes, count) => {
   assert.ok(WebAssembly.validate(bytes), 'Every loop outlining variant must validate.');
   const folded = input => outlineOperands(count).reduce((value, operand) => value ^ operand, input);
@@ -639,6 +674,89 @@ const checkOutlining = (bytes, count) => {
   }
 };
 
+const linkedControlFixture = `(module
+  (type $pair (func (param i32 i64) (result i32 i64)))
+  (tag $signal (param i32))
+  (global $effects (export "effects") (mut i32) (i32.const 0))
+  (func (export "invert") (param i32) (result i32)
+    block $out (result i32)
+      block $inner (result i32)
+        global.get $effects i32.const 1 i32.add global.set $effects
+        i32.const 61 local.get 0 br_if $inner br $out
+      end
+      i32.const 20 i32.add
+    end)
+  (func (export "terminal") (param i32) (result i32)
+    block (result i32) i32.const 17 local.get 0 br_if 0 end
+    return)
+  (func (export "pair") (param i32 i64 i32) (result i32 i64)
+    local.get 0 local.get 1
+    block $outer (type $pair) block $middle (type $pair) block $inner (type $pair)
+      i64.const 4 i64.add local.get 2 br_if $outer br $inner unreachable
+    end end end)
+  (func (export "table") (param i32) (result i32)
+    block $outer (result i32)
+      block $inner (result i32)
+        block loop i32.const 19 local.get 0 br_table $inner $outer end end
+        unreachable
+      end
+      i32.const 10 i32.add
+    end)
+  (func (export "implicit") (result i32)
+    block loop i32.const 59 br 2 end end unreachable)
+  (func (export "loop") (param i32) (result i32)
+    block $out
+      loop $again
+        block
+          global.get $effects i32.const 1 i32.add global.set $effects
+          local.get 0 i32.eqz br_if $out
+          local.get 0 i32.const 1 i32.sub local.set 0 br $again
+        end
+        unreachable
+      end
+    end
+    global.get $effects)
+  (func (export "handler") (param i32) (result i32)
+    block $out (result i32)
+      block
+        try_table (catch $signal $out)
+          i32.const 73 local.get 0 br_if $out
+          i32.const 81 throw $signal
+        end
+      end
+      unreachable
+    end)
+  (func (export "nullBranch") (param externref) (result i32)
+    block $out (result i32)
+      block i32.const 3 local.get 0 br_on_null $out drop drop end
+      i32.const 5
+    end)
+  (func (export "nonNullBranch") (param externref) (result externref)
+    block $out (result externref)
+      block local.get 0 br_on_non_null $out end
+      ref.null extern
+    end)
+  (func $value (param i32) (result (ref null eq))
+    local.get 0 if (result (ref null eq)) i32.const 46 ref.i31 else ref.null eq end)
+  (func (export "castBranch") (param i32) (result i32)
+    block $out (result (ref i31))
+      block local.get 0 call $value br_on_cast $out (ref null eq) (ref i31) drop end
+      i32.const 61 ref.i31
+    end
+    i31.get_s)
+  (func (export "castFailBranch") (param i32) (result i32)
+    block $out (result (ref null eq))
+      block local.get 0 call $value br_on_cast_fail $out (ref null eq) (ref i31) drop end
+      i32.const 72 ref.i31
+    end
+    ref.is_null))`;
+
+const rejectedControlFixture = `(module
+  (func (export "discardAtBranch") (result i32)
+    i32.const 1 block i32.const 2 br 0 end return unreachable)
+  (func (export "nested") (result i32)
+    block loop block i32.const 17 drop end end end i32.const 19))`;
+
 const [mode, pathname, optimizedPath, sharedPath, operandCount] = process.argv.slice(2);
 if (mode === 'prepare') {
   const bytes = fixture();
@@ -690,6 +808,85 @@ if (mode === 'prepare') {
   await fs.writeFile(pathname, outliningFixture(Number(optimizedPath)));
 } else if (mode === 'prepare-outlining-loops') {
   await fs.writeFile(pathname, outliningLoopFixture(Number(optimizedPath)));
+} else if (mode === 'prepare-call-pairs') {
+  await fs.writeFile(pathname, callPairFixture);
+} else if (mode === 'verify-call-pairs') {
+  const plain = await fs.readFile(pathname), shared = await fs.readFile(optimizedPath);
+  for (const bytes of [plain, shared]) checkCallPairs(bytes);
+  assert.ok(shared.length < plain.length, 'Sharing call pairs must reduce the complete module.');
+  console.log('Native module optimizer: shared calls preserve operands, traps, effects, and handler continuations.');
+} else if (mode === 'prepare-linked-control' || mode === 'prepare-rejected-control') {
+  await fs.writeFile(pathname, mode === 'prepare-linked-control' ? linkedControlFixture : rejectedControlFixture);
+} else if (mode === 'verify-linked-control' || mode === 'verify-rejected-control') {
+  const original = await fs.readFile(pathname), compact = await fs.readFile(optimizedPath);
+  assert.ok(compact.length < original.length, 'Admitted control-flow rewrites must reduce the complete module.');
+  for (const bytes of [original, compact]) {
+    const entries = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+    if (mode === 'verify-rejected-control') {
+      assert.equal(entries.discardAtBranch(), 1);
+      assert.equal(entries.nested(), 19);
+    } else {
+      assert.equal(entries.invert(0), 61);
+      assert.equal(entries.invert(9), 81);
+      assert.equal(entries.effects.value, 2);
+      assert.equal(entries.terminal(0), 17);
+      assert.equal(entries.terminal(-3), 17);
+      assert.deepEqual(entries.pair(14, 25n, 0), [14, 29n]);
+      assert.deepEqual(entries.pair(-2, 3n, 7), [-2, 7n]);
+      assert.equal(entries.table(0), 29);
+      assert.equal(entries.table(1), 19);
+      assert.equal(entries.implicit(), 59);
+      assert.equal(entries.loop(7), 10);
+      assert.equal(entries.handler(0), 81);
+      assert.equal(entries.handler(-2), 73);
+      const subject = { subject: true };
+      assert.equal(entries.nullBranch(null), 3);
+      assert.equal(entries.nullBranch(subject), 5);
+      assert.equal(entries.nonNullBranch(null), null);
+      assert.equal(entries.nonNullBranch(subject), subject);
+      assert.equal(entries.castBranch(0), 61);
+      assert.equal(entries.castBranch(1), 46);
+      assert.equal(entries.castFailBranch(0), 1);
+      assert.equal(entries.castFailBranch(1), 0);
+    }
+  }
+  console.log('Native module optimizer: linked control-flow compaction preserves values, effects, and branch targets.');
+} else if (mode === 'verify-helper-layout') {
+  const original = new WebAssembly.Module(await fs.readFile(pathname));
+  const compact = new WebAssembly.Module(await fs.readFile(optimizedPath));
+  assert.deepEqual(WebAssembly.Module.exports(compact), WebAssembly.Module.exports(original));
+  for (const module of [original, compact]) {
+    const entries = new WebAssembly.Instance(module).exports;
+    for (const input of [-7, 0, 19, 2147483647]) {
+      assert.equal(entries.call(input), (input + 20) | 0);
+      assert.equal(entries.tail(input), (input + 3) | 0);
+    }
+    assert.equal(entries.table.get(0)(), 77);
+    assert.equal(entries.held.value(), 88);
+    assert.equal(entries.minimum.value, -(1n << 63n));
+    const subject = { subject: true }, other = { other: true };
+    const [taken, absent] = entries.nullGet(null);
+    assert.equal(taken, 37);
+    assert.equal(absent, null);
+    const [fallthrough, kept] = entries.nullGet(subject);
+    assert.equal(fallthrough, 41);
+    assert.equal(kept, subject);
+    const [teeTaken, teeAbsent, cleared] = entries.nullTee(null, other);
+    assert.equal(teeTaken, 46);
+    assert.equal(teeAbsent, null);
+    assert.equal(cleared, null);
+    const [teeFallthrough, teeKept, assigned] = entries.nullTee(subject, other);
+    assert.equal(teeFallthrough, 50);
+    assert.equal(teeKept, subject);
+    assert.equal(assigned, subject);
+    const [differentTaken, differentAbsent] = entries.nullDifferent(null, other);
+    assert.equal(differentTaken, 51);
+    assert.equal(differentAbsent, null);
+    const [differentFallthrough, selected] = entries.nullDifferent(subject, other);
+    assert.equal(differentFallthrough, 53);
+    assert.equal(selected, other);
+  }
+  console.log('Native module optimizer: compact helper indices and null branches preserve calls, references, and label values.');
 } else if (mode === 'verify-outlining' || mode === 'verify-outlining-loops') {
   const original = await fs.readFile(pathname), plain = await fs.readFile(optimizedPath);
   const shared = await fs.readFile(sharedPath), count = Number(operandCount);

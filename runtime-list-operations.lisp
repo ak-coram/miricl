@@ -9,7 +9,7 @@
 (define-runtime-function $checked-apply-list-length (($args :nullable-object)) (:nullable-object)
   (:locals ($count :nullable-object))
   #@(local.set $count (call $checked-list-length (local.get $args) (i32.const 1)))
-  #@(if (i64.lt_s (call $scalar-integer-value (ref.as_non_null (local.get $count))) (i64.const 0))
+  #@(if (i64.lt_s (call $scalar-integer-value (local.get $count)) (i64.const 0))
     (then (call $type-fail (local.get $args) (call $symbol-value ,(clos-library-reference '%proper-list-type))
       (i32.const ,(runtime-error-code :expected-designator)))))
   #@(local.get $count))
@@ -143,8 +143,8 @@
       (if (i64.ge_s (local.get $wide) (i64.const 0))
         (then (return (if (result i32) (i64.gt_s (local.get $wide) (i64.const 2147483647))
           (then (i32.const 2147483647)) (else (i32.wrap_i64 (local.get $wide)))))))))
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $natural-count-cl (local.get $x) (call $int (i32.const 2147483647)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value
+    (call $natural-count-cl (local.get $x) (call $int (i32.const 2147483647))))))
 
 (defun $natural-count-cl ()
   (runtime-function-definition '$natural-count-cl
@@ -274,7 +274,7 @@
   ;; Share the checked spine traversal with source, HIR and FASL validation.
   ;; Its count is a full scalar integer, never a truncated length selector.
   #@(local.set $count (call $compiler-list-length (local.get $object)))
-  #@(local.set $status (call $scalar-integer-value (ref.as_non_null (local.get $count))))
+  #@(local.set $status (call $scalar-integer-value (local.get $count)))
   #@(if (i32.or (i64.eq (local.get $status) (i64.const -1))
                 (i64.eq (local.get $status) (i64.const -2)))
     ;; Keep ordinary helper rebinding, effects and all returned values, even
@@ -526,8 +526,8 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$bounded-index-cl 'miricl-runtime:bounded-index-value))))
 
 (define-runtime-function $bounded-index (($x :nullable-object) ($limit i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $bounded-index-cl (local.get $x) (call $int (local.get $limit)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value
+    (call $bounded-index-cl (local.get $x) (call $int (local.get $limit))))))
 
 (define-runtime-function $sequence-character-kind (($function :nullable-object)) (i32)
   (runtime-wat-forms

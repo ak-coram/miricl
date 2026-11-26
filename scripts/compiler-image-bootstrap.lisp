@@ -43,34 +43,43 @@
       (let ((names nil) (codes nil) (roots nil)
             (dump (symbol-function (compiler-primitive 10 1 "%FASL-DUMP"))))
         ;; This second compilation uses the already self-compiled frontend and emitter.
-        (dolist (entry *image-sources*)
-          (push (list (and (symbol-package (first entry)) (package-name (symbol-package (first entry))))
-                      (symbol-name (first entry))) names))
         ;; The compiler owns its sealed internal bindings. Runtime entries stay
         ;; in separate singleton modules; private runtime calls retain their live
         ;; bindings while standard CL calls use their ANSI definitions. Factories preserve
         ;; the actual private symbols and general (including SETF) function names.
         (dolist (sources (cons *image-sources* (mapcar #'list *image-runtime-sources*)))
           (let* ((*wasm-bootstrap-direct-workers* t)
-                 (unit (compile-module-to-hir
-                        (mapcar (lambda (entry) (list* 'defun (first entry) (cdr (second entry)))) sources)
-                        :inline nil)))
+                 (definitions
+                   (mapcar (lambda (entry) (list* 'defun (first entry) (cdr (second entry)))) sources))
+                 (*hir-grouped-module-definitions* (and (eq sources *image-sources*) definitions))
+                 (unit (compile-module-to-hir definitions :inline nil)))
             (multiple-value-bind (code literals) (emit-native-module-checked unit nil)
-            ;; One factory shares the module's literals and closes over its
-            ;; internal function bindings. Preserve only its literal graph;
-            ;; runtime startup creates and installs the native entry points.
-            (let ((entries (funcall (compiler-primitive 17 code literals nil))))
-              ;; Validate and instantiate the output without installing another
-              ;; compiler generation. Keep compiling the fixed original corpus.
-              (unless (every (lambda (entry) (compiled-function-p (cdr entry))) entries)
-                (error "Module compiler output contains an uncompiled entry")))
-            (unless (= 42 (funcall (compile-native '(lambda (x) (+ x 2))) 40))
-              (error "Module-compiled compiler failed its compilation check"))
-            (push (coerce code 'list) codes)
+              ;; One factory shares the module's literals and closes over its
+              ;; internal function bindings. Runtime startup recreates the
+              ;; same entries from the retained literal graph.
+              (let ((entries (funcall (compiler-primitive 17 code literals nil))))
+                ;; Instantiate without installing another compiler generation.
+                (unless (every (lambda (entry) (compiled-function-p (cdr entry))) entries)
+                  (error "Module compiler output contains an uncompiled entry"))
+                (when (eq sources *image-sources*)
+                  (let ((entry-names (mapcar #'car entries)))
+                    (unless (equal entry-names (mapcar #'first *image-sources*))
+                      (error "Compiler factory entries differ from the ordered source names"))
+                    ;; Record the actual installed identities using the same
+                    ;; symbol domains as the factory's FASL literals.
+                    (setf names
+                      (mapcar (lambda (name)
+                                (let ((package (symbol-package name)))
+                                  (list (and package (package-name package)) (symbol-name name)
+                                        (if package 0 (compiler-primitive 9 name)))))
+                              entry-names)))))
+              (unless (= 42 (funcall (compile-native '(lambda (x) (+ x 2))) 40))
+                (error "Module-compiled compiler failed its compilation check"))
+              (push (coerce code 'list) codes)
               (push (funcall dump (list :module literals)) roots))))
         (with-open-file (out output :direction :output :if-exists :supersede)
           (let ((*print-readably* t) (*print-pretty* nil) (*print-circle* t) (*print-base* 10) (*print-radix* nil))
-            (write (list (nreverse names) (nreverse codes) (nreverse roots)
+            (write (list names (nreverse codes) (nreverse roots)
               (coerce (symbol-value (compiler-primitive 10 1 "%FASL-RECORDS")) 'list)) :stream out)))))
     (values)
 )

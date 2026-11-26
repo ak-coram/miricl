@@ -479,8 +479,8 @@
   #@(local.set $length (struct.get $text-stream $length (local.get $buffer)))
   #@(local.set $position (call $value-n (local.get $stream)))
   #@(local.set $data (struct.get $text-stream $data (local.get $buffer)))
-  #@(local.set $count (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $file-column-cl (call $text (local.get $data)) (call $int (local.get $length)) (call $int (local.get $position)))))))
+  #@(local.set $count (i32.wrap_i64 (call $scalar-integer-value
+    (call $file-column-cl (call $text (local.get $data)) (call $int (local.get $length)) (call $int (local.get $position))))))
   #@(array.set $digits (struct.get $obj $digits (ref.cast (ref $obj) (local.get $stream))) (i32.const 4) (local.get $count))
   #@(local.get $count))
 

@@ -191,6 +191,34 @@ Generate only source forms here; the compiler-free guest needs no contract table
                       (lower-runtime-library
                         `(defun ,(second form) ,(third form) (%%compile ,mode ,@(third form))))
                       form)))))
+        (when (equal file "wasm-optimizer.lisp")
+          ;; Every compiler-bearing guest installs both kernels, including
+          ;; guests that cannot instantiate new native modules.
+          (setf forms
+            (loop for form in forms
+              unless (member (second form)
+                        '(miricl-compiler::native-op-liveness-lisp
+                          miricl-compiler::native-simplify-ops-lisp
+                          miricl-compiler::native-i32 miricl-compiler::native-fold-i32))
+              collect
+                (case (second form)
+                  (miricl-compiler::native-op-liveness
+                   (lower-runtime-library
+                     '(defun miricl-compiler::native-op-liveness (ops total exceptions &optional blocks)
+                        (declare (type simple-vector ops) (type (unsigned-byte 32) total)
+                                 (type (or null simple-vector) blocks))
+                        (setq blocks (or blocks (miricl-compiler::native-liveness-blocks ops)))
+                        (%%compile 41 ops (vector blocks exceptions) total)
+                        blocks)))
+                  (miricl-compiler::native-simplify-ops
+                   (lower-runtime-library
+                     '(defun miricl-compiler::native-simplify-ops (ops bytes &optional (clean-scopes t))
+                        (declare (type simple-vector ops) (type vector bytes))
+                        (let ((status (%%compile 42 ops bytes)))
+                          (when (and (logbitp 2 status) (or clean-scopes (logbitp 1 status)))
+                            (miricl-compiler::native-clean-scopes ops bytes))
+                          (remove-if-not (lambda (op) (miricl-compiler::native-op-code op)) ops)))))
+                  (otherwise form)))))
         (when (equal file "fasl-format.lisp")
           ;; Every guest image has the native record codec. Keep the portable
           ;; descriptions codec on the host without shipping duplicate parsers

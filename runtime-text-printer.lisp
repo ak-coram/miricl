@@ -480,7 +480,7 @@
   (:locals ($readably :nullable-object) ($value :nullable-object))
   #@(local.set $readably (call $symbol-value (call $symbol (i32.const ,(runtime-symbol-id '*print-readably*)))))
   #@(if (ref.is_null (local.get $readably)) (then (local.set $value (call $symbol-value (call $symbol (local.get $id))))))
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $print-limit-cl (local.get $readably) (local.get $value) (call $int (i32.const 2147483647)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $print-limit-cl (local.get $readably) (local.get $value) (call $int (i32.const 2147483647))))))
 
 (define-runtime-function $print-list (($x :nullable-object) ($depth i32) ($aesthetic i32)) ()
   (:locals ($left i32))

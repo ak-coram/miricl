@@ -27,7 +27,7 @@
     (($selector :nullable-object) ($type :nullable-object) ($argument :nullable-object)) (:nullable-object)
   (:locals ($code i64) ($class :nullable-object) ($result :nullable-object) ($valid i32))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :malformed-type)
-  #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
+  #@(local.set $code (call $scalar-integer-value (local.get $selector)))
   (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 7)) :malformed-type)
   #@(call $clear-values)
   #@(if (i64.eqz (local.get $code))
@@ -85,8 +85,8 @@
   #@(throw $transfer))
 
 (define-runtime-function $complex-type-mask (($type :nullable-object) ($env :nullable-object)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $complex-type-worker (local.get $type) (local.get $env) (i32.const 0))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value
+    (call $complex-type-worker (local.get $type) (local.get $env) (i32.const 0)))))
 
 (defun $complex-part-type ()
   (runtime-function-definition '$complex-part-type

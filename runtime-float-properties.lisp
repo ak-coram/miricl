@@ -35,7 +35,7 @@
         (call $cons (call $int (local.get $width)) (ref.null eq)))
       (i32.const ,(runtime-error-code :expected-designator)))))
   #@(if (call $scalar-integer-p (local.get $bits))
-    (then (local.set $word (call $scalar-integer-value (ref.as_non_null (local.get $bits)))) )
+    (then (local.set $word (call $scalar-integer-value (local.get $bits))) )
     (else
       (local.set $i (call $integer-length (ref.as_non_null (local.get $bits))))
       (loop $digits

@@ -1039,6 +1039,7 @@
 (defvar *native-outlining-budget* 1000000)
 (defvar *native-outlining-minimum-bytes* 0)
 (defvar *native-outlining-minimum-saving* 512)
+(defvar *native-outlining-helper-limit* 64)
 
 ;;;; Repeated straight-line Wasm regions. Records and signatures are private,
 ;;;; validated emitter/decoder data; this is not a public bytecode boundary.
@@ -1185,6 +1186,7 @@ Return replacement bodies and (body parameters results) helper records."
   (let ((groups (make-hash-table :test 'equal)) (group-count 0)
         (fingerprints (make-hash-table :test 'eql)) (occurrences 0)
         (candidates nil) (selected nil) (helpers nil)
+        (helper-limit *native-outlining-helper-limit*)
         (frequencies (make-hash-table :test 'eql)))
     ;; Preserve large-region discovery, then count and discover short regions
     ;; from the other end of the module. Each phase has its own work/storage
@@ -1309,7 +1311,7 @@ Return replacement bodies and (body parameters results) helper records."
         (setq candidates (stable-sort candidates #'>
           :key (lambda (group) (saving group (second group) (length signatures)))))
         (dolist (group candidates)
-          (when (< (length helpers) 64)
+          (when (< (length helpers) helper-limit)
             (let ((sites nil) (index (+ (length signatures) (length helpers))))
               (dolist (site (reverse (second group)))
                 (when (and (available site)

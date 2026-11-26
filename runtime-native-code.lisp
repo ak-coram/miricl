@@ -1020,7 +1020,7 @@
 
 (define-runtime-function $native-check-result-spine (($list :nullable-object) ($count i32)) ()
   (wat-fail-when #@(i64.ne
-    (call $scalar-integer-value (ref.as_non_null (call $checked-list-length (local.get $list) (i32.const 1))))
+    (call $scalar-integer-value (call $checked-list-length (local.get $list) (i32.const 1)))
     (i64.extend_i32_u (i32.sub (local.get $count) (i32.const 1)))) :malformed-form))
 
 (define-runtime-function $native-captured-result-ref

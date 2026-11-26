@@ -26,7 +26,7 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$standard-reader-syntax-cl 'miricl-runtime:standard-syntax-code))))
 
 (define-runtime-function $standard-reader-syntax (($code i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $standard-reader-syntax-cl (call $int (local.get $code)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $standard-reader-syntax-cl (call $int (local.get $code))))))
 
 (define-runtime-function $readtable-syntax (($table :nullable-object) ($code i32)) (i32)
   (:locals ($cell :nullable-object))

@@ -22,30 +22,30 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$calendar-part-cl 'miricl-runtime:calendar-part-value))))
 
 (define-runtime-function $calendar-part (($value :nullable-object) ($min i32) ($max i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $calendar-part-cl (local.get $value) (call $int (local.get $min)) (call $int (local.get $max)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value
+    (call $calendar-part-cl (local.get $value) (call $int (local.get $min)) (call $int (local.get $max))))))
 
 (defun $calendar-year-days-cl ()
   (runtime-function-definition '$calendar-year-days-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$calendar-year-days-cl 'miricl-runtime:calendar-days-before-year))))
 
 (define-runtime-function $calendar-year-days (($year i32)) (i64)
-  #@(call $scalar-integer-value (ref.as_non_null (call $calendar-year-days-cl (call $int (local.get $year))))))
+  #@(call $scalar-integer-value (call $calendar-year-days-cl (call $int (local.get $year)))))
 
 (defun $calendar-month-days-cl ()
   (runtime-function-definition '$calendar-month-days-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$calendar-month-days-cl 'miricl-runtime:calendar-days-before-month))))
 
 (define-runtime-function $calendar-month-days (($year i32) ($month i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $calendar-month-days-cl (call $int (local.get $year)) (call $int (local.get $month)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value
+    (call $calendar-month-days-cl (call $int (local.get $year)) (call $int (local.get $month))))))
 
 (defun $calendar-zone-cl ()
   (runtime-function-definition '$calendar-zone-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$calendar-zone-cl 'miricl-runtime:calendar-zone-value))))
 
 (define-runtime-function $calendar-zone (($zone :nullable-object)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $calendar-zone-cl (local.get $zone))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $calendar-zone-cl (local.get $zone)))))
 
 (define-runtime-function $calendar-native (($operation i32) ($value :nullable-object) ($zone :nullable-object)) (:nullable-object)
   (:locals ($offset i32) ($seconds i32) ($minutes i32) ($hours i32) ($date i32) ($month i32) ($year i32)

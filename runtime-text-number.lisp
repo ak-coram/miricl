@@ -7,7 +7,7 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$digit-value-cl 'miricl-runtime:ascii-digit-value))))
 
 (define-runtime-function $digit-value (($c i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $digit-value-cl (call $int (local.get $c)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $digit-value-cl (call $int (local.get $c))))))
 
 (defun $power-cl ()
   (runtime-function-definition '$power-cl
@@ -21,9 +21,9 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$reader-float-kind-cl 'miricl-runtime:reader-float-format-code))))
 
 (define-runtime-function $reader-float-kind () (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+  #@(i32.wrap_i64 (call $scalar-integer-value
     (call $reader-float-kind-cl (call $symbol-value
-      (call $symbol (i32.const ,(runtime-symbol-id '*read-default-float-format*)))))))))
+      (call $symbol (i32.const ,(runtime-symbol-id '*read-default-float-format*))))))))
 
 (define-runtime-function $read-token-number (($a :digits) ($n i32) ($base i32)) (:nullable-object)
   (:locals ($radix i32) ($value :nullable-object) ($setting :nullable-object))

@@ -526,7 +526,7 @@
 
 (define-runtime-function $native-simplify-argument (($op (ref null $objects))) (i32)
   #@(i32.wrap_i64 (call $scalar-integer-value
-    (ref.as_non_null ,(wat-native-simplify-field '$op 1)))))
+    ,(wat-native-simplify-field '$op 1))))
 
 (defun wat-native-fold-i32-cases ()
   (apply #'runtime-wat-sequence

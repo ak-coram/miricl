@@ -18,7 +18,7 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$sequence-index-cl 'miricl-runtime:sequence-index-value))))
 
 (define-runtime-function $sequence-index (($x :nullable-object)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $sequence-index-cl (local.get $x))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $sequence-index-cl (local.get $x)))))
 
 (define-runtime-function $sequence-apply (($id i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($x :nullable-object) ($y :nullable-object) ($n i32))

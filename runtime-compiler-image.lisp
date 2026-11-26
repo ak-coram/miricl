@@ -23,17 +23,25 @@
                 `(setq miricl-compiler:*compile-evaluations* ,(when *include-compiler* :interpreted)))))
       (destructuring-bind (wat names roots records policies) *native-compiler-image*
         (declare (ignore wat policies))
-        (let ((packed (compiler-image-records-string records)))
-          (labels ((filter-form (form)
-                     (cond
-                       ((atom form) form)
-                       ((and (eq (car form) 'defun) (symbolp (second form))
-                             (eq (symbol-package (second form)) (find-package :miricl-compiler))
-                             (member (symbol-name (second form)) names :test #'equal)) nil)
-                       ((eq (car form) 'let)
-                        (list* 'let (second form) (remove nil (mapcar #'filter-form (cddr form)))))
-                       (t form))))
-            (append (remove nil (mapcar #'filter-form *clos-library*))
+        (let ((packed (compiler-image-records-string records))
+              (compiler-package (find-package :miricl-compiler)))
+          (labels ((defun-name (form)
+                     (when (and (consp form) (eq (car form) 'defun)) (second form)))
+                   (filter-form (form &optional top-level)
+                     (let ((name (defun-name form)))
+                       (cond
+                         ((atom form) form)
+                         ((and (member name names)
+                               (or (eq (symbol-package name) compiler-package)
+                                   ;; A plain private DEFUN installs only its
+                                   ;; function and optional documentation.
+                                   (and top-level (not (stringp (fourth form)))
+                                        (= 1 (count name *clos-library* :key #'defun-name))))) nil)
+                         ((eq (car form) 'let)
+                          (list* 'let (second form) (remove nil (mapcar #'filter-form (cddr form)))))
+                         (t form)))))
+            (append (loop for form in *clos-library* for retained = (filter-form form t)
+                          when retained collect retained)
               (list (lower-runtime-library
                 `(let ((%fasl-records (%%compile 16 ,packed 0 ,(length packed)))
                        (%fasl-values (make-array ,(length records)))
@@ -49,7 +57,21 @@
                          miricl-compiler::*compiler-origin* :image
                          miricl-compiler:*compile-evaluations* ,*compile-evaluations-default*))))))))))
 
-(defun native-compiler-image-from-manifest (manifest)
+(defun compiler-image-private-functions (names)
+  ;; These file preparation and FASL writing helpers are first called after
+  ;; the native compiler factory is installed. The startup record reader,
+  ;; including %FASL-OBJECT-SLOW for numeric records, still needs source.
+  (loop for symbol in '(%compile-form %fasl-reference %fasl-dump
+                        %file-lexical-name %file-lexical-specials %file-lexical-bind
+                        %file-lexical-reference %file-code-cons %file-lexical-forms
+                        %file-lexical-function %file-lexical-call %file-lexical-form)
+        for name = (symbol-name symbol)
+        when (and (member (list nil name 1) names :test #'equal)
+                  (eq symbol (find name *clos-library-symbols* :test #'string= :key #'symbol-name))
+                  (= 1 (count name *clos-library-symbols* :test #'string= :key #'symbol-name)))
+          collect symbol))
+
+(defun native-compiler-image-from-manifest (manifest &key bootstrap-ownership-p)
   ;; Treat the current build manifest as untrusted serialized compiler data.
   ;; Validate list spines before iteration and executable modules before the
   ;; private policy reader; reuse the ordinary FASL graph validator.
@@ -61,9 +83,10 @@
     (miricl-compiler::compiler-list-length roots "native compiler roots")
     (miricl-compiler::compiler-list-length records "native compiler records")
     (dolist (name names)
-      (unless (and (= 2 (miricl-compiler::compiler-list-length name "native compiler name"))
-                   (or (null (first name)) (stringp (first name))) (stringp (second name)))
-        (native-link-fail name "expected a package/name string pair")))
+      (unless (and (= 3 (miricl-compiler::compiler-list-length name "native compiler name"))
+                   (stringp (second name)) (typep (third name) '(integer 0 2))
+                   (or (null (first name)) (and (stringp (first name)) (zerop (third name)))))
+        (native-link-fail name "expected a package, symbol name and symbol namespace")))
     (unless (= (length codes) (length roots))
       (native-link-fail manifest "module and literal-root counts differ"))
     (let ((graph (coerce records 'vector)))
@@ -89,9 +112,19 @@
            (policies
              (loop for code in bytes for i from 0 append
                (handler-case (miricl-compiler::native-module-outline-policies code i)
-                 (error (condition) (native-link-fail code "malformed compilation policies: ~A" condition))))))
+                   (error (condition) (native-link-fail code "malformed compilation policies: ~A" condition)))))
+           (compiler-package (find-package :miricl-compiler)))
       (list wat
-            (loop for (package name) in names when (equal package "MIRICL-COMPILER") collect name)
+            (append (loop for (package name) in names
+                          for symbol = (when (equal package "MIRICL-COMPILER")
+                                         (find-symbol name compiler-package))
+                          when (and symbol (eq (symbol-package symbol) compiler-package)) collect symbol)
+                    ;; Only the local producer has checked its instantiated
+                    ;; factory entries. Graphs with active records may run
+                    ;; code before the factory has installed those entries.
+                    (when (and bootstrap-ownership-p roots
+                               (every (lambda (record) (<= 0 (first record) 6)) records))
+                      (compiler-image-private-functions names)))
             roots records policies))))
 
 (defun ensure-native-compiler-image ()
@@ -114,7 +147,8 @@
               (with-open-file (in manifest)
                 (with-standard-io-syntax
                   (let ((*read-eval* nil))
-                    (let ((image (native-compiler-image-from-manifest (read in))) (eof (gensym)))
+                    (let ((image (native-compiler-image-from-manifest (read in) :bootstrap-ownership-p t))
+                          (eof (gensym)))
                       (unless (eq eof (read in nil eof))
                         (native-link-fail manifest "trailing compiler manifest data"))
                       ;; Bootstrap runs reuse these linker names. Each name has

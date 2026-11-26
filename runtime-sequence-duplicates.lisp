@@ -37,12 +37,12 @@
             (then (local.set $hash-test (i32.const ,(runtime-symbol-id 'eql)))))
           (if (i32.eq (local.get $kind) (i32.const 3))
             (then (local.set $hash-test (i32.const ,(runtime-symbol-id 'equalp)))))))))
-  #@(local.set $removed (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+  #@(local.set $removed (i32.wrap_i64 (call $scalar-integer-value
     (call $mark-duplicate-values-cl (local.get $keys) (call $sequence-mark-view (local.get $marks) (local.get $n))
       (local.get $function) (call $vector-new (array.new_fixed $objects 3
         (call $bool (local.get $negate)) (call $bool (local.get $from-end))
         (if (result (ref null eq)) (local.get $hash-test)
-          (then (call $symbol (local.get $hash-test))) (else (ref.null eq))))))))))
+          (then (call $symbol (local.get $hash-test))) (else (ref.null eq)))))))))
   #@(call $copy-with-removals (local.get $sequence) (local.get $length) (local.get $first) (local.get $stop)
     (local.get $marks) (local.get $removed) (local.get $write)))
 

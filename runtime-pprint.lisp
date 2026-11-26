@@ -191,9 +191,9 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$pretty-tab-size-cl 'miricl-runtime:pretty-tab-distance))))
 
 (define-runtime-function $pretty-tab-size (($column i32) ($section i32) ($kind i32) ($n i32) ($inc i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+  #@(i32.wrap_i64 (call $scalar-integer-value
     (call $pretty-tab-size-cl (call $int (local.get $column)) (call $int (local.get $section)) (call $int (local.get $kind))
-      (call $cons (call $int (local.get $n)) (call $cons (call $int (local.get $inc)) (ref.null eq))))))))
+      (call $cons (call $int (local.get $n)) (call $cons (call $int (local.get $inc)) (ref.null eq)))))))
 
 (define-runtime-function $pretty-event
     (($stream :nullable-object) ($kind i32) ($n :nullable-object) ($inc :nullable-object)) (:nullable-object)

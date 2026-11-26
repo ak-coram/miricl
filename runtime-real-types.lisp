@@ -41,7 +41,7 @@
     (($selector :nullable-object) ($value :nullable-object) ($argument :nullable-object)) (:nullable-object)
   (:locals ($code i64) ($kind i32) ($adjacent f64))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :malformed-type)
-  #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
+  #@(local.set $code (call $scalar-integer-value (local.get $selector)))
   (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 5)) :malformed-type)
   #@(call $clear-values)
   #@(if (i64.eqz (local.get $code))
@@ -67,9 +67,9 @@
     (then (return_call $array-type-metadata-value (local.get $selector) (local.get $value) (local.get $argument))))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $value))) :malformed-type)
   (wat-fail-when #@(i32.and
-    (i64.ne (call $scalar-integer-value (ref.as_non_null (local.get $value))) (i64.const 3))
-    (i64.ne (call $scalar-integer-value (ref.as_non_null (local.get $value))) (i64.const 4))) :malformed-type)
-  #@(local.set $kind (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $value)))))
+    (i64.ne (call $scalar-integer-value (local.get $value)) (i64.const 3))
+    (i64.ne (call $scalar-integer-value (local.get $value)) (i64.const 4))) :malformed-type)
+  #@(local.set $kind (i32.wrap_i64 (call $scalar-integer-value (local.get $value))))
   #@(call $float (local.get $kind)
     (if (result f64) (i32.eq (local.get $kind) (i32.const 3))
       (then (f64.const 3.4028234663852886e38)) (else (f64.const 1.7976931348623157e308)))))
@@ -100,8 +100,8 @@
   #@(local.set $parts (call $vector-data (call $real-type-worker (local.get $type) (call $bool (local.get $coverage)) (i32.const 0))))
   #@(array.get $objects (local.get $parts) (i32.const 0))
   #@(array.get $objects (local.get $parts) (i32.const 1))
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (array.get $objects (local.get $parts) (i32.const 2)))))
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (array.get $objects (local.get $parts) (i32.const 3))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (array.get $objects (local.get $parts) (i32.const 2))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (array.get $objects (local.get $parts) (i32.const 3)))))
 
 ;; Adjacent representable value, with infinities used only as internal empty
 ;; interval sentinels. Both zero signs have the same ordering for type bounds.
@@ -133,8 +133,8 @@
 
 (define-runtime-function $real-subtypep (($a :nullable-object) ($b :nullable-object)) (:nullable-object)
   (:locals ($result i32))
-  #@(local.set $result (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
-    (call $real-type-worker (local.get $a) (local.get $b) (i32.const 2))))))
+  #@(local.set $result (i32.wrap_i64 (call $scalar-integer-value
+    (call $real-type-worker (local.get $a) (local.get $b) (i32.const 2)))))
   #@(call $two-values (call $bool (i32.eq (local.get $result) (i32.const 1))) (call $bool (local.get $result))))
 
 (define-runtime-function $numeric-subtypep

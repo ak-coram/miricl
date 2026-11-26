@@ -440,7 +440,7 @@
   #@(if (i32.lt_s (local.get $budget) (i32.const 0)) (then (return (ref.null eq) (i32.const -1))))
   #@(local.set $result (call $loop-source-copy-cl (local.get $source) (call $int (local.get $budget))))
   #@(call $car (local.get $result))
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $cdr (local.get $result))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $cdr (local.get $result)))))
 
 (defun $loop-source-equal ()
   (runtime-function-definition '$loop-source-equal

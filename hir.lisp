@@ -76,6 +76,8 @@
 (defvar *hir-function-index* nil)
 (defvar *hir-inlining* nil)
 (defvar *hir-inline-small-functions* nil)
+;; The bootstrap selects its own definitions list without affecting reentrant calls.
+(defvar *hir-grouped-module-definitions* nil)
 (defvar *hir-inline-budget* 0)
 (defvar *hir-inline-work* 0)
 (defvar *hir-inline-growth-policy* nil)
@@ -1956,13 +1958,25 @@ global definitions. Internal calls refer to this group's lexical definitions."
     (dolist (name entry-points)
       (compiler-function-name name "module entry point")
       (unless (member name names :test #'equal) (error "Unknown module entry point ~S." name)))
-    (compile-to-hir
-      (list 'lambda nil (list 'labels (nreverse local)
-        ;; This scaffolding is compiler-owned. Keep its inline policy inside
-        ;; the LABELS body so it does not affect the supplied function bodies.
-        (list 'locally '(declare (inline cons list))
-          (cons 'list (mapcar (lambda (name) (list 'cons (list 'quote name) (list 'function name))) entry-points)))))
-      :global-specials global-specials)))
+    (let* ((grouped (and definitions (eq definitions *hir-grouped-module-definitions*)))
+           (closure-list
+             (cons 'list
+               (mapcar (if grouped
+                           (lambda (name) (list 'function name))
+                           (lambda (name) (list 'cons (list 'quote name) (list 'function name))))
+                       entry-points)))
+           ;; Keep the scaffolding's inline declarations out of the supplied bodies.
+           (body (list 'labels (nreverse local)
+                   (list 'locally (if grouped '(declare (inline list)) '(declare (inline cons list)))
+                     closure-list))))
+      (compile-to-hir
+        (list 'lambda nil
+          (if grouped
+              ;; Pair entry names with closures outside their lexical definitions.
+              (list 'map '(quote list) '(function cons)
+                    (list 'quote (coerce entry-points 'simple-vector)) body)
+              body))
+        :global-specials global-specials))))
 
 (defparameter *hir-instruction-shapes*
   ;; Validation consults this fixed opcode grammar for every instruction.

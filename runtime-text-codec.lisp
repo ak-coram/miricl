@@ -58,7 +58,7 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$upper-cl 'miricl-runtime:ascii-upper-code))))
 
 (define-runtime-function $upper (($c i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $upper-cl (call $int (local.get $c)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $upper-cl (call $int (local.get $c))))))
 
 (define-runtime-function $slice
     (($a :digits) ($start i32) ($length i32))

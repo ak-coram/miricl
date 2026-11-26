@@ -268,7 +268,7 @@
   (:locals ($count i64))
   ;; The worker traverses only the body spine; nested forms are retained.
   #@(local.set $count (call $scalar-integer-value
-    (ref.as_non_null (call $compiler-list-length (local.get $body)))))
+    (call $compiler-list-length (local.get $body))))
   #@(if (i64.lt_s (local.get $count) (i64.const 0))
     (then (call $macro-structure-error (local.get $body)
       (call $symbol-value ,(clos-library-reference '%iteration-body-error-controls))
@@ -288,7 +288,7 @@
     (($datum :nullable-object) ($minimum i64) ($maximum i64) ($reason i32)) ()
   (:locals ($count i64))
   #@(local.set $count (call $scalar-integer-value
-    (ref.as_non_null (call $compiler-list-length (local.get $datum)))))
+    (call $compiler-list-length (local.get $datum))))
   #@(if (i64.lt_s (local.get $count) (i64.const 0))
     (then (call $macro-structure-error (local.get $datum)
       (call $symbol-value ,(clos-library-reference '%iteration-expansion-error-controls))
@@ -328,7 +328,7 @@
 
 (define-runtime-function $input-string-expansion (($form :nullable-object)) (:nullable-object)
   (:locals ($args :nullable-object) ($binding :nullable-object) ($variable :nullable-object) ($count i64))
-  #@(local.set $count (call $scalar-integer-value (ref.as_non_null (call $compiler-list-length (local.get $form)))))
+  #@(local.set $count (call $scalar-integer-value (call $compiler-list-length (local.get $form))))
   #@(if (i64.lt_s (local.get $count) (i64.const 0))
     (then (call $input-string-error (local.get $form)
       (select (i32.const 1) (i32.const 0) (i64.eq (local.get $count) (i64.const -2))))))
@@ -336,7 +336,7 @@
     (then (call $input-string-error (local.get $form) (i32.const 2))))
   #@(local.set $args (call $cdr (local.get $form)))
   #@(local.set $binding (call $car (local.get $args)))
-  #@(local.set $count (call $scalar-integer-value (ref.as_non_null (call $compiler-list-length (local.get $binding)))))
+  #@(local.set $count (call $scalar-integer-value (call $compiler-list-length (local.get $binding))))
   #@(if (i64.lt_s (local.get $count) (i64.const 0))
     (then (call $input-string-error (local.get $binding)
       (select (i32.const 4) (i32.const 3) (i64.eq (local.get $count) (i64.const -2))))))
@@ -863,14 +863,14 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$path-directory-end-cl 'miricl-runtime:path-directory-end-value))))
 
 (define-runtime-function $path-directory-end (($chars :digits)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $path-directory-end-cl (call $text (local.get $chars)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $path-directory-end-cl (call $text (local.get $chars))))))
 
 (defun $path-name-end-cl ()
   (runtime-function-definition '$path-name-end-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$path-name-end-cl 'miricl-runtime:path-name-end-value))))
 
 (define-runtime-function $path-name-end (($chars :digits) ($i i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $path-name-end-cl (call $text (local.get $chars)) (call $int (local.get $i)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $path-name-end-cl (call $text (local.get $chars)) (call $int (local.get $i))))))
 
 (defun $path-directories-match-cl ()
   (runtime-function-definition '$path-directories-match-cl

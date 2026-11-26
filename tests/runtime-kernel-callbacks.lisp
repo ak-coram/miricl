@@ -35,8 +35,8 @@
    local.get 0 if (result (ref null eq)) i32.const 1 ref.i31 else ref.null eq end)
  (func $int64 (param i64) (result (ref null eq)) local.get 0 i32.wrap_i64 ref.i31)
  (func $box-int64 (param i64) (result (ref null eq)) local.get 0 struct.new $boxed-integer)
- (func $scalar-integer-value (param (ref eq)) (result i64)
-   local.get 0 ref.test (ref i31)
+ (func $scalar-integer-value (param (ref null eq)) (result i64)
+   local.get 0 ref.as_non_null ref.test (ref i31)
    if (result i64) local.get 0 ref.cast (ref i31) i31.get_s i64.extend_i32_s
    else local.get 0 ref.cast (ref $boxed-integer) struct.get $boxed-integer 0 end)
  (func $eql (param (ref null eq) (ref null eq)) (result i32) local.get 0 local.get 1 ref.eq)

@@ -7390,11 +7390,10 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     native-vector-snapshot-call-p native-vector-snapshot-region
     native-private-i64-return-source native-plan-private-i64-site native-private-i64-edges-valid-p
     native-scalar-work-loop native-batch-scalar-work native-epoch-poll-body
-    native-simplify-ops-lisp native-op-liveness-lisp
     compilation-statistics-report compiler-input-summary
     hir-assert-form hir-correctable-place-form hir-restart-options
     hir-condition-initializer hir-define-condition hir-restart-expression
-    hir-bounded-integer-cells hir-literal-clock-cells
+    hir-literal-counter-cells hir-bounded-integer-cells hir-literal-clock-cells
     structure-info class-info method-info))
 
 (defparameter *native-compiler-seeds*
@@ -7464,9 +7463,9 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-restart-signal-form hir-symbol-iterate-form hir-while-form
                    hir-multiple-value-call-form hir-return-from-form
                    hir-body-declaration-base hir-body-macro-context hir-literal-membership hir-application-form hir-recursive-form hir-form lower-source-to-hir compile-source-hir compile-to-hir compile-module-to-hir compile-native-module
-                   make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-liveness-lisp native-op-stack native-scalar-call-effects native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-forward-locals native-result-blocks native-fold-locals native-optimize-body
+                   make-native-op make-native-flow native-read-uleb native-read-sleb native-read-ops native-read-ops-portable native-op-target native-control-matches native-op-flow native-liveness-blocks native-op-liveness native-op-stack native-scalar-call-effects native-stackify-ops native-stackify-ops-lisp native-coalesce-ops native-forward-locals native-result-blocks native-fold-locals native-optimize-body
                    ;; Compile larger size passes after the frontend and emitter.
-                   native-i32 native-fold-i32 native-clean-scopes native-simplify-ops-lisp native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module native-batch-work-bodies native-outline-result native-outline-match-region native-outline-region native-outline-site native-outline-code native-outline-bodies
+                   native-clean-scopes native-simplify-ops native-fuse-literal-functions native-fold-cells native-prune-module native-batch-work-bodies native-outline-result native-outline-match-region native-outline-region native-outline-site native-outline-code native-outline-bodies
                    symbol-key function-key literal-initializer-p static-type-form-p structure-info class-info method-info
                    definition-info namespace reachability-case-clauses form-written-variables form-references
                    miricl::%normalize-lambda-1 miricl::%normalize-lambda
@@ -7511,7 +7510,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
   ;; interpreter still installs and executes ordinary global definitions.
   '((wasm-byte wasm-append wasm-u32 wasm-u32-width wasm-s32 wasm-s64 wasm-name wasm-type wasm-section wasm-call)
     (hir-new-value hir-new-block hir-emit hir-terminate hir-single hir-multiple hir-nth-value hir-constant hir-clear-source)
-    (hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-widen-integer-interval hir-type-restrict hir-constant-type hir-type-cell hir-literal-list-cells hir-literal-counter-cells)
+    (hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-widen-integer-interval hir-type-restrict hir-constant-type hir-type-cell hir-literal-list-cells)
     (hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells)
     (miricl::%file-lexical-name miricl::%file-lexical-specials miricl::%file-lexical-bind
      miricl::%file-lexical-reference miricl::%file-code-cons miricl::%file-lexical-forms

@@ -25,8 +25,9 @@
 (define-runtime-function $scalar-integer-p (($x :nullable-object)) (i32)
   #@(i32.or (ref.test (ref i31) (local.get $x)) (ref.test (ref $fixnum) (local.get $x))))
 
-(define-runtime-function $scalar-integer-value (($x :object)) (i64)
-  #@(if (result i64) (ref.test (ref i31) (local.get $x))
+(define-runtime-function $scalar-integer-value (($x :nullable-object)) (i64)
+  ;; Linked callers share this null check before either scalar extraction.
+  #@(if (result i64) (ref.test (ref i31) (ref.as_non_null (local.get $x)))
     (then (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $x)))))
     (else (struct.get $fixnum $value (ref.cast (ref $fixnum) (local.get $x))))))
 

@@ -57,7 +57,7 @@
     (($selector :nullable-object) ($object :nullable-object) ($argument :nullable-object)) (:nullable-object)
   (:locals ($code i64) ($result :nullable-object))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :malformed-type)
-  #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
+  #@(local.set $code (call $scalar-integer-value (local.get $selector)))
   (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 5)) :malformed-type)
   #@(call $clear-values)
   #@(if (i64.eqz (local.get $code))

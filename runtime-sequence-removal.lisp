@@ -92,7 +92,7 @@
         (then (local.set $needle (call $sequence-character-needle (local.get $fast-character) (local.get $item)))))))
   ;; One bit per selected position; predicates run before DELETE relinks cells.
   #@(local.set $marks (array.new_default $digits (i32.shr_u (i32.add (local.get $selected) (i32.const 31)) (i32.const 5))))
-  #@(local.set $removed (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null
+  #@(local.set $removed (i32.wrap_i64 (call $scalar-integer-value
     (call $mark-sequence-values-cl (local.get $item) (local.get $sequence)
       (call $sequence-mark-view (local.get $marks) (local.get $selected))
       (call $vector-new (array.new_fixed $objects 11 (call $int (local.get $mode))
@@ -100,7 +100,7 @@
         (call $int (local.get $first)) (call $int (local.get $stop))
         (call $bool (local.get $reverse)) (call $int (local.get $limit))
         (call $int (local.get $fast-character)) (call $int (local.get $needle))
-        (call $sequence-character-fold-function (i32.eq (local.get $fast-character) (i32.const 3))))))))))
+        (call $sequence-character-fold-function (i32.eq (local.get $fast-character) (i32.const 3)))))))))
   #@(if (local.get $substitute)
     (then (return (call $copy-with-substitutions (local.get $sequence) (local.get $first) (local.get $stop)
       (local.get $marks) (local.get $removed) (local.get $write) (local.get $new)))))

@@ -89,8 +89,8 @@
   #@(local.set $ones (array.get $objects (local.get $parts) (i32.const 2)))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $sign))) :malformed-type)
   (wat-fail-when #@(i32.and
-    (i64.ne (call $scalar-integer-value (ref.as_non_null (local.get $sign))) (i64.const -1))
-    (i64.ne (call $scalar-integer-value (ref.as_non_null (local.get $sign))) (i64.const 1))) :malformed-type)
+    (i64.ne (call $scalar-integer-value (local.get $sign)) (i64.const -1))
+    (i64.ne (call $scalar-integer-value (local.get $sign)) (i64.const 1))) :malformed-type)
   (wat-fail-when #@(i32.ne (call $tag (local.get $exponent)) (i32.const 1)) :malformed-type)
   (wat-fail-when #@(i32.le_s (call $value-n (local.get $exponent)) (i32.const 0)) :malformed-type)
   (wat-fail-when #@(i32.and (i32.eqz (ref.is_null (local.get $ones)))
@@ -102,7 +102,7 @@
     (($selector :nullable-object) ($value :nullable-object) ($argument :nullable-object)) (:nullable-object)
   (:locals ($code i64))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :malformed-type)
-  #@(local.set $code (call $scalar-integer-value (ref.as_non_null (local.get $selector))))
+  #@(local.set $code (call $scalar-integer-value (local.get $selector)))
   (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 5)) :malformed-type)
   #@(call $clear-values)
   #@(if (i64.eqz (local.get $code))
@@ -130,7 +130,7 @@
     (local.set $result (call $upgraded-array-kind-cl (local.get $type) (local.get $env)
       (call $array-upgrade-metadata-function)))
     (global.set $extra-values (local.get $saved)) (global.set $value-count (local.get $count))
-    (return (i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (local.get $result)))))))
+    (return (i32.wrap_i64 (call $scalar-integer-value (local.get $result))))))
   #@(global.set $extra-values (local.get $saved)) #@(global.set $value-count (local.get $count))
   #@(throw $transfer))
 
@@ -174,7 +174,7 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$bit-value-cl 'miricl-runtime:checked-bit-value))))
 
 (define-runtime-function $bit-value (($value :nullable-object)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $bit-value-cl (local.get $value))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $bit-value-cl (local.get $value)))))
 
 (define-runtime-function $make-bit-vector (($length i32) ($initial :nullable-object)) (:object)
   (wat-new-object :bit-vector :n #@(local.get $length)
@@ -185,7 +185,7 @@
   #@(if (i32.eqz (call $scalar-integer-p (local.get $value)))
     (then (call $list-type-error (local.get $value) (i32.const ,(runtime-symbol-id 'fixnum)))))
   (wat-fail-when #@(i32.ne (call $tag (local.get $value)) (i32.const 1)) :malformed-form)
-  #@(call $scalar-integer-value (ref.as_non_null (local.get $value))))
+  #@(call $scalar-integer-value (local.get $value)))
 
 ;; Probe live owned storage after the caller's entry checkpoint. A successful
 ;; access returns a fixnum, so NIL leaves all general checks and errors to the
@@ -234,7 +234,7 @@
       (if (i32.ne (call $tag (local.get $value)) (i32.const 1))
         (then (return (ref.null eq))))
       (array.set $array-i64-data (local.get $data) (local.get $index)
-        (call $scalar-integer-value (ref.as_non_null (local.get $value))))
+        (call $scalar-integer-value (local.get $value)))
       (return (local.get $value))))
   #@(call $int64 (array.get $array-i64-data (local.get $data) (local.get $index))))
 
@@ -293,7 +293,7 @@
                 (i32.eqz (call $scalar-integer-p (local.get $index))))
     (then (return (i32.const -1))))
   #@(return_call $array-rank1-index64 (local.get $dimension)
-    (call $scalar-integer-value (ref.as_non_null (local.get $index)))))
+    (call $scalar-integer-value (local.get $index))))
 
 (define-runtime-function $array-check-bit-capacity (($length i32) ($words i32)) ()
   (wat-fail-when #@(i32.or (i32.gt_u (local.get $length) (i32.const 536870910))
@@ -427,8 +427,8 @@
   #@(if (i32.eqz (i32.and (call $scalar-integer-p (local.get $i))
                           (call $scalar-integer-p (local.get $j))))
     (then (return (i32.const -1))))
-  #@(local.set $row (call $scalar-integer-value (ref.as_non_null (local.get $i))))
-  #@(local.set $column (call $scalar-integer-value (ref.as_non_null (local.get $j))))
+  #@(local.set $row (call $scalar-integer-value (local.get $i)))
+  #@(local.set $column (call $scalar-integer-value (local.get $j)))
   ;; Unsigned comparisons reject negative boxed and immediate indices as well.
   #@(if (i32.or (i64.ge_u (local.get $row) (local.get $rows))
                 (i64.ge_u (local.get $column) (local.get $columns)))
@@ -550,7 +550,7 @@
 
 (define-runtime-function $array-subscript-index (($array :nullable-object) ($subscripts :nullable-object) ($query i32)) (i32)
   #@(call $check-apply-list (local.get $subscripts))
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $array-subscript-index-cl (local.get $array) (local.get $subscripts) (call $bool (local.get $query)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $array-subscript-index-cl (local.get $array) (local.get $subscripts) (call $bool (local.get $query))))))
 
 (define-runtime-function $array-new
     (($shape :digits) ($flags i32) ($storage :nullable-object) ($offset i32) ($fill i32)) (:object)
@@ -563,7 +563,7 @@
     (wat-fragment (miricl-cross:runtime-kernel-wat '$array-contents-length-cl 'miricl-runtime:array-contents-count))))
 
 (define-runtime-function $array-contents-length (($contents :nullable-object) ($reader i32)) (i32)
-  #@(i32.wrap_i64 (call $scalar-integer-value (ref.as_non_null (call $array-contents-length-cl (local.get $contents) (call $bool (local.get $reader)))))))
+  #@(i32.wrap_i64 (call $scalar-integer-value (call $array-contents-length-cl (local.get $contents) (call $bool (local.get $reader))))))
 
 (define-runtime-function $array-initialize-contents
     (($storage :nullable-object) ($shape :digits) ($axis i32) ($contents :nullable-object)
