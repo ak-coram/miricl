@@ -498,6 +498,15 @@ common literal/lookup sequences and choose compact factory/table
 representations based on encoded costs. Equal bodies can share code
 without merging observable function or literal identities.
 
+When packaging the browser image with the precompiled compiler, the host
+lays out live function definitions to fit the most referenced functions
+into one-byte Wasm indices. The WAT reachability pass counts symbolic
+calls, tail calls and function references from retained definitions and
+module fields. The layout retains the positions of anonymous and inline
+export definitions and the order of table entries. Modules with imports
+or numeric type operands keep the ordinary layout. Numeric function
+references also prevent pruning.
+
 =native-outline-code= moves repeated straight-line regions to typed helpers after
 matching their normalized instructions, local aliases and signatures.
 Live-ins become arguments and written locals are returned, including

@@ -71,28 +71,75 @@ Keep source order within each index range to preserve compression locality."
           (stable-sort (copy-seq definitions) #'>
             :key (lambda (entry) (if (find entry short :test #'eq) 1 0))))))))
 
-(defun runtime-prune-wat (text)
+(defun runtime-live-function-layout (records counts)
+  ;; The browser runtime is import-free and fits in two ULEB widths. Keep
+  ;; anonymous and inline-export declarations in their live source slots.
+  (unless (< 128 (length records) 16384)
+    (return-from runtime-live-function-layout records))
+  (flet ((movable-p (record)
+           (and (stringp (svref record 0)) (not (svref record 4)))))
+    (let* ((mobile (loop for record in records when (movable-p record) collect record))
+           (short-slots (loop for record in records repeat 128 count (movable-p record)))
+           (ranked (stable-sort (copy-list mobile) #'>
+                     :key (lambda (record) (gethash (svref record 0) counts 0))))
+           (short (make-hash-table :test 'eq)))
+      (loop for record in ranked repeat short-slots do (setf (gethash record short) 1))
+      (setf mobile (stable-sort mobile #'> :key (lambda (record) (gethash record short 0))))
+      (mapcar (lambda (record) (if (movable-p record) (pop mobile) record)) records))))
+
+(defun runtime-prune-wat (text &key layout-functions)
   "Remove unreferenced named functions from a generated core WAT module.
 Keep all non-function fields byte-for-byte. Every symbolic function name in
 those fields is a root; every matching name in a function is an edge. This
 deliberately overestimates references through identifier namespace collisions.
 Anonymous and imported definitions are retained; numeric references keep TEXT.
+LAYOUT-FUNCTIONS gives frequently referenced live definitions short indices
+in import-free images while leaving anonymous and inline exports in place.
 This private host pass accepts trusted generated text, not arbitrary user WAT;
 the assembler still validates its output."
   (check-type text string)
   (let* ((size (length text)) (position 0) (depth 0) (frames nil)
          (functions (make-hash-table :test 'equal)) (roots nil) (records nil)
-         (owner nil) (pending-reference nil) (module-seen nil))
+         (owner nil) (pending-reference nil) (module-seen nil)
+         (layout-supported layout-functions)
+         (counts (and layout-functions (make-hash-table :test 'equal)))
+         (previous nil) (before-previous nil))
     (labels ((unsupported () (return-from runtime-prune-wat (values text nil nil)))
              (spacep (char) (find char '(#\Space #\Tab #\Newline #\Return #\Page)))
              (namedp (token) (and (> (length token) 1) (char= (char token 0) #\$)))
              (reference (token)
                (if owner (push token (svref owner 3)) (push token roots)))
+             (count-reference (token)
+               (if owner
+                   (push token (svref owner 5))
+                   (incf (gethash token counts 0))))
+             (numericp (token)
+               (let ((first (char token 0)))
+                 (or (digit-char-p first) (find first "+-"))))
+             (type-operand-p ()
+               ;; The assembler can synthesize types for inline signatures.
+               ;; Reordering functions can change those types' numeric indices.
+               (or (member previous '("type" "ref" "ref.null" "sub" "call_ref" "return_call_ref")
+                           :test #'equal)
+                   (and (member previous '("null" "final") :test #'equal)
+                        (member before-previous '("ref" "sub") :test #'equal))
+                   (equal before-previous "array.copy")
+                   (and previous
+                        (or (and (>= (length previous) 7)
+                                 (string= previous "struct." :end1 7))
+                            (and (>= (length previous) 6)
+                                 (string= previous "array." :end1 6))))))
              (atom-token (token)
                (let* ((frame (car frames)) (head (and frame (svref frame 0))))
                  (unless frame (unsupported))
+                 (when layout-supported
+                   (when (and (numericp token) (type-operand-p))
+                     (setf layout-supported nil))
+                   (setf before-previous previous previous token))
                  (when pending-reference
                    (unless (namedp token) (unsupported))
+                   (when (and layout-supported (eq pending-reference :counted))
+                     (count-reference token))
                    (setf pending-reference nil))
                  (cond
                    ((null head)
@@ -101,8 +148,12 @@ the assembler still validates its output."
                       (unless (and (not module-seen) (string= token "module")) (unsupported))
                       (setf module-seen t))
                     (when (and (= depth 2) (string= token "func"))
-                      (setf owner (vector nil (svref frame 1) nil nil nil))
+                      ;; Name, source span, reachability edges, inline roots,
+                      ;; and call/reference operands used for layout.
+                      (setf owner (vector nil (svref frame 1) nil nil nil nil))
                       (push owner records))
+                    (when (and (<= 2 depth 3) (string= token "import"))
+                      (setf layout-supported nil))
                     (when (and owner (member token '("export" "import") :test #'string=))
                       (setf (svref owner 4) t)))
                    ((and (= depth 2) (string= head "func") (null (svref owner 0)))
@@ -112,17 +163,17 @@ the assembler still validates its output."
                           (setf (svref owner 0) token (gethash token functions) owner))
                         (setf (svref owner 0) :anonymous))))
                  (when (namedp token) (reference token))
-                 (when (member token '("call" "return_call" "ref.func" "start") :test #'string=)
-                   (setf pending-reference t))
+                 (cond
+                   ((member token '("call" "return_call" "ref.func") :test #'string=)
+                    (setf pending-reference :counted))
+                   ((string= token "start") (setf pending-reference t)))
                  ;; Function descriptors in explicit export fields and old
                  ;; bare element lists may use numeric indices. Do not alter
                  ;; indices without a complete binary relocation pass.
                  (when (and (string= token "func") (cdr frames)
                             (string= (or (svref (second frames) 0) "") "export"))
                    (setf pending-reference t))
-                 (when (and (string= (or head "") "elem")
-                            (plusp (length token))
-                            (or (digit-char-p (char token 0)) (find (char token 0) "+-")))
+                 (when (and (string= (or head "") "elem") (numericp token))
                    (unsupported)))))
       (loop while (< position size) for char = (char text position) do
         (cond
@@ -146,6 +197,7 @@ the assembler still validates its output."
                  (t (incf position))))))
           ((char= char #\")
            (when pending-reference (unsupported))
+           (setf previous nil before-previous nil)
            (incf position)
            (loop
              (when (>= position size) (unsupported))
@@ -155,11 +207,13 @@ the assembler still validates its output."
                      ((char= value #\") (return))))))
           ((char= char #\()
            (when pending-reference (unsupported))
+           (setf previous nil before-previous nil)
            (when (and owner (= depth 2) (null (svref owner 0)))
              (setf (svref owner 0) :anonymous))
            (push (vector nil position) frames) (incf depth) (incf position))
           ((char= char #\))
            (when (or pending-reference (zerop depth)) (unsupported))
+           (setf previous nil before-previous nil)
            (when (and owner (= depth 2))
              (unless (svref owner 0) (setf (svref owner 0) :anonymous))
              (setf (svref owner 2) (1+ position) owner nil))
@@ -173,7 +227,7 @@ the assembler still validates its output."
              (when (= start position) (unsupported))
              (atom-token (subseq text start position))))))
       (when (or (not module-seen) (plusp depth) owner pending-reference) (unsupported))
-      (let ((live (make-hash-table :test 'equal)) (pending roots) (removed nil))
+      (let ((live (make-hash-table :test 'equal)) (pending roots) (removed nil) (kept nil))
         (dolist (record records)
           (if (eq (svref record 0) :anonymous)
               (dolist (callee (svref record 3)) (push callee pending))
@@ -184,15 +238,29 @@ the assembler still validates its output."
             (let ((function (gethash name functions)))
               (when function (dolist (callee (svref function 3)) (push callee pending))))))
         (dolist (record records)
-          (unless (or (eq (svref record 0) :anonymous)
-                      (gethash (svref record 0) live)) (push record removed)))
+          (if (or (eq (svref record 0) :anonymous) (gethash (svref record 0) live))
+              (when layout-supported (push record kept))
+              (push record removed)))
+        (when layout-supported
+          (dolist (record kept)
+            (dolist (callee (svref record 5)) (incf (gethash callee counts 0)))))
         (values
           (with-output-to-string (out)
-            (let ((start 0))
-              (dolist (record removed)
-                (write-string text out :start start :end (svref record 1))
-                (setf start (svref record 2)))
-              (write-string text out :start start)))
+            (if layout-supported
+                (let ((start 0) (original kept) (layout (runtime-live-function-layout kept counts)))
+                  (dolist (record (nreverse records))
+                    (write-string text out :start start :end (svref record 1))
+                    (when (eq record (first original))
+                      (pop original)
+                      (let ((replacement (pop layout)))
+                        (write-string text out :start (svref replacement 1) :end (svref replacement 2))))
+                    (setf start (svref record 2)))
+                  (write-string text out :start start))
+                (let ((start 0))
+                  (dolist (record removed)
+                    (write-string text out :start start :end (svref record 1))
+                    (setf start (svref record 2)))
+                  (write-string text out :start start))))
           (mapcar (lambda (record) (svref record 0)) removed) t)))))
 
 (defmacro define-runtime-function (name parameters results &body body)

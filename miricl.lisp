@@ -124,8 +124,9 @@
 (defparameter *interpreter-wasm-compact* nil)
 (defparameter *interpreter-native-compiler-wasm* nil)
 (defparameter *interpreter-only-wasm* nil)
-(defun optimize-runtime-wat (wat)
-  (miricl-compiler::optimize-wasm-module (wt:wat-to-wasm (runtime-prune-wat wat))
+(defun optimize-runtime-wat (wat &key layout-functions)
+  (miricl-compiler::optimize-wasm-module
+    (wt:wat-to-wasm (runtime-prune-wat wat :layout-functions layout-functions))
     :default-outline-policy 29))
 
 (defun interpreter-wasm (&key wasi native-compiler debug-names (compiler t))
@@ -151,7 +152,7 @@ DEBUG-NAMES retains native debugging names."
         ;; these bytes. Invalidate the cache when the bootstrap image changes.
         (unless (eq image (car *interpreter-native-compiler-wasm*))
           (let* ((*native-compiler-image* image)
-                 (raw (optimize-runtime-wat (interpreter-wat))))
+                 (raw (optimize-runtime-wat (interpreter-wat) :layout-functions t)))
             (setf *interpreter-native-compiler-wasm*
               (list image raw (wasm-without-debug-names raw)))))
         (copy-seq (if debug-names (second *interpreter-native-compiler-wasm*)

@@ -49,4 +49,29 @@
                 "(module) trailing"))
   (multiple-value-bind (output removed supported) (miricl::runtime-prune-wat text)
     (assert (eq output text)) (assert (not removed)) (assert (not supported))))
+
+;; A live caller can use a numeric type index even when all function
+;; references are symbolic. Keep the pruned source order in that case.
+(let* ((template (with-output-to-string (out)
+              (write-line "(module (type $signature (func (result i32)))" out)
+              (write-line "(table 1 funcref)" out)
+              ;; Fill the one-byte index range with otherwise infrequent roots.
+              (loop for i below (ash 1 7)
+                    do (format out "(func $f~D (result i32) i32.const ~D)~%" i i))
+              (write-string "(elem declare func" out)
+              (loop for i below (ash 1 7) do (format out " $f~D" i))
+              (write-line ")" out)
+              (write-line "(func $target (result i32) i32.const 42)" out)
+              (write-line "(elem (i32.const 0) func $target)" out)
+              (write-line "(func $runner (export \"run\") (result i32)
+                             call $target drop i32.const 0 call_indirect (type ~A)))" out)))
+       (numeric (format nil template 0))
+       (symbolic (format nil template "$signature"))
+       (candidate (miricl::runtime-prune-wat symbolic :layout-functions t)))
+  (assert (string= (miricl::runtime-prune-wat numeric)
+                   (miricl::runtime-prune-wat numeric :layout-functions t)))
+  ;; The layout is active on the equivalent symbolic version of this module.
+  (assert (string/= candidate (miricl::runtime-prune-wat symbolic)))
+  (wasmtime:wat-to-wasm numeric)
+  (wasmtime:wat-to-wasm candidate))
 (format t "~&Runtime WAT reachability contracts passed.~%")
