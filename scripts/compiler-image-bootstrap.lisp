@@ -34,9 +34,12 @@
 )
 
 (defun bootstrap-compiler-image (&optional (output "/compiler-image.lisp"))
+  ;; Use the package's compact SPACE default while emitting shipped sources.
+  ;; Source declarations and the guest's other policy qualities still apply.
   (progv (mapcar (lambda (name) (compiler-primitive 10 1 name))
-        '("%FASL-RECORDS" "%FASL-SEEN" "%FILE-LOAD-VALUES"))
-      (list (make-array 32 :adjustable t :fill-pointer 0) (make-hash-table :test 'eq) nil)
+        '("%FASL-RECORDS" "%FASL-SEEN" "%FILE-LOAD-VALUES" "%SIZE-DEFAULT-POLICY"))
+      (list (make-array 32 :adjustable t :fill-pointer 0) (make-hash-table :test 'eq) nil
+            (native-size-policy '((declare (optimize (space 3)))) (compiler-primitive 52 nil)))
       (let ((names nil) (codes nil) (roots nil)
             (dump (symbol-function (compiler-primitive 10 1 "%FASL-DUMP"))))
         ;; This second compilation uses the already self-compiled frontend and emitter.

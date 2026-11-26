@@ -90,7 +90,10 @@ their respective observation points. Binding-specific handler categories and
 other augmentation keywords are unsupported. Debugger scope packets omit
 this metadata.
 
-The default compact policy is =(optimize (space 3) (speed 1))=.
+The default compilation policy is =(optimize (space 2) (speed 1))=.
+Image packaging uses a SPACE 3 default when compiling the shipped compiler
+and runtime kernels and outlining runtime code without policy metadata.
+Explicit source policies and recorded Wasm policies still apply.
 SPEED and SPACE guide growth and code sharing. COMPILATION-SPEED separately
 bounds analysis. Visibility and STRIP are explicit controls. SAFETY and
 DEBUG retain lexical scope, including across deferred work and inlining.
@@ -123,8 +126,14 @@ Reconstruction keeps each unit's dynamic context through nested LOAD and
 preserves initialization order and traversal checkpoints.
 
 Bootstrap source and symbol-name tables use a separate bounded LZ
-encoding. The decoder validates extents and back references before
-reconstructing the original bytes for the readers. Native package
+encoding. The host searches a bounded hash chain for nearby one-byte
+distances and longer or farther two-byte matches. It minimizes the packed
+size across the resulting match prefixes and literal runs, including
+their token headers. A greedy parse handles streams beyond the size or
+work budget. Before each
+copy the decoder checks input and output extents and backward distances.
+It requires the exact output length before handing reconstructed bytes to
+the readers. Native package
 preambles also avoid repeating identical registrations while preserving
 their installation order. These are startup-storage transformations.
 Compiler, runtime, serialized artifacts and packed sources use matching
@@ -243,6 +252,19 @@ calls, callbacks, and cleanup. FTYPE and primary demand supply no exact
 count proof. Tuple transport and frame omission require independent
 admission.
 
+Native result analysis can keep supported four- through eight-value
+returns in component locals. These returns publish an exact count,
+fixed secondary slots and a private immutable array of secondary values.
+One-argument calls and eligible no-prefix APPLY calls can capture and
+project present components without allocating a Lisp spine. The adapters
+retain argument validation, entry checkpoints and frame cleanup. Raw
+projection and materialization check the transport shape, value count and
+read operands. General groups and list consumers use Lisp spines.
+Scheduling preserves the ambient result group across callbacks. Lisp list
+consumers materialize the group before it can enter a saved image.
+Bootstrap emission and host-linked runtime workers use the ordinary
+result convention.
+
 In a source-owned sealed module, a retained non-tail DEBUG 0 call can use a
 private fixed worker that returns i64 directly to an existing scalar
 arithmetic consumer. A bounded function scan skips instruction analysis
@@ -263,7 +285,9 @@ binder for optional, rest and keyword arguments, debugger entry and arity
 errors. Keyword binding can share lookup and default handling when the
 missing-argument result supplies the default and no supplied-p value is
 needed. Native packet ingress checks representation, bounds and elements,
-and snapshots mutable storage before defaults or callbacks. Ordinary REST
+and snapshots mutable storage before defaults or callbacks. Individual
+positional reads from list and vector transports also validate the
+physical representation of the selected value. Ordinary REST
 bindings materialize a fresh list where required. Proven private
 observations may use the packet.
 
@@ -305,10 +329,16 @@ own fixed worker under the Common Lisp recursive-call consistency rule.
 Source lowering records the identity of directly resolved call operands
 after macro and lexical resolution. Emission checks their surviving uses
 against the originating calls. Local and proclaimed NOTINLINE preserve live
-lookup. A scoped body proof admits matching-arity, primary-result calls
-with retained frames. The executing function supplies the recursive context,
-and the framed call retains the entry checkpoint, checked result and
-transfer cleanup.
+lookup. A scoped body proof admits matching-arity non-tail calls with
+primary demand and retained frames. Eligible tail calls replace the current
+frame and forward the full value group. The executing function supplies
+the recursive context, and both routes retain the entry checkpoint and
+transfer cleanup. A bounded exact-one query closes the recursive result
+equation over admitted calls only, with a concrete producer and agreement
+between the original and revised call plans. After relocation and outlining,
+the emitter audits the checked entry adapter, worker descriptor, incoming
+references and recursive frame protocols. Failed admission or audit retries
+ordinary emission without the recursive substitutions or their result proof.
 
 A narrower exception independently audits final executable bytes for
 straight-line leaves that normalize exactly one value and cannot signal,

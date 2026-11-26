@@ -318,67 +318,165 @@ from *RUNTIME-LIBRARY-PREFIXES*."
 
 (defun compress-runtime-library-bytes (bytes)
   "Pack bootstrap bytes into bounded literals and overlapping back references.
-Tokens 0..127 introduce 1..128 literal bytes. Tokens 128..255 copy 4..131
-bytes from a nonzero little-endian 16-bit backward distance. The decoder
-knows both extents from the generated runtime; no Lisp objects are shared."
+Tokens 0..63 introduce 1..64 literal bytes. Tokens 64..127 copy 4..67
+bytes with a one-byte backward distance. Tokens 128..255 copy 4..131
+bytes with a little-endian two-byte backward distance. Distances are nonzero."
   (let* ((size (length bytes))
          (heads (make-array 65536 :initial-element -1))
-         (previous (make-array size :initial-element -1))
-         (output (make-array 0 :element-type '(unsigned-byte 8)
-                              :adjustable t :fill-pointer 0))
-         (position 0) (literal-start 0))
-    (labels ((emit (byte) (vector-push-extend byte output))
-             (hash-at (index)
+         (previous (make-array (min size 65536))))
+    (labels ((hash-at (index)
                (logxor (ash (aref bytes index) 8)
                        (ash (aref bytes (+ index 1)) 5)
                        (ash (aref bytes (+ index 2)) 2)
                        (aref bytes (+ index 3))))
              (remember (index)
-               (when (<= (+ index 4) size)
-                 (let ((hash (hash-at index)))
-                   (setf (aref previous index) (aref heads hash)
-                         (aref heads hash) index))))
-             (flush-literals (end)
-               (loop while (< literal-start end) do
-                 (let ((count (min 128 (- end literal-start))))
-                   (emit (1- count))
-                   (loop for index from literal-start below (+ literal-start count)
-                         do (emit (aref bytes index)))
-                   (incf literal-start count)))))
-      (loop while (< position size) do
-        (let ((best-length 0) (best-distance 0))
-          (when (<= (+ position 4) size)
-            (let ((candidate (aref heads (hash-at position)))
-                  (limit (min 131 (- size position))))
-              ;; Chains are newest first, so an out-of-window candidate also
-              ;; excludes every older one. A fixed probe budget bounds work
-              ;; even for adversarial hash collisions or repetitive input.
-              (loop repeat 32 while (and (>= candidate 0)
-                                         (<= (- position candidate) 65535)) do
-                (let ((count 0))
-                  (loop while (and (< count limit)
-                                   (= (aref bytes (+ position count))
-                                      (aref bytes (+ candidate count))))
-                        do (incf count))
-                  (when (and (>= count 4) (> count best-length))
-                    (setf best-length count best-distance (- position candidate)))
-                  (when (= count limit) (return)))
-                (setf candidate (aref previous candidate)))))
-          (if (plusp best-length)
-              (progn
-                (flush-literals position)
-                (emit (+ 128 (- best-length 4)))
-                (emit (logand best-distance 255))
-                (emit (ash best-distance -8))
-                ;; Insert the copied positions too: subsequent matches may
-                ;; start inside this match, including distance-one runs.
-                (loop for index from position below (+ position best-length)
-                      do (remember index))
-                (incf position best-length)
-                (setf literal-start position))
-              (progn (remember position) (incf position)))))
-      (flush-literals size))
-    output))
+               (if (<= (+ index 4) size)
+                   (let ((hash (hash-at index))
+                         (slot (logand index #xffff)))
+                     ;; The overwritten link is already outside the window.
+                     (setf (aref previous slot) (aref heads hash)
+                           (aref heads hash) index)
+                     (aref previous slot))
+                   -1))
+             (matches (position candidate)
+               (let ((wide-length 0) (wide-distance 0)
+                     (short-length 0) (short-distance 0)
+                     (limit (min 131 (- size position))) (work 0))
+                 ;; Chains are newest first. An out-of-window link excludes
+                 ;; every older candidate. Count work for the bounded parse.
+                 (loop repeat 32 while (and (>= candidate 0)
+                                            (<= (- position candidate) 65535)) do
+                   (let ((count 0)
+                         (distance (- position candidate)))
+                     (loop while (and (< count limit)
+                                      (= (aref bytes (+ position count))
+                                         (aref bytes (+ candidate count))))
+                           do (incf count))
+                     (incf work (1+ count))
+                     (when (>= count 4)
+                       (when (> count wide-length)
+                         (setf wide-length count wide-distance distance))
+                       (when (and (<= distance 255) (> (min count 67) short-length))
+                         (setf short-length (min count 67) short-distance distance)))
+                     ;; A match reaching LIMIT supplies the longest wide
+                     ;; prefix. It also supplies the longest short prefix
+                     ;; if near enough. Otherwise all older candidates are far.
+                     (when (= count limit) (return)))
+                   (setf candidate (aref previous (logand candidate #xffff))))
+                 (values wide-length wide-distance short-length short-distance work)))
+             (greedy ()
+               (fill heads -1)
+               (let ((output (make-array 0 :element-type '(unsigned-byte 8)
+                                           :adjustable t :fill-pointer 0))
+                     (position 0) (literal-start 0))
+                 (flet ((flush-literals (end)
+                          (loop while (< literal-start end) do
+                            (let ((count (min 64 (- end literal-start))))
+                              (vector-push-extend (1- count) output)
+                              (loop for index from literal-start below (+ literal-start count)
+                                    do (vector-push-extend (aref bytes index) output))
+                              (incf literal-start count)))))
+                   (loop while (< position size) do
+                     (multiple-value-bind (wide-length wide-distance short-length short-distance)
+                         (matches position (remember position))
+                       (let* ((short-p (and (plusp short-length)
+                                            (>= (- short-length 2) (- wide-length 3))))
+                              (length (if short-p short-length wide-length))
+                              (distance (if short-p short-distance wide-distance)))
+                         (if (plusp length)
+                             (progn
+                               (flush-literals position)
+                               (vector-push-extend (+ (if short-p 60 124) length) output)
+                               (vector-push-extend (logand distance 255) output)
+                               (unless short-p (vector-push-extend (ash distance -8) output))
+                               ;; Matches may start inside earlier copies.
+                               (loop for index from (1+ position) below (+ position length)
+                                     do (remember index))
+                               (incf position length)
+                               (setf literal-start position))
+                             (incf position)))))
+                   (flush-literals size))
+                 output))
+             (emit-parse (tokens distances cost)
+               (let ((output (make-array cost :element-type '(unsigned-byte 8)))
+                     (write-position cost)
+                     (end size))
+                 (loop while (plusp end) do
+                   (let* ((token (aref tokens end))
+                          (count (cond ((< token 64) (1+ token))
+                                       ((< token 128) (- token 60))
+                                       (t (- token 124))))
+                          (start (- end count)))
+                     (decf write-position (cond ((< token 64) (1+ count))
+                                                ((< token 128) 2)
+                                                (t 3)))
+                     (setf (aref output write-position) token)
+                     (if (< token 64)
+                         (replace output bytes :start1 (1+ write-position)
+                                               :start2 start :end2 end)
+                         (let ((distance (aref distances end)))
+                           (setf (aref output (1+ write-position)) (logand distance 255))
+                           (when (>= token 128)
+                             (setf (aref output (+ write-position 2)) (ash distance -8)))))
+                     (setf end start)))
+                 output))
+             (minimum-size ()
+               (let* ((infinity (1+ (* 2 size)))
+                      (costs (make-array 256 :element-type '(unsigned-byte 32)
+                                             :initial-element infinity))
+                      (tokens (make-array (1+ size) :element-type '(unsigned-byte 8)))
+                      (distances (make-array (1+ size) :element-type '(unsigned-byte 16)))
+                      (literal-starts (make-array 64 :element-type '(unsigned-byte 32)))
+                      (head 0) (tail 0) (work-left #x2000000))
+                 (flet ((literal-cost (start)
+                          (- (aref costs (logand start 255)) start))
+                        (offer-matches (position length distance token-base cost)
+                          ;; The longest match of each width supplies every
+                          ;; legal prefix at the same encoded cost.
+                          (loop for count from 4 to length
+                                for end = (+ position count)
+                                for slot = (logand end 255)
+                                when (< cost (aref costs slot)) do
+                                  (setf (aref costs slot) cost
+                                        (aref tokens end) (+ token-base count)
+                                        (aref distances end) distance))))
+                   (setf (aref costs 0) 0)
+                   (loop for position from 0 to size
+                         for slot = (logand position 255) do
+                     ;; A literal from START costs its prefix cost plus
+                     ;; POSITION - START + 1. The deque keeps possible starts
+                     ;; in increasing order of prefix cost minus START.
+                     (when (plusp position)
+                       (let* ((start (aref literal-starts (logand head 63)))
+                              (cost (+ (literal-cost start) position 1)))
+                         (when (< cost (aref costs slot))
+                           (setf (aref costs slot) cost
+                                 (aref tokens position) (1- (- position start))))
+                         (when (= (- position start) 64)
+                           (incf head))))
+                     (when (= position size)
+                       (return (emit-parse tokens distances (aref costs slot))))
+                     (let ((cost (literal-cost position)))
+                       (loop while (and (< head tail)
+                                        (>= (literal-cost (aref literal-starts (logand (1- tail) 63)))
+                                            cost))
+                             do (decf tail)))
+                     (setf (aref literal-starts (logand tail 63)) position)
+                     (incf tail)
+                     ;; Only the last 64 prefix costs and next 131 match
+                     ;; endpoints are live. This endpoint first enters reach
+                     ;; here, so discard the stale cost before offering matches.
+                     (setf (aref costs (logand (+ position 131) 255)) infinity)
+                     (multiple-value-bind (wide-length wide-distance short-length short-distance work)
+                         (matches position (remember position))
+                       (decf work-left (+ work wide-length short-length))
+                       (when (minusp work-left) (return nil))
+                       (offer-matches position wide-length wide-distance 124 (+ (aref costs slot) 3))
+                       (offer-matches position short-length short-distance 60 (+ (aref costs slot) 2))))))))
+      ;; The parse uses three bytes of choice storage per input byte.
+      ;; Bound both that storage and the work spent relaxing match lengths.
+      (or (and (<= size #x100000) (minimum-size))
+          (greedy)))))
 
 (defun runtime-library-data (bytes)
   (wat-fragment (with-output-to-string (out)

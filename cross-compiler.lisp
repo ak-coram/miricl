@@ -1254,6 +1254,9 @@ Unsupported dependencies and captures are errors, never fallbacks."
            (or (gethash key *kernel-cache*)
                (setf (gethash key *kernel-cache*)
                  (let ((miricl-compiler::*compiler-state* :interpreted)
+                       ;; Packaged kernels always use SPACE 3 as their default,
+                       ;; so the cache is independent of the host HIR default.
+                       (miricl-compiler::*hir-default-size-policy* 29)
                        (miricl-compiler::*hir-load-time-evaluator* #'require-target-load-time-evaluation)
                        (*macroexpand-hook* (fdefinition 'kernel-macroexpand-hook)))
                    (let* ((unit (miricl-compiler:compile-module-to-hir definitions :entry-points (list entry)))

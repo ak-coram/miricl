@@ -338,7 +338,7 @@
            (arguments nil) (variables nil) (functions nil) (targets nil) (factory nil) (macros nil)
            (*hir-unit* (make-hir-unit-record)) (*hir-specials* nil)
            (*hir-debug-level* (if debugger-p 2 (or (compiler-primitive 33 nil) 1)))
-           (*hir-size-policy* (or (compiler-primitive 52 nil) 29))
+           (*hir-size-policy* (or (compiler-primitive 52 nil) 25))
            (*hir-macro-context* (hir-import-macro-context source-environment nil nil)) (*hir-debug-write-types* t)
            (*hir-safety-level* 3) (*hir-types* nil) (*hir-inline-policy* nil) (*hir-inlining* nil)
            (*hir-function-index* nil)

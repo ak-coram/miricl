@@ -140,7 +140,10 @@
 
 (defun core-image-runtime-wat ()
   (let ((types (remove-if (lambda (type)
-                 (member (car type) '($bootstrap-bytes $bootstrap-names $hir-decoded-instruction) :test #'string-equal)) *core-types*))
+                 ;; Runtime value state is transient. Escaped values are
+                 ;; ordinary Lisp data; exclude the immutable carrier type.
+                 (member (car type) '($bootstrap-bytes $bootstrap-names $hir-decoded-instruction $secondary-values)
+                         :test #'string-equal)) *core-types*))
         (excluded '($green-thread $thread-context $thread-scratch-block $javascript-value)))
     (runtime-wat-forms
       (append

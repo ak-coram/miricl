@@ -124,6 +124,10 @@
 (defparameter *interpreter-wasm-compact* nil)
 (defparameter *interpreter-native-compiler-wasm* nil)
 (defparameter *interpreter-only-wasm* nil)
+(defun optimize-runtime-wat (wat)
+  (miricl-compiler::optimize-wasm-module (wt:wat-to-wasm (runtime-prune-wat wat))
+    :default-outline-policy 29))
+
 (defun interpreter-wasm (&key wasi native-compiler debug-names (compiler t))
   "Return the interpreter binary. NATIVE-COMPILER includes the bootstrapped
 compiler. COMPILER NIL keeps minimal HIR compilation without the Wasm backend.
@@ -133,15 +137,13 @@ DEBUG-NAMES retains native debugging names."
   (cond
     ((not compiler)
       (unless *interpreter-only-wasm*
-        (let ((raw (miricl-compiler::optimize-wasm-module
-                    (wt:wat-to-wasm (runtime-prune-wat (interpreter-wat :compiler nil))))))
+        (let ((raw (optimize-runtime-wat (interpreter-wat :compiler nil))))
           (setf *interpreter-only-wasm* (list raw (wasm-without-debug-names raw)))))
       (copy-seq (if debug-names (first *interpreter-only-wasm*) (second *interpreter-only-wasm*))))
     (wasi
       (let* ((image (ensure-native-compiler-image))
              (*native-compiler-image* image)
-             (bytes (miricl-compiler::optimize-wasm-module
-                      (wt:wat-to-wasm (runtime-prune-wat (interpreter-wat :wasi wasi))))))
+             (bytes (optimize-runtime-wat (interpreter-wat :wasi wasi))))
         (if debug-names bytes (wasm-without-debug-names bytes))))
     (native-compiler
       (let ((image (ensure-native-compiler-image)))
@@ -149,16 +151,14 @@ DEBUG-NAMES retains native debugging names."
         ;; these bytes. Invalidate the cache when the bootstrap image changes.
         (unless (eq image (car *interpreter-native-compiler-wasm*))
           (let* ((*native-compiler-image* image)
-                 (raw (miricl-compiler::optimize-wasm-module
-                        (wt:wat-to-wasm (runtime-prune-wat (interpreter-wat))))))
+                 (raw (optimize-runtime-wat (interpreter-wat))))
             (setf *interpreter-native-compiler-wasm*
               (list image raw (wasm-without-debug-names raw)))))
         (copy-seq (if debug-names (second *interpreter-native-compiler-wasm*)
                                 (third *interpreter-native-compiler-wasm*)))))
     (t (let* ((*native-compiler-image* nil)
              (raw (or *interpreter-wasm* (setf *interpreter-wasm*
-                    (miricl-compiler::optimize-wasm-module
-                      (wt:wat-to-wasm (runtime-prune-wat (interpreter-wat))))))))
+                    (optimize-runtime-wat (interpreter-wat))))))
         (copy-seq (if debug-names raw
           (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
             (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw)))))))))))

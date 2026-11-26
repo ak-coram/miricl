@@ -490,17 +490,18 @@
   (wat-fail-when #@(i32.lt_s (local.get $index) (i32.const 0)) :malformed-form)
   #@(local.set $value (call $native-checked-object (local.get $args)))
   #@(if (ref.test (ref $objects) (local.get $value))
-    ;; Raw packets already expose their checked representation. Read them
-    ;; without allocating a temporary Lisp vector or boxing the index.
+    ;; Read a raw packet without allocating a Lisp vector or boxing the index.
     (then
       (if (i32.ge_u (local.get $index) (array.len (ref.cast (ref $objects) (local.get $value))))
         (then (return (ref.null extern))))
-      (local.set $value (array.get $objects (ref.cast (ref $objects) (local.get $value)) (local.get $index)))
-      ,(wat-fail-when #@(i32.eqz (i32.or (ref.is_null (local.get $value))
-        (i32.or (ref.test (ref i31) (local.get $value)) (ref.test (ref $obj) (local.get $value))))) :malformed-form)
-      (return (extern.convert_any (local.get $value)))))
-  #@(call $native-check-private-spine (local.get $value))
-  #@(extern.convert_any (call $native-argument-cl (local.get $value) (call $int (local.get $index)))))
+      (local.set $value (array.get $objects (ref.cast (ref $objects) (local.get $value)) (local.get $index))))
+    (else
+      (call $native-check-private-spine (local.get $value))
+      (local.set $value (call $native-argument-cl (local.get $value) (call $int (local.get $index))))))
+  ;; The container's shape does not establish the shape of its slots.
+  (wat-fail-when #@(i32.eqz (i32.or (ref.test (ref null i31) (local.get $value))
+    (ref.test (ref $obj) (local.get $value)))) :malformed-form)
+  #@(extern.convert_any (local.get $value)))
 
 (defun $native-check-arguments-cl ()
   (runtime-function-definition '$native-check-arguments-cl
@@ -995,6 +996,80 @@
   #@(extern.convert_any (call $three-values
     ,(native-object '(local.get $a)) ,(native-object '(local.get $b))
     ,(native-object '(local.get $c)))))
+
+(define-runtime-function $native-return-counted8
+    (($a externref) ($b externref) ($c externref) ($d externref)
+     ($e externref) ($f externref) ($g externref) ($h externref) ($count i32)) (externref)
+  (:export-raw "native-return-counted8")
+  (:locals ($first :nullable-object) ($second :nullable-object) ($third :nullable-object)
+           ($payload (ref $secondary-values)))
+  ;; Check every externally supplied slot before publishing anything, even
+  ;; padding. Allocation and publication have no intervening callback.
+  (wat-fail-when #@(i32.ge_u (i32.sub (local.get $count) (i32.const 4)) (i32.const 5)) :malformed-form)
+  #@(local.set $first (call $native-checked-value (local.get $a)))
+  #@(local.set $second (call $native-checked-value (local.get $b)))
+  #@(local.set $third (call $native-checked-value (local.get $c)))
+  #@(local.set $payload (array.new_fixed $secondary-values 7
+    (local.get $second) (local.get $third)
+    (call $native-checked-value (local.get $d)) (call $native-checked-value (local.get $e))
+    (call $native-checked-value (local.get $f)) (call $native-checked-value (local.get $g))
+    (call $native-checked-value (local.get $h))))
+  #@(call $restore-values (local.get $second) (local.get $third)
+    (local.get $payload) (local.get $count))
+  #@(extern.convert_any (local.get $first)))
+
+(define-runtime-function $native-check-result-spine (($list :nullable-object) ($count i32)) ()
+  (wat-fail-when #@(i64.ne
+    (call $scalar-integer-value (ref.as_non_null (call $checked-list-length (local.get $list) (i32.const 1))))
+    (i64.extend_i32_u (i32.sub (local.get $count) (i32.const 1)))) :malformed-form))
+
+(define-runtime-function $native-captured-result-ref
+    (($payload externref) ($index i32) ($count i32)) (externref)
+  (:export-raw "native-captured-result-ref")
+  (:locals ($value (ref null any)) ($array (ref $secondary-values)) ($list :nullable-object))
+  ;; INDEX counts the primary value. Reserve the first three result slots for
+  ;; caller locals. Bounds and admission are independent of array identity.
+  (wat-fail-when #@(i32.or (i32.lt_u (local.get $index) (i32.const 3))
+    (i32.lt_s (local.get $count) (i32.const 4))) :malformed-form)
+  #@(local.set $value (any.convert_extern (local.get $payload)))
+  #@(if (ref.test (ref $secondary-values) (local.get $value))
+    (then
+      (local.set $array (ref.cast (ref $secondary-values) (local.get $value)))
+      ,(wat-fail-when #@(i32.or
+        (i32.ge_u (i32.sub (local.get $count) (i32.const 4)) (i32.const 5))
+        (i32.ne (array.len (local.get $array)) (i32.const 7))) :malformed-form)
+      (if (i32.ge_u (local.get $index) (local.get $count)) (then (return (ref.null extern))))
+      (return (extern.convert_any (call $native-checked-value
+        (extern.convert_any (array.get $secondary-values (local.get $array)
+          (i32.sub (local.get $index) (i32.const 1)))))))))
+  #@(local.set $list (call $native-checked-value (local.get $payload)))
+  #@(call $native-check-result-spine (local.get $list) (local.get $count))
+  #@(if (i32.ge_u (local.get $index) (local.get $count)) (then (return (ref.null extern))))
+  ;; A long projection can service interrupts. Recheck each observed cell
+  ;; and the selected value after any callback can have edited a shared spine.
+  #@(loop $next
+    ,(wat-fail-when #@(i32.eqz (call $checked-consp (local.get $list))) :malformed-form)
+    (if (i32.eq (local.get $index) (i32.const 1))
+      (then (return (extern.convert_any (call $native-checked-value
+        (extern.convert_any (struct.get $obj $a (ref.cast (ref $obj) (local.get $list)))))))))
+    (local.set $list (struct.get $obj $b (ref.cast (ref $obj) (local.get $list))))
+    (local.set $index (i32.sub (local.get $index) (i32.const 1)))
+    (if (i32.gt_u (local.get $count) (i32.const 8)) (then (call $native-poll)))
+    (br $next))
+  #@(unreachable))
+
+(define-runtime-function $native-captured-extra-list
+    (($payload externref) ($count i32)) (externref)
+  (:export-raw "native-captured-extra-list")
+  (:locals ($value (ref null any)) ($list :nullable-object))
+  (wat-fail-when #@(i32.lt_s (local.get $count) (i32.const 4)) :malformed-form)
+  #@(local.set $value (any.convert_extern (local.get $payload)))
+  #@(if (ref.test (ref $secondary-values) (local.get $value))
+    (then (return (extern.convert_any (call $secondary-values-list
+      (ref.cast (ref $secondary-values) (local.get $value)) (local.get $count))))))
+  #@(local.set $list (call $native-checked-value (local.get $payload)))
+  #@(call $native-check-result-spine (local.get $list) (local.get $count))
+  #@(extern.convert_any (local.get $list)))
 
 (define-runtime-function $native-int64 (($value i64)) (externref)
   (:export-raw "native-int64")
@@ -2337,11 +2412,9 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
        (else ,(reduce (lambda (argument tail) `(call $cons ,argument ,tail))
                       arguments :from-end t :initial-value '(ref.null eq))))))
 
-(define-runtime-function $native-call-values1
-    (($function externref) ($value externref)) (externref externref externref externref i32)
-  (:export-raw "native-call-values1")
+(define-runtime-function $native-call-values1-ready
+    (($function externref) ($value externref)) (:nullable-object)
   (:locals ($function-object :nullable-object) ($a :nullable-object) ($result :nullable-object)
-           ($b :nullable-object) ($c :nullable-object) ($extra :nullable-object) ($count i32)
            ($id i32) ($hit i32) ($native-function (ref $native-function)))
   ;; This raw export has the same checked Lisp-value boundary as NATIVE-CALL.
   ;; Preserve the public scalar worker ABI and its ordinary frame/cleanup owner.
@@ -2393,14 +2466,31 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
           (if (local.get $hit) (then (br $called))))))
     (local.set $result (call $apply (local.get $function-object)
       ,(native-fixed-fallback-arguments-wat 1))))
-  ;; EXTRA owns the complete secondary spine for large groups, as supplied by
-  ;; the existing VALUES/VALUES-LIST snapshot contract. No list is made here.
-  #@(call $capture-values)
+  #@(local.get $result))
+
+(define-runtime-function $native-capture-result
+    (($result :nullable-object) ($compact i32)) (externref externref externref externref i32)
+  (:locals ($b :nullable-object) ($c :nullable-object) ($extra :nullable-object) ($count i32))
+  #@(if (result (ref null eq) (ref null eq) (ref null eq) i32) (local.get $compact)
+    (then (call $capture-values))
+    (else (call $capture-values-list)))
   #@(local.set $count) #@(local.set $extra) #@(local.set $c) #@(local.set $b)
   #@(call $clear-values)
   #@(extern.convert_any (local.get $result))
   #@(extern.convert_any (local.get $b)) #@(extern.convert_any (local.get $c))
   #@(extern.convert_any (local.get $extra)) #@(local.get $count))
+
+(define-runtime-function $native-call-values1
+    (($function externref) ($value externref)) (externref externref externref externref i32)
+  (:export-raw "native-call-values1")
+  #@(call $native-capture-result
+    (call $native-call-values1-ready (local.get $function) (local.get $value)) (i32.const 0)))
+
+(define-runtime-function $native-call-captured1
+    (($function externref) ($value externref)) (externref externref externref externref i32)
+  (:export-raw "native-call-captured1")
+  #@(call $native-capture-result
+    (call $native-call-values1-ready (local.get $function) (local.get $value)) (i32.const 1)))
 
 (define-runtime-function $native-call1 (($function externref) ($value externref)) (externref)
   (:export-raw "native-call1")
@@ -3032,6 +3122,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-write)
   ($native-call) ($native-primary-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1) ($native-return2) ($native-return3)
+  ($native-return-counted8) ($native-check-result-spine) ($native-captured-result-ref) ($native-captured-extra-list)
   ($native-int64) ($native-unbox-int64) ($native-check-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)
   ($native-add-integer) ($native-sub-integer) ($native-mul-integer)
   ($native-logand-int64) ($native-logior-int64) ($native-logxor-int64) ($native-ash-int64)
@@ -3065,7 +3156,9 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-vector-set-inline)
   ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-frame-enter) ($native-frame-leave)
   ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
-  ($native-symbol-fixed-function) ($native-fixed-apply-ready) ($native-fixed-call) ($native-call0) ($native-call1) ($native-call-values1) ($native-call2) ($native-call3) ($native-call4)
+  ($native-symbol-fixed-function) ($native-fixed-apply-ready) ($native-fixed-call)
+  ($native-call-values1-ready) ($native-capture-result) ($native-call-values1) ($native-call-captured1)
+  ($native-call0) ($native-call1) ($native-call2) ($native-call3) ($native-call4)
   ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
   ($native-aref-scalar-index) ($native-aref-scalar) ($native-aref-int64) ($native-aref-i31-index)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)

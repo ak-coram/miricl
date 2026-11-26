@@ -52,13 +52,14 @@
     (cons 'progn (nreverse forms))))
 
 (define-hir-record hir-unit functions)
+;; The packed default has COMPILATION-SPEED 1, SPACE 2 and SPEED 1.
 (define-hir-record hir-function name parent parameters environment entry blocks captures bindings values
-  (value-count 0) (block-count 0) (debug-level 1) (optimization-policy 29))
+  (value-count 0) (block-count 0) (debug-level 1) (optimization-policy 25))
 (define-hir-record hir-block id parameters instructions terminator predecessors environment)
 (define-hir-record hir-value id kind owner producer (type t))
 (define-hir-record hir-instruction opcode inputs output attributes origin effect (safety-level 1))
 (define-hir-record hir-binding name owner cell special-p captured-p assigned-p local)
-(define-hir-record hir-local definition variables functions targets types policy debug-level used-p function (safety-level 1) macro-context (size-policy 29))
+(define-hir-record hir-local definition variables functions targets types policy debug-level used-p function (safety-level 1) macro-context (size-policy 25))
 (define-hir-record hir-target name owner block token captured-p)
 (define-hir-record hir-debug-site kind operator value variables functions targets types parent owner form macros)
 (defvar *hir-unit*)
@@ -80,7 +81,8 @@
 (defvar *hir-inline-growth-policy* nil)
 (defvar *hir-debug-level* 1)
 (defvar *hir-safety-level* 1)
-(defvar *hir-size-policy* 29)
+(defvar *hir-default-size-policy* 25)
+(defvar *hir-size-policy* 25)
 (defvar *hir-source-path* nil)
 (defvar *hir-debug-sites* nil)
 (defvar *hir-macro-context* nil)
@@ -1911,7 +1913,7 @@ Unsupported special operators and parameter syntax signal an error."
   (let* ((*hir-unit* (make-hir-unit-record)) (*hir-specials* global-specials)
         (*hir-debug-level* (or (compiler-primitive 33 nil) 1)) (*hir-types* nil)
         (*hir-safety-level* (or (compiler-primitive 36 nil) 1))
-        (*hir-size-policy* (or (compiler-primitive 52 nil) 29))
+        (*hir-size-policy* (or (compiler-primitive 52 nil) *hir-default-size-policy*))
         (*hir-inline-policy* nil) (*hir-inlining* nil) (*hir-function-index* nil)
         ;; This invocation owns the reference table. Reentrant source
         ;; compilation establishes its own contour before emitting HIR.

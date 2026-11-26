@@ -205,7 +205,7 @@ Compare compression with identical settings and report JavaScript adapter growth
 separately from Wasm image growth.
 
 Design optimization policy around compact browser deployment by default:
-`(optimize (space 3) (speed 1))`. Give users local control over measured hot
+`(optimize (space 2) (speed 1))`. Give users local control over measured hot
 paths, for example `(optimize (speed 3) (space 1))`. When SPACE exceeds SPEED,
 favor shared helpers, conservative inlining and little code duplication. When
 SPEED exceeds SPACE, allow larger inlining budgets, specialization and code

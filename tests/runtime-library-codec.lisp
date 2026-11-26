@@ -8,19 +8,21 @@
              (loop while (< cursor (length packed)) do
                (let ((token (aref packed cursor)))
                  (incf cursor)
-                 (if (< token 128)
+                 (if (< token 64)
                      (dotimes (index (1+ token))
                        (assert (< cursor (length packed)))
                        (assert (< used expected-size))
                        (setf (aref bytes used) (aref packed cursor))
                        (incf cursor) (incf used))
-                     (progn
-                       (assert (< (1+ cursor) (length packed)))
+                     (let* ((short (< token 128))
+                            (distance-width (if short 1 2))
+                            (count (+ 4 (mod token (if short 64 128)))))
+                       (assert (<= (+ cursor distance-width) (length packed)))
                        (let ((distance (+ (aref packed cursor)
-                                          (* 256 (aref packed (1+ cursor))))))
-                         (incf cursor 2)
+                                          (if short 0 (* 256 (aref packed (1+ cursor)))))))
+                         (incf cursor distance-width)
                          (assert (<= 1 distance used))
-                         (dotimes (index (+ 4 (- token 128)))
+                         (dotimes (index count)
                            (assert (< used expected-size))
                            (setf (aref bytes used) (aref bytes (- used distance)))
                            (incf used)))))))
@@ -31,7 +33,7 @@
              (assert (equalp bytes (unpack-bytes packed (length bytes)))))))
   ;; Cross literal and match token boundaries, exercise overlapping matches,
   ;; and move older matches outside the 16-bit distance window.
-  (dolist (size '(0 1 3 4 127 128 129 131 132 256 512 65535 65536 65700))
+  (dolist (size '(0 1 3 4 63 64 65 68 69 70 127 128 129 131 132 256 512 65535 65536 65700))
     (check (make-array size :element-type '(unsigned-byte 8) :initial-element 42))
     (check (map '(vector (unsigned-byte 8)) (lambda (index) (mod index 256))
                 (loop for index below size collect index))))
@@ -43,8 +45,21 @@
             (aref bytes index) (ldb (byte 8 24) state)))
     (replace bytes bytes :start1 65536 :start2 0 :end2 512)
     (check bytes))
+  ;; Exercise greedy recovery after both work and input size exhaustion.
+  (dolist (size '(110000 1048577))
+    (check (make-array size :element-type '(unsigned-byte 8) :initial-element 42)))
   (let ((repeated (make-array 1024 :element-type '(unsigned-byte 8) :initial-element 17)))
-    (assert (< (length (miricl::compress-runtime-library-bytes repeated)) (length repeated)))))
+    (assert (< (length (miricl::compress-runtime-library-bytes repeated)) (length repeated))))
+  ;; Six literals and a four-byte match take nine bytes. Taking the first
+  ;; available match leaves two separate literal runs and costs more.
+  (let* ((bytes (make-array 10 :element-type '(unsigned-byte 8)
+                             :initial-contents '(1 0 1 1 0 1 1 1 0 1)))
+         (packed (miricl::compress-runtime-library-bytes bytes)))
+    (assert (<= (length packed) (+ 1 6 2)))
+    (assert (equalp bytes (unpack-bytes packed (length bytes)))))
+  ;; A single literal and the longest distance-one short match fit in four bytes.
+  (let ((repeated (make-array 68 :element-type '(unsigned-byte 8) :initial-element 17)))
+    (assert (= (length (miricl::compress-runtime-library-bytes repeated)) 4))))
 
 (let* ((first-name (symbol-name (gensym "MIRICL-BOOTSTRAP-PACKAGE-")))
        (second-name (symbol-name (gensym "MIRICL-BOOTSTRAP-PACKAGE-")))
@@ -121,9 +136,22 @@
          (state 17)
          (cases (append
                   (list (miricl::runtime-library-bytes forms nil 24))
-                  (loop for size in '(0 1 3 4 127 128 129 131 132 1024)
+                  (loop for size in '(0 1 3 4 63 64 65 68 69 70 127 128 129 131 132 1024)
                         collect (make-array size :element-type '(unsigned-byte 8) :initial-element 255))
-                  (list noise (make-array 5 :element-type '(unsigned-byte 8) :initial-element 42))))
+                  (list noise)))
+         ;; Hand-encoded streams cover the distance cutoff independently of
+         ;; the packer's match selection. The overlap case also checks recovery.
+         (boundary-cases
+           (append
+            (loop for distance in '(255 256)
+                  for match in '((64 255) (128 0 1))
+                  for prefix = (loop for byte below distance collect byte)
+                  for literals = (loop for start from 0 below distance by 64
+                                       for end = (min (+ start 64) distance)
+                                       append (cons (- end start 1) (subseq prefix start end)))
+                  collect (list (append prefix (subseq prefix 0 4))
+                                (coerce (append literals match) 'vector)))
+            (list (list (make-list 68 :initial-element 42) #(0 42 127 1)))))
          (malformed '(((128 0 0) 4) ; Zero backward distance.
                       ((128 1 0) 4) ; No earlier output.
                       ((0 42 128 2 0) 5) ; Distance exceeds prefix.
@@ -131,6 +159,10 @@
                       ((128) 4) ((128 1) 4) ; Truncated distances.
                       ((0 42) 0) ; Literal overrun.
                       ((0 42 128 1 0) 4) ; Match overrun.
+                      ((0 42 64 0) 5) ; Zero short backward distance.
+                      ((64 1) 4) ((0 42 64 2) 5) ; Short distance exceeds prefix.
+                      ((0 42 64) 5) ; Truncated short distance.
+                      ((0 42 64 1) 4) ((0 42 64 1) 6) ; Short output overrun and underrun.
                       ((0 42) 2) (nil 1) ; Output underrun.
                       ((0 42 0 43) 1) ; Trailing token.
                       (nil 16777216) (nil 4294967295)))) ; Huge lengths.
@@ -140,8 +172,11 @@
     (replace noise noise :start1 65536 :start2 0 :end2 512)
     (with-open-file (out compression-fixture :direction :output)
       (write-string "{\"valid\":[" out)
-      (loop for bytes in cases for first = t then nil
-            for packed = (miricl::compress-runtime-library-bytes bytes) do
+      (loop for (bytes packed) in
+              (append (loop for bytes in cases
+                            collect (list bytes (miricl::compress-runtime-library-bytes bytes)))
+                      boundary-cases)
+            for first = t then nil do
         (unless first (write-char #\, out))
         (format out "[[~{~D~^,~}],~D,~D]" (coerce bytes 'list)
                 (length compression-bytes) (length packed))

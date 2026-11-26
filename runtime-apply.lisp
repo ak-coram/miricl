@@ -207,9 +207,8 @@
 ;; No-prefix APPLY has two existing transport observations: fixed CALL2 shares
 ;; its public tail and supplies P1; generic packet calls snapshot it without P1.
 ;; MODE bit zero selects primary demand; bit one preserves that fixed ABI.
-(define-runtime-function $native-apply-list
-    (($function externref) ($arguments externref) ($mode i32)) (externref)
-  (:export-raw "native-apply-list")
+(define-runtime-function $native-apply-list-ready
+    (($function externref) ($arguments externref) ($mode i32)) (:nullable-object)
   (:locals ($name :nullable-object) ($args :nullable-object) ($outer :nullable-object)
            ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
            ($handlers :nullable-object) ($restarts :nullable-object)
@@ -249,10 +248,25 @@
           (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
           (global.set $backtrace-depth (local.get $backtrace-depth))))
       (drop)))
+  #@(local.get $result))
+
+(define-runtime-function $native-apply-list
+    (($function externref) ($arguments externref) ($mode i32)) (externref)
+  (:export-raw "native-apply-list")
+  (:locals ($result :nullable-object))
+  #@(local.set $result
+    (call $native-apply-list-ready (local.get $function) (local.get $arguments) (local.get $mode)))
   #@(if (i32.eqz (i32.and (local.get $mode) (i32.const 1)))
     (then (local.set $result (call $value-list (local.get $result)))))
   #@(call $clear-values)
   #@(extern.convert_any (local.get $result)))
+
+(define-runtime-function $native-apply-captured-list
+    (($function externref) ($arguments externref)) (externref externref externref externref i32)
+  (:export-raw "native-apply-captured-list")
+  #@(call $native-capture-result
+    (call $native-apply-list-ready (local.get $function) (local.get $arguments) (i32.const 0))
+    (i32.const 1)))
 
 (define-runtime-function $apply-source (($name :nullable-object) ($args :nullable-object)) (:nullable-object)
   (:locals ($params :nullable-object) ($param :nullable-object) ($env :nullable-object) ($stop :nullable-object))
@@ -618,5 +632,6 @@
 (define-runtime-section apply-runtime-wat ()
   ($apply0) ($apply0-ready)
   (if *source-bootstrap-p* ($apply-source) "")
-  ($spread-arguments) ($native-spread-arguments) ($native-spread-list) ($copy-apply-arguments) ($native-apply-list-selected) ($native-apply-list)
+  ($spread-arguments) ($native-spread-arguments) ($native-spread-list) ($copy-apply-arguments)
+  ($native-apply-list-selected) ($native-apply-list-ready) ($native-apply-list) ($native-apply-captured-list)
   ($apply1))

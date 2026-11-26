@@ -260,7 +260,7 @@
                             (wasm-u32 (car entry)) (wasm-u32 (length (cdr entry)))
                             (module-write-bytes (cdr entry)))))))))))))))
 
-(defun optimize-wasm-module (bytes)
+(defun optimize-wasm-module (bytes &key (default-outline-policy 25))
   "Apply the existing local/stack passes to a core module, without changing ABI.
 Unsupported instruction sets retain their original function bodies. Returns
 the module, the number of smaller bodies and the number of unsupported bodies."
@@ -319,16 +319,17 @@ the module, the number of smaller bodies and the number of unsupported bodies."
                       (wasm-u32 (length body)) (module-write-bytes body)))))))))
       (values
         (outline-wasm-module
-        (if (zerop changed) bytes
-            (coerce (with-wasm-bytes
-              (module-write-bytes (subseq bytes 0 8))
-              (dolist (section sections)
-                (let ((payload (cdr section)))
-                  (when (and (zerop (car section)) (>= (length payload) 5)
-                             (equalp (subseq payload 0 5) #(4 110 97 109 101)))
-                    (setq payload (module-local-names payload mappings label-mappings)))
-                  (module-write-section (car section) payload))))
-              '(simple-array (unsigned-byte 8) (*)))))
+          (if (zerop changed) bytes
+              (coerce (with-wasm-bytes
+                (module-write-bytes (subseq bytes 0 8))
+                (dolist (section sections)
+                  (let ((payload (cdr section)))
+                    (when (and (zerop (car section)) (>= (length payload) 5)
+                               (equalp (subseq payload 0 5) #(4 110 97 109 101)))
+                      (setq payload (module-local-names payload mappings label-mappings)))
+                    (module-write-section (car section) payload))))
+                '(simple-array (unsigned-byte 8) (*))))
+          *native-outlining-budget* default-outline-policy)
         changed unsupported))))
 ;; Host-only WAT identities survive GC type adaptation and whole-image linking.
 (defvar *wasm-outline-policies* (make-hash-table :test 'equal))
@@ -381,7 +382,7 @@ the module, the number of smaller bodies and the number of unsupported bodies."
       (loop for policy across policies for i from 0 collect
         (cons (format nil "compiler-~D-~D" module i) policy)))))
 
-(defun outline-wasm-module (bytes &optional (budget *native-outlining-budget*))
+(defun outline-wasm-module (bytes &optional (budget *native-outlining-budget*) (default-policy 25))
   ;; Host build adapter. Keep the shared matching/rewriting core independent of
   ;; recursive GC type parsing and the rest of the full-image binary format.
   (unless (plusp budget) (return-from outline-wasm-module bytes))
@@ -413,13 +414,14 @@ the module, the number of smaller bodies and the number of unsupported bodies."
                     (unsupported-wasm-optimization () (list body nil nil nil)))))
             (push record records))))
       (setq records (coerce (nreverse records) 'vector)
-            policies (or (module-outline-policies sections) (make-array (length records) :initial-element 29)))
+            policies (or (module-outline-policies sections)
+                         (make-array (length records) :initial-element default-policy)))
       (unless (= (length policies) (length records)) (error "Mismatched Wasm compilation policy count."))
-      (let ((named (make-array (length functions) :initial-element 29)))
+      (let ((named (make-array (length functions) :initial-element nil)))
         (module-outline-names sections named)
         (dotimes (i (length policies))
           (let ((policy (aref named (+ i (length imported)))))
-            (unless (= policy 29) (setf (aref policies i) policy)))))
+            (when policy (setf (aref policies i) policy)))))
       (multiple-value-setq (replacements helpers)
         (native-outline-code records signatures
           (map 'vector (lambda (record policy) (and (second record) policy)) records policies) budget)))

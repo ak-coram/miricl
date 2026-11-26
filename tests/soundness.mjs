@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {Script, createContext} from 'node:vm';
 import {Miricl} from '../scripts/miricl.mjs';
+import {checkCountedResults} from './soundness-counted-results.mjs';
 
 const vm = await Miricl.instantiate(await fs.readFile(process.argv[2] ?? 'miricl.wasm'));
 const evaluate = source => vm.evaluate(source, {eof: true}).output;
@@ -971,6 +972,7 @@ try {
     vm.vm['native-check-arguments'](owned, elements.length, elements.length);
   }
   console.log('Soundness: raw native packets preserve elements and reject invalid reads with recovery.');
+  await checkCountedResults(process.argv[2] ?? 'miricl.wasm');
 
   // Canonical calls and shared list paths are public native boundaries too.
   // Invalid identities, foreign objects and unchecked path codes must signal
@@ -1578,8 +1580,10 @@ try {
     for (const invalid of [packets.empty(), digits]) {
       packets.set(poolData, 0, invalid);
       rejectPacketOperation(() => lookupLiteral(setterOwner, 0));
+      rejectPacketOperation(() => vm.vm['native-argument'](literalPool, 0));
       packets.set(poolData, 0, setterName);
       assert.equal(lookupLiteral(setterOwner, 0), lookupFunctions[0]);
+      assert.equal(vm.vm['native-argument'](literalPool, 0), setterName);
     }
   } finally {vm.vm['native-call1'](lookupUnset, setterName);}
   console.log('Soundness: checked names and literal lookups preserve live SETF bindings and recover from malformed inputs.');
@@ -1607,6 +1611,8 @@ try {
       assert.equal(vm.vm['native-apply-list'](provedRoot, applyArguments, mode | 1), elements[0]);
     }
     rejectPacketOperation(() => vm.vm['native-argument'](badTail, 0));
+    rejectPacketOperation(() => vm.vm['native-argument'](badElement, 0));
+    assert.equal(vm.vm['native-argument'](applyArguments, 0), elements[0]);
     rejectPacketOperation(() => vm.vm['native-check-arguments'](badTail, 1, 1));
   }
   console.log('Soundness: APPLY list transport validates raw ingress and recovers in full and primary modes.');
@@ -3025,7 +3031,7 @@ try {
     assert.equal(evaluate('(soundness-named-frame 5 0)'), '5\n');
   } finally {
     evaluate(`(mapc #'fmakunbound
-      '(soundness-named-frame soundness-named-values soundness-named-shadow)) (values)`);
+      '(soundness-named-frame soundness-named-values soundness-named-shadow soundness-named-carrier)) (values)`);
   }
   console.log('Soundness: named recursive calls preserve binding scope, multiple values and owned frames across errors and transfers.');
 

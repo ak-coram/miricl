@@ -504,9 +504,13 @@ const outlineInputs = [0n, -1n, 0x123456789abcdefn, -(1n << 63n), (1n << 63n) - 
 // helper cost. The two-operand case exercises short-region discovery; longer
 // folds retain the large-region checks after local simplification.
 const outlineNames = Array.from({length: 64}, (_, i) => `fold-${i}`);
+// Exercise SPACE 3 short-region discovery regardless of the default policy.
+const outlinePolicy = [...word(outlineNames.length), ...outlineNames.map(() => 16 + 4 * 3 + 1)]
+  .map(byte => `\\${byte.toString(16).padStart(2, '0')}`).join('');
 const outlineOperands = count => Array.from({length: count}, (_, i) =>
   0x123456789abcdefn ^ (BigInt(i + 1) * 0x100000001n));
 const outliningFixture = count => `(module
+  (@custom "miricl.policy" "${outlinePolicy}")
   (import "m" "hook" (func $hook (param i64) (result i64)))
   ${outlineNames.map((name, i) => `
     (func (export "${name}") (param i64) (result i64 i32) (local i64)
@@ -517,6 +521,7 @@ const outliningFixture = count => `(module
 // A host countdown bounds execution even if outlining loses the loop-carried
 // store. Its only later dynamic read precedes that store in textual order.
 const outliningLoopFixture = count => `(module
+  (@custom "miricl.policy" "${outlinePolicy}")
   (import "m" "hook" (func $hook (param i64) (result i64)))
   (import "m" "tick" (func $tick (param i32) (result i32)))
   ${outlineNames.map((name, i) => `

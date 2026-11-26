@@ -848,7 +848,8 @@
 
 (defvar %debug-default-level 1)
 (defvar %safety-default-level 1)
-(defvar %size-default-policy 29)
+;; Packed COMPILATION-SPEED 1, SPACE 2 and SPEED 1, as in HIR.LISP.
+(defvar %size-default-policy 25)
 (defvar %global-inline-policy nil)
 (defparameter %debug-declaration '(declare (optimize (debug 3))))
 

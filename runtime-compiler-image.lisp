@@ -117,8 +117,10 @@
                     (let ((image (native-compiler-image-from-manifest (read in))) (eof (gensym)))
                       (unless (eq eof (read in nil eof))
                         (native-link-fail manifest "trailing compiler manifest data"))
+                      ;; Bootstrap runs reuse these linker names. Each name has
+                      ;; one policy supplied by the current validated manifest.
                       (dolist (entry (fifth image))
-                        (miricl-compiler::record-wasm-outline-policy (car entry) (cdr entry)))
+                        (setf (gethash (car entry) miricl-compiler::*wasm-outline-policies*) (cdr entry)))
                       (setf *native-compiler-image* image))))))
           (uiop:delete-file-if-exists manifest)))))
   *native-compiler-image*)

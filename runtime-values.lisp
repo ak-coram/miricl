@@ -11,9 +11,9 @@
   #@(global.set $value-count (i32.const 1)))
 
 ;; The public runtime ABI still returns the primary value. Small groups keep
-;; their remaining values in fixed slots; a non-NIL EXTRA-VALUES overrides the
-;; slots and contains the complete secondary-value spine. Only list consumers
-;; and legacy state-preservation boundaries materialize that spine.
+;; their remaining values in fixed slots. Large groups keep all secondary
+;; values in EXTRA-VALUES, as a private immutable array or an owned Lisp spine.
+;; The exact count is independent of both padding and present NIL values.
 (define-runtime-function $small-values
     (($a :nullable-object) ($b :nullable-object) ($c :nullable-object) ($count i32))
     (:nullable-object)
@@ -25,11 +25,37 @@
 
 (define-runtime-function $secondary-value () (:nullable-object)
   #@(if (result (ref null eq)) (i32.gt_u (global.get $value-count) (i32.const 1))
-    (then (if (result (ref null eq)) (ref.is_null (global.get $extra-values))
-      (then (global.get $secondary-value)) (else (call $car (global.get $extra-values)))))
+    (then (if (result (ref null eq))
+      (i32.or (ref.is_null (global.get $extra-values))
+              (ref.test (ref $secondary-values) (global.get $extra-values)))
+      (then (global.get $secondary-value))
+      (else (call $car (global.get $extra-values)))))
     (else (ref.null eq))))
 
+(define-runtime-function $secondary-values-list
+    (($payload (ref $secondary-values)) ($count i32)) (:nullable-object)
+  (:locals ($index i32) ($list :nullable-object))
+  ;; This worker also handles a shape supplied by an external Wasm module.
+  ;; Canonical array types establish immutability, but not slot validity.
+  (wat-fail-when #@(i32.or
+    (i32.ge_u (i32.sub (local.get $count) (i32.const 4)) (i32.const 5))
+    (i32.ne (array.len (local.get $payload)) (i32.const 7))) :malformed-form)
+  #@(local.set $index (i32.sub (local.get $count) (i32.const 1)))
+  #@(block $done (loop $next
+    (br_if $done (i32.eqz (local.get $index)))
+    (local.set $index (i32.sub (local.get $index) (i32.const 1)))
+    (local.set $list (call $cons
+      (call $native-checked-value (extern.convert_any
+        (array.get $secondary-values (local.get $payload) (local.get $index))))
+      (local.get $list)))
+    (br $next)))
+  #@(local.get $list))
+
 (define-runtime-function $extra-value-list () (:nullable-object)
+  #@(if (ref.test (ref $secondary-values) (global.get $extra-values))
+    (then (return (call $secondary-values-list
+      (ref.cast (ref $secondary-values) (global.get $extra-values))
+      (global.get $value-count)))))
   #@(if (result (ref null eq)) (ref.is_null (global.get $extra-values))
     (then (if (result (ref null eq)) (i32.gt_u (global.get $value-count) (i32.const 1))
       (then (call $cons (global.get $secondary-value)
@@ -43,12 +69,20 @@
 (define-runtime-function $capture-values ()
     (:nullable-object :nullable-object :nullable-object i32)
   #@(if (result (ref null eq) (ref null eq) (ref null eq) i32)
-      (ref.is_null (global.get $extra-values))
+      (i32.or (ref.is_null (global.get $extra-values))
+              (ref.test (ref $secondary-values) (global.get $extra-values)))
     (then (global.get $secondary-value) (global.get $tertiary-value)
-      (ref.null eq) (global.get $value-count))
+      (global.get $extra-values) (global.get $value-count))
     (else (call $car (global.get $extra-values))
       (call $car (call $cdr (global.get $extra-values)))
       (global.get $extra-values) (global.get $value-count))))
+
+(define-runtime-function $capture-values-list ()
+    (:nullable-object :nullable-object :nullable-object i32)
+  #@(if (ref.test (ref $secondary-values) (global.get $extra-values))
+    (then (return (global.get $secondary-value) (global.get $tertiary-value)
+      (call $extra-value-list) (global.get $value-count))))
+  #@(call $capture-values))
 
 (define-runtime-function $restore-values
     (($b :nullable-object) ($c :nullable-object) ($extra :nullable-object) ($count i32)) ()
@@ -135,12 +169,14 @@
       (then (call $cons (local.get $primary) (call $extra-value-list))) (else (ref.null eq))))
 
 (define-runtime-section values-runtime-wat ()
+  #@(type $secondary-values (array (ref null eq)))
   #@(global $extra-values (mut (ref null eq)) (ref.null eq))
   #@(global $secondary-value (mut (ref null eq)) (ref.null eq))
   #@(global $tertiary-value (mut (ref null eq)) (ref.null eq))
   #@(global $value-count (mut i32) (i32.const 1))
   ($clear-values)
-  ($small-values) ($secondary-value) ($extra-value-list) ($capture-values) ($restore-values)
+  ($small-values) ($secondary-value) ($secondary-values-list) ($extra-value-list)
+  ($capture-values) ($capture-values-list) ($restore-values)
   ($return-values)
   ($return-values-count)
   ($snapshot-values)

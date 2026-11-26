@@ -31,6 +31,12 @@
                  ((< n 1) 1)
                  (direct (+ 1 (soundness-named-indirect (- n 1) direct)))
                  (t (+ 1 (funcall #'soundness-named-indirect (- n 1) direct))))))
+  (eval '(defun soundness-named-carrier (n)
+           (declare (optimize (debug 1) (safety 1)))
+           (if (eql n 0)
+               (values 1 nil :base 0 nil 6 7 :base-end)
+               (let ((primary (soundness-named-carrier (1- n))))
+                 (values (1+ primary) nil :step n nil 6 7 :step-end)))))
   ;; Use a fresh name because PROCLAIM affects subsequent compilations.
   (let ((name (gensym "SOUNDNESS-NAMED-PROCLAIMED-")))
     (proclaim (list 'notinline name))
@@ -84,6 +90,12 @@
 (assert (equal (multiple-value-list (soundness-named-values 5 :two)) '(7 :second)))
 (assert (null (multiple-value-list (soundness-named-values 5 :empty))))
 (assert (equal (multiple-value-list (soundness-named-values 5 :primary)) '(17)))
+
+(let ((entry #'soundness-named-carrier))
+  (assert (compiled-function-p entry))
+  (assert (equal (multiple-value-list (funcall entry 0)) '(1 nil :base 0 nil 6 7 :base-end)))
+  (assert (handler-case (progn (funcall entry) nil) (program-error () t)))
+  (assert (equal (multiple-value-list (apply entry '(4))) '(5 nil :step 4 nil 6 7 :step-end))))
 
 (let ((entry #'soundness-named-frame) (cleanup nil))
   (assert (handler-case (progn (funcall entry 5) nil) (program-error () t)))

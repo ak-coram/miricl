@@ -1004,7 +1004,7 @@ Generate only source forms here; the compiler-free guest needs no contract table
 (define-runtime-function $unpack-library-bytes
     (($bytes (ref $bootstrap-bytes)) ($length i32)) ()
   (:locals ($input i32) ($output i32) ($size i32) ($token i32)
-           ($count i32) ($distance i32) ($index i32))
+           ($count i32) ($distance i32) ($wide i32) ($width i32) ($index i32))
   ;; This representation compresses bytes, not Lisp objects. Reconstruct the
   ;; complete checked source stream before its ordinary reader runs, retaining
   ;; source offsets, fresh decoded objects and all private symbol identities.
@@ -1016,7 +1016,7 @@ Generate only source forms here; the compiler-free guest needs no contract table
     (br_if $done (i32.eq (local.get $input) (local.get $size)))
     (local.set $token (array.get_u $bootstrap-bytes (local.get $bytes) (local.get $input)))
     (local.set $input (i32.add (local.get $input) (i32.const 1)))
-    (if (i32.lt_u (local.get $token) (i32.const 128))
+    (if (i32.lt_u (local.get $token) (i32.const 64))
       (then
         (local.set $count (i32.add (local.get $token) (i32.const 1)))
         ,(wat-fail-when #@(i32.or
@@ -1030,17 +1030,22 @@ Generate only source forms here; the compiler-free guest needs no contract table
           (br_if $literal (i32.lt_u (local.get $index) (local.get $count))))
         (local.set $input (i32.add (local.get $input) (local.get $count))))
       (else
-        (local.set $count (i32.sub (local.get $token) (i32.const 124)))
+        (local.set $wide (i32.ge_u (local.get $token) (i32.const 128)))
+        (local.set $width (i32.add (local.get $wide) (i32.const 1)))
+        (local.set $count (i32.sub (local.get $token)
+          (select (i32.const 124) (i32.const 60) (local.get $wide))))
         ,(wat-fail-when #@(i32.or
-          (i32.lt_u (i32.sub (local.get $size) (local.get $input)) (i32.const 2))
+          (i32.lt_u (i32.sub (local.get $size) (local.get $input)) (local.get $width))
           (i32.gt_u (local.get $count) (i32.sub (local.get $length) (local.get $output)))) :malformed-form)
-        (local.set $distance (i32.or
-          (array.get_u $bootstrap-bytes (local.get $bytes) (local.get $input))
-          (i32.shl (array.get_u $bootstrap-bytes (local.get $bytes) (i32.add (local.get $input) (i32.const 1)))
-            (i32.const 8))))
+        (local.set $distance (array.get_u $bootstrap-bytes (local.get $bytes) (local.get $input)))
+        (if (local.get $wide) (then
+          (local.set $distance (i32.or (local.get $distance)
+            (i32.shl (array.get_u $bootstrap-bytes (local.get $bytes)
+                                (i32.add (local.get $input) (i32.const 1)))
+                     (i32.const 8))))))
         ,(wat-fail-when #@(i32.or (i32.eqz (local.get $distance))
           (i32.gt_u (local.get $distance) (local.get $output))) :malformed-form)
-        (local.set $input (i32.add (local.get $input) (i32.const 2)))
+        (local.set $input (i32.add (local.get $input) (local.get $width)))
         (local.set $index (i32.const 0))
         ;; Forward byte copies intentionally expand overlapping matches.
         (loop $match
