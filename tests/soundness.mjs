@@ -1019,6 +1019,16 @@ try {
       rejectPacketOperation(() => vm.vm['native-standard-call2'](code, integerOne, invalid));
     }
   }
+  // A canonical cons can carry a private GC array in either bytespec slot.
+  const callStandard2 = vm.vm['native-standard-call2'];
+  const byteSize = vm.vm['native-int64'](3n), byteInput = vm.vm['native-int64'](14n);
+  const byteSpec = callStandard2(canonicalCode('byte'), byteSize, integerOne);
+  const ldbCode = canonicalCode('ldb'), privateArray = packets.empty();
+  for (const [size, position] of [[privateArray, integerOne], [byteSize, privateArray]]) {
+    const malformed = vm.vm['native-cons'](size, position);
+    rejectPacketOperation(() => callStandard2(ldbCode, malformed, byteInput));
+    assert.equal(vm.javascript.integer(callStandard2(ldbCode, byteSpec, byteInput)), 7n);
+  }
   console.log('Soundness: canonical standard calls and list paths reject malformed ingress with recovery.');
 
   // Capture a Lisp function through the adapter's ordinary callback bridge,
@@ -1035,6 +1045,24 @@ try {
     assert.ok(function_, 'The Lisp callback bridge supplied its function.');
     return function_;
   };
+  // The fixed bitwise paths must reject malformed values in every raw slot.
+  const logeqv = packetFunction("#'logeqv"), logeqvCode = canonicalCode('logeqv');
+  const scalarBitInputs = [vm.vm['native-int64'](-(1n << 63n)),
+    vm.vm['native-int64']((1n << 63n) - 1n), integerOne];
+  for (const [arity, expected] of [[2, 0n], [3, -2n]]) {
+    const inputs = scalarBitInputs.slice(0, arity);
+    for (const [entry, callee] of [[`native-call${arity}`, logeqv],
+      [`native-standard-call${arity}`, logeqvCode]]) {
+      const call = vm.vm[entry];
+      for (let index = 0; index < inputs.length; index++) {
+        for (const invalid of [foreign, privateArray]) {
+          const malformed = inputs.map((value, slot) => slot === index ? invalid : value);
+          rejectPacketOperation(() => call(callee, ...malformed));
+        }
+      }
+      assert.equal(vm.javascript.integer(call(callee, ...inputs)), expected);
+    }
+  }
   // Fixed array adapters use live dimensions and retain checked storage access.
   const rank1Read = packetFunction("#'aref");
   const rank1ReadRaw = vm.vm['native-aref-int64'];

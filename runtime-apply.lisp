@@ -2,6 +2,21 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defun wat-apply-frame (expression)
+  ;; Reuse a bounded ring, restoring overwritten entries on return as well as
+  ;; nonlocal exits. No frame objects or argument lists are allocated here.
+  (runtime-wat-sequence
+    #@(local.set $backtrace-depth (global.get $backtrace-depth))
+    #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
+    #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
+    #@(array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $name))
+    #@(global.set $backtrace-depth (i32.add (local.get $backtrace-depth) (i32.const 1)))
+    #@(call $clear-values)
+    (wat-dynamic-call expression
+      :cleanup #@(block
+        (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
+        (global.set $backtrace-depth (local.get $backtrace-depth))))))
+
 (define-runtime-function $apply0
     (($name :nullable-object) ($args :nullable-object))
     (:nullable-object)
@@ -23,17 +38,9 @@
            ($thrown i32) ($direct-arity i32) ($direct-usage i32)
            ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object)
            ($result :nullable-object))
-  ;; Reuse a bounded ring, restoring overwritten entries on return as well as
-  ;; nonlocal exits. No frame objects or argument lists are allocated here.
-  #@(local.set $backtrace-depth (global.get $backtrace-depth))
-  #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
-  #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
-  #@(array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $name))
-  #@(global.set $backtrace-depth (i32.add (local.get $backtrace-depth) (i32.const 1)))
-  #@(call $clear-values)
   ;; Resolved native functions already carry a typed entry. Preserve the same
   ;; dynamic cleanup and backtrace frame while bypassing generic dispatch.
-  (wat-dynamic-call
+  (wat-apply-frame
     #@(if (result (ref null eq)) (ref.test (ref $native-function) (local.get $name))
       (then
         (if (result (ref null eq))
@@ -71,10 +78,33 @@
                   (else (ref.null extern)))
                 (struct.get $native-direct-code $entry (ref.as_non_null
                   (struct.get $native-function $direct (ref.cast (ref $native-function) (local.get $name)))))))))))
-      (else (call $apply1 (local.get $name) (local.get $args))))
-    :cleanup #@(block
-      (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
-      (global.set $backtrace-depth (local.get $backtrace-depth)))))
+      (else (call $apply1 (local.get $name) (local.get $args))))))
+
+(define-runtime-function $fixed-byte-apply
+    (($name :nullable-object) ($id i32) ($a :nullable-object) ($b :nullable-object)) (externref)
+  (:locals ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
+           ($handlers :nullable-object) ($restarts :nullable-object)
+           ($restart-associations :nullable-object) ($catches :nullable-object) ($targets :nullable-object)
+           ($thrown i32) ($backtrace-depth i32) ($backtrace-slot i32)
+           ($backtrace-frame :nullable-object) ($result :nullable-object))
+  ;; CALL2 has checked the operands, run its checkpoint and selected the
+  ;; ordinary APPLY entry. Retain APPLY0's checkpoint before the frame and
+  ;; any reads of the bytespec. The admitted ID bounds the canonical lookup.
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(block $called
+    (block $ordinary
+      (br_if $ordinary (global.get $debug-evaluating))
+      (br_if $ordinary (i32.eqz (ref.eq (local.get $name)
+        (array.get $objects (global.get $canonical-builtin-functions) (i32.shl (local.get $id) (i32.const 1))))))
+      (br_if $ordinary (i32.ne (struct.get $obj $n (ref.cast (ref $obj) (local.get $name)))
+        (i32.add (local.get $id) (i32.const 1))))
+      (drop ,(wat-apply-frame #@(call $binary-byte-operation (local.get $id) (local.get $a) (local.get $b))))
+      (br $called))
+    ;; Resume the original ordinary entry after its checkpoint.
+    (local.set $result (call $apply0-ready (local.get $name)
+      (call $cons2 (local.get $a) (local.get $b) (ref.null eq)))))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
 
 (defun $spread-arguments ()
   (runtime-function-definition '$spread-arguments
@@ -630,7 +660,7 @@
   #@(ref.null eq))
 
 (define-runtime-section apply-runtime-wat ()
-  ($apply0) ($apply0-ready)
+  ($apply0) ($apply0-ready) ($fixed-byte-apply)
   (if *source-bootstrap-p* ($apply-source) "")
   ($spread-arguments) ($native-spread-arguments) ($native-spread-list) ($copy-apply-arguments)
   ($native-apply-list-selected) ($native-apply-list-ready) ($native-apply-list) ($native-apply-captured-list)

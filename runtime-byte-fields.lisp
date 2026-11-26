@@ -15,6 +15,28 @@
 
 (define-runtime-function $ldb-native
     (($x :nullable-object) ($size :nullable-object) ($position :nullable-object) ($predicate i32)) (:nullable-object)
+  (:locals ($value i64) ($width i64) ($shift i64) ($field i64))
+  #@(block $fallback
+    ,(wat-decode-scalar-integer '$x '$value '$fallback)
+    ,(wat-decode-scalar-integer '$size '$width '$fallback)
+    ,(wat-decode-scalar-integer '$position '$shift '$fallback)
+    (br_if $fallback (i64.gt_u (local.get $width) (i64.const 63)))
+    (br_if $fallback (i64.lt_s (local.get $shift) (i64.const 0)))
+    ;; Wasm wraps shift counts. Shifting by 63 already gives the sign bits
+    ;; for any higher position. Width 63 keeps the masked result in signed i64.
+    (local.set $shift (select (local.get $shift) (i64.const 63)
+      (i64.lt_s (local.get $shift) (i64.const 63))))
+    (local.set $field (i64.and
+      (i64.shr_s (local.get $value) (local.get $shift))
+      (i64.sub (i64.shl (i64.const 1) (local.get $width)) (i64.const 1))))
+    (if (local.get $predicate) (then (return (call $bool (i64.ne (local.get $field) (i64.const 0))))))
+    (return (call $int64 (local.get $field))))
+  ;; A foreign canonical cons can hold private GC values. Check the fallback
+  ;; operands' shapes before the CL worker reads their Lisp tags.
+  (runtime-wat-forms
+    (loop for operand in '($x $size $position) collect
+      (wat-fail-when #@(i32.eqz (i32.or (ref.test (ref null i31) (local.get ,operand))
+        (ref.test (ref $obj) (local.get ,operand)))) :malformed-form)))
   ;; The CL boundary validates VALUE, SIZE and POSITION in that order; counts
   ;; remain arbitrary precision until exact support bounds establish a result.
   #@(call $extract-integer-field-cl (local.get $x) (local.get $size)

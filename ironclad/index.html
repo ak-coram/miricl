@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Run Ironclad's cryptography benchmarks in your browser with MIRICL.">
+<link rel="icon" href="data:,">
+<title>Ironclad Benchmarks · MIRICL</title>
+<style>
+:root { color-scheme: light; --paper: #ffffea; --tag: #eaffff; --active: #acebeb;
+  --select: #eeee9e; --border: #8888cc; --ink: #141421; --muted: #505067; --line: #d8d7ad;
+  font: 1rem/1.5 "DejaVu Sans Mono", ui-monospace, monospace; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: clamp(8px, 2vw, 28px); background: var(--border); color: var(--ink); }
+button, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled, select:disabled { cursor: default; opacity: .55; }
+button:focus-visible, select:focus-visible, a:focus-visible, summary:focus-visible, .table:focus-visible { outline: 2px solid #25258a; outline-offset: 3px; }
+a { color: #242479; }
+[hidden] { display: none !important; }
+::selection { background: var(--select); }
+.window { max-width: 1440px; margin: auto; background: var(--paper); border: 1px solid var(--ink); min-height: calc(100dvh - 56px); }
+.tag { display: flex; gap: 12px; align-items: center; padding: 9px 16px; background: var(--tag); border-bottom: 1px solid var(--ink); font-size: .875rem; }
+.tag::before { content: ''; width: .75rem; height: .75rem; background: var(--border); border: 1px solid var(--ink); }
+.tag a { margin-left: auto; }
+.hero { padding: clamp(20px, 4vw, 52px); border-bottom: 1px solid var(--ink); }
+h1 { font-size: clamp(1.55rem, 4.4vw, 3.5rem); line-height: 1.12; letter-spacing: -.055em; margin: 0 0 14px; }
+.hero p { margin: 0; max-width: 62ch; color: var(--muted); }
+.workspace { display: grid; grid-template-columns: minmax(13rem, 19rem) minmax(0, 1fr); }
+.sidebar { border-right: 1px solid var(--ink); }
+.section-tag { margin: 0; padding: 8px 16px; background: var(--tag); border-bottom: 1px solid var(--ink); font-size: .875rem; font-weight: bold; }
+.suites { margin: 0; padding: 0; list-style: none; }
+.suites button { display: flex; justify-content: space-between; gap: 8px; width: 100%; border: 0; border-bottom: 1px solid var(--line); background: transparent; padding: 10px 16px; text-align: left; font-size: .875rem; }
+.suites button:hover:not(:disabled), .row-action:hover:not(:disabled), .action:hover:not(:disabled) { background: var(--select); }
+.suites button[aria-current="true"] { background: var(--active); box-shadow: inset 4px 0 var(--ink); font-weight: bold; }
+.suites span { color: var(--muted); }
+.controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 16px; background: var(--tag); border-bottom: 1px solid var(--ink); font-size: .875rem; min-height: 46px; }
+.controls label { margin-left: auto; display: flex; gap: 7px; align-items: baseline; }
+.controls select, .action, .row-action { border: 1px solid var(--ink); border-radius: 0; background: var(--paper); padding: 3px 8px; }
+.controls select { appearance: none; padding-right: 24px; background: var(--paper) linear-gradient(45deg, transparent 50%, var(--ink) 50%) calc(100% - 13px) 53% / 5px 5px no-repeat;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink) 50%), linear-gradient(135deg, var(--ink) 50%, transparent 50%);
+  background-position: calc(100% - 13px) 53%, calc(100% - 8px) 53%; background-size: 5px 5px; background-repeat: no-repeat; }
+.action.primary { background: var(--active); font-weight: bold; }
+.result-panel { padding: 18px 16px 30px; }
+.result-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px 16px; flex-wrap: wrap; margin-bottom: 10px; }
+h2 { font-size: 1.25rem; margin: 0; }
+#status { margin: 0; color: var(--muted); font-size: .875rem; overflow-wrap: anywhere; }
+#error { background: #ffebdf; color: #771b25; border-left: 3px solid #771b25; padding: 6px 10px; font-size: .875rem; overflow-wrap: anywhere; }
+progress { width: 100%; height: 10px; accent-color: #468787; display: block; margin-bottom: 12px; }
+.table { overflow-x: auto; border: 1px solid var(--ink); }
+table { width: 100%; border-collapse: collapse; text-align: left; font-size: .875rem; }
+th, td { padding: 8px 10px; vertical-align: middle; }
+thead { background: var(--select); border-bottom: 1px solid var(--ink); }
+tbody tr + tr { border-top: 1px solid var(--line); }
+tbody tr:nth-child(even) { background: #f8f8dc; }
+tbody tr[data-active="true"] { background: var(--active); }
+.number { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.work { white-space: nowrap; color: var(--muted); font-size: .8125rem; }
+.scale { width: 24%; min-width: 5rem; }
+.scale div { height: .5rem; background: #88cccc; border-right: 1px solid #365050; }
+.row-action { background: var(--tag); }
+.detail { max-width: 58ch; overflow-wrap: anywhere; white-space: normal; color: #771b25; }
+footer { border-top: 1px solid var(--ink); padding: 10px 16px; background: var(--tag); font-size: .875rem; }
+summary { cursor: pointer; }
+footer p { margin: 8px 0 0; color: var(--muted); }
+@media (max-width: 840px) {
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .sidebar { border-right: 0; border-bottom: 1px solid var(--ink); }
+  .suites { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr)); }
+  .suites button { height: 100%; border-right: 1px solid var(--line); }
+  .controls label { margin-left: 0; }
+  .scale { display: none; }
+  th, td { padding: 6px; }
+  th.number, .work { white-space: normal; }
+  tbody th { overflow-wrap: anywhere; }
+}
+</style>
+</head>
+<body>
+<main class="window">
+  <div class="tag"><strong>MIRICL / Ironclad</strong><a href="https://github.com/sharplispers/ironclad/tree/master/benchmark">Upstream benchmarks</a></div>
+  <header class="hero">
+    <h1>Ironclad benchmarks</h1>
+    <p>Measure Common Lisp cryptography running in WebAssembly on this device.</p>
+  </header>
+  <div class="workspace">
+    <aside class="sidebar">
+      <h2 class="section-tag" id="suite-label">Benchmark suites</h2>
+      <nav aria-labelledby="suite-label"><ul class="suites" id="suites"></ul></nav>
+    </aside>
+    <section aria-labelledby="group-title">
+      <div class="controls">
+        <button class="action primary" id="run" type="button" disabled>Run suite</button>
+        <button class="action" id="stop" type="button" disabled>Stop</button>
+        <button class="action" id="export" type="button" disabled>Export JSON</button>
+        <label>Workload
+          <select id="workload" disabled><option value="quick" selected>Quick</option><option value="standard">Standard</option><option value="extended">Extended</option></select>
+        </label>
+      </div>
+      <div class="result-panel">
+        <div class="result-head"><h2 id="group-title">Digests</h2><p id="status" role="status">Loading Ironclad…</p></div>
+        <p id="error" role="alert" hidden></p>
+        <progress id="progress" aria-label="Suite progress" hidden></progress>
+        <div class="table" tabindex="0" aria-label="Benchmark results">
+          <table>
+            <thead><tr><th scope="col">Algorithm</th><th scope="col" class="number">Median throughput</th><th scope="col" class="scale" aria-label="Relative throughput"></th><th scope="col">Work / sample</th><th scope="col" aria-label="Actions"></th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </div>
+  <footer><details><summary>Measurement and build information</summary>
+    <p id="method"></p><p id="revision"></p>
+    <p>Each case runs one warm-up and reports the median of the retained samples. Input sizes are scaled for the browser. Symmetric cases reuse the upstream 32 KiB buffer and public-key cases retain the upstream key parameters. Key generation happens before timing.</p>
+  </details></footer>
+</main>
+<script type="module" src="app.mjs"></script>
+</body>
+</html>

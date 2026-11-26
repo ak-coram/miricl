@@ -50,6 +50,14 @@ build-todo:
 build-clysm:
     {{ quote(node) }} scripts/build-clysm.mjs {{ quote(precompiled) }} build/clysm/site
 
+# Compile Ironclad and package its browser benchmark app with the matching runtime.
+build-ironclad:
+    SBCL={{ quote(sbcl) }} {{ quote(node) }} scripts/build-ironclad.mjs {{ quote(precompiled) }} build/ironclad/site
+
+# Serve an existing Ironclad benchmark build over loopback.
+serve-ironclad port='8000':
+    {{ quote(node) }} ironclad/serve.mjs build/ironclad/site {{ quote(port) }}
+
 # Check the packaged page offline, including its browser-time compiler bootstrap.
 test-clysm:
     {{ quote(node) }} tests/clysm-packaging.mjs

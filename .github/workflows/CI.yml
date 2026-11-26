@@ -215,7 +215,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [game-of-life, maxima, fricas, mcclim, lem]
+        app: [game-of-life, maxima, fricas, mcclim, lem, ironclad]
     env:
       LISP: sbcl-bin
       CHROMIUM: google-chrome
@@ -228,7 +228,7 @@ jobs:
       - uses: ./.github/actions/setup-miricl
         with:
           lisp: ${{ matrix.app == 'game-of-life' && 'true' || 'false' }}
-          native-tools: ${{ (matrix.app == 'maxima' || matrix.app == 'fricas' || matrix.app == 'lem') && 'true' || 'false' }}
+          native-tools: ${{ (matrix.app == 'maxima' || matrix.app == 'fricas' || matrix.app == 'lem' || matrix.app == 'ironclad') && 'true' || 'false' }}
           just: 'true'
       - uses: actions/download-artifact@v4
         with:
@@ -298,6 +298,9 @@ jobs:
           node lem/page.mjs build/lem/miricl-lem.wasm build/lem/site
           node lem/tests/image.mjs build/lem/miricl-lem.wasm
           LEM_BROWSER_EVIDENCE=build/lem/browser node lem/tests/browser.mjs build/lem/site
+      - name: Build the Ironclad browser benchmarks
+        if: matrix.app == 'ironclad'
+        run: node scripts/build-ironclad.mjs miricl.wasm build/ironclad/site
       - name: Cache upstream FriCAS bootstrap
         if: matrix.app == 'fricas'
         uses: actions/cache@v4
@@ -731,6 +734,10 @@ jobs:
           path: build/lem/site
       - uses: actions/download-artifact@v4
         with:
+          name: application-ironclad
+          path: build/ironclad/site
+      - uses: actions/download-artifact@v4
+        with:
           name: acl2-math-books
           path: build/acl2/books
       - name: Assemble static site and measure the actual payloads
@@ -746,6 +753,7 @@ jobs:
           cp -R build/clysm/site public/clysm
           cp -R build/mcclim/site public/mcclim
           cp -R build/lem/site public/lem
+          cp -R build/ironclad/site public/ironclad
           node scripts/build-size-html.mjs . public/image-sizes.html index.html
       - uses: actions/upload-artifact@v4
         with:

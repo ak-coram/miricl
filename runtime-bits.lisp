@@ -2,6 +2,9 @@
 (in-package #:miricl)
 (named-readtables:in-readtable :miricl-wat)
 
+(defparameter *variadic-integer-bit-operations*
+  '((logand 8) (logior 14) (logxor 6) (logeqv 9)))
+
 (defun $require-integer-cl ()
   (runtime-function-definition '$require-integer-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$require-integer-cl 'miricl-runtime:checked-integer-value))))
@@ -210,28 +213,68 @@
         (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))))
   #@(call $integer (select (i32.const -1) (i32.const 1) (local.get $negative)) (ref.as_non_null (local.get $digits))))
 
+(define-runtime-function $fixed-scalar-integer-bits
+    (($function :nullable-object) ($id i32) ($x :nullable-object) ($y :nullable-object)
+     ($z :nullable-object) ($ternary i32)) (:nullable-object)
+  (:locals ($op i32) ($left i64) ($right i64) ($third i64) ($word i64))
+  ;; CALL2/3 already admitted the inputs and ran the application checkpoint.
+  ;; The ID gate selects only the ordinary bit builtins and bounds the slot.
+  #@(block $miss
+    (br_if $miss (global.get $debug-evaluating))
+    (br_if $miss (i32.eqz (ref.eq (local.get $function)
+      (array.get $objects (global.get $canonical-builtin-functions) (i32.shl (local.get $id) (i32.const 1))))))
+    (br_if $miss (i32.ne (struct.get $obj $n (ref.cast (ref $obj) (local.get $function)))
+      (i32.add (local.get $id) (i32.const 1))))
+    ,(wat-decode-scalar-integer '$x '$left '$miss)
+    ,(wat-decode-scalar-integer '$y '$right '$miss)
+    (if (local.get $ternary)
+      (then ,(wat-decode-scalar-integer '$z '$third '$miss)))
+    (local.set $op (i32.and (i32.const 15)
+      (i32.shr_u (i32.const ,(loop with first = (runtime-symbol-id 'logand)
+                                  for (name op) in *variadic-integer-bit-operations*
+                                  for i from 0
+                                  do (assert (= (runtime-symbol-id name) (+ first i)))
+                                  sum (ash op (* i 4))))
+        (i32.shl (i32.sub (local.get $id) (i32.const ,(runtime-symbol-id 'logand))) (i32.const 2)))))
+    (local.set $word (call $boole64-word (local.get $op) (local.get $left) (local.get $right)))
+    ;; Sign extension is preserved by each bitwise operation. Keep the
+    ;; intermediate result unboxed and apply LOGEQV's complement per pair.
+    (if (local.get $ternary)
+      (then (local.set $word (call $boole64-word (local.get $op) (local.get $word) (local.get $third)))))
+    (call $clear-values)
+    (return_call $int64 (local.get $word)))
+  #@(ref.null eq))
+
+(define-runtime-function $binary-byte-operation
+    (($id i32) ($a :nullable-object) ($b :nullable-object)) (:nullable-object)
+  (:locals ($result :nullable-object) ($position :nullable-object))
+  #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'byte)))
+    (then
+      (drop (call $natural-count (local.get $a)))
+      (drop (call $natural-count (local.get $b)))
+      (return (call $cons (local.get $a) (local.get $b)))))
+  #@(local.set $result (call $ldb-native (local.get $b)
+    (call $car (local.get $a)) (call $cdr (local.get $a))
+    (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'ldb-test)))))
+  #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'mask-field)))
+    (then
+      ;; Extraction can enter Lisp. Read the live position again before shifting.
+      (local.set $position (call $cdr (local.get $a)))
+      ,(wat-fail-when #@(i32.eqz (i32.or (ref.test (ref null i31) (local.get $position))
+        (ref.test (ref $obj) (local.get $position)))) :malformed-form)
+      (return_call $ash-native (local.get $result) (local.get $position))))
+  #@(local.get $result))
+
 (define-runtime-function $integer-bits-apply (($id i32) ($args :nullable-object)) (:nullable-object)
   (:locals ($a :nullable-object) ($b :nullable-object) ($result :nullable-object) ($op i32))
   (wat-symbol-case #@(local.get $id)
-    (byte
+    ((byte ldb ldb-test mask-field)
       (wat-arity 2)
-      #@(local.set $a (call $car (local.get $args)))
-      #@(local.set $b (call $car (call $cdr (local.get $args))))
-      #@(drop (call $natural-count (local.get $a)))
-      #@(drop (call $natural-count (local.get $b)))
-      #@(return (call $cons (local.get $a) (local.get $b))))
+      #@(return_call $binary-byte-operation (local.get $id)
+        (call $car (local.get $args)) (call $car (call $cdr (local.get $args)))))
     ((byte-size byte-position)
       (wat-arity 1) #@(return (call $byte-component (call $car (local.get $args))
         (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'byte-position))))))
-    ((ldb ldb-test mask-field)
-      (wat-arity 2)
-      #@(local.set $a (call $car (local.get $args)))
-      #@(local.set $result (call $ldb-native (call $car (call $cdr (local.get $args)))
-        (call $car (local.get $a)) (call $cdr (local.get $a))
-        (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'ldb-test)))))
-      #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'mask-field)))
-        (then (local.set $result (call $ash-native (local.get $result) (call $cdr (local.get $a))))))
-      #@(return (local.get $result)))
     ((dpb deposit-field)
       (wat-arity 3) #@(return (call $deposit-native (call $car (local.get $args))
         (call $car (call $cdr (local.get $args))) (call $car (call $cdr (call $cdr (local.get $args))))
@@ -251,8 +294,8 @@
     (logbitp (wat-arity 2) #@(return (call $logbitp-native (local.get $a) (local.get $b))))
     (logtest (wat-arity 2) #@(return (call $boole-native (i32.const 8) (local.get $a) (local.get $b) (i32.const 1)))))
   (runtime-wat-forms
-    (loop for (name op) in '((logand 8) (logior 14) (logxor 6) (logeqv 9)
-                             (lognand 7) (lognor 1) (logandc1 2) (logandc2 4) (logorc1 11) (logorc2 13)) collect
+    (loop for (name op) in (append *variadic-integer-bit-operations*
+                            '((lognand 7) (lognor 1) (logandc1 2) (logandc2 4) (logorc1 11) (logorc2 13))) collect
       `(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id name))) (then (local.set $op (i32.const ,op))))))
   #@(if (i32.gt_u (local.get $id) (i32.const ,(runtime-symbol-id 'logeqv)))
     (then ,(wat-arity 2) (return (call $boole-native (local.get $op) (local.get $a) (local.get $b) (i32.const 0)))))
@@ -268,4 +311,4 @@
 
 (define-runtime-section integer-bits-runtime-wat ()
   ($require-integer-cl) ($require-integer) ($ash-native) ($integer-bit-measure) ($logbitp-native-cl) ($logbitp-native)
-  ($boole-word) ($boole64-word) ($boole-native) ($integer-bits-apply))
+  ($boole-word) ($boole64-word) ($boole-native) ($binary-byte-operation) ($integer-bits-apply) ($fixed-scalar-integer-bits))

@@ -1,0 +1,31 @@
+* Ironclad browser benchmarks
+
+Run the [[https://ak-coram.github.io/miricl/ironclad/][Ironclad benchmarks on GitHub Pages]]. CI builds the site with the
+shared MIRICL runtime and the pinned Ironclad sources.
+
+To build locally, initialize =vendor/ironclad= and package the app using an
+existing matching precompiled compiler image.
+
+#+begin_src sh
+  git submodule update --init vendor/ironclad
+  just build-ironclad
+  just serve-ironclad
+#+end_src
+
+Open =http://127.0.0.1:8000/= in a browser with WasmGC and JavaScript Promise
+Integration support. The static output is in =build/ironclad/site/=. It can also
+be served from a subdirectory of an existing static site.
+
+The build compiles the portable Ironclad subsystems in the MIRICL guest and
+ships them as a native Wasm bundle alongside the matching runtime image, which
+contains its JavaScript adapter. A browser worker loads the native library,
+checks AES and SHA-256 known answers, and compiles the benchmark drivers from
+the upstream
+[[file:../vendor/ironclad/benchmark/benchmark-implementation.lisp][benchmark implementation]].
+Web Crypto supplies random benchmark inputs through Ironclad's PRNG interface.
+The runner uses the upstream timed bodies, changes the byte and iteration counts
+to suit browser runs, and reports KiB/s, MiB/s, or operations per second.
+Public-key setup follows upstream parameters and can take time. Stop cancels the
+worker and preserves finished rows. Export records all retained samples, the
+Ironclad revision, the backend and both Wasm artifact hashes, and any per-case
+errors.

@@ -31,6 +31,31 @@
     (then (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $x)))))
     (else (struct.get $fixnum $value (ref.cast (ref $fixnum) (local.get $x))))))
 
+(define-runtime-function $decode-scalar-integer (($x :nullable-object)) (i64 i32)
+  (:locals ($boxed (ref $fixnum)))
+  ;; Each cast also establishes the corresponding representation. A foreign
+  ;; canonical boxed scalar still needs the Lisp integer tag before extraction.
+  #@(block $miss (result (ref null eq))
+    (local.set $boxed
+      (br_on_cast_fail $miss (ref null eq) (ref $fixnum)
+        (block $try-boxed (result (ref null eq))
+          (return (i64.extend_i32_s (i31.get_s
+            (br_on_cast_fail $try-boxed (ref null eq) (ref i31) (local.get $x))))
+            (i32.const 0)))))
+    (if (i32.eq (i32.and (struct.get $obj $tag (local.get $boxed)) (i32.const 63)) (i32.const 1))
+      (then (return (struct.get $fixnum $value (local.get $boxed)) (i32.const 0))))
+    (ref.null eq))
+  #@(drop)
+  #@(i64.const 0)
+  #@(i32.const 1))
+
+(defun wat-decode-scalar-integer (source destination miss)
+  ;; A miss branches before assigning the payload and leaves SOURCE intact.
+  (runtime-wat-sequence
+    #@(call $decode-scalar-integer (local.get ,source))
+    #@(br_if ,miss)
+    #@(local.set ,destination)))
+
 (define-runtime-function $magnitude64 (($x :object)) (i64)
   (:locals ($value i64))
   #@(local.set $value (call $scalar-integer-value (local.get $x)))
@@ -487,7 +512,8 @@
   #@(local.get $a))
 
 (define-runtime-section integer-runtime-wat ()
-  ($box-int64) ($int64) ($scalar-integer-p) ($scalar-integer-value) ($magnitude64) ($integer-length)
+  ($box-int64) ($int64) ($scalar-integer-p) ($scalar-integer-value) ($decode-scalar-integer)
+  ($magnitude64) ($integer-length)
   ($integer-normalized) ($integer) ($wide-integer)
   ($int)
   ($small-integer-value)

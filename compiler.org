@@ -573,6 +573,27 @@ caching tracks live backend definitions so changes to passes reach
 recompiled kernels.
 Linked scalar integer extraction shares its null check at the private
 helper entry before dispatching on the WasmGC integer representation.
+Byte-field extraction checks the integer representations and count bounds
+before extracting fields of up to 63 bits from a scalar integer. The
+bounded path preserves sign extension and serves LDB and LDB-TEST under
+the ordinary call checkpoint. MASK-FIELD shifts the extracted bits back
+to their original position. Arbitrary-precision operands and wider fields
+use the exact Common Lisp kernel.
+
+Fixed native calls to BYTE, LDB, LDB-TEST and MASK-FIELD pass both
+operands directly to the workers used by general application. The runtime
+keeps the call and application checkpoints, authenticates the captured
+builtin after both, and uses the ordinary backtrace frame and dynamic
+cleanup even when the worker signals. Debugger evaluation and dispatch
+misses follow general application. MASK-FIELD rereads the bytespec
+position after extraction.
+
+Fixed native calls with two or three operands to LOGAND, LOGIOR, LOGXOR
+and LOGEQV share a scalar fold. After the call checkpoint, the runtime
+checks the captured builtin against its canonical identity and accepts
+immediate signed i31 and boxed signed i64 operands. The fold uses signed
+64-bit words and normalizes one result. General application handles
+debugger evaluation, arbitrary-precision operands and type errors.
 
 Generic dispatch caches method selection under runtime ownership, with
 checks on the actual discriminator, type and method state, argument

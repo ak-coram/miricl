@@ -139,3 +139,6 @@
 [submodule "clysm/upstream"]
 	path = clysm/upstream
 	url = https://github.com/cxxxr/clysm
+[submodule "vendor/ironclad"]
+	path = vendor/ironclad
+	url = https://github.com/sharplispers/ironclad

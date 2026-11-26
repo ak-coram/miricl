@@ -1,0 +1,25 @@
+;;;; Read Ironclad's source order from ASDF without loading its host dependencies.
+(require :asdf)
+(let* ((root (truename (uiop:ensure-directory-pathname (second sb-ext:*posix-argv*))))
+       (definition (merge-pathnames "ironclad.asd" root))
+       (seen (make-hash-table :test #'eq)))
+  (asdf:load-asd definition)
+  (labels ((source-files (component)
+             (etypecase component
+               (asdf:cl-source-file
+                (let ((name (enough-namestring (asdf:component-pathname component) root)))
+                  (unless (or (uiop:string-prefix-p "src/opt/" name)
+                              (member name '("src/prng/os-prng.lisp" "src/octet-stream.lisp")
+                                      :test #'string=))
+                    (write-line name))))
+               (asdf:parent-component (mapc #'source-files (asdf:component-children component)))
+               (asdf:component nil)))
+           (visit (name)
+             (when (uiop:string-prefix-p "ironclad/" name)
+               (let ((system (asdf:find-system name)))
+                 (unless (gethash system seen)
+                   (setf (gethash system seen) t)
+                   (mapc #'visit (asdf:system-depends-on system))
+                   (source-files system))))))
+    (mapc #'visit '("ironclad/ciphers" "ironclad/digests" "ironclad/macs"
+                    "ironclad/public-keys"))))

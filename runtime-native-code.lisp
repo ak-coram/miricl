@@ -2628,6 +2628,20 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
           (i32.lt_s (i31.get_s (local.get $small-left)) (i31.get_s (local.get $small-right)))))))))
     #@(drop)))
 
+(defun native-fixed-integer-bits-wat (arity)
+  (wat-integer-branch '(local.get $id)
+    (loop for (name) in *variadic-integer-bit-operations*
+          for id = (runtime-symbol-id name)
+          collect (if (= arity 2) id (- -2 id)))
+    (runtime-wat-sequence
+      #@(local.set $direct-result (call $fixed-scalar-integer-bits (local.get $function-object)
+        ,(if (= arity 2) '(local.get $id) '(i32.sub (i32.const -2) (local.get $id)))
+        ,@(if (= arity 2) '((local.get $a) (local.get $b) (ref.null eq))
+              (list (native-object '(local.get $a)) '(local.get $array) '(local.get $subscript)))
+        (i32.const ,(if (= arity 2) 0 1))))
+      #@(if (i32.eqz (ref.is_null (local.get $direct-result)))
+        (then (return (extern.convert_any (local.get $direct-result))))))))
+
 (define-runtime-function $native-call2
     (($function externref) ($left externref) ($right externref)) (externref)
   (:export-raw "native-call2")
@@ -2645,6 +2659,13 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
       (then ,(native-direct-call-wat 2 t '(local.get $function-object) '((local.get $a) (local.get $b)) nil t)
         (return (extern.convert_any (call $native-primary-apply
         (local.get $function-object) (array.new_fixed $objects 2 (local.get $a) (local.get $b)))))))))
+  (wat-symbol-branch '(local.get $id) '(byte ldb ldb-test mask-field)
+    (wat-fragment
+      #@(if (i32.and (i32.eqz (global.get $debug-evaluating))
+          (ref.eq (local.get $function-object)
+            (array.get $objects (global.get $canonical-builtin-functions) (i32.shl (local.get $id) (i32.const 1)))))
+        (then (return_call $fixed-byte-apply (local.get $function-object)
+          (local.get $id) (local.get $a) (local.get $b))))))
   ;; Exact native workers need only checked Lisp values, not builtin tags.
   #@(local.set $at (call $tag (local.get $a)))
   #@(local.set $bt (call $tag (local.get $b)))
@@ -2761,6 +2782,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
           (call $clear-values)
           (return (extern.convert_any (local.get $direct-result)))))))
   (native-fixed-primitive-call-wat 2)
+  (native-fixed-integer-bits-wat 2)
   (native-generic-fast-call-wat 2 t)
   (native-symbol-fixed-call-wat 2)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
@@ -2840,6 +2862,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
           (call $clear-values)
           (return (local.get $a))))))
   (native-fixed-primitive-call-wat 3)
+  (native-fixed-integer-bits-wat 3)
   (native-generic-fast-call-wat 3 t)
   (native-symbol-fixed-call-wat 3)
   #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
