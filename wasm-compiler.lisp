@@ -5396,24 +5396,20 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
            (new (and cell (hir-value-producer cell)))
            (zero (first-input new :cell-new))
            (literal (and zero (hir-value-producer zero)))
-           (bound (fourth inputs)) (copy (hir-value-producer bound))
-           ;; Use the nearest ordinary cross-block producer. This original
-           ;; COPY use already pins its reference local across loop entry.
-           (root (first-input copy :copy))
+           (bound (fourth inputs)) (bound-producer (hir-value-producer bound))
+           ;; A value produced in entry or setup can be observed directly.
+           ;; For a header copy, observe its already evaluated source.
+           (root (first-input bound-producer :copy))
            (root-producer (and root (hir-value-producer root)))
-           (write nil) (access nil) (binding nil) (read-seen nil) (new-seen nil)
-           (copy-seen nil) (root-seen nil))
+           (write nil) (accesses nil) (binding nil) (read-seen nil) (new-seen nil)
+           (bound-block nil) (root-block nil))
       (unless (and (native-vector-snapshot-value-p cell raw tiered t)
                    (native-vector-snapshot-value-p zero raw tiered)
                    (%hir-instruction-p literal) (eq (hir-instruction-opcode literal) :constant)
                    (eql (first (hir-instruction-attributes literal)) 0)
                    (native-vector-snapshot-value-p bound raw tiered)
-                   (native-vector-snapshot-value-p root raw tiered)
-                   (eq (hir-value-kind root) :single) (slot *wasm-live-values* root)
                    (slot *wasm-live-values* bound)
-                   (not (slot *wasm-inline-constants* root))
-                   (%hir-instruction-p root-producer)
-                   (member (hir-instruction-opcode root-producer) '(:argument :copy)))
+                   (%hir-instruction-p bound-producer))
         (return-from native-vector-snapshot-region))
       (dolist (candidate (hir-function-bindings function))
         (charge 1)
@@ -5428,11 +5424,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
         (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
           (charge 1)
           (cond ((eq instruction new) (setq new-seen (eq block setup)))
-                ((eq instruction copy) (setq copy-seen (eq block header)))
-                ((eq instruction root-producer)
-                 (setq root-seen (or (eq block setup)
-                                     (and (eq block entry)
-                                          (eq (hir-instruction-opcode root-producer) :argument)))))
+                ((eq instruction bound-producer) (setq bound-block block))
+                ((eq instruction root-producer) (setq root-block block))
                 ((eq instruction read) (setq read-seen (eq block header))))
           (let ((arguments (hir-instruction-inputs instruction)))
             (loop for operand in arguments for index from 0 do
@@ -5446,18 +5439,25 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
             (when (and (eq block body)
                        (native-vector-snapshot-call-p instruction 'aref 2 :standard-call)
                        (progn (charge 16)
-                              (eq (native-vector-snapshot-source (fourth arguments) raw tiered) current)))
-              (when access (return-from native-vector-snapshot-region))
-              (setq access instruction)))))
-      (unless (and binding read-seen new-seen copy-seen root-seen write access)
+                              (eq (native-vector-snapshot-source (fourth arguments) raw tiered) current))
+                       (native-vector-snapshot-value-p (hir-instruction-output instruction) raw tiered)
+                       (slot *wasm-scalar-groups* (hir-instruction-output instruction)))
+              (push instruction accesses)))))
+      (setq root (cond ((or (eq bound-block setup) (eq bound-block entry)) bound)
+                       ((and (eq bound-block header)
+                             (or (eq root-block setup) (eq root-block entry)))
+                        root)))
+      (unless (and binding read-seen new-seen write accesses
+                   (native-vector-snapshot-value-p root raw tiered)
+                   (eq (hir-value-kind root) :single)
+                   (slot *wasm-live-values* root)
+                   (not (slot *wasm-inline-constants* root)))
         (return-from native-vector-snapshot-region))
       (let* ((next (native-vector-snapshot-source (second (hir-instruction-inputs write)) raw tiered))
              (step (and next (hir-value-producer next))))
         (unless (and (native-vector-snapshot-call-p step '1+ 1 :standard-call)
                      (slot *wasm-scalar-groups* next)
                      (native-vector-snapshot-value-p (hir-instruction-output write) raw tiered)
-                     (native-vector-snapshot-value-p (hir-instruction-output access) raw tiered)
-                     (slot *wasm-scalar-groups* (hir-instruction-output access))
                      (eq (native-vector-snapshot-source (third (hir-instruction-inputs step)) raw tiered) current)
                      (member step (hir-block-instructions body)))
           (return-from native-vector-snapshot-region))
@@ -5469,7 +5469,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                        (hir-type-proves-p (hir-inline-result-type '1+ '((integer 0 1073741822)))
                                           '(integer 1 1073741823)))
             (return-from native-vector-snapshot-region)))
-        (vector header root compare step access nil nil))))))
+        (vector header root compare step accesses nil nil))))))
 
 (defun native-plan-vector-snapshots (function structured raw tiered tiered-comparisons offset)
   (declare (type simple-vector function) (type (unsigned-byte 32) offset))
@@ -5503,8 +5503,9 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           (setf (svref record 5) (+ offset count) (svref record 6) (+ offset count 1)
                 (gethash (svref record 0) prefixes) record
                 (gethash (svref record 2) operations) record
-                (gethash (svref record 3) operations) record
-                (gethash (svref record 4) operations) record)
+                (gethash (svref record 3) operations) record)
+          (dolist (access (svref record 4))
+            (setf (gethash access operations) record))
           (incf count 2)
           (compiler-statistic :planning/vector-snapshot :raw-aref))
         (return-from native-plan-vector-snapshots (values prefixes operations count))))
@@ -6408,20 +6409,16 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
 
 (defun native-scalar-work-loop (body ops poll)
   ;; Match the final executable loop, after wrapper construction, arity
-  ;; copies and local optimization. The header has one exit and the body
-  ;; has a single latch. Candidate instructions cannot trap or change
-  ;; anything outside this activation except at the recorded polls.
+  ;; copies and local optimization. Candidate instructions cannot trap or
+  ;; change anything outside this activation except at the recorded polls.
   (when (find #x1f ops :key (lambda (op) (native-op-code op)))
     (return-from native-scalar-work-loop nil))
-  (let ((scopes nil))
+  (let ((scopes nil) (size (length ops)))
     (loop for op across ops for start from 0 do
       (when (and (eql (native-op-code op) #x03) (eql (native-op-argument op) #x40)
-                 (= (- (native-op-end op) (native-op-start op)) 2)
-                 scopes (eql (native-op-code (first scopes)) #x02)
-                 (eql (native-op-argument (first scopes)) #x40)
-                 (= (- (native-op-end (first scopes)) (native-op-start (first scopes))) 2))
-        (let ((exit nil) (polls nil) (latch nil))
-          (loop for i from (1+ start) below (min (length ops) (+ start 48))
+                 (= (- (native-op-end op) (native-op-start op)) 2))
+        (let ((sites nil) (nesting 0) (prefix 0))
+          (loop for i from (1+ start) below (min size (+ start 48))
                 for instruction = (aref ops i)
                 for code = (native-op-code instruction) do
             (unless (eql code (aref body (native-op-start instruction))) (return))
@@ -6429,43 +6426,52 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
               ((#x1a #x20 #x21 #x22 #x41 #x42
                 #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f
                 #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a
-                #x6a #x6b #x71 #x7c #x7d #x7e #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad))
-              (#x0d
-               ;; The rewritten IF cannot access branch operands beneath
-               ;; its stack floor. The immediately enclosing void BLOCK
-               ;; supplies a result-free destination.
-               (unless (and (null exit) (eql (native-op-argument instruction) 1)) (return))
-               (setq exit instruction))
+                #x6a #x6b #x6c #x71 #x7c #x7d #x7e #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad
+                #xd1 #xd3))
+              ((#x02 #x04) (incf nesting))
+              (#x05 (when (zerop nesting) (return)))
+              (#x0b (when (zerop nesting) (return)) (decf nesting))
+              ((#x0c #x0d)
+               ;; Inner labels are forward destinations within a poll-free
+               ;; scope. An exit must target a known enclosing void label:
+               ;; a rewritten BR_IF cannot fetch operands below its IF.
+               (let ((depth (- (native-op-argument instruction) nesting)))
+                 (unless (minusp depth)
+                   (let ((target (and (plusp depth) (nth (1- depth) scopes))))
+                     (unless (and target (member (native-op-code target) '(#x02 #x04))
+                                  (eql (native-op-argument target) #x40)
+                                  (= (- (native-op-end target) (native-op-start target)) 2))
+                       (return)))
+                   (push (cons instruction prefix) sites))))
               (#x10
-               (unless (and exit (null latch) (eql (native-op-argument instruction) poll)
-                            (< (+ i 2) (length ops))) (return))
-               (let ((next (aref ops (1+ i))))
-                 (if (and (eql (native-op-code next) #x0c)
-                          (eql (native-op-argument next) 0)
+               ;; All paths that reach this observation passed the same
+               ;; earlier polls. No nested path may skip or add one.
+               (unless (and (zerop nesting) (eql (native-op-argument instruction) poll)) (return))
+               (when (and (< (+ i 2) size)
+                          (eql (native-op-code (aref ops (1+ i))) #x0c)
+                          (eql (native-op-argument (aref ops (1+ i))) 0)
                           (eql (native-op-code (aref ops (+ i 2))) #x0b))
-                     (setq latch instruction)
-                     (push instruction polls))))
-              (#x0c
-               (when latch (return-from native-scalar-work-loop (list exit (nreverse polls) latch)))
-               (return))
+                 (return-from native-scalar-work-loop
+                   (list (nreverse sites) instruction (1+ prefix))))
+               (push (cons instruction nil) sites)
+               (incf prefix))
               (otherwise (return))))))
       (case (native-op-code op)
         ((#x02 #x03 #x04) (push op scopes))
         (#x0b (pop scopes))))))
 
 (defun native-batch-scalar-work (body parameters poll)
-  (destructuring-bind (exit polls latch)
+  (destructuring-bind (sites latch weight)
       (or (native-scalar-work-loop body (native-read-ops body) poll)
           (return-from native-batch-scalar-work body))
     (let ((remaining parameters) (cursor 0)
-          (weight (1+ (length polls)))
           (*wasm-last-local* nil))
       (multiple-value-bind (groups first) (native-read-uleb body 0)
         (setq cursor first)
         (dotimes (i groups)
           (multiple-value-bind (count type) (native-read-uleb body cursor)
             (incf remaining count)
-            (setq cursor (1+ type))))
+            (setq cursor (native-local-type-end body type))))
         (unless (< remaining #xfffffffe) (return-from native-batch-scalar-work body))
         (compiler-statistic :optimization/scalar-work-batch weight)
         (decf (gethash "native-poll" *wasm-import-counts*) weight)
@@ -6474,24 +6480,37 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           (wasm-u32 (1+ groups))
           (wasm-append body first cursor)
           (wasm-u32 2) (wasm-type :i32)
-          (wasm-append body cursor (native-op-start exit))
-          ;; The scalar condition already ran. On exit, charge only the
-          ;; earlier completed trips since admission, then clear both locals
-          ;; before control can reenter the loop from an enclosing region.
-          (wasm-byte #x04) (wasm-byte #x40)
-          (wasm-local granted) (wasm-local remaining) (wasm-byte #x6b)
-          (wasm-byte #x22) (wasm-u32 remaining)
-          (wasm-byte #x04) (wasm-byte #x40)
-          (wasm-local remaining) (wasm-call "native-work-complete") (wasm-byte #x0b)
-          (wasm-integer 0) (wasm-byte #x22) (wasm-u32 remaining)
-          (wasm-byte #x21) (wasm-u32 granted)
-          (wasm-byte #x0c) (wasm-u32 (1+ (native-op-argument exit))) (wasm-byte #x0b)
-          (setq cursor (native-op-end exit))
-          (dolist (site polls)
-            (wasm-append body cursor (native-op-start site))
-            (wasm-local remaining) (wasm-byte #x45) (wasm-byte #x04) (wasm-byte #x40)
-            (wasm-call "native-poll") (wasm-byte #x0b)
-            (setq cursor (native-op-end site)))
+          (dolist (entry sites)
+            (let ((site (car entry)) (prefix (cdr entry)))
+              (wasm-append body cursor (native-op-start site))
+              (if prefix
+                  (let ((conditional (eql (native-op-code site) #x0d)))
+                    (when conditional (wasm-byte #x04) (wasm-byte #x40))
+                    ;; Charge completed trips and the prefix of this trip.
+                    ;; Without a grant, the ordinary prefix already polled.
+                    (when (zerop prefix)
+                      (wasm-local granted) (wasm-local remaining) (wasm-byte #x6b)
+                      (wasm-byte #x22) (wasm-u32 remaining))
+                    (when (plusp prefix) (wasm-local remaining))
+                    (wasm-byte #x04) (wasm-byte #x40)
+                    (if (plusp prefix)
+                        (progn
+                          (wasm-local granted) (wasm-local remaining) (wasm-byte #x6b)
+                          (wasm-integer prefix) (wasm-byte #x6a))
+                        (wasm-local remaining))
+                    (wasm-call "native-work-complete") (wasm-byte #x0b)
+                    ;; An enclosing loop can run this same region again.
+                    (wasm-integer 0) (wasm-byte #x22) (wasm-u32 remaining)
+                    (wasm-byte #x21) (wasm-u32 granted)
+                    (if conditional
+                        (progn
+                          (wasm-byte #x0c) (wasm-u32 (1+ (native-op-argument site)))
+                          (wasm-byte #x0b))
+                        (wasm-append body (native-op-start site) (native-op-end site))))
+                  (progn
+                    (wasm-local remaining) (wasm-byte #x45) (wasm-byte #x04) (wasm-byte #x40)
+                    (wasm-call "native-poll") (wasm-byte #x0b)))
+              (setq cursor (native-op-end site))))
           (wasm-append body cursor (native-op-start latch))
           ;; Zero on entry means the whole trip took its ordinary poll path.
           ;; A positive countdown is an integral number of trips, capped by
@@ -6524,7 +6543,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
 
 (defun native-batch-work-bodies (bodies)
   ;; Leave sealed host kernels on their separately owned checkpoint ABI,
-  ;; and keep the default compact policy. Coalesced entries must all agree.
+  ;; and keep maximum-space or zero-speed workers compact. Coalesced
+  ;; entries must all agree.
   (when (or *wasm-debug* *compiler-bootstrapping*
             *wasm-fixed-call-emitter* *wasm-closed-worker-functions*
             (not (gethash "native-poll" *wasm-import-counts*)))
@@ -6536,9 +6556,11 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
       (let* ((source (or (gethash function *wasm-worker-origins*) function))
              (plan (gethash source *wasm-function-plans*))
              (policy (hir-function-optimization-policy source))
+             (speed (logand policy 3))
+             (space (logand 3 (ash policy -2)))
              (index (gethash function *native-function-indices*))
              (parameters (and plan (svref plan 20) (not (svref plan 4))
-                              (> (logand policy 3) (logand 3 (ash policy -2)))
+                              (plusp speed) (< space 3)
                               (length (first (native-result-signature function))))))
         (setf (aref candidates index)
               (if (and parameters (or (null (aref candidates index))

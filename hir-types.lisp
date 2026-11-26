@@ -666,9 +666,15 @@ NIL endpoints mean infinity. Unchanged endpoints retain their exact bounds."
                          ((and (eql low low-a) (eql high high-a)) derived)
                          ((and (eql low low-b) (eql high high-b)) asserted)
                          (t (list 'integer (or low '*) (or high '*)))))
-                 ;; Retaining just the assertion is a sound upper bound of
-                 ;; the intersection, and avoids growing recursive AND trees.
-                 asserted))))))
+                 ;; Retain the established integer interval as an upper bound
+                 ;; on the intersection. A real interval assertion can supply
+                 ;; tighter bounds, which this approximation discards.
+                 (if (and integer-a (member (if (consp asserted) (car asserted) asserted)
+                                           '(number real rational)))
+                     derived
+                     ;; Keep a single upper bound on the intersection
+                     ;; instead of growing recursive AND trees.
+                     asserted)))))))
 
 (defun hir-constant-type (value)
   (cond ((integerp value) (list 'integer value value))

@@ -391,11 +391,12 @@ extents when that path follows a displaced view.
 General dispatch and rank or bounds errors reconstruct the original index.
 An untyped loop can use the same reader with an immediate index when its
 private counter starts at zero, advances by one at its only write, and
-continues strictly below an invariant bound. A total representation test at
+continues strictly below an invariant bound. The bound can be a saved result
+of an earlier computation such as LENGTH. A total representation test at
 loop entry admits an i31 bound. Each continued iteration takes a scalar
-snapshot at the comparison and reuses it for the successor and AREF at
-their original instruction positions. The successor and read keep their
-operation-entry checkpoints, and the read resolves the current array
+snapshot at the comparison and reuses it for the successor and each
+eligible AREF at their original instruction positions. These operations
+keep their entry checkpoints, and each read resolves the current array
 backing after its checkpoint. A bound outside the immediate representation
 keeps the ordinary comparison, successor and read. Out-of-line NOTINLINE
 calls and other boxed consumers keep their ordinary calling convention.
@@ -437,14 +438,20 @@ loops for proved reducible natural loops. Irreducible control, captured
 landings and exhausted analysis retain dense dispatch. Block arguments,
 environments and backedge checkpoints survive either lowering.
 
-Speed-oriented native compilation can batch checkpoints in a bounded scalar
-loop. The compiler audits the emitted body after arity adaptation and local
-optimization. The eligible region has a single void exit, an ordinary latch
-poll and a bounded sequence of total integer instructions and private local
-operations. The ordinary and admitted paths share the loop body. Denied
-admission retains the original polls. A successful chunk settles at the
-latch or on the exit with exactly the work completed. Typed exit payloads,
-unknown calls and mutable storage access keep their ordinary lowering.
+Native compilation can batch checkpoints in a structured loop at the default
+optimization levels. Maximum SPACE or SPEED 0 retains ordinary checkpoints.
+The compiler audits the emitted Wasm after arity adaptation and local
+optimization, so admission is independent of source syntax. A scheduler grant
+bounds the work in each strip. The trip count can be unknown and the loop
+can have dynamic exits or run indefinitely.
+
+The audit requires a common latch and a fixed number of polls on every path
+that reaches it. It accepts total scalar instructions, private local
+operations and poll-free forward control flow. The ordinary and admitted
+paths share the body. On a latch or a void exit, the emitter settles the exact
+work performed, including the polls already traversed on a partially completed
+trip. A denied or short grant keeps the ordinary checkpoints. Typed exit
+payloads, unknown calls and mutable storage accesses retain ordinary lowering.
 
 =wasm-optimizer.lisp= runs a shared body pipeline over decoded Wasm.
 Its principal transformations are:

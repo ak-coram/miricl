@@ -624,7 +624,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
           (if captured (third *hir-macro-context*) functions) (fourth *hir-macro-context*))
         *hir-macro-context*)))
 
-(defun hir-body (forms variables functions targets)
+(defun hir-body (forms variables functions targets &optional discard-results)
   (declare (type list forms variables functions targets))
   (let ((result nil)
         (*hir-macro-context* (if (and (consp (car forms)) (eq (caar forms) 'declare))
@@ -632,7 +632,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                                 *hir-macro-context*)))
     (dolist (form forms)
       (unless (hir-block-terminator *hir-block*)
-        (setq result (catch 'hir-path-ended (hir-form form variables functions targets)))))
+        (setq result (catch 'hir-path-ended
+                       (hir-form form variables functions targets discard-results)))))
     (when (hir-block-terminator *hir-block*) (throw 'hir-path-ended nil))
     (or result (hir-constant nil))))
 
@@ -869,7 +870,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
       (cons (nth mode '(psetf rotatef shiftf multiple-value-setq remf pushnew)) (cddr form))
       (hir-macro-environment variables functions))))
 
-(defun hir-expand-arithmetic-step (form)
+(defun hir-expand-arithmetic-step (form discard-result)
   (unless (= (length form) 6) (error 'program-error))
   (let ((flags (fifth form)) (step (gensym)) (limit (gensym)) (next (gensym)))
     (unless (and (integerp flags) (<= 0 flags 3)) (error 'program-error))
@@ -882,7 +883,10 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
       (list 'if (list (if (logbitp 0 flags) (if (logbitp 1 flags) '<= '<)
                          (if (logbitp 1 flags) '>= '>)) next limit)
         (list 'return-from (or (compiler-primitive 10 2 "%FINISH") 'miricl::%finish) nil)
-        (list 'setq (second form) (list 'the (or (sixth form) t) next))))))
+        (let ((write (list 'setq (second form) (list 'the (or (sixth form) t) next))))
+          ;; The loop body discards this result. Keep the assignment out of
+          ;; the join's value so a scalar cell write needs no boxed copy.
+          (if discard-result (list 'progn write nil) write))))))
 
 (defun hir-assert-form (form variables functions)
   (unless (cdr form) (error 'program-error))
@@ -1274,7 +1278,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
           (body (hir-new-block)) (exit (hir-new-block)))
       (hir-terminate :branch (list test) (list body exit))
       (setq *hir-block* body)
-      (catch 'hir-path-ended (hir-body (cddr form) variables functions targets))
+      (catch 'hir-path-ended (hir-body (cddr form) variables functions targets t))
       (unless (hir-block-terminator *hir-block*) (hir-terminate :jump nil (list header)))
       (setq *hir-block* exit) (hir-constant nil))))
 
@@ -1339,12 +1343,13 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
         (hir-single (hir-form (car form) variables functions targets)))
     (cdr form) variables functions targets))
 
-(defun hir-form (form variables functions targets)
+(defun hir-form (form variables functions targets &optional discard-result)
   ;; Lower expression trees with heap continuations. Each task carries the
   ;; source and lexical dynamic context in which its instructions are emitted;
   ;; *HIR-BLOCK* alone follows control flow between tasks. Branch boundaries
   ;; catch ended paths before lowering the next arm or continuation.
-  (let ((work nil) (result nil) (*hir-safety-level* *hir-safety-level*)
+  (let ((work nil) (result nil) (discarded-form (and discard-result form))
+        (*hir-safety-level* *hir-safety-level*)
         (*hir-size-policy* *hir-size-policy*))
     (declare (type list variables functions targets work)
              (type (integer 0 3) *hir-safety-level*) (type (integer 0 63) *hir-size-policy*))
@@ -1550,7 +1555,9 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                           miricl::%%native-restart-signal miricl::%%native-value-list
                           miricl::%%check-apply-list miricl::%%check-apply-arguments miricl::%%checked-argument
                           miricl::quasiquote miricl::unquote miricl::unquote-splicing)))
-                    (setq result (hir-recursive-form form variables functions targets)))
+                    (setq result
+                          (hir-recursive-form form variables functions targets
+                            (and (< *hir-debug-level* 2) (eq form discarded-form)))))
                    (t
                     (multiple-value-bind (expansion expanded)
                         (if (and (symbolp (car form)) (or *hir-macro-context* (not (hir-lexical-function-entry (car form) functions))))
@@ -1589,7 +1596,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
             (unless work (throw 'hir-path-ended nil)))))
       result)))
 
-(defun hir-recursive-form (form variables functions targets)
+(defun hir-recursive-form (form variables functions targets &optional discard-result)
   (let ((*hir-origin* (if (and *hir-debug-sites* (gethash *hir-origin* *hir-debug-sites*))
                           *hir-origin* form)))
     (hir-note-optimization-policy form)
@@ -1655,7 +1662,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
          (miricl::%%parallel-place-form
           (hir-form (hir-expand-parallel-places form variables functions) variables functions targets))
          (miricl::%%arithmetic-step
-          (hir-form (hir-expand-arithmetic-step form) variables functions targets))
+          (hir-form (hir-expand-arithmetic-step form discard-result) variables functions targets))
          ((case ecase typecase etypecase)
           (if (hir-lexical-function-entry (car form) functions)
               (hir-call-arguments (hir-function-reference (car form) functions) (cdr form) variables functions targets)

@@ -465,9 +465,9 @@
              :allocation nil) endp)
            ;; Audited operation domains, independent of dispatch/polling and
            ;; stronger than ordinary argument signatures. Integer comparison
-           ;; needs no floating contagion or floating exception assumption.
+           ;; and bitwise AND have no floating contagion or floating exceptions.
            ((:non-signaling-arguments (list)) car first cdr rest endp)
-           ((:non-signaling-arguments (integer integer)) < > <= >= = /=)
+           ((:non-signaling-arguments (integer integer)) < > <= >= = /= logand)
            ((:result-count 1 :result-type cons :result-argument 0 :arity (2 . 2)
              :keywords nil :argument-types (cons t) :writes t :callbacks nil
              :may-signal t :sharing :argument) rplaca rplacd)
