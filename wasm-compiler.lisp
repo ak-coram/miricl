@@ -652,7 +652,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   ;; These arithmetic plans retain their original cooperative checkpoint,
   ;; even when no consumer observes the arithmetic result.
   (when (and *wasm-proven-integer-arithmetic*
-             (gethash instruction *wasm-proven-integer-arithmetic*))
+             (let ((proof (gethash instruction *wasm-proven-integer-arithmetic*)))
+               (and proof (svref proof 3))))
     (return-from native-removable-p nil))
   (when (and *wasm-inline-simple-calls*
              (eq (gethash instruction *wasm-inline-simple-calls*) :endp-list))
@@ -2710,10 +2711,10 @@ exhausted work budgets keep every incoming value group."
               (when kind
                     (when (and arithmeticp (not (minusp fuel))
                                (= (hir-instruction-safety-level instruction) 1)
-                               (eq kind :standard-call)
-                               name
-                               (or (and (= (length inputs) 4) (member name '(+ -)))
-                                   (and (= (length inputs) 3) (member name '(1+ 1-)))))
+                               (or (and (eq kind :standard-call)
+                                        (or (and (= (length inputs) 4) (member name '(+ - *)))
+                                            (and (= (length inputs) 3) (member name '(1+ 1-)))))
+                                   (and (eq kind :logand-general) (eq name 'logand))))
                       ;; NAME already requires a direct canonical reference
                       ;; with expansion permission, including NOTINLINE.
                       (push (cons instruction name) arithmetic))
@@ -2894,31 +2895,38 @@ exhausted work budgets keep every incoming value group."
 
 (defun native-plan-proven-integer-arithmetic (pending proven)
   "Choose exact scalar arithmetic from executable operand facts at SAFETY 1."
-  (dolist (entry pending)
-    (let* ((instruction (car entry)) (name (cdr entry))
-           (types (mapcar (lambda (operand) (gethash operand proven t))
-                          (cddr (hir-instruction-inputs instruction))))
-           (widths (mapcar #'native-type-integer-width types))
-           ;; A result assertion is never evidence of nonoverflow.
-           (width (native-type-integer-width (hir-inline-result-type name types))))
-      (when (and width (<= width 64)
-                 (every (lambda (size) (and size (<= size 64))) widths))
-        (compiler-statistic
-          (if (and (<= width 32) (every (lambda (size) (<= size 32)) widths))
-              :proof/integer-arithmetic-i32 :proof/integer-arithmetic-i64) name)
-        (setf (gethash instruction *wasm-proven-integer-arithmetic*) (vector widths width name)
-              (gethash instruction *wasm-inline-simple-calls*)
-              (if (member name '(+ 1+)) #x7c #x7d))))))
+  ;; Apply the same mixed operand-width classification as the ordinary
+  ;; integer call emitter. A caller's function-local width cache is unrelated.
+  (let ((*wasm-integer-widths* nil))
+    (dolist (entry pending)
+      (let* ((instruction (car entry)) (name (cdr entry))
+             (operands (cddr (hir-instruction-inputs instruction)))
+             (types (mapcar (lambda (operand) (gethash operand proven t)) operands))
+             (widths (mapcar #'native-type-integer-width types))
+             ;; A result assertion is never evidence of nonoverflow.
+             (width (native-type-integer-width (hir-inline-result-type name types))))
+        (when (and width (<= width 64)
+                   (eql (standard-function-result-count name (length operands)) 1)
+                   (every (lambda (size) (and size (<= size 64))) widths))
+          (let* ((opcode (ecase name ((+ 1+) #x7c) ((- 1-) #x7d) (* #x7e) (logand #x83)))
+                 (narrow (and (member name '(+ - 1+ 1-)) (<= width 32)
+                              (every (lambda (size) (<= size 32)) widths)))
+                 ;; Direct LOGAND and typed multiply do not poll. The
+                 ;; generic multiply fallback and existing add/subtract
+                 ;; proof plans retain their operation-entry checkpoints.
+                 (poll (case name (logand nil) (* (not (every #'native-integer-width operands))) (t t))))
+            (compiler-statistic (if narrow :proof/integer-arithmetic-i32 :proof/integer-arithmetic-i64) name)
+            (setf (gethash instruction *wasm-proven-integer-arithmetic*) (vector widths width name poll narrow)
+                  (gethash instruction *wasm-inline-simple-calls*) opcode)))))))
 
 (defun emit-native-proven-integer-arithmetic (inputs opcode proof &optional raw)
-  (let ((narrow (and (<= (svref proof 1) 32)
-                     (every (lambda (width) (<= width 32)) (svref proof 0)))))
+  (let ((narrow (svref proof 4)))
     (compiler-statistic (if narrow :optimization/integer-arithmetic-i32
                             :optimization/integer-arithmetic-i64) (svref proof 2))
     ;; Operand and result intervals independently prove the operation exact.
     ;; Keep the narrow operation for i32 proofs and use the existing raw i64
     ;; snapshot ABI for wider proofs. The scheduling point remains in place.
-    (wasm-call "native-poll")
+    (when (svref proof 3) (wasm-call "native-poll"))
     (loop for operand in (cddr inputs) for width in (svref proof 0) do
       (let* ((producer (hir-value-producer operand))
              (literal (and (%hir-instruction-p producer)
@@ -7061,6 +7069,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     compilation-statistics-report compiler-input-summary
     hir-assert-form hir-correctable-place-form hir-restart-options
     hir-condition-initializer hir-define-condition hir-restart-expression
+    hir-bounded-integer-cells hir-literal-clock-cells
     structure-info class-info method-info))
 
 (defparameter *native-compiler-seeds*
@@ -7106,7 +7115,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-capture hir-cell-for-binding
                    hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-widen-integer-interval hir-type-restrict hir-constant-type hir-type-cell
                    hir-type-without-null hir-copy-source hir-type-truth-premise hir-type-branch-guards
-                   hir-standard-property-negative-p hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-literal-list-cells hir-literal-counter-cells hir-symbolic-target-type-p hir-type-query-result-type hir-integer-identity hir-integer-branch-type hir-integer-comparison-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
+                   hir-standard-property-negative-p hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-literal-list-cells hir-literal-counter-cells hir-bounded-integer-cells hir-literal-clock-cells hir-symbolic-target-type-p hir-type-query-result-type hir-integer-identity hir-integer-branch-type hir-integer-comparison-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
                    hir-dispatch-candidate
                    hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells
                    hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-tail-pair-p hir-share-branch-tails hir-refresh-predecessors hir-proper-list-checks optimize-hir-checked optimize-hir

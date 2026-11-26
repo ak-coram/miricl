@@ -2155,14 +2155,16 @@ try {
     ['(setf (hir-block-id block) -1)', /block record or ID/],
     ['(setf (hir-instruction-opcode instruction) :unknown)', /unknown opcode/],
     ['(setf (hir-instruction-safety-level instruction) -1)', /safety level/],
+    ['(push instruction (hir-block-instructions block))', /duplicate instruction placement/],
   ]) for (const consumer of ['emit-native-module', 'emit-hir-code', 'optimize-hir', 'infer-hir-types'])
     reject(`(let* ((unit (compile-to-hir '(lambda (x) (+ x 1))))
       (function (first (hir-unit-functions unit)))
       (block (first (hir-function-blocks function)))
       (instruction (first (hir-block-instructions block))))
     ${mutation} (${consumer} unit))`, reason);
-  // Native scalar admission depends on the definition dominating its uses.
-  reject(`(let* ((unit (lower-source-to-hir '(lambda () (values 7 9))))
+  // Type inference and native scalar admission depend on dominating definitions.
+  for (const consumer of ['emit-native-module', 'infer-hir-types'])
+    reject(`(let* ((unit (lower-source-to-hir '(lambda () (values 7 9))))
       (function (first (hir-unit-functions unit)))
       (block (hir-function-entry function))
       (instructions (hir-block-instructions block))
@@ -2170,8 +2172,9 @@ try {
       (producer (hir-value-producer (first (hir-instruction-inputs group)))))
     (setf (hir-block-instructions block)
       (append (remove producer instructions) (list producer)))
-    (emit-native-module unit))`, /used before its definition/, 'hir-code-input-error');
-  reject(`(let* ((unit (lower-source-to-hir '(lambda (flag)
+    (${consumer} unit))`, /used before its definition/, 'hir-code-input-error');
+  for (const consumer of ['emit-native-module', 'infer-hir-types'])
+    reject(`(let* ((unit (lower-source-to-hir '(lambda (flag)
                       (if flag (values 17 29) (values 47 61)))))
       (function (first (hir-unit-functions unit)))
       (groups (loop for block in (hir-function-blocks function)
@@ -2180,7 +2183,7 @@ try {
         when (and group (= 2 (length (hir-instruction-inputs group)))) collect group)))
     (setf (first (hir-instruction-inputs (first groups)))
           (first (hir-instruction-inputs (second groups))))
-    (emit-native-module unit))`, /does not dominate/, 'hir-code-input-error');
+    (${consumer} unit))`, /does not dominate/, 'hir-code-input-error');
   reject(`(let* ((unit (lower-source-to-hir '(lambda (x) (values x *soundness-context*))))
       (function (first (hir-unit-functions unit)))
       (instructions (hir-block-instructions (hir-function-entry function)))
@@ -3904,6 +3907,9 @@ try {
                               '(signed-byte 64)))))`);
   check(`(let ((function (compile-native *soundness-bounded-recurrence*)))
     (loop for count from 0 to 16 always (= (funcall function count) (1+ count))))`);
+  await vm.mountFile('/soundness-integer-recurrence.lisp',
+    await fs.readFile(new URL('./soundness-integer-recurrence.lisp', import.meta.url), 'utf8'));
+  check('(load "/soundness-integer-recurrence.lisp")');
   evaluate(`(deftype soundness-opaque () (error "Proof expanded an opaque DEFTYPE"))
     (defun soundness-predicate (value) (declare (ignore value))
       (error "Proof executed a SATISFIES predicate")) (values)`);

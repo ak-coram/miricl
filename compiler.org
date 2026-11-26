@@ -75,7 +75,11 @@ summaries. Literal graphs may retain sharing and cycles. Admitted declaration
 syntax is snapshotted before callbacks can mutate it and opaque type arguments
 retain their identities. Compiler-owned HIR remains private between passes.
 Mutation invalidates dependent analysis, including predecessor information
-when edges change. Public consumers revalidate caller-owned inputs.
+when edges change. Public consumers revalidate caller-owned inputs. Public
+type inference checks operand representations and SSA dominance before
+using definitions. HIR shape validation requires unique instruction
+placement and block parameters, and identifies the incoming dynamic
+environment as the function-produced value.
 
 The optional =miricl-environment= service supports custom free declarations,
 including =DEFINE-DECLARATION=, =DECLARATION-INFORMATION= and
@@ -164,6 +168,14 @@ be complete before excluding an edge. Bounded private-use analyses can also
 prove a quoted-list cursor or a traversal counter invariant. Mutation,
 aliasing, captures, unresolved calls and unknown effects can invalidate
 such facts. A LIST fact permits NIL or CONS and gives no proper-spine proof.
+
+A bounded audit of private integer cells joins the successful result ranges
+of the initializer and every store. A literal-initialized counter that
+advances by one toward a literal limit also bounds the number of updates to
+private accumulators. The recurrence proof checks the entry and backedge,
+excludes exceptional entries, and uses the continuing counter range only
+for reads that precede its store. Unknown ranges and exhausted analyses
+leave the ordinary arithmetic and overflow promotion available.
 
 Source-owned sealed modules can propagate executable argument facts through
 audited lexical function cells. The audit identifies the actual initializer

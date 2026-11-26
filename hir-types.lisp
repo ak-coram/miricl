@@ -1594,6 +1594,8 @@ NIL is the empty type and T is unknown. Value counts remain a separate analysis.
 Captured cells and debug-enabled functions keep conservative inferred types."
   (declare (optimize (safety 3)))
   (verify-hir unit)
+  (verify-hir-code-operands unit)
+  (verify-hir-code-dominance unit)
   (compiler-list-length roots "type-inference roots")
   (compiler-list-length entries "type-inference entry points")
   (dolist (entry entries)
@@ -1604,6 +1606,217 @@ Captured cells and debug-enabled functions keep conservative inferred types."
                  (member root (hir-function-values (hir-value-owner root)) :test #'eq))
       (compiler-input-fail "type-inference root" root "value does not belong to this HIR unit")))
   (values (infer-hir-types-checked unit roots rootsp entries)))
+
+(defun hir-literal-clock-cells (function private writes proofs result charge)
+  "Prove cell bounds for a literal clock and private accumulators in its body."
+  ;; Checked SSA provides a unique, dominating definition at every use,
+  ;; including intermediate primary forwarders and arithmetic operands.
+  (let* ((entry (hir-function-entry function))
+         (jump (hir-block-terminator entry))
+         (guard (and (eq (hir-instruction-opcode jump) :jump)
+                     (first (hir-instruction-attributes jump))))
+         (branch (and guard (hir-block-terminator guard))))
+    (unless (and branch (not (eq entry guard))
+                 (eq (hir-instruction-opcode branch) :branch))
+      (return-from hir-literal-clock-cells nil))
+    (destructuring-bind (body exit) (hir-instruction-attributes branch)
+      (let ((backedge (hir-block-terminator body)))
+        (unless (and (not (member body (list entry guard exit)))
+                     (not (member exit (list entry guard)))
+                     (eq (hir-instruction-opcode backedge) :jump)
+                     (eq (first (hir-instruction-attributes backedge)) guard))
+          (return-from hir-literal-clock-cells nil)))
+      (let ((positions (make-hash-table :test 'eq)))
+        ;; Inspect all ordinary edges, including unreachable ones. Captured
+        ;; landings were rejected by the caller's optimization barrier audit.
+        (dolist (block (hir-function-blocks function))
+          (funcall charge)
+          (dolist (target (hir-instruction-attributes (hir-block-terminator block)))
+            (funcall charge)
+            (when (or (eq target entry)
+                      (and (eq target guard) (not (or (eq block entry) (eq block body))))
+                      (and (eq target body) (not (eq block guard))))
+              (return-from hir-literal-clock-cells nil))))
+        (loop for block in (list entry guard body) for first-position from 1 to 3 do
+          ;; The cdr orders instructions in the same block; the car orders
+          ;; observations on one continuing trip.
+          (loop for instruction in (hir-block-instructions block) for i from 0 do
+            (funcall charge)
+            (setf (gethash instruction positions) (cons first-position i))))
+        (labels ((source (value)
+                   (dotimes (depth 16)
+                     (funcall charge)
+                     (unless value (return nil))
+                     (let ((producer (hir-value-producer value)))
+                       (unless (%hir-instruction-p producer) (return nil))
+                       (if (member (hir-instruction-opcode producer) '(:copy :primary :values))
+                           (setq value (first (hir-instruction-inputs producer)))
+                           (return producer)))))
+                 (before-p (left right)
+                   (let ((a (gethash left positions)) (b (gethash right positions)))
+                     (and a b (or (< (car a) (car b))
+                                  (and (= (car a) (car b)) (< (cdr a) (cdr b)))))))
+                 (read-cell (instruction)
+                   (when (and instruction (eq (hir-instruction-opcode instruction) :cell-read))
+                     (first (hir-instruction-inputs instruction))))
+                 (small-literal (value)
+                   (let ((literal (source value)))
+                     (when (and literal (eq (hir-instruction-opcode literal) :constant)
+                                (gethash literal positions))
+                       (let ((number (first (hir-instruction-attributes literal))))
+                         (when (typep number '(signed-byte 64)) number)))))
+                 (update (cell write)
+                   (let* ((call (source (second (hir-instruction-inputs write))))
+                          (name (and call (eq (hir-instruction-opcode call) :call)
+                                     (hir-inline-primitive call)))
+                          (operands (and name (cddr (hir-instruction-inputs call))))
+                          (read (source (first operands))))
+                     (when (and (eql (car (gethash write positions)) 3)
+                                (eql (car (gethash call positions)) 3)
+                                (before-p call write)
+                                (member (car (gethash read positions)) '(2 3))
+                                (before-p read call)
+                                (eq (read-cell read) cell)
+                                (case name
+                                  (1+ (and operands (null (cdr operands))))
+                                  ((+ -) (and (second operands) (null (cddr operands))))))
+                       (values name (second operands)))))
+                 (initial (cell)
+                   (let ((allocation (hir-value-producer cell)))
+                     (when (eql (car (gethash allocation positions)) 1)
+                       (small-literal (first (hir-instruction-inputs allocation))))))
+                 (record-proof (cell low high)
+                   (when (<= -9223372036854775808 low high 9223372036854775807)
+                     (setf (gethash cell proofs)
+                       (hir-type-restrict (list 'integer low high) (gethash cell proofs t)))
+                     (compiler-statistic :proof/literal-clock-cell))))
+          (let* ((call (source (first (hir-instruction-inputs branch))))
+                 (operands (and call (eq (hir-instruction-opcode call) :call)
+                                (eq (hir-inline-primitive call) '<)
+                                (cddr (hir-instruction-inputs call))))
+                 (read (source (first operands)))
+                 (clock (read-cell read))
+                 (limit (and (second operands) (null (cddr operands))
+                             (small-literal (second operands))))
+                 (start (and clock (gethash clock private) (initial clock)))
+                 (stores (gethash clock writes))
+                 (advance (and (null (cdr stores)) (first stores))))
+            (unless (and start limit advance (eql (car (gethash read positions)) 2)
+                         (eql (car (gethash call positions)) 2) (before-p read call)
+                         (multiple-value-bind (operation step) (update clock advance)
+                           (or (eq operation '1+) (and (eq operation '+) (eql (small-literal step) 1)))))
+              (return-from hir-literal-clock-cells nil))
+            (record-proof clock start (max start limit))
+            (let ((visits (max 0 (- limit start)))
+                  (continuing (list 'integer start (max start (1- limit)))))
+              (maphash
+                (lambda (cell stores)
+                  (funcall charge)
+                  (let ((write (and (null (cdr stores)) (first stores)))
+                        (start (and (gethash cell private) (initial cell))))
+                    (when (and start write (not (eq cell clock)))
+                      (multiple-value-bind (operation delta) (update cell write)
+                        (when operation
+                          (let ((type
+                                  (if (eq operation '1+) '(integer 1 1)
+                                      (funcall result delta 16
+                                        (lambda (read)
+                                          (when (and (eq (read-cell read) clock) (before-p read advance))
+                                            continuing))))))
+                            (multiple-value-bind (low high bounded) (hir-integer-bounds type)
+                              (when bounded
+                                (when (eq operation '-) (psetq low (- high) high (- low)))
+                                (record-proof cell (+ start (* visits (min 0 low)))
+                                                   (+ start (* visits (max 0 high))))))))))))
+                writes))))))))
+
+(defun hir-bounded-integer-cells (unit invariants)
+  "Bound private cells from the successful result of every initializer and store.
+Read dependencies and unknown producers contribute T. The result of an exact
+operation can still have finite bounds, as with a nonnegative LOGAND operand."
+  (let ((proofs (make-hash-table :test 'eq)) (writes (make-hash-table :test 'eq))
+        (control (make-hash-table :test 'eq)) (fuel 65536))
+    (labels ((charge ()
+               (when (minusp (decf fuel)) (return-from hir-bounded-integer-cells invariants)))
+             (result (value depth &optional read-type)
+               (charge)
+               (when (or (null value) (zerop depth)) (return-from result t))
+               (let ((producer (hir-value-producer value)))
+                 (unless (%hir-instruction-p producer) (return-from result t))
+                 (let ((inputs (hir-instruction-inputs producer)))
+                   (case (hir-instruction-opcode producer)
+                     (:constant (hir-constant-type (first (hir-instruction-attributes producer))))
+                     ((:copy :primary :values) (result (first inputs) (1- depth) read-type))
+                     (:cell-read (or (and read-type (funcall read-type producer)) t))
+                     (:call
+                      (let* ((name (hir-inline-primitive producer))
+                             (arity (case name ((1+ 1-) 1) ((+ - * logand logior logxor) 2)))
+                             (operands (cddr inputs)))
+                        (if (case arity
+                              (1 (and operands (null (cdr operands))))
+                              (2 (and (cdr operands) (null (cddr operands)))))
+                            (let ((types (mapcar (lambda (input) (result input (1- depth) read-type)) operands)))
+                              (if (and read-type
+                                       (not (every (lambda (type) (nth-value 2 (hir-integer-bounds type))) types)))
+                                  t
+                                  (hir-inline-result-type name types)))
+                            t)))
+                     (otherwise t)))))
+             (bounded-result (value)
+               (let ((type (result value 16)))
+                 (multiple-value-bind (low high bounded) (hir-integer-bounds type)
+                   (when (and bounded (<= -9223372036854775808 low high 9223372036854775807))
+                     type)))))
+      ;; Include every store, even unreachable ones. Preflight bounds the
+      ;; complete use and capture audits before constructing any proof.
+      (dolist (function (hir-unit-functions unit))
+        (charge)
+        (dolist (identity (hir-function-captures function)) (declare (ignore identity)) (charge))
+        (dolist (block (hir-function-blocks function))
+          (charge)
+          (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+            (charge)
+            (dolist (input (hir-instruction-inputs instruction)) (declare (ignore input)) (charge))
+            (case (hir-instruction-opcode instruction)
+              ((:control-call :restart-signal) (setf (gethash function control) t))
+              (:block-enter
+               ;; An emitted exceptional landing can skip the clock guard.
+               (when (hir-target-captured-p (first (hir-instruction-attributes instruction)))
+                 (setf (gethash function control) t)))
+              (:cell-write
+               (when (< (hir-function-debug-level function) 2)
+                 (let ((cells (or (gethash function writes)
+                                  (setf (gethash function writes) (make-hash-table :test 'eq)))))
+                   (push instruction (gethash (first (hir-instruction-inputs instruction)) cells)))))))))
+      (when (plusp (hash-table-count writes))
+        (let ((barriers (hir-optimization-barriers unit)))
+          (maphash
+            (lambda (function cells)
+              (unless (gethash function barriers)
+                (let ((private (hir-private-cells function barriers)))
+                  (maphash
+                    (lambda (cell stores)
+                      (charge)
+                      (when (gethash cell private)
+                        (let ((type (bounded-result (first (hir-instruction-inputs (hir-value-producer cell))))))
+                          (dolist (store stores)
+                            (unless type (return))
+                            (let ((stored (bounded-result (second (hir-instruction-inputs store)))))
+                              (setq type (and stored (hir-type-join type stored)))))
+                          (when type
+                            (setf (gethash cell proofs) type)
+                            (compiler-statistic :proof/bounded-integer-cell)))))
+                    cells)
+                  (unless (gethash function control)
+                    (hir-literal-clock-cells function private cells proofs #'result #'charge)))))
+            writes))))
+    ;; Publish only after the complete audit and keep any independent
+    ;; traversal invariant already established for the same cell.
+    (when invariants
+      (maphash (lambda (cell type)
+                 (setf (gethash cell invariants)
+                   (hir-type-restrict type (gethash cell invariants t)))) proofs))
+    (or invariants proofs)))
 
 (defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts operation-facts guard-facts certificates)
   "Internal inference kernel; UNIT and ROOTS have passed the public boundary.
@@ -1629,7 +1842,8 @@ be discarded after mutation. The public inference boundary accepts no maps."
         (guards (or guard-facts (hir-type-branch-guards unit)))
         (literal-certificates (multiple-value-list (hir-literal-list-cells unit)))
         (literal-cells (first literal-certificates))
-        (counter-cells (hir-literal-counter-cells unit (second literal-certificates)))
+        (integer-cells (hir-bounded-integer-cells unit
+                         (hir-literal-counter-cells unit (second literal-certificates))))
         (callees (or callee-facts (hir-result-callees unit (hir-optimization-barriers unit)))))
     (declare (type hash-table facts sources users calls references candidates escaped
                    sites opaque queued required growth guards)
@@ -1781,7 +1995,7 @@ be discarded after mutation. The public inference boundary accepts no maps."
                             (:argument (if (gethash (hir-value-owner value) escaped) t (joined value)))
                             (:values (if inputs (joined value) 'null))
                             (:cell-new (hir-type-restrict (joined value)
-                                         (or (and counter-cells (gethash value counter-cells))
+                                         (or (and integer-cells (gethash value integer-cells))
                                              (and literal-cells (gethash value literal-cells)) t)))
                             ((:primary :copy :cell-read :cell-write) (joined value))
                             (:value-ref
@@ -1831,12 +2045,13 @@ be discarded after mutation. The public inference boundary accepts no maps."
                    (hir-type-join previous refined))))
           (remhash value queued)
           (unless (hir-type-equal-p previous next)
-            ;; Backedges can grow an interval one integer at a time. At
-            ;; repeatedly changing multi-input nodes, widen after four strict
-            ;; range expansions. Executable facts use a finite outward ladder;
-            ;; crossing a threshold schedules users again and widens further.
-            ;; Declared inference keeps informative assertion fallbacks.
-            (when (and previous (cdr (gethash value sources)))
+            ;; Widen where alternative execution paths join. The operands of
+            ;; a primitive are simultaneous inputs to its transfer, so its
+            ;; result keeps the bounds calculated from the widened inputs.
+            (when (and previous (cdr (gethash value sources))
+                       (or function (%hir-block-p producer)
+                           (and (%hir-instruction-p producer)
+                                (member (hir-instruction-opcode producer) '(:argument :cell-new)))))
               (multiple-value-bind (old-low old-high old-integer) (hir-integer-interval previous)
                 (multiple-value-bind (low high integer) (hir-integer-interval next)
                   (when (and old-integer integer
@@ -1850,33 +2065,14 @@ be discarded after mutation. The public inference boundary accepts no maps."
                         (setq next
                           (if (or function proven-only)
                               (hir-widen-integer-interval old-low old-high low high)
-                              (let ((fallback (hir-type-restrict
-                                ;; Repeated arithmetic growth can stabilize at
-                                ;; declared operand bounds after its storage
-                                ;; join widens. Use those owned assertions and
-                                ;; literal facts, independent of this cycle's
-                                ;; evolving inferred intervals. Unknown inputs
-                                ;; still give the ordinary unknown result.
-                                (if (and (%hir-instruction-p producer)
-                                         (eq (hir-instruction-opcode producer) :call)
-                                         (gethash value intrinsics))
-                                    (hir-inline-result-type (gethash value intrinsics)
-                                      (mapcar (lambda (input)
-                                                (let ((origin (hir-value-producer input)))
-                                                  (if (and (%hir-instruction-p origin)
-                                                           (eq (hir-instruction-opcode origin) :constant))
-                                                      (hir-constant-type (first (hir-instruction-attributes origin)))
-                                                      (hir-value-type-at (hir-value-type input) 0))))
-                                        (cddr (hir-instruction-inputs producer))))
-                                    t)
-                                (hir-value-type value))))
+                              (let ((fallback (hir-value-type-at (hir-value-type value) 0)))
                                 (if (eq fallback t)
                                     (hir-widen-integer-interval old-low old-high low high)
                                     fallback))))))))))
             ;; A proved cell invariant also bounds the widening ladder. Both
             ;; declared and executable queries must retain this independent fact.
-            (when (and counter-cells (gethash value counter-cells))
-              (setq next (hir-type-restrict next (gethash value counter-cells))))
+            (when (and integer-cells (gethash value integer-cells))
+              (setq next (hir-type-restrict next (gethash value integer-cells))))
             (unless (hir-type-equal-p previous next)
               (setf (gethash value facts) next)
               (dolist (user (gethash value users)) (enqueue user))))))
