@@ -7,6 +7,7 @@ import {Script, createContext} from 'node:vm';
 import {Miricl} from '../scripts/miricl.mjs';
 import {checkCountedResults} from './soundness-counted-results.mjs';
 import {checkPollImports} from './soundness-poll-imports.mjs';
+import {checkScalarTransport} from './soundness-scalar-transport.mjs';
 
 const image = await fs.readFile(process.argv[2] ?? 'miricl.wasm');
 const vm = await Miricl.instantiate(image);
@@ -16,6 +17,7 @@ const recover = () => assert.equal(evaluate("(funcall (compile-native '(lambda (
 try {
   evaluate('(in-package :miricl-compiler) (setq *compile-evaluations* nil) (ensure-compiler) (values)');
   await checkPollImports(image);
+  await checkScalarTransport(image);
   // Lazy builtin condition classes can invoke Lisp during a cache lookup.
   // Isolate the fixture so earlier tests cannot materialize every candidate.
   {
@@ -1250,6 +1252,102 @@ try {
   }
   rank1Equal(vm.vm['native-call2'](rank1Read, rank1Numeric, rank1Index), rank1Value('9223372036854775807'));
   console.log('Soundness: fixed rank-one array access preserves live dimensions, backing, element checks and rejection recovery.');
+  const rank1Snapshot = vm.vm['native-aref-snapshot'];
+  const rank1WideSnapshot = vm.vm['native-aref-snapshot64'];
+  const rank1WideStore = vm.vm['native-set-aref-int64'];
+  const boxedNil = rank1Value('(vector nil)');
+  const immediateZero = rank1Value('0');
+  assert.deepEqual(rank1WideSnapshot(boxedNil, 0n), [0n, 0, null]);
+  rank1WideStore(rank1Write, -(1n << 63n), rank1Numeric, rank1Index);
+  for (const invalid of [foreign, rank1Private, ...rank1BadTargets, rank1Cycle]) {
+    rejectPacketOperation(() => rank1WideSnapshot(invalid, 0n));
+    rejectPacketOperation(() => rank1WideStore(rank1Write, 0n, invalid, immediateZero));
+    assert.deepEqual(rank1Snapshot(rank1Numeric, rank1Index), [-(1n << 63n), 1, null]);
+  }
+  rejectPacketOperation(() => rank1Snapshot(rank1Numeric, rank1Private));
+  rejectPacketOperation(() => rank1WideStore(rank1Write, 0n, rank1Numeric, rank1Private));
+  rejectPacketOperation(() => rank1WideSnapshot(rank1Numeric, 4294967297n));
+  const forgedBoxedIndex = rank1Clone(rank1BoxedIndex, fields => {fields[1] = 0;});
+  const rawCharacterStore = vm.vm['native-character-set-code-inline'];
+  rejectPacketOperation(() => rank1Snapshot(rank1FlatBits, forgedBoxedIndex));
+  rejectPacketOperation(() => rank1WideStore(rank1Write, 0n, rank1FlatBits, forgedBoxedIndex));
+  rejectPacketOperation(() => rank1Snapshot(rank1ShortBits, rank1BoxedIndex));
+  rejectPacketOperation(() => rank1WideStore(rank1Write, 0n, rank1ShortBits, rank1BoxedIndex));
+  rank1Equal(vm.vm['native-call2'](rank1Read, rank1FlatBits, rank1Index), rank1Value('1'));
+  rank1WideStore(rank1Write, 0n, rank1FlatBits, rank1BoxedIndex);
+  rank1Equal(vm.vm['native-call2'](rank1Read, rank1FlatBits, rank1Index), rank1Value('0'));
+  rejectPacketOperation(() => rawCharacterStore(122, rank1FlatString, forgedBoxedIndex));
+  rejectPacketOperation(() => rawCharacterStore(0xd800, rank1FlatString, rank1BoxedIndex));
+  rejectPacketOperation(() => rawCharacterStore(122, rank1Private, rank1BoxedIndex));
+  rank1Equal(vm.vm['native-call2'](rank1Read, rank1FlatString, rank1Index), rank1Value('#\\b'));
+  rawCharacterStore(122, rank1FlatString, rank1BoxedIndex);
+  rank1Equal(vm.vm['native-call2'](rank1Read, rank1FlatString, rank1Index), rank1Value('#\\z'));
+  evaluate('(defparameter *scalar-store-arguments* nil) (values)');
+  const replacementSetter = packetFunction(`(lambda (value array index)
+    (setq *scalar-store-arguments* (list value array index))
+    (values :ignored :secondary))`);
+  // A replacement can accept arguments that canonical AREF would reject.
+  rank1WideStore(replacementSetter, 17n, rank1Value(':array'), rank1Value(':index'));
+  check("(equal *scalar-store-arguments* '(17 :array :index))");
+  assert.deepEqual(rank1WideSnapshot(rank1Numeric, 1n), [-(1n << 63n), 1, null]);
+  console.log('Soundness: scalar snapshots distinguish NIL and i64 values and retain checked store dispatch.');
+  const floatPair = vm.vm['native-float-pair'];
+  const singleOne = rank1Value('1.0f0');
+  const singleHalf = rank1Value('0.5f0');
+  assert.deepEqual(floatPair(0, 3, 0, 0n, singleOne, singleHalf), [0x3ff8000000000000n, 1, null]);
+  for (const invalid of [foreign, packets.empty(), rank1Private]) {
+    rejectPacketOperation(() => floatPair(0, 3, 0, 0n, invalid, singleHalf));
+    rejectPacketOperation(() => floatPair(1, 3, 1, 0x3ff8000000000000n, null, invalid));
+  }
+  rejectPacketOperation(() => floatPair(0, 4, 1, 0x7ff0000000000000n, null, singleOne));
+  rejectPacketOperation(() => floatPair(0, 1, 0, 0n, singleOne, singleHalf));
+  rank1Equal(floatPair(1, 3, 1, 0x3ff8000000000000n, null, singleHalf)[2], singleOne);
+  check(`(let ((worker (compile-native '(lambda (x next)
+                 (declare (optimize (debug 1) (space 2) (speed 1)))
+                 (values (- (+ x 1.0f0) (funcall next))))))
+               (calls 0))
+           (and (equal (multiple-value-list
+                         (funcall worker 16777216.0f0
+                           (lambda () (incf calls) 16777216.0f0))) '(0.0f0))
+                (equal (multiple-value-list
+                         (funcall worker 6.0f0 (lambda () (incf calls) 2.0d0))) '(5.0d0))
+                (handler-case (progn (funcall worker :bad (lambda () (incf calls))) nil)
+                  (type-error (condition) (eq (type-error-datum condition) :bad)))
+                (= calls 2)))`);
+  const scalarReader = rank1Value(`(compile-native '(lambda (array index)
+    (declare (optimize (debug 1) (space 2) (speed 1)))
+    (logand (aref array index) 255)))`);
+  const scalarInput = rank1Value('(make-array 2 :initial-contents (list 512 753))');
+  const scalarCall = vm.vm['native-scalar-call2'];
+  assert.deepEqual(scalarCall(scalarReader, scalarInput, rank1Index), [241n, 1, null]);
+  const copiedReader = rank1Clone(scalarReader, () => {});
+  const [, admitted, ordinary] = scalarCall(copiedReader, scalarInput, rank1Index);
+  assert.equal(admitted, 0);
+  rank1Equal(ordinary, rank1Value('241'));
+  rejectPacketOperation(() => scalarCall(scalarReader, rank1Private, rank1Index));
+  assert.deepEqual(scalarCall(scalarReader, scalarInput, rank1Index), [241n, 1, null]);
+  check(`(let ((caller (compile-native '(lambda (array index)
+                   (declare (optimize (debug 1) (space 2) (speed 1)))
+                   (logand (soundness-replaceable-scalar array index) 127))))
+               (input #(753)))
+           (unwind-protect
+                (let ((original (compile-native '(lambda (array index)
+                                   (declare (optimize (debug 1) (space 2) (speed 1)))
+                                   (logand (aref array index) 255)))))
+                  (setf (fdefinition 'soundness-replaceable-scalar) original)
+                  (and (= (funcall caller input 0) 113)
+                       (progn (setf (fdefinition 'soundness-replaceable-scalar)
+                                    (lambda (array index)
+                                      (declare (ignore array index)) (values 243 :secondary)))
+                              (and (equal (multiple-value-list
+                                            (soundness-replaceable-scalar input 0)) '(243 :secondary))
+                                   (= (funcall caller input 0) 115)))
+                       (= (funcall original input 0) 241)
+                       (progn (fmakunbound 'soundness-replaceable-scalar)
+                              (handler-case (progn (funcall caller input 0) nil)
+                                (undefined-function () t)))))
+             (fmakunbound 'soundness-replaceable-scalar)))`);
+  console.log('Soundness: reusable scalar entries bind to their installed owner and preserve live user calls.');
   check(`(let* ((worker (compile-native '(lambda (array limit)
                   (declare (optimize (safety 1) (debug 1) (space 3) (speed 1)))
                   (do ((index 0 (1+ index)) (sum 0 (+ sum (aref array index))))
@@ -1934,6 +2032,14 @@ try {
   const freshInteger = number => vm.vm['native-call0'](
     packetFunction(`(compile-native '(lambda () ${number}))`));
   const freshZero = freshInteger(0n), freshOne = freshInteger(1n);
+  const immediateIdentity = rank1Value(`(compile-native '(lambda (value)
+    (declare (type (signed-byte 31) value) (optimize (debug 1) (space 2) (speed 1)))
+    value))`);
+  const boxedOne = boxedInteger(1n);
+  assert.deepEqual(vm.vm['native-scalar-call'](immediateIdentity, freshOne, null, null, null, 1, 1),
+    [1n, 1, null]);
+  assert.deepEqual(vm.vm['native-scalar-call'](immediateIdentity, boxedOne, null, null, null, 1, 1),
+    [0n, 0, boxedOne]);
   for (const value of [freshZero, freshOne, boxedInteger(1n), boxedInteger(-(1n << 63n)),
     boxedInteger((1n << 63n) - 1n)]) {
     assert.equal(vm.vm['native-check-int64'](value), value,
@@ -2777,6 +2883,44 @@ try {
                (= (funcall escaped 40) 42))))
       (delete-package package)))`);
 
+  // A character read remains an observation across the fixed call and a
+  // callback. The caller uses the old character and the live destination.
+  check(`(let* ((module (compile-native-module
+      '((defun soundness-character-leaf (text)
+          (declare (optimize (debug 0) (safety 1)))
+          (char text 0))
+        (defun soundness-character-entry (text output transition)
+          (declare (notinline soundness-character-leaf)
+                   (optimize (debug 0) (safety 1) (speed 3) (space 1)))
+          (let ((observed (soundness-character-leaf text)))
+            (funcall transition)
+            (setf (aref output 0) (logxor (char-code observed) 255)))
+          (values nil :stored)))
+      :entry-points '(soundness-character-entry) :inline nil))
+    (entry (cdr (assoc 'soundness-character-entry module)))
+    (text (make-array 1 :element-type 'character :initial-element (code-char #x1f642)))
+    (output (make-array 1 :element-type 'fixnum :adjustable t :initial-element 0))
+    (backing (make-array 3 :element-type 'fixnum :initial-contents '(11 12 13)))
+    (effects 0))
+    (and (equal (multiple-value-list
+                 (funcall entry text output
+                   (lambda ()
+                     (incf effects)
+                     (setf (char text 0) (code-char 0))
+                     (assert (eq output (adjust-array output 1 :displaced-to backing
+                                                       :displaced-index-offset 1))))))
+                '(nil :stored))
+         (= (aref backing 1) (logxor #x1f642 255))
+         (eq :invalid (catch 'read-error
+                        (handler-bind ((error (lambda (condition)
+                                                (declare (ignore condition))
+                                                (throw 'read-error :invalid))))
+                          (funcall entry 27 output (lambda () (incf effects))))))
+         (= effects 1)
+         (equal (multiple-value-list (funcall entry text output (lambda () (incf effects))))
+                '(nil :stored))
+         (= effects 2) (= 255 (aref output 0))))`);
+
   // Primary truth cannot discard an ordinary worker call, its argument
   // effects, a secondary VALUES error, or the distinction between groups.
   for (const returned of ['(values)', '(values nil)', '(values nil :second :third)']) {
@@ -3092,6 +3236,103 @@ try {
       '(soundness-named-frame soundness-named-values soundness-named-shadow soundness-named-carrier)) (values)`);
   }
   console.log('Soundness: named recursive calls preserve binding scope, multiple values and owned frames across errors and transfers.');
+
+  // A typed result crosses DEBUG 1 frames. An error shows the callee and
+  // caller, and a transfer through the callee leaves the frame stack usable.
+  evaluate(`(setf (fdefinition 'soundness-framed-scalar)
+    (cdr (assoc 'soundness-framed-scalar
+      (compile-native-module
+        '((defun soundness-framed-leaf (text)
+            (declare (optimize (debug 1) (safety 1)))
+            (char text 0))
+          (defun soundness-framed-scalar (text array)
+            (declare (notinline soundness-framed-leaf)
+                     (optimize (debug 1) (safety 1) (speed 1) (space 2)))
+            (setf (aref array 0) (logxor (char-code (soundness-framed-leaf text)) 255))
+            (values nil :stored)))
+        :entry-points '(soundness-framed-scalar) :inline nil))))
+    (values)`);
+  try {
+    assert.throws(() => evaluate('(soundness-framed-scalar 77 (vector 0))'), error => {
+      const trace = error.backtrace ?? '';
+      return /\b(?:LAMBDA|SOUNDNESS-FRAMED-LEAF)\b[^\n]*\n[^\n]*\bSOUNDNESS-FRAMED-SCALAR\b/.test(trace);
+    });
+    check(`(let ((output (vector :untouched)))
+      (and (eq (catch 'read-transfer
+                 (handler-bind ((error (lambda (condition)
+                                        (declare (ignore condition))
+                                        (throw 'read-transfer :transferred))))
+                   (soundness-framed-scalar 77 output)))
+               :transferred)
+           (eq (aref output 0) :untouched)
+           (equal (multiple-value-list (soundness-framed-scalar "x" output)) '(nil :stored))
+           (= (aref output 0) (logxor (char-code #\\x) 255))))`);
+  } finally {evaluate("(fmakunbound 'soundness-framed-scalar) (values)");}
+
+  check(`(let* ((module
+          (compile-native-module
+            '((defun soundness-index-leaf (index source)
+                (declare (optimize (debug 1) (safety 1)))
+                (logand (aref source index) #xffffffff))
+              (defun soundness-index-entry (indices source destination transition)
+                (declare (optimize (debug 1) (safety 1) (speed 1) (space 2))
+                         (notinline soundness-index-leaf))
+                (setf (aref destination 0)
+                  (logxor (soundness-index-leaf (logand (aref indices 0) 255)
+                                               (progn (funcall transition) source)) 255))
+                (setf (aref destination 1)
+                  (logxor (soundness-index-leaf (logand (aref indices 1) 255) source) 255))
+                (values :stored nil)))
+            :entry-points '(soundness-index-entry) :inline nil))
+         (entry (cdr (assoc 'soundness-index-entry module)))
+         (indices (make-array 2 :element-type 'fixnum :initial-contents '(0 1)))
+         (old (make-array 2 :element-type 'fixnum :initial-contents '(44 55)))
+         (next (make-array 2 :element-type 'fixnum :initial-contents '(-1 42)))
+         (source (make-array 2 :element-type 'fixnum :adjustable t :displaced-to old))
+         (destination (make-array 2 :element-type 'fixnum :initial-element 0))
+         (events 0)
+         (transition (lambda ()
+                       (incf events)
+                       (setf (aref indices 0) 1)
+                       (adjust-array source 2 :displaced-to next))))
+     (and (equal (multiple-value-list (funcall entry indices source destination transition)) '(:stored nil))
+          (= events 1)
+          (= (aref destination 0) (logxor #xffffffff 255))
+          (= (aref destination 1) (logxor 42 255))
+          (eq (catch 'bad-index
+                (handler-bind ((error (lambda (condition)
+                                        (declare (ignore condition))
+                                        (throw 'bad-index :transferred))))
+                  (funcall entry #(99 0) source destination transition)))
+              :transferred)
+          (= events 2)
+          (equal (multiple-value-list
+                    (funcall entry (vector (+ (ash 1 100) 1) 0) source destination transition))
+                 '(:stored nil))
+          (= events 3)
+          (= (aref destination 0) (logxor 42 255))
+          (= (aref destination 1) (logxor #xffffffff 255))))`);
+
+  check(`(let* ((module
+          (compile-native-module
+            '((defun soundness-joined-mask (choice indices other destination)
+                (declare (optimize (debug 1) (safety 1) (speed 1) (space 2)))
+                (let ((result (logand (if choice (logand (aref indices 0) 255) other) 127)))
+                  (setf (aref destination 0) result)
+                  (values result :stored))))
+            :entry-points '(soundness-joined-mask) :inline nil))
+         (entry (cdr (assoc 'soundness-joined-mask module)))
+         (indices (make-array 1 :element-type 'fixnum :initial-element -1))
+         (destination (make-array 1 :element-type 'fixnum :initial-element 0)))
+     (and (equal (multiple-value-list (funcall entry t indices nil destination)) '(127 :stored))
+          (= (aref destination 0) 127)
+          (handler-case (progn (funcall entry nil indices nil destination) nil)
+            (type-error () t))
+          (= (aref destination 0) 127)
+          (equal (multiple-value-list
+                    (funcall entry nil indices (+ (ash 1 100) 42) destination))
+                 '(42 :stored))
+          (= (aref destination 0) 42)))`);
 
   // Distinct captured workers may call arbitrary callbacks and own dynamic
   // bindings. Full-value transport must retain their cleanup on every exit.

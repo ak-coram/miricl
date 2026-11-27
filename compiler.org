@@ -280,22 +280,109 @@ consumers materialize the group before it can enter a saved image.
 Bootstrap emission and host-linked runtime workers use the ordinary
 result convention.
 
-In a source-owned sealed module, a retained non-tail DEBUG 0 call can use a
-private fixed worker that returns i64 directly to an existing scalar
-arithmetic consumer. A bounded function scan skips instruction analysis
-when no DEBUG 0 caller with a frame plan has SPEED greater than SPACE. When
-a caller qualifies, the work budget covers the full unit. The compiler
-requires an exact one-value proof, a nonescaping frameless leaf, a checked
-range proof for its arithmetic result and a result with only scalar uses.
-The ordinary object entry remains available for closure attachment. Both
-operation-entry polling and one-value cleanup remain in place. The emitter
-bounds duplication and checks the relocated worker's final call edges and
-entry references before publishing the module. A failed plan restarts
-emission with the ordinary calling convention.
+In a source-owned sealed module, a retained non-tail call can use a
+private fixed worker for an exact scalar result. Admitted integer arithmetic
+and checked array observations followed by a bounded mask return i64. An
+admitted checked CHAR returns an i32 character code. The caller carries that
+scalar as a character through copies and produces a separate integer value
+at CHAR-CODE. The current character plan requires raw-only uses.
+
+A bounded scan considers DEBUG 0 and 1 callers at SPACE levels 0 through 2.
+SPACE 3 keeps the ordinary call convention for these calls.
+The compiler requires a sealed binding, an exact one-value proof, a nonescaping
+straight-line callee, and a caller plan that consumes the scalar without
+boxing. The ordinary object entry remains available for closure attachment.
+When a checked array observation uses a fixed parameter as its index, sites
+with an existing exact i64 index can share one worker with a raw parameter.
+The caller passes the evaluated SSA value, and the worker checks the current
+array backing and bounds. The checked read retains its general array path.
+Sites without a compatible representation retain object arguments. The
+compiler admits the caller plans and the worker together and retries with the
+object-argument convention if rewriting or the final edge audit fails.
+A DEBUG 1 callee uses the scoped call protocol. Frame entry owns the
+checkpoint, and the raw result crosses normal cleanup in a typed Wasm block.
+Exceptional cleanup restores the prior frame before propagating the transfer.
+A DEBUG 0 callee can omit the frame while retaining its entry poll and
+one-value cleanup. The emitter bounds body duplication and audits the final
+call and any required frame protocol after relocation and outlining. A failed
+audit disables the scalar worker for that emission and keeps the sealed
+binding analysis.
+
+For acyclic control flow without captured landing entries or dynamic
+bindings, the planner can assign an i64 local to a join whose incoming
+values already have compatible exact raw representations. The ordinary
+return convention can materialize that value. Typed consumers use the
+local directly, including an admitted fixed call and checked array store.
+A mixed join feeding a single bounded LOGAND carries a separate status,
+an i64 local, and the original Lisp object on its boxed path. LOGAND tests
+the status before using the scalar and applies the ordinary operation to
+the boxed operand on a miss. Admission checks every predecessor before
+lowering either edge.
+
+Checked array snapshots can read an owned fixnum backing or flat packed
+bit storage into the integer transport. The checked integer store accepts
+exactly zero and one on its packed path. It reads and updates the live word
+after the checkpoint, preserving the neighboring bits. The general paths
+retain displacement, other array kinds, and ordinary error handling.
+For an index produced by checked CHAR-CODE, the compiler can use the i32
+index convention and keep its immediate integer materialization on a miss.
+Discarded canonical CHAR stores can consume a private worker's raw character
+code directly. The checked store validates the character code and current
+string storage, and materializes a character for its general continuation.
+
+Binary addition, subtraction and multiplication can carry a float result
+to a single same-block consumer of its primary value. A precision hint
+selects a checked plan. Both operations inspect the actual boxed inputs
+before reading float payloads. The producer rounds single-float results
+at the operation, checks finiteness, and carries the binary payload in an
+i64 local with a separate status. Double-float results retain binary64
+precision. Each operation retains its entry checkpoint. A producer miss
+retains the evaluated Lisp result. A consumer miss materializes the
+intermediate at its original precision and uses ordinary numeric
+dispatch. This transport uses existing boxed float objects at the
+boundaries and leaves array storage unchanged.
+
+Fixed-arity functions with a proved single result can retain scalar workers
+in independently installed modules and compact production bundles. The
+compiler establishes a contract while it owns the HIR. The worker receives
+the closure, the evaluated boxed operands, and checked raw payloads with
+validity bits for selected operands. The argument descriptor distinguishes
+boxed values, signed i64, physical i31, bits, characters, and both float
+precisions. Extraction requires the actual runtime representation. A
+failed guard leaves the original operand available to the ordinary
+operation, including for bignums and mixed numeric inputs. Raw results use
+the requested scalar representation or carry the original boxed result.
+The boxed adapter publishes exactly one Lisp value.
+
+The compiler checks the final packet and boxed adapters after relocation and
+outlining. A custom section identifies the candidate entries and transport
+descriptors. The loader checks the adapter instructions, imported operation
+identities and Wasm signatures before binding the executable references.
+Root installation and compact closure attachment grant authority to the
+actual function object and its direct entry, literal pool and capture
+environment. The process-local registry can discard grants. Saved images
+preserve the executable code and reconstruct authority from the same checks
+after restoring the objects.
+
+Bounded LOGAND, CHAR-CODE and selected binary arithmetic operations can
+consume scalar primary results of retained calls. The caller encodes the
+requested arity and representation and keeps its original function
+observation and operand evaluation order. A new native definition carries
+its applicable worker when the function object is published. The runtime
+checks the selected owner's registration after the entry checkpoint and
+invokes a matching worker with normal frame and dynamic cleanup. Missing
+or incompatible registrations use the ordinary entry and the same
+evaluated operands. Calls with full value demand use the ordinary result
+convention. DEBUG levels 0 and 1 and SPACE levels 0 through 2 admit the
+transport independently of SPEED.
 
 Shared fixed-call adapters cover up to four operands. A matching worker can
 avoid the input packet while the shared executor still owns frames, dynamic
-state, result admission and cleanup. General application retains the
+state, result admission and cleanup. On a binary dispatch miss, fixed and
+scalar callers share ordinary binary call storage selection. Native, HIR
+and generic entries can receive owned slots, while list consumers receive
+a fresh argument spine directly. The ordinary invocation owns frames and
+values after this selection. General application retains the
 binder for optional, rest and keyword arguments, debugger entry and arity
 errors. Keyword binding can share lookup and default handling when the
 missing-argument result supplies the default and no supplied-p value is
@@ -447,6 +534,21 @@ and resolves displaced storage through the ordinary live backing path.
 The raw entry validates external references and checks physical backing
 extents when that path follows a displaced view.
 General dispatch and rank or bounds errors reconstruct the original index.
+A rank-one AREF followed by a single use through a bounded LOGAND mask
+can retain the checked read as a raw i64 or its original Lisp result.
+Inline-call discovery identifies candidate bodies before the bounded
+snapshot pass checks reachability, ownership and uses.
+An explicit status distinguishes the two arms. The mask consumes the
+snapshot at its own instruction and establishes a bounded integer even
+when the ordinary read returned a bignum. Checked character codes can
+enter the same raw integer transport. Finite bit operations use the
+target interval rules and raw operands where available. Lisp consumers
+materialize the result through the ordinary scalar boxing rules.
+A discarded SETF AREF result allows the fixed call to pass the stored
+integer directly. The store checks its captured callable and live
+destination after the operation-entry checkpoint. On a miss it
+materializes the saved integer and invokes the ordinary continuation
+with the evaluated arguments.
 An untyped loop can use the same reader with an immediate index when its
 private counter starts at zero, advances by one at its only write, and
 continues strictly below an invariant bound. The bound can be a saved result

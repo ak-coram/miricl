@@ -140,9 +140,10 @@
 
 (defun core-image-runtime-wat ()
   (let ((types (remove-if (lambda (type)
-                 ;; Runtime value state is transient. Escaped values are
-                 ;; ordinary Lisp data; exclude the immutable carrier type.
-                 (member (car type) '($bootstrap-bytes $bootstrap-names $hir-decoded-instruction $secondary-values)
+                 ;; Runtime value carriers and executable grants belong to
+                 ;; the process. Escaped values are ordinary Lisp data.
+                 (member (car type) '($bootstrap-bytes $bootstrap-names $hir-decoded-instruction $secondary-values
+                                      $native-scalar-worker $native-scalar-registry)
                          :test #'string-equal)) *core-types*))
         (excluded '($green-thread $thread-context $thread-scratch-block $javascript-value)))
     (runtime-wat-forms

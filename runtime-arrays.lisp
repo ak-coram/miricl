@@ -202,31 +202,10 @@
 (define-runtime-function $array-owned-rank1-fixnum-element64
     (($array :nullable-object) ($subscript i64) ($value :nullable-object) ($write i32))
     (:nullable-object)
-  (:locals ($header (ref $array)) ($shape :digits) ($storage :nullable-object)
-           ($data (ref $array-i64-data)) ($dimension i32) ($index i32))
-  #@(if (i32.eqz (ref.test (ref $array) (local.get $array)))
-    (then (return (ref.null eq))))
-  #@(local.set $header (ref.cast (ref $array) (local.get $array)))
-  ;; Kind 4 is encoded as flag 16. Only the adjustable flag may also be set.
-  #@(if (i32.or
-      (i32.ne (i32.and (struct.get $obj $tag (local.get $header)) (i32.const 63)) (i32.const 35))
-      (i32.or (i32.ne (i32.and (struct.get $obj $n (local.get $header)) (i32.const -5)) (i32.const 16))
-              (struct.get $array $offset (local.get $header))))
-    (then (return (ref.null eq))))
-  #@(local.set $shape (struct.get $array $shape (local.get $header)))
-  #@(if (i32.ne (array.len (local.get $shape)) (i32.const 1))
-    (then (return (ref.null eq))))
-  #@(local.set $dimension (array.get $digits (local.get $shape) (i32.const 0)))
-  #@(if (i32.or (i32.gt_u (local.get $dimension) (i32.const 536870910))
-                (i64.ge_u (local.get $subscript) (i64.extend_i32_u (local.get $dimension))))
-    (then (return (ref.null eq))))
+  (:locals ($data (ref null $array-i64-data)) ($index i32))
+  #@(local.set $data (call $array-owned-rank1-fixnum-backing (local.get $array) (local.get $subscript)))
+  #@(if (ref.is_null (local.get $data)) (then (return (ref.null eq))))
   #@(local.set $index (i32.wrap_i64 (local.get $subscript)))
-  #@(local.set $storage (struct.get $obj $a (local.get $header)))
-  #@(if (i32.eqz (ref.test (ref $array-i64-data) (local.get $storage)))
-    (then (return (ref.null eq))))
-  #@(local.set $data (ref.cast (ref $array-i64-data) (local.get $storage)))
-  #@(if (i32.gt_u (local.get $dimension) (array.len (local.get $data)))
-    (then (return (ref.null eq))))
   #@(if (local.get $write)
     (then
       (if (i32.eqz (call $scalar-integer-p (local.get $value)))
@@ -237,6 +216,35 @@
         (call $scalar-integer-value (local.get $value)))
       (return (local.get $value))))
   #@(call $int64 (array.get $array-i64-data (local.get $data) (local.get $index))))
+
+;; The backing remains valid only for this access, with no intervening poll.
+(define-runtime-function $array-owned-rank1-fixnum-backing
+    (($array :nullable-object) ($subscript i64)) ((ref null $array-i64-data))
+  (:locals ($header (ref $array)) ($shape :digits) ($storage :nullable-object)
+           ($data (ref $array-i64-data)) ($dimension i32))
+  #@(if (i32.eqz (ref.test (ref $array) (local.get $array)))
+    (then (return (ref.null $array-i64-data))))
+  #@(local.set $header (ref.cast (ref $array) (local.get $array)))
+  ;; Kind 4 is encoded as flag 16. Only the adjustable flag may also be set.
+  #@(if (i32.or
+      (i32.ne (i32.and (struct.get $obj $tag (local.get $header)) (i32.const 63)) (i32.const 35))
+      (i32.or (i32.ne (i32.and (struct.get $obj $n (local.get $header)) (i32.const -5)) (i32.const 16))
+              (struct.get $array $offset (local.get $header))))
+    (then (return (ref.null $array-i64-data))))
+  #@(local.set $shape (struct.get $array $shape (local.get $header)))
+  #@(if (i32.ne (array.len (local.get $shape)) (i32.const 1))
+    (then (return (ref.null $array-i64-data))))
+  #@(local.set $dimension (array.get $digits (local.get $shape) (i32.const 0)))
+  #@(if (i32.or (i32.gt_u (local.get $dimension) (i32.const 536870910))
+                (i64.ge_u (local.get $subscript) (i64.extend_i32_u (local.get $dimension))))
+    (then (return (ref.null $array-i64-data))))
+  #@(local.set $storage (struct.get $obj $a (local.get $header)))
+  #@(if (i32.eqz (ref.test (ref $array-i64-data) (local.get $storage)))
+    (then (return (ref.null $array-i64-data))))
+  #@(local.set $data (ref.cast (ref $array-i64-data) (local.get $storage)))
+  #@(if (i32.gt_u (local.get $dimension) (array.len (local.get $data)))
+    (then (return (ref.null $array-i64-data))))
+  #@(local.get $data))
 
 ;; Fixed AREF entries probe the live logical dimension after their checkpoint.
 (define-runtime-function $array-rank1-dimension (($array :nullable-object)) (i32)
@@ -448,6 +456,12 @@
   #@(return_call $array-resolve-element
     (local.get $array) (local.get $index) (local.get $value) (local.get $write) (i32.const 0)))
 
+(define-runtime-function $array-checked-character-code (($code i32)) (i32)
+  ;; Character interning indexes the Unicode page table with this value.
+  (wat-fail-when #@(i32.or (i32.gt_u (local.get $code) (i32.const 1114111))
+    (i32.lt_u (i32.sub (local.get $code) (i32.const 55296)) (i32.const 2048))) :malformed-form)
+  #@(local.get $code))
+
 (define-runtime-function $array-resolve-element
     (($array :nullable-object) ($index i32) ($value :nullable-object) ($write i32) ($checked i32)) (:nullable-object)
   (:locals ($data :digits) ($word i32) ($mask i32) ($bit i32)
@@ -523,7 +537,8 @@
   #@(if (local.get $write)
     (then (array.set $digits (local.get $data) (local.get $index) (call $character-code (local.get $value)))
       (return (local.get $value))))
-  #@(call $node (i32.const 16) (array.get $digits (local.get $data) (local.get $index))
+  #@(call $node (i32.const 16)
+    (call $array-checked-character-code (array.get $digits (local.get $data) (local.get $index)))
     (ref.null eq) (ref.null eq) (ref.null eq)))
 
 (define-runtime-function $array-element
@@ -1136,10 +1151,10 @@
   ($array-simple-p) ($stringp-native) ($upgraded-array-kind)
   ($array-length) ($array-dimension-value) ($array-sequence-length)
   ($bit-value-cl) ($bit-value) ($make-bit-vector) ($array-fixnum-value)
-  ($array-owned-rank1-fixnum-element) ($array-owned-rank1-fixnum-element64)
+  ($array-owned-rank1-fixnum-element) ($array-owned-rank1-fixnum-element64) ($array-owned-rank1-fixnum-backing)
   ($array-rank1-dimension) ($array-rank1-index) ($array-rank1-index64)
   ($array-check-raw-read-miss) ($array-check-header-layout) ($array-check-bit-capacity)
-  ($array-rank2-index) ($array-raw-element) ($array-resolve-element) ($array-element) ($sequence-value)
+  ($array-rank2-index) ($array-raw-element) ($array-checked-character-code) ($array-resolve-element) ($array-element) ($sequence-value)
   ($array-construction-apply) ($array-subscript-index-cl) ($array-subscript-index) ($array-new) ($array-contents-length-cl) ($array-contents-length) ($array-initialize-contents) ($make-array-native)
   ($index-error) ($elt-element) ($character-element) ($array-bit-check-cl) ($array-bit-check) ($array-kind-type)
   ($array-equal-native) ($hash-array-code) ($string-contents)

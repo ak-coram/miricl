@@ -739,15 +739,20 @@
   #@(local.set $f (f64.mul (call $to-float (local.get $q)) (local.get $factor)))
   #@(f64.mul (local.get $f) (f64.convert_i32_s (local.get $sign))))
 
-(define-runtime-function $float
+(define-runtime-function $checked-float
     (($kind i32) ($f f64))
-    (:object)
+    (f64)
   #@(if (i32.eq (local.get $kind) (i32.const 3))
       (then (local.set $f (f64.promote_f32 (f32.demote_f64 (local.get $f))))))
   (wat-fail-when #@(i64.eq (i64.and (i64.reinterpret_f64 (local.get $f)) (i64.const 9218868437227405312))
               (i64.const 9218868437227405312)) :invalid-float)
+  #@(local.get $f))
+
+(define-runtime-function $float
+    (($kind i32) ($f f64))
+    (:object)
   (wat-new-object #@(local.get $kind)
-                  :f #@(local.get $f)))
+                  :f #@(call $checked-float (local.get $kind) (local.get $f))))
 
 (define-runtime-section float-runtime-wat ()
   ($number)
@@ -758,6 +763,7 @@
   ($uint64)
   ($rational)
   ($coerce-float)
+  ($checked-float)
   ($float))
 
 (define-runtime-function $zero
