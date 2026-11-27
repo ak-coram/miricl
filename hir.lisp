@@ -417,12 +417,12 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   ;; body remains. No speculative emission, expansion, or user computation.
   (declare (type fixnum depth))
   (when (or (zerop depth) (> (incf *hir-inline-work*) (hir-inline-limit :work)))
-    (throw 'hir-inline-cost nil))
+    (throw 'hir-inline-cost :analysis-budget))
   (when (and (consp form)
              (not (or (member (car form) '(quote if progn the values))
                       (and (symbolp (car form)) (not (special-operator-p (car form)))
                            (not (macro-function (car form)))))))
-    (throw 'hir-inline-cost nil))
+    (throw 'hir-inline-cost :unsupported-syntax))
   (cond
     ((atom form)
      (cond ((assoc form constants) 3)
@@ -432,7 +432,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                 (and (stringp form) (<= (length form) 64)))
             (+ 12 (if (stringp form) (length form) 0)))
            ((or (characterp form) (and (integerp form) (<= (- (ash 1 28)) form (ash 1 28)))) 8)
-           (t (throw 'hir-inline-cost nil))))
+           (t (throw 'hir-inline-cost :unsupported-syntax))))
     ((eq (car form) 'quote)
      ;; A literal pool entry may survive even when its code is shared. Do not
      ;; count its arbitrary object graph as executable syntax or assume free
@@ -443,7 +443,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
              ((and (stringp literal) (<= (length literal) 64)) (+ 16 (length literal)))
              ((or (characterp literal)
                   (and (integerp literal) (<= (- (ash 1 28)) literal (ash 1 28)))) 8)
-             (t (throw 'hir-inline-cost nil)))))
+             (t (throw 'hir-inline-cost :unsupported-syntax)))))
     ((eq (car form) 'if)
      (let* ((test (second form))
             (fact (cond ((and (symbolp test) (assoc test constants)))
@@ -479,60 +479,79 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
 
 (defun hir-inline-candidate (name arguments functions)
   (declare (type list arguments functions))
+  ;; Return a binding to expand, or an observed decline reason for a call
+  ;; that reaches the argument continuation.
   ;; Global INLINE names are symbols or SETF names; local declarations use
   ;; binding records. With automatic inlining disabled, avoid a linear scan
-  ;; of the entire lexical function group unless a local INLINE is in scope.
-  (when (or (>= *hir-debug-level* 2)
-            (not (or *hir-inline-small-functions*
-                     (loop for entry in *hir-inline-policy* thereis
-                       (and (eq (cdr entry) 'inline) (simple-vector-p (car entry)))))))
+  ;; of the entire lexical function group unless a local INLINE is in scope
+  ;; or the collector needs to observe policy decisions for resolved calls.
+  (when (and (or (>= *hir-debug-level* 2)
+                (not (or *hir-inline-small-functions*
+                         (loop for entry in *hir-inline-policy* thereis
+                           (and (eq (cdr entry) 'inline) (simple-vector-p (car entry)))))))
+             (not *compilation-statistics*))
     (return-from hir-inline-candidate nil))
   (let* ((binding (cdr (hir-lexical-function-entry name functions)))
          (info (and binding (hir-binding-local binding)))
-         (definition (and info (hir-local-definition info)))
-         (parameters (second definition))
-         (policy (cdr (assoc binding *hir-inline-policy*))))
-    (when (and info definition (< *hir-debug-level* 2) (< (hir-local-debug-level info) 2)
-               (null (nthcdr 24 *hir-inlining*)) (null (nthcdr 24 *hir-source-path*))
-               (not (member binding *hir-inlining*))
-               (not (eq policy 'notinline)) (or (eq policy 'inline) *hir-inline-small-functions*)
-               (null (nthcdr 16 parameters)) (null (nthcdr 16 arguments))
-               (= (length arguments) (length parameters))
-               (every (lambda (parameter)
-                        (and (symbolp parameter) parameter (not (eq parameter t)) (not (keywordp parameter))
-                             (not (member parameter lambda-list-keywords)))) parameters)
-               (= (length parameters) (length (remove-duplicates parameters))))
-      (let ((*hir-macro-context* (hir-local-macro-context info)))
-        (multiple-value-bind (size plain)
-            (unless *hir-macro-context*
-              (hir-inline-size (cddr definition) (if (eq policy 'inline) 2048 512)))
-          ;; Shared definition conses and recursive lowering must not look like
-          ;; a structural source cycle to HIR-FORM. Scan only capped syntax.
-          (when (and size plain
-                     (not (loop for form in (cddr definition) thereis
-                            (member form *hir-source-path* :test #'eq))))
-            (multiple-value-bind (body specials) (hir-declarations (cddr definition) t)
-              (let ((constants nil) (dynamic-cost 0))
-                (loop for parameter in parameters for actual in arguments do
-                  (if (hir-special-p parameter specials)
-                      ;; Binding and restoration remain observable even when
-                      ;; the parameter's result is unused or constant.
-                      (incf dynamic-cost 24)
-                      (cond ((and (consp actual) (eq (car actual) 'quote))
-                             (push (cons parameter (second actual)) constants))
-                            ((or (null actual) (eq actual t) (keywordp actual) (numberp actual)
-                                 (characterp actual) (stringp actual))
-                             (push (cons parameter actual) constants)))))
-                (let* ((cost (catch 'hir-inline-cost
-                               (hir-inline-cost (cons 'progn body) constants 24)))
-                       ;; Only the removed call and argument/result transfer get
-                       ;; credit. Retention of the callee, helpers and adapters
-                       ;; is the default even for a syntactically unique call.
-                       (growth (and cost (max 0 (- (+ cost 8 dynamic-cost (* 2 (length parameters)))
-                                                    (+ 12 (* 2 (length arguments))))))))
-                  (when (and growth (<= growth (hir-inline-limit (eq policy 'inline)))
-                             (<= (+ growth *hir-inline-budget*) (hir-inline-limit :growth)))
-                    (incf *hir-inline-budget* growth) binding))))))))))
+         (definition (and info (hir-local-definition info))))
+    (when definition
+      (let* ((parameters (second definition))
+             (policy (cdr (assoc binding *hir-inline-policy*)))
+             (reason
+               (block decline
+                 (when (or (>= *hir-debug-level* 2) (>= (hir-local-debug-level info) 2))
+                   (return-from decline :debug-policy))
+                 (when (eq policy 'notinline) (return-from decline :notinline))
+                 (unless (or (eq policy 'inline) *hir-inline-small-functions*)
+                   (return-from decline :disabled-policy))
+                 (when (or (nthcdr 24 *hir-inlining*) (nthcdr 24 *hir-source-path*))
+                   (return-from decline :expansion-depth))
+                 (when (member binding *hir-inlining*) (return-from decline :recursive-expansion))
+                 (unless (and (null (nthcdr 16 parameters)) (null (nthcdr 16 arguments))
+                              (= (length arguments) (length parameters))
+                              (every (lambda (parameter)
+                                       (and (symbolp parameter) parameter (not (eq parameter t))
+                                            (not (keywordp parameter)) (not (member parameter lambda-list-keywords))))
+                                parameters)
+                              (= (length parameters) (length (remove-duplicates parameters))))
+                   (return-from decline :unsupported-signature))
+                 (let ((*hir-macro-context* (hir-local-macro-context info)))
+                   (when *hir-macro-context* (return-from decline :unsupported-syntax))
+                   (multiple-value-bind (size plain)
+                       (hir-inline-size (cddr definition) (if (eq policy 'inline) 2048 512))
+                     (unless size (return-from decline :analysis-budget))
+                     (unless plain (return-from decline :unsupported-syntax)))
+                   ;; Shared definition conses and recursive lowering must not look like
+                   ;; a structural source cycle to HIR-FORM. Scan only capped syntax.
+                   (when (loop for form in (cddr definition) thereis
+                           (member form *hir-source-path* :test #'eq))
+                     (return-from decline :recursive-expansion))
+                   (multiple-value-bind (body specials) (hir-declarations (cddr definition) t)
+                     (let ((constants nil) (dynamic-cost 0))
+                       (loop for parameter in parameters for actual in arguments do
+                         (if (hir-special-p parameter specials)
+                             ;; Binding and restoration remain observable even when
+                             ;; the parameter's result is unused or constant.
+                             (incf dynamic-cost 24)
+                             (cond ((and (consp actual) (eq (car actual) 'quote))
+                                    (push (cons parameter (second actual)) constants))
+                                   ((or (null actual) (eq actual t) (keywordp actual) (numberp actual)
+                                        (characterp actual) (stringp actual))
+                                    (push (cons parameter actual) constants)))))
+                       (let ((cost (catch 'hir-inline-cost
+                                     (hir-inline-cost (cons 'progn body) constants 24))))
+                         (when (keywordp cost) (return-from decline cost))
+                         ;; Only the removed call and argument/result transfer get
+                         ;; credit. The callee, helpers and adapters may remain.
+                         (let ((growth (max 0 (- (+ cost 8 dynamic-cost (* 2 (length parameters)))
+                                                (+ 12 (* 2 (length arguments)))))))
+                           (when (> growth (hir-inline-limit (eq policy 'inline)))
+                             (return-from decline :site-growth-budget))
+                           (when (> (+ growth *hir-inline-budget*) (hir-inline-limit :growth))
+                             (return-from decline :function-growth-budget))
+                           (incf *hir-inline-budget* growth)
+                           (return-from hir-inline-candidate binding)))))))))
+        (when *compilation-statistics* reason)))))
 
 (defun hir-inline-body (binding arguments)
   (declare (type simple-vector binding) (type list arguments)
@@ -1374,16 +1393,22 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                  (when (cdr forms)
                    (defer (lambda () (body (cdr forms) variables functions targets))))
                  (lower (car forms) variables functions targets))))
-         (arguments (forms values function variables functions targets &optional valuesp inline)
+         (arguments (forms values function variables functions targets &optional valuesp inline-decision)
            (if (null forms)
                (setq result
-                 (cond (inline (hir-inline-body inline (nreverse values)))
+                 (cond ((and inline-decision (null function))
+                        (compiler-statistic :decision/lexical-inline :applied)
+                        (hir-inline-body inline-decision (nreverse values)))
                        (valuesp (hir-emit :values (nreverse values) :multiple))
-                       (t (hir-emit :call (list* *hir-dynamic* function (nreverse values)) :multiple nil :call))))
+                       (t
+                        ;; Argument evaluation can terminate this path before
+                        ;; either an inlined body or an out-of-line call exists.
+                        (when inline-decision (compiler-statistic :decision/lexical-inline inline-decision))
+                        (hir-emit :call (list* *hir-dynamic* function (nreverse values)) :multiple nil :call))))
                (progn
                  (defer (lambda ()
                           (arguments (cdr forms) (cons (hir-single result) values)
-                            function variables functions targets valuesp inline)))
+                            function variables functions targets valuesp inline-decision)))
                  (lower (car forms) variables functions targets))))
          (function-call (form variables functions targets)
            (if (hir-lexical-function-entry 'funcall functions)
@@ -1568,14 +1593,15 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                       (cond
                         (expanded (lower expansion variables functions targets))
                         ((symbolp (car form))
-                         (let ((inline (and (or *hir-inline-small-functions* *hir-inline-policy*)
-                                         (hir-inline-candidate (car form) (cdr form) functions))))
+                         (let ((decision (and (or *hir-inline-small-functions* *hir-inline-policy*
+                                                  (and functions *compilation-statistics*))
+                                           (hir-inline-candidate (car form) (cdr form) functions))))
                            (arguments (cdr form) nil
-                             (unless inline
+                             (unless (and decision (not (keywordp decision)))
                                (if (eq (car form) (car *hir-named-definition*))
                                    (hir-direct-function-reference (car form) functions)
                                    (hir-function-reference (car form) functions)))
-                             variables functions targets nil inline)))
+                             variables functions targets nil decision)))
                         (t
                          (defer (lambda ()
                                   (arguments (cdr form) nil (hir-single result) variables functions targets)))
@@ -1936,6 +1962,7 @@ Unsupported special operators and parameter syntax signal an error."
     (hir-clear-source *hir-unit*)
     (dolist (function (hir-unit-functions *hir-unit*))
       (hir-refresh-predecessors function))
+    (compiler-statistic :decision-coverage/lexical-inline :measured)
     *hir-unit*))
 
 (defun compile-module-to-hir (definitions &key (entry-points nil entriesp) (inline t) global-specials)

@@ -19,14 +19,15 @@ const vm = await loadMiricl(image, {imports: {acl2Build: {
   progress(file, compiled) {count = compiled; if (count % 500 === 0) console.log(`ACL2 native: ${file}, ${count} initializers`);},
 }}});
 const stages = [];
-async function evaluate(name, source) {
+async function evaluate(name, compilationMode, source) {
   stage = name; console.log(`ACL2 native: ${stage}`); const start = performance.now();
   const profile = process.env.MIRICL_ACL2_PROFILE_DIRECTORY
     && new RegExp(process.env.MIRICL_ACL2_PROFILE_PHASE ?? 'compile native code').test(name)
     ? await startWasmProfile(vm, image,
       path.join(process.env.MIRICL_ACL2_PROFILE_DIRECTORY, name.replaceAll(/[^a-z0-9-]+/gi, '-'))) : null;
   let result, milliseconds;
-  try {result = await collectCompilationStatistics(vm, {workload: 'acl2', phase: name},
+  try {result = await collectCompilationStatistics(vm,
+    {workload: 'acl2', workloadScope: 'application', phase: name, compilationMode},
     () => vm.evaluateAsync(source, {eof: true})); milliseconds = Math.round(performance.now() - start);}
   finally {if (profile) await profile();}
   stages.push({name, milliseconds});
@@ -40,15 +41,15 @@ try {
   }
   vm.mountFile('/acl2/miricl-host.lisp', await fs.readFile('acl2/miricl-host.lisp'));
   vm.mountFile('/acl2-input.wasm', portable);
-  await evaluate('loader', `
+  await evaluate('loader', 'mixed', `
     (setq *default-pathname-defaults* #P"/acl2/")
     (pushnew :cltl2 *features*) (pushnew :unix *features*)
     (load "init.lisp") (acl2::proclaim-optimize) (values)`);
-  await evaluate('compact dynamic environment', `
+  await evaluate('compact dynamic environment', 'none', `
     (progn
       (miricl-compiler:shake-file "/acl2-input.wasm" "/acl2-output.wasm"
         :strip nil :report "/acl2-retention.txt") (values))`);
-  await evaluate('compile native code', `
+  await evaluate('compile native code', 'native', `
     (js:define-import cl-user::acl2-native-progress ("acl2Build" "progress") (:string :i32) :void)
     (miricl-compiler:compile-native-bundle "/acl2-output.wasm" "/acl2-output.wasm"
       :load t :progress (lambda (file count)
@@ -65,7 +66,9 @@ try {
     initializedWorld: false, retainedInterface: 'complete dynamic ACL2 prover',
     optimizer: 'miricl-compiler:shake-file + compile-native-bundle', strip: false,
   }, null, 2) + '\n');
-  await writeCompilationStatistics({workload: 'acl2', phase: 'native output', status: 'complete', recordType: 'measurement', counters: [], runtimeBytes: image.length, inputBytes: portable.length, outputBytes: native.length});
+  await writeCompilationStatistics({workload: 'acl2', workloadScope: 'application',
+    phase: 'native output', compilationMode: 'native', status: 'complete', recordType: 'measurement', counters: [],
+    runtimeBytes: image.length, inputBytes: portable.length, outputBytes: native.length});
   console.log(`Native ACL2: ${native.length} bytes (${output}).`);
 } catch (error) {console.error(`ACL2 native failed during ${stage}:`, error.message, error.backtrace); throw error;}
 finally {clearInterval(heartbeat); vm.close();}

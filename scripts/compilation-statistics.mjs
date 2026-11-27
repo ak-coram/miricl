@@ -62,7 +62,7 @@ export async function writeCompilationStatistics(record, directory = process.env
 
 export async function collectCompilationStatistics(vm, metadata, operation) {
   if (!process.env.MIRICL_COMPILER_STATISTICS_DIRECTORY) return operation();
-  const marker = await writeCompilationStatistics({...metadata, status:'partial', counters:[],
+  const marker = await writeCompilationStatistics({...metadata, collectionKind: 'compiler', status:'partial', counters:[],
     failure:'Stage started; final counters have not been received.'});
   let status = 'failed', failure, counters = [], elapsedMs;
   enableCompilationStatistics(vm);
@@ -80,7 +80,7 @@ export async function collectCompilationStatistics(vm, metadata, operation) {
       try {disableCompilationStatistics(vm);}
       catch (error) {failure = [failure, `Stopping collection: ${error.message}`].filter(Boolean).join('; '); status = 'partial';}
     }
-    await writeCompilationStatistics({...marker, ...metadata, status, elapsedMs, generatedAt:new Date().toISOString(),
+    await writeCompilationStatistics({...marker, status, elapsedMs, generatedAt:new Date().toISOString(),
       timingIncludesCollection: true, counters, failure});
   }
 }

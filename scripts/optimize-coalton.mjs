@@ -9,6 +9,7 @@ const [image = 'miricl.wasm', input = 'build/coalton/coalton-portable.wasm',
   output = 'build/coalton/coalton.wasm'] = process.argv.slice(2);
 const scope = process.env.MIRICL_COALTON_SCOPE ?? 'full';
 if (!['full', 'compiler'].includes(scope)) throw new Error('Expected full or compiler scope.');
+const workloadScope = 'application';
 const prefixPath = process.env.MIRICL_COALTON_BOOTSTRAP;
 const prefix = prefixPath ? await fs.readFile(prefixPath) : null;
 let bytes = await fs.readFile(input);
@@ -41,10 +42,10 @@ const heartbeat = setInterval(() => {
   const detail = phase === 'native bundle' ? `, ${count} initializers` : '';
   console.log(`Coalton: still working on ${phase}${detail} (${Math.round((performance.now() - phaseStart) / 1000)} s)`);
 }, 30000);
-async function evaluatePhase(name, source) {
+async function evaluatePhase(name, compilationMode, source) {
   phase = name;
   phaseStart = performance.now();
-  await collectCompilationStatistics(vm, {workload: 'coalton', phase: `${scope}: ${name}`},
+  await collectCompilationStatistics(vm, {workload: 'coalton', workloadScope, phase: `${scope}: ${name}`, compilationMode},
     () => vm.evaluateAsync(source, {eof: true}));
   const milliseconds = Math.round(performance.now() - phaseStart);
   timings[name] = milliseconds;
@@ -67,21 +68,21 @@ try {
       (call-next-method)) (values)`, {eof: true});
   if (prefix) {
     vm.mountFile('/coalton-bootstrap.wasm', prefix);
-    await evaluatePhase('load bootstrap', '(declaim (declaration values)) (load "/coalton-bootstrap.wasm") (cl:values)');
+    await evaluatePhase('load bootstrap', 'mixed', '(declaim (declaration values)) (load "/coalton-bootstrap.wasm") (cl:values)');
   }
   const inputBytes = bytes.length;
   vm.mountFile('/coalton-input.wasm', bytes);
   bytes = null;
   const start = performance.now();
-  await evaluatePhase('compaction', `
+  await evaluatePhase('compaction', 'none', `
     (declaim (declaration values))
     (progn
       (miricl-compiler:shake-file "/coalton-input.wasm" "/coalton-output.wasm"
         :strip nil :report "/coalton-retention.txt") (cl:values))`);
-  await evaluatePhase('release portable input', '(delete-file "/coalton-input.wasm") (cl:values)');
+  await evaluatePhase('release portable input', 'none', '(delete-file "/coalton-input.wasm") (cl:values)');
   if (scope === 'compiler')
-    await evaluatePhase('load compacted compiler', '(load "/coalton-output.wasm") (cl:values)');
-  await evaluatePhase('native bundle', `
+    await evaluatePhase('load compacted compiler', 'mixed', '(load "/coalton-output.wasm") (cl:values)');
+  await evaluatePhase('native bundle', 'native', `
     (js:define-import coalton-native-progress ("coaltonBuild" "progress") (:string :i32) :void)
     (handler-bind ((error (lambda (condition)
                            (let ((*print-length* 10) (*print-level* 4) (*print-circle* t))
@@ -108,7 +109,9 @@ try {
     retainedInterface: scope === 'compiler' ? 'Coalton compiler and dependencies' : 'complete interactive Coalton compiler and standard library',
     optimizer: 'miricl-compiler:shake-file + compile-native-bundle', backend: 'native-wasm', strip: false,
   }, null, 2) + '\n');
-  await writeCompilationStatistics({workload: 'coalton', phase: scope + ': native output', status: 'complete', recordType: 'measurement', counters: [], runtimeBytes: runtime.length, inputBytes, outputBytes: native.length});
+  await writeCompilationStatistics({workload: 'coalton', workloadScope, phase: scope + ': native output',
+    compilationMode: 'native', status: 'complete', recordType: 'measurement', counters: [],
+    runtimeBytes: runtime.length, inputBytes, outputBytes: native.length});
   console.log(`Native Coalton: ${inputBytes} → ${native.length} bytes (${output}).`);
 } catch (error) {
   await fs.mkdir(path.dirname(output), {recursive: true});

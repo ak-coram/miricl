@@ -2,6 +2,7 @@
 (in-package #:miricl-compiler)
 
 (defvar *compilation-statistics* nil)
+(defvar *native-decision-statistics* nil)
 
 (defmacro with-compilation-statistics ((statistics) &body body)
   "Collect counters in STATISTICS, a fresh EQUAL hash table, during BODY.
@@ -16,6 +17,17 @@ BODY retains its normal values. Read counters with COMPILATION-STATISTICS-REPORT
   (list 'if '*compilation-statistics*
     (list 'record-compilation-statistic rule detail amount) nil))
 
+(defmacro native-decision-statistic (rule detail &optional (amount 1))
+  ;; Preserve the legacy counters' timing while native decisions wait for
+  ;; successful module emission.
+  (list 'when '*native-decision-statistics*
+    (list 'record-native-decision-statistic rule detail amount)))
+
+(defmacro compiler-size-statistic ((input-rule output-rule units-rule) input output)
+  (list 'when '*compilation-statistics*
+    (list 'record-compilation-size
+      (list 'quote (list input-rule output-rule units-rule)) input output)))
+
 (defun record-compilation-statistic (rule detail amount)
   (when *compilation-statistics*
     (unless (and (keywordp rule) (or (symbolp detail) (integerp detail))
@@ -26,6 +38,20 @@ BODY retains its normal values. Read counters with COMPILATION-STATISTICS-REPORT
       (setf (gethash key *compilation-statistics*)
         (+ (gethash key *compilation-statistics* 0) amount))))
   (values))
+
+(defun record-native-decision-statistic (rule detail amount)
+  (let ((*compilation-statistics* *native-decision-statistics*))
+    (record-compilation-statistic rule detail amount)))
+
+(defun record-compilation-size (rules input output)
+  (record-compilation-statistic (first rules) nil input)
+  (record-compilation-statistic (second rules) nil output)
+  (record-compilation-statistic (third rules) nil 1))
+
+(defun publish-native-decision-statistics (statistics)
+  (maphash (lambda (key amount)
+             (record-compilation-statistic (first key) (second key) amount))
+           statistics))
 
 (defun compilation-statistics-report (&optional (statistics *compilation-statistics*))
   "Return fresh (RULE DETAIL COUNT) rows. Missing counters mean unobserved events.

@@ -1033,8 +1033,9 @@
                                do (wasm-byte (aref bytes i))))))))))
         (when *wasm-function-relocations*
           (setf (gethash *wasm-current-function* *wasm-function-relocations*) new-relocations))
-        (compiler-statistic :lowering/wasm-input-bytes nil (length bytes))
-        (compiler-statistic :lowering/wasm-output-bytes nil (length result))
+        (compiler-size-statistic
+          (:lowering/wasm-input-bytes :lowering/wasm-output-bytes :size-units/wasm-body-optimization)
+          (length bytes) (length result))
         (values result mapping)))))
 (defvar *native-outlining-budget* 1000000)
 (defvar *native-outlining-minimum-bytes* 0)

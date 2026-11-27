@@ -15,10 +15,10 @@ let initializers = 0;
 const vm = await loadMiricl(compilerImage, {imports: {build: {
   progress(count) {initializers = count; if (count % 1000 === 0) console.log(`Maxima: compiled ${count} initializers`);},
 }}});
-async function phase(name, source) {
+async function phase(name, compilationMode, source) {
   const cpu = process.cpuUsage();
   const start = performance.now();
-  await collectCompilationStatistics(vm, {workload: 'maxima', phase: name},
+  await collectCompilationStatistics(vm, {workload: 'maxima', workloadScope: 'application', phase: name, compilationMode},
     () => vm.evaluateAsync(`(progn ${source} (values))`, {eof: true}));
   const milliseconds = Math.round(performance.now() - start);
   const elapsed = process.cpuUsage(cpu);
@@ -30,14 +30,14 @@ try {
   // A REPL can call any Maxima function and load packages using its macros.
   // Preserve that interface while pooling constants, compacting the graph,
   // and removing the optional compiler/source index.
-  await phase('compact portable input', `
+  await phase('compact portable input', 'none', `
     (miricl-compiler:shake-file "/maxima-input.wasm" "/maxima-output.wasm"
       :strip nil :report "/maxima-retention.txt")`);
-  await phase('load build environment', `
+  await phase('load build environment', 'mixed', `
     (setq miricl:*trap-floating-point-underflow* nil)
     (load "/maxima-output.wasm")
     (js:define-import native-build-progress ("build" "progress") (:i32) :void)`);
-  await phase('compile native code', `
+  await phase('compile native code', 'native', `
     (miricl-compiler:compile-native-bundle "/maxima-output.wasm" "/maxima-output.wasm"
       :progress (lambda (file count) (declare (ignore file)) (native-build-progress count)))`);
   const bytes = await vm.readFile('/maxima-output.wasm');
@@ -55,6 +55,8 @@ try {
     retainedInterface: 'complete dynamic Maxima environment',
     optimizer: 'miricl-compiler:shake-file + compile-native-bundle', backend: 'native-wasm', strip: false,
   }, null, 2) + '\n');
-  await writeCompilationStatistics({workload: 'maxima', phase: 'native output', status: 'complete', recordType: 'measurement', counters: [], runtimeBytes: compilerImage.length, inputBytes: original.length, outputBytes: bytes.length});
+  await writeCompilationStatistics({workload: 'maxima', workloadScope: 'application',
+    phase: 'native output', compilationMode: 'native', status: 'complete', recordType: 'measurement', counters: [],
+    runtimeBytes: compilerImage.length, inputBytes: original.length, outputBytes: bytes.length});
   console.log(`Optimized Maxima: ${original.length} → ${bytes.length} bytes (${output}).`);
 } finally {vm.close();}

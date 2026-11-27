@@ -11,11 +11,13 @@ try {
   const source = await fs.readFile(new URL('./compiler-image-bootstrap.lisp', import.meta.url), 'utf8');
   vm.evaluate(source, {eof: true});
   const bootstrapStarted = performance.now();
-  await collectCompilationStatistics(vm, {workload: 'compiler-bootstrap', phase: 'bootstrap native functions'},
+  await collectCompilationStatistics(vm, {workload: 'compiler-bootstrap', workloadScope: 'compiler',
+    phase: 'bootstrap native functions', compilationMode: 'native'},
     () => vm.evaluate('(miricl-compiler::bootstrap-compiler-native-functions) (values)', {eof: true}));
   const interpretedBootstrapMs = performance.now() - bootstrapStarted;
   const moduleStarted = performance.now();
-  await collectCompilationStatistics(vm, {workload: 'compiler-bootstrap', phase: 'sealed compiler module'},
+  await collectCompilationStatistics(vm, {workload: 'compiler-bootstrap', workloadScope: 'compiler',
+    phase: 'sealed compiler module', compilationMode: 'native'},
     () => vm.evaluate('(miricl-compiler::bootstrap-compiler-image) (values)', {eof: true}));
   const nativeModuleAndManifestMs = performance.now() - moduleStarted;
   console.log(`Compiler phase times: ${JSON.stringify({interpretedBootstrapMs, nativeModuleAndManifestMs,

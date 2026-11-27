@@ -106,13 +106,18 @@ if (help) {
           (options.report ? ` :report ${lispString(options.report)}` : '')
         : '';
       const operation = options.optimize ? 'miricl-compiler:optimize-system' : 'miricl-bundle:dump-system';
+      const workload = options.optimize ?? options.bundle;
+      const workloadScope = 'application';
       const result = await collectCompilationStatistics(interpreter,
-        {workload: options.optimize ?? options.bundle, phase: operation},
+        {workload, workloadScope, phase: operation, compilationMode: options.native ? 'mixed' : 'portable',
+          reason: options.native ? 'Collects portable ASDF compilation and retained native compilation together.' : undefined},
         () => interpreter.evaluateAsync(`(${operation} ${system}${output}${optimization})`, {eof: true}));
       if (result.output) process.stdout.write(result.output);
       await filesystem.publish();
       if (options.output && process.env.MIRICL_COMPILER_STATISTICS_DIRECTORY)
-        await writeCompilationStatistics({workload: options.optimize ?? options.bundle, phase: 'application output', status: 'complete', recordType: 'measurement', counters: [], runtimeBytes: compilerImage?.length ?? (await fs.stat(selectedImage)).size, outputBytes: (await fs.stat(filesystem.resolve(options.output))).size});
+        await writeCompilationStatistics({workload, workloadScope, phase: 'application output',
+          compilationMode: options.native ? 'native' : 'portable', status: 'complete', recordType: 'measurement', counters: [],
+          runtimeBytes: compilerImage?.length ?? (await fs.stat(selectedImage)).size, outputBytes: (await fs.stat(filesystem.resolve(options.output))).size});
     } catch (error) { report(error); process.exitCode = 1; }
     finally { filesystem.close(); interpreter.close(); }
   } else {

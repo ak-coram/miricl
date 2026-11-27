@@ -98,6 +98,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-inline-simple-calls* nil)
 (defvar *wasm-dynamic-rests* nil)
 (defvar *wasm-proven-integer-arithmetic* nil)
+(defvar *native-integer-arithmetic-emissions* nil)
+(defvar *native-tail-decisions* nil)
+(defvar *native-private-scalar-decisions* nil)
 (defvar *wasm-proven-cell-types* nil)
 (defvar *wasm-inline-references* nil)
 (defvar *wasm-branch-tests* nil)
@@ -2254,6 +2257,10 @@ exhausted work budgets keep every incoming value group."
             (setf (native-value-slot *wasm-integer-widths* value) (native-compute-integer-width value)) width))
       (native-compute-integer-width value)))
 
+(defun native-observe-raw-integer-operand (outcome)
+  (native-decision-statistic :decision-coverage/raw-integer-operand :measured)
+  (native-decision-statistic :decision/raw-integer-operand outcome))
+
 (defun emit-native-unboxed-integer (operand width)
   (declare (type simple-vector operand) (type (integer 1 64) width))
   (let* ((cached (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* operand)))
@@ -2261,6 +2268,9 @@ exhausted work budgets keep every incoming value group."
          (literal (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :constant)
                        (first (hir-instruction-attributes producer)))))
     (cond ((and cached (or (eq (svref cached 4) :result) (svref cached 3)))
+           (when *native-decision-statistics*
+             (native-observe-raw-integer-operand
+               (if (eq (svref cached 4) :result) :applied/cached-result :applied/cached-argument)))
            (compiler-statistic (if (eq (svref cached 4) :result)
                                    :optimization/unboxed-result-read :optimization/unboxed-argument-read))
            (wasm-local (svref cached 0)))
@@ -2268,6 +2278,10 @@ exhausted work budgets keep every incoming value group."
            ;; Signed LEB32 is also the canonical LEB64 encoding for this range.
            (wasm-byte #x42) (wasm-s32 literal))
           (t
+           (when (and *native-decision-statistics* (not (integerp literal)))
+             (native-observe-raw-integer-operand
+               (if (and cached (not (eq (svref cached 4) :checked-copy)))
+                   :applied/initialize-argument :object-extraction)))
            (wasm-get operand)
            ;; Logical ranges and checked producer origins permit scalar
            ;; extraction, but do not distinguish immediate from boxed i64.
@@ -2728,7 +2742,8 @@ exhausted work budgets keep every incoming value group."
   ;; Each CASE arm names an exact standard CL operation. These bounded plans
   ;; reuse compact checked helpers or replace the ordinary argument packet;
   ;; NOTINLINE still vetoes expansion. Never classify a private builtin by ID.
-  (let ((arithmetic nil) (list-accesses nil) (fuel 4096) (low-field-fuel (list 4096)))
+  (let ((arithmetic nil) (list-accesses nil) (fuel 4096) (low-field-fuel (list 4096))
+        (arithmetic-functions 0))
     (declare (type (integer -1 4096) fuel))
     (dolist (function (hir-unit-functions unit))
       ;; Only inline TRUNCATE needs full multiple-value demand here. Compute
@@ -2739,6 +2754,14 @@ exhausted work budgets keep every incoming value group."
                               (< (ash (hir-function-optimization-policy function) -4) 3)
                               (not (and *wasm-optimization-barriers*
                                         (gethash function *wasm-optimization-barriers*))))))
+      (when *native-decision-statistics*
+        (if arithmeticp
+            (incf arithmetic-functions)
+            (native-decision-statistic :decision-coverage/checked-integer-arithmetic
+              (cond ((null *wasm-proven-integer-arithmetic*) :planner-unavailable)
+                    ((>= (hir-function-debug-level function) 2) :debug)
+                    ((>= (ash (hir-function-optimization-policy function) -4) 3) :compilation-speed)
+                    (t :optimization-barrier)))))
       (dolist (block (hir-function-blocks function))
         (let ((allocated nil))
         (dolist (instruction (hir-block-instructions block))
@@ -2960,7 +2983,10 @@ exhausted work budgets keep every incoming value group."
                     ;; Computed designators retain their evaluation and identity.
                     (when attributes
                       (setf (gethash reference *wasm-inline-references*) t))))))))))
-  (native-plan-proven-integers unit arithmetic list-accesses sealed-entries certificates)
+    (when (and *native-decision-statistics* (plusp arithmetic-functions))
+      (native-decision-statistic :decision-coverage/checked-integer-arithmetic
+        (if (minusp fuel) :selection-budget :measured) arithmetic-functions))
+    (native-plan-proven-integers unit arithmetic list-accesses sealed-entries certificates)
   (native-plan-character-code-fusion unit)
   *wasm-inline-simple-calls*))
 
@@ -3034,14 +3060,18 @@ exhausted work budgets keep every incoming value group."
                          (mapcar (lambda (operand) (gethash operand *wasm-inferred-types* t)) operands))))
         ;; Mixed facts only reject candidates. Reject unknown operand widths
         ;; before deriving a result, so untyped calls need no interval work.
-        (when (and types
-                   (every (lambda (type)
-                            (let ((width (native-type-integer-width type)))
-                              (and width (<= width 64)))) types)
-                   (let ((width (native-type-integer-width (hir-inline-result-type name types))))
-                     (and width (<= width 64))))
-          (push entry arithmetic)
-          (dolist (operand operands) (push operand roots)))))
+        (cond ((null types)
+               (native-decision-statistic :decision/checked-integer-arithmetic :missing-mixed-facts))
+              ((not (every (lambda (type)
+                             (let ((width (native-type-integer-width type)))
+                               (and width (<= width 64)))) types))
+               (native-decision-statistic :decision/checked-integer-arithmetic :mixed-operand-width))
+              ((let ((width (native-type-integer-width (hir-inline-result-type name types))))
+                 (not (and width (<= width 64))))
+               (native-decision-statistic :decision/checked-integer-arithmetic :mixed-result-width))
+              (t
+               (push entry arithmetic)
+               (dolist (operand operands) (push operand roots))))))
     (dolist (function (hir-unit-functions unit))
       (dolist (block (hir-function-blocks function))
         (dolist (instruction (hir-block-instructions block))
@@ -3130,19 +3160,24 @@ exhausted work budgets keep every incoming value group."
              (widths (mapcar #'native-type-integer-width types))
              ;; A result assertion is never evidence of nonoverflow.
              (width (native-type-integer-width (hir-inline-result-type name types))))
-        (when (and width (<= width 64)
-                   (eql (standard-function-result-count name (length operands)) 1)
-                   (every (lambda (size) (and size (<= size 64))) widths))
-          (let* ((opcode (ecase name ((+ 1+) #x7c) ((- 1-) #x7d) (* #x7e) (logand #x83)))
-                 (narrow (and (member name '(+ - 1+ 1-)) (<= width 32)
-                              (every (lambda (size) (<= size 32)) widths)))
-                 ;; Direct LOGAND and typed multiply do not poll. The
-                 ;; generic multiply fallback and existing add/subtract
-                 ;; proof plans retain their operation-entry checkpoints.
-                 (poll (case name (logand nil) (* (not (every #'native-integer-width operands))) (t t))))
-            (compiler-statistic (if narrow :proof/integer-arithmetic-i32 :proof/integer-arithmetic-i64) name)
-            (setf (gethash instruction *wasm-proven-integer-arithmetic*) (vector widths width name poll narrow)
-                  (gethash instruction *wasm-inline-simple-calls*) opcode)))))))
+        (cond
+          ((not (every (lambda (size) (and size (<= size 64))) widths))
+           (native-decision-statistic :decision/checked-integer-arithmetic :executable-operand-width))
+          ((not (and width (<= width 64)))
+           (native-decision-statistic :decision/checked-integer-arithmetic :executable-result-width))
+          ((not (eql (standard-function-result-count name (length operands)) 1))
+           (native-decision-statistic :decision/checked-integer-arithmetic :result-count))
+          (t
+           (let* ((opcode (ecase name ((+ 1+) #x7c) ((- 1-) #x7d) (* #x7e) (logand #x83)))
+                  (narrow (and (member name '(+ - 1+ 1-)) (<= width 32)
+                               (every (lambda (size) (<= size 32)) widths)))
+                  ;; Direct LOGAND and typed multiply do not poll. The
+                  ;; generic multiply fallback and existing add/subtract
+                  ;; proof plans retain their operation-entry checkpoints.
+                  (poll (case name (logand nil) (* (not (every #'native-integer-width operands))) (t t))))
+             (compiler-statistic (if narrow :proof/integer-arithmetic-i32 :proof/integer-arithmetic-i64) name)
+             (setf (gethash instruction *wasm-proven-integer-arithmetic*) (vector widths width name poll narrow)
+                   (gethash instruction *wasm-inline-simple-calls*) opcode))))))))
 
 (defun emit-native-proven-integer-arithmetic (inputs opcode proof &optional raw)
   (let ((narrow (svref proof 4)))
@@ -3166,7 +3201,12 @@ exhausted work budgets keep every incoming value group."
       (if narrow (wasm-integer 1) (progn (wasm-byte #x42) (wasm-s32 1))))
     (wasm-byte (if narrow (if (= opcode #x7c) #x6a #x6b) opcode))
     (when narrow (wasm-byte #xac))
-    (unless raw (wasm-call "native-int64"))))
+    (unless raw (wasm-call "native-int64"))
+    ;; One proof belongs to one HIR call, even when worker construction
+    ;; emits the arithmetic in more than one body.
+    (when *native-integer-arithmetic-emissions*
+      (setf (gethash proof *native-integer-arithmetic-emissions*)
+            (if narrow :applied/i32 :applied/i64)))))
 
 (defun native-plan-proven-integer-comparisons (pending proven)
   ;; Only exact binary ordered comparisons at SAFETY 1 enter
@@ -3196,7 +3236,10 @@ exhausted work budgets keep every incoming value group."
   (dolist (operand (cddr inputs))
     (let ((record (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* operand))))
       (if (and record (eq (svref record 4) :checked-copy))
-          (wasm-local (svref record 0))
+          (progn
+            (when *native-decision-statistics*
+              (native-observe-raw-integer-operand :applied/checked-copy))
+            (wasm-local (svref record 0)))
           (multiple-value-bind (literal known) (hir-primary-constant operand)
             (if (and known (integerp literal) (<= -9223372036854775808 literal 9223372036854775807))
                 (progn (wasm-byte #x42) (wasm-s64 literal))
@@ -3358,6 +3401,29 @@ exhausted work budgets keep every incoming value group."
             (push instruction calls)))))
     calls))
 
+(defun native-observe-tail-candidates (function blocks)
+  (setf (gethash function *native-tail-decisions*) :function)
+  (dolist (block blocks)
+    (let* ((site (car (last (hir-block-instructions block))))
+           (end (hir-block-terminator block))
+           (opcode (hir-instruction-opcode end)))
+      (when (and site (member (hir-instruction-opcode site) '(:call :multiple-value-call))
+                 (member opcode '(:return :jump :block-return))
+                 (eq (hir-instruction-output site)
+                     (if (eq opcode :block-return) (third (hir-instruction-inputs end))
+                         (first (hir-instruction-inputs end)))))
+        ;; Initialize each reachable site once per body emission. A retry of
+        ;; the checked entry replaces its observations, as does actual lowering.
+        (setf (gethash site *native-tail-decisions*)
+              (cond ((member site *wasm-tail-calls* :test #'eq) :other-lowering)
+                    ((>= (hir-function-debug-level function) 2) :debug-policy)
+                    ((gethash site *wasm-inline-vector-calls*) :inline-vector-call)
+                    ((not (native-tail-environment-p (first (hir-instruction-inputs site)) function))
+                     :dynamic-environment)
+                    ((and (native-value-slot *wasm-single-calls* (hir-instruction-output site))
+                          (not (native-named-single-call-p site function))) :single-call-convention)
+                    (t :continuation)))))))
+
 (defun native-known-callee (value)
   (declare (type simple-vector value))
   (hir-result-callee value *wasm-result-callees*))
@@ -3383,11 +3449,13 @@ exhausted work budgets keep every incoming value group."
         (wasm-call "native-return1") (wasm-byte #x0f)
         t)))
 
-(defun emit-native-tail-call (inputs &optional (safety 1))
+(defun emit-native-tail-call (inputs safety instruction)
   (when (emit-native-tail-builtin inputs safety)
+    (when *native-tail-decisions*
+      (setf (gethash instruction *native-tail-decisions*) :builtin-return))
     (return-from emit-native-tail-call nil))
-  (let ((target (if (and *wasm-named-call-plan* (gethash (second inputs) *wasm-named-call-plan*)) *wasm-current-function*
-                    (native-known-callee (second inputs)))))
+  (let* ((named (and *wasm-named-call-plan* (gethash (second inputs) *wasm-named-call-plan*)))
+         (target (if named *wasm-current-function* (native-known-callee (second inputs)))))
     (when (and target (< (hir-function-debug-level target) 2))
       ;; Lexical function bindings are immutable. Their known entry can be a
       ;; direct RETURN_CALL while retaining the actual closure as its context.
@@ -3415,6 +3483,9 @@ exhausted work budgets keep every incoming value group."
           (push (list (length *wasm-bytes*) entry)
                 (gethash *wasm-current-function* *wasm-function-relocations*)))
         (wasm-u32 (+ (length *native-imports*) (gethash entry *native-function-indices*))))
+      (when *native-tail-decisions*
+        (setf (gethash instruction *native-tail-decisions*)
+              (cond (*wasm-debug* :applied/guarded-direct) (named :applied/named-direct) (t :applied/direct))))
       (if *wasm-debug* (wasm-byte #x0b) (return-from emit-native-tail-call nil))))
   ;; Small calls share a guarded runtime helper. The ordinary adapter only
   ;; allocates a packet when the selected target cannot use its fixed worker.
@@ -3424,7 +3495,11 @@ exhausted work budgets keep every incoming value group."
         (progn (wasm-get (second inputs)) (wasm-arguments (cddr inputs))))
     (let ((start (length *wasm-bytes*)))
       (wasm-call (if (<= count 4) (format nil "native-tail-call~D" count) "native-tail-call"))
-      (setf (aref *wasm-bytes* start) #x12))))
+      (setf (aref *wasm-bytes* start) #x12))
+    (when (and *native-tail-decisions*
+               (not (eq (gethash instruction *native-tail-decisions*) :applied/guarded-direct)))
+      (setf (gethash instruction *native-tail-decisions*)
+            (if (<= count 4) :applied/guarded-dispatch :applied/generic-dispatch)))))
 
 (defun native-fixed-arity (function)
   (dolist (instruction (hir-block-instructions (hir-function-entry function)))
@@ -3911,7 +3986,7 @@ exhausted work budgets keep every incoming value group."
              (ecase (cdr site)
                (:tail
                 (compiler-statistic :optimization/direct-named-tail)
-                (emit-native-tail-call inputs (hir-instruction-safety-level instruction)))
+                (emit-native-tail-call inputs (hir-instruction-safety-level instruction) instruction))
                (:scoped
                 (unless (emit-native-scoped-call inputs)
                   (throw 'native-multiple-result-fallback :retry-named-recursion))
@@ -4203,7 +4278,7 @@ exhausted work budgets keep every incoming value group."
          (wasm-set output)
          (return-from emit-native-instruction nil))
        (when (member instruction *wasm-tail-calls* :test #'eq)
-         (emit-native-tail-call inputs (hir-instruction-safety-level instruction))
+         (emit-native-tail-call inputs (hir-instruction-safety-level instruction) instruction)
          (return-from emit-native-instruction nil))
        (when (native-no-prefix-apply-p inputs *wasm-current-function*)
          ;; Demand and the original transport ABI are independent: discarded
@@ -4254,6 +4329,8 @@ exhausted work budgets keep every incoming value group."
            (let ((start (length *wasm-bytes*)))
              (wasm-call "native-tail-multiple-value-call")
              (setf (aref *wasm-bytes* start) #x12)
+             (when *native-tail-decisions*
+               (setf (gethash instruction *native-tail-decisions*) :applied/multiple-value-dispatch))
              (return-from emit-native-instruction nil))
            (wasm-call "native-multiple-value-call"))
        (when (native-value-slot *wasm-scalar-groups* output) (wasm-call "native-primary")))
@@ -6803,6 +6880,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
      (cond (structured :structured) (forward :forward) (t :dispatcher)))
    (when *wasm-unboxed-values*
      (loop for record across *wasm-unboxed-values* when record do (setf (svref record 3) nil)))
+   (when *native-tail-decisions* (native-observe-tail-candidates function blocks))
    (with-wasm-bytes
     (wasm-u32 (+ (if (or (not direct) (plusp raw-count)) 2 1)
                  (if (plusp wide-count) 1 0) (if (plusp captured-count) 1 0)
@@ -7276,6 +7354,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                                                         source *wasm-private-scalar-argument*)))
                                                (*wasm-call-frame-locals* nil)
                                                (*wasm-captured-result-p* nil)
+                                               (*native-tail-decisions* nil)
                                                (*wasm-function-plans* (if (or *wasm-private-scalar-argument*
                                                                              (and (not (sixth reusable))
                                                                                   (member (fourth reusable) '(3 4)))
@@ -7526,7 +7605,9 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
   ;; copies and local optimization. Candidate instructions cannot trap or
   ;; change anything outside this activation except at the recorded polls.
   (when (find #x1f ops :key (lambda (op) (native-op-code op)))
+    (native-decision-statistic :decision-coverage/loop-strip-mining :body-exception-control)
     (return-from native-scalar-work-loop nil))
+  (native-decision-statistic :decision-coverage/loop-strip-mining :measured)
   (let ((scopes nil) (size (length ops)))
     (loop for op across ops for start from 0 do
       (when (and (eql (native-op-code op) #x03) (eql (native-op-argument op) #x40)
@@ -7535,7 +7616,9 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           (loop for i from (1+ start) below (min size (+ start 48))
                 for instruction = (aref ops i)
                 for code = (native-op-code instruction) do
-            (unless (eql code (aref body (native-op-start instruction))) (return))
+            (unless (eql code (aref body (native-op-start instruction)))
+              (native-decision-statistic :decision/loop-strip-mining :opcode-rewritten)
+              (return))
             (case code
               ((#x1a #x20 #x21 #x22 #x41 #x42
                 #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f
@@ -7543,8 +7626,15 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                 #x6a #x6b #x6c #x71 #x7c #x7d #x7e #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad
                 #xd1 #xd3))
               ((#x02 #x04) (incf nesting))
-              (#x05 (when (zerop nesting) (return)))
-              (#x0b (when (zerop nesting) (return)) (decf nesting))
+              (#x05
+               (when (zerop nesting)
+                 (native-decision-statistic :decision/loop-strip-mining :unexpected-else)
+                 (return)))
+              (#x0b
+               (when (zerop nesting)
+                 (native-decision-statistic :decision/loop-strip-mining :missing-latch)
+                 (return))
+               (decf nesting))
               ((#x0c #x0d)
                ;; Inner labels are forward destinations within a poll-free
                ;; scope. An exit must target a known enclosing void label:
@@ -7555,12 +7645,16 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                      (unless (and target (member (native-op-code target) '(#x02 #x04))
                                   (eql (native-op-argument target) #x40)
                                   (= (- (native-op-end target) (native-op-start target)) 2))
+                       (native-decision-statistic :decision/loop-strip-mining :unsupported-exit)
                        (return)))
                    (push (cons instruction prefix) sites))))
               (#x10
                ;; All paths that reach this observation passed the same
                ;; earlier polls. No nested path may skip or add one.
-               (unless (and (zerop nesting) (eql (native-op-argument instruction) poll)) (return))
+               (unless (and (zerop nesting) (eql (native-op-argument instruction) poll))
+                 (native-decision-statistic :decision/loop-strip-mining
+                   (if (eql (native-op-argument instruction) poll) :nested-poll :other-call))
+                 (return))
                (when (and (< (+ i 2) size)
                           (eql (native-op-code (aref ops (1+ i))) #x0c)
                           (eql (native-op-argument (aref ops (1+ i))) 0)
@@ -7569,7 +7663,12 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                    (list (nreverse sites) instruction (1+ prefix))))
                (push (cons instruction nil) sites)
                (incf prefix))
-              (otherwise (return))))))
+              (otherwise
+               (native-decision-statistic :decision/loop-strip-mining :unsupported-instruction)
+               (return)))
+            finally
+              (native-decision-statistic :decision/loop-strip-mining
+                (if (< (+ start 48) size) :scan-limit :missing-latch)))))
       (case (native-op-code op)
         ((#x02 #x03 #x04) (push op scopes))
         (#x0b (pop scopes))))))
@@ -7586,11 +7685,14 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           (multiple-value-bind (count type) (native-read-uleb body cursor)
             (incf remaining count)
             (setq cursor (native-local-type-end body type))))
-        (unless (< remaining #xfffffffe) (return-from native-batch-scalar-work body))
+        (unless (< remaining #xfffffffe)
+          (native-decision-statistic :decision/loop-strip-mining :local-limit)
+          (return-from native-batch-scalar-work body))
         (compiler-statistic :optimization/scalar-work-batch weight)
         (decf (gethash "native-poll" *wasm-import-counts*) weight)
         (let ((granted (1+ remaining)))
-         (with-wasm-bytes
+         (prog1
+          (with-wasm-bytes
           (wasm-u32 (1+ groups))
           (wasm-append body first cursor)
           (wasm-u32 2) (wasm-type :i32)
@@ -7653,7 +7755,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           (wasm-byte #x22) (wasm-u32 remaining)
           (wasm-byte #x21) (wasm-u32 granted)
           (wasm-byte #x0b)
-          (wasm-append body (native-op-end latch))))))))
+          (wasm-append body (native-op-end latch)))
+          (native-decision-statistic :decision/loop-strip-mining :applied)))))))
 
 (defun native-epoch-poll-body (body ops poll local)
   ;; Replace only calls in the structured loop paths of the final body.
@@ -7702,7 +7805,14 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
   (when (or *wasm-debug* *compiler-bootstrapping*
             *wasm-fixed-call-emitter* *wasm-closed-worker-functions*
             (not (gethash "native-poll" *wasm-import-counts*)))
+    (native-decision-statistic :decision-coverage/loop-strip-mining
+      (cond (*wasm-debug* :module-debug)
+            (*compiler-bootstrapping* :module-bootstrap)
+            (*wasm-fixed-call-emitter* :module-fixed-call-emitter)
+            (*wasm-closed-worker-functions* :module-closed-workers)
+            (t :module-no-poll)))
     (return-from native-batch-work-bodies bodies))
+  (native-decision-statistic :decision-coverage/loop-strip-mining :module-measured)
   (let ((candidates (make-array (length bodies) :initial-element nil))
         (poll (position "native-poll" *native-imports* :key #'first :test #'equal))
         (fuel 8192))
@@ -7719,7 +7829,15 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
         (setf (aref candidates index)
               (if (and parameters (or (null (aref candidates index))
                                       (eql parameters (aref candidates index))))
-                  parameters :ordinary))))
+                  parameters
+                  (if *native-decision-statistics*
+                      (let ((previous (aref candidates index)))
+                        (cond ((and previous (symbolp previous)) previous)
+                              ((not (and plan (svref plan 20))) :body-no-structured-plan)
+                              ((svref plan 4) :body-dynamic-cleanup)
+                              ((not (and (plusp speed) (< space 3))) :body-policy)
+                              (t :body-coalesced-entry)))
+                      :ordinary)))))
     (loop for body in bodies for parameters across candidates
           collect (if (and (integerp parameters) (<= (length body) 4096 fuel))
                       (progn
@@ -7729,7 +7847,12 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                             (if (and epoch-polling (eq body batched))
                                 (native-epoch-poll-body body ops poll (+ parameters (- offset 2) locals))
                                 batched))))
-                      body))))
+                      (progn
+                        (native-decision-statistic :decision-coverage/loop-strip-mining
+                          (cond ((not (integerp parameters)) (or parameters :body-no-structured-plan))
+                                ((> (length body) 4096) :body-size)
+                                (t :body-module-fuel)))
+                        body)))))
 
 (defun native-prune-module (bodies entries &optional (prune-functions t))
   ;; RemoveUnusedModuleElements after branch/DCE cleanup. No calls or closure
@@ -7987,9 +8110,14 @@ the named-entry format for hosts that translate individual Wasm workers."
             (map 'vector #'signature (append (mapcar #'cdr *native-imports*) (coerce body-signatures 'list))) eligible)
         (when helpers
           (compiler-statistic :optimization/outlined-region nil (length helpers)))
-        (values (append replacements (mapcar #'first helpers))
+        (let ((output (append replacements (mapcar #'first helpers))))
+          (when *native-decision-statistics*
+            (let ((*compilation-statistics* *native-decision-statistics*))
+              (compiler-size-statistic (:size-input/wasm-outlining :size-output/wasm-outlining :size-units/wasm-outlining)
+                (reduce #'+ bodies :key #'length) (reduce #'+ output :key #'length))))
+          (values output
                 (mapcar (lambda (helper) (list (mapcar #'native-type (second helper)) (mapcar #'native-type (third helper)))) helpers)
-                (concatenate 'vector eligible (make-array (length helpers) :initial-element 0)))))))
+                (concatenate 'vector eligible (make-array (length helpers) :initial-element 0))))))))
 
 (defun native-private-scalar-return-source (function)
   ;; The implicit function block may forward the last result through one
@@ -8057,12 +8185,16 @@ the named-entry format for hosts that translate individual Wasm workers."
         ((hir-type-proves-p type 'double-float) 4)))
 
 (defun native-plan-reusable-scalar (function)
-  (when (and (native-fixed-arity function)
-             (< (hir-function-value-count function) 48)
-             (< (logand 3 (ash (hir-function-optimization-policy function) -2)) 3)
-             (gethash function *wasm-direct-workers*)
-             (eql (gethash function *wasm-result-arities*) 1)
-             (not (gethash function *wasm-optimization-barriers*)))
+  (let ((veto (cond ((not (native-fixed-arity function)) :fixed-arity)
+                    ((>= (hir-function-value-count function) 48) :function-size)
+                    ((= (logand 3 (ash (hir-function-optimization-policy function) -2)) 3) :space-policy)
+                    ((not (gethash function *wasm-direct-workers*)) :no-fixed-worker)
+                    ((not (eql (gethash function *wasm-result-arities*) 1)) :result-count)
+                    ((gethash function *wasm-optimization-barriers*) :optimization-barrier))))
+    (native-decision-statistic :decision-coverage/reusable-scalar-worker :measured)
+    (when veto
+      (native-decision-statistic :decision/reusable-scalar-worker veto)
+      (return-from native-plan-reusable-scalar nil)))
     (let* ((value (native-private-scalar-return-source function))
            (producer (and value (hir-value-producer value)))
            (kind (and producer (gethash producer *wasm-inline-simple-calls*)))
@@ -8085,6 +8217,12 @@ the named-entry format for hosts that translate individual Wasm workers."
                        (setf (gethash function *wasm-function-plans*) (native-function-plan function)))))
            (contract (and plan (svref plan 1) (not (svref plan 4))
                           (native-private-scalar-contract function plan float-kind identity-kind))))
+      (unless contract
+        (native-decision-statistic :decision/reusable-scalar-worker
+          (cond ((null plan) :unsupported-return)
+                ((not (svref plan 1)) :control-flow)
+                ((svref plan 4) :dynamic-environment)
+                (t :scalar-contract))))
       (when contract
         (let ((worker (copy-seq function)) (arguments 0)
               (identity (and identity-kind identity))
@@ -8111,7 +8249,7 @@ the named-entry format for hosts that translate individual Wasm workers."
                 (gethash worker *native-function-indices*) (length *native-functions*))
           (setq *native-functions* (append *native-functions* (list worker))
                 *native-call-stack-effects*
-                (concatenate 'simple-vector *native-call-stack-effects* (vector (cons 10 3)))))))))
+                (concatenate 'simple-vector *native-call-stack-effects* (vector (cons 10 3))))))))
 
 (defun native-reusable-scalar-section (bodies)
   ;; These indices describe the final physical entries in either module
@@ -8127,13 +8265,18 @@ the named-entry format for hosts that translate individual Wasm workers."
                (packet (gethash root *native-function-indices*))
                (boxed (gethash worker *native-function-indices*))
                (raw (gethash raw-worker *native-function-indices*)))
-          (when (and packet boxed raw
+          (if (and packet boxed raw
                      (equalp (svref bodies boxed)
                              (native-boxed-scalar-worker raw-worker (fifth contract) (fourth contract)))
                      (equalp (svref bodies packet) (native-direct-wrapper root worker)))
-            (pushnew (list (+ offset packet) (+ offset boxed) (+ offset raw)
-                           (native-fixed-arity root) (fifth contract) (fourth contract))
-                     claims :test #'equal))))
+            (progn
+              (native-decision-statistic :decision/reusable-scalar-worker
+                (case (fourth contract)
+                  (1 :applied/i64) (2 :applied/character) (3 :applied/f32) (4 :applied/f64)))
+              (pushnew (list (+ offset packet) (+ offset boxed) (+ offset raw)
+                             (native-fixed-arity root) (fifth contract) (fourth contract))
+                       claims :test #'equal))
+            (native-decision-statistic :decision/reusable-scalar-worker :final-wrapper-shape))))
       *wasm-reusable-scalars*)
     (when claims
       (wasm-section 0 (with-wasm-bytes
@@ -8201,6 +8344,17 @@ the named-entry format for hosts that translate individual Wasm workers."
                           (contract (and (gethash target targets) (not (eq target function))
                                          (eql (- (length arguments) 2) (native-fixed-arity target))
                                          (contract-for target))))
+                     (when *native-private-scalar-decisions*
+                       ;; Multiple raw consumers may trace back to the same
+                       ;; call. Keep an admitted observation over a mismatch.
+                       (unless (eq :unselected (gethash site *native-private-scalar-decisions*))
+                         (setf (gethash site *native-private-scalar-decisions*)
+                               (cond ((not (gethash target targets)) :uncertified-target)
+                                     ((eq target function) :recursive-target)
+                                     ((not (eql (- (length arguments) 2) (native-fixed-arity target))) :arity)
+                                     ((null contract) :scalar-contract)
+                                     ((eq character (eq (second contract) 'character)) :unselected)
+                                     (t :consumer-representation)))))
                      (when (and contract (eq character (eq (second contract) 'character)))
                        (unless ordinary (setq ordinary (list site target contract)))
                        (unless *wasm-private-scalar-arguments-enabled*
@@ -8387,7 +8541,14 @@ the named-entry format for hosts that translate individual Wasm workers."
 (defun emit-native-module-with-results (unit entries entry-tables named-recursion sealed-unit epoch-polling)
   "Emit a verified unit. Internal callers must retain ownership until emission."
   (declare (type hir-unit unit) (type list entries))
-  (let* ((*wasm-named-recursion* named-recursion)
+  (let* (;; Final worker validation can retry after planning and batching.
+         (*native-decision-statistics*
+           (and *compilation-statistics* (make-hash-table :test 'equal)))
+         (*native-integer-arithmetic-emissions*
+           (and *native-decision-statistics* (make-hash-table :test 'eq)))
+         (*native-tail-decisions* (and *native-decision-statistics* (make-hash-table :test 'eq)))
+         (*native-private-scalar-decisions* (and *native-decision-statistics* (make-hash-table :test 'eq)))
+         (*wasm-named-recursion* named-recursion)
          (*wasm-named-single-result* nil)
          (*wasm-named-call-plan* nil)
          (*wasm-literals* (make-array 16 :adjustable t :fill-pointer 0))
@@ -8532,6 +8693,8 @@ the named-entry format for hosts that translate individual Wasm workers."
                       (unless (and raw (eq (svref raw 1) output) (zerop (svref raw 5))
                                    (or (null argument) (and input (eq (svref input 4) :result))))
                         (when argument (throw 'native-multiple-result-fallback :retry-sealed-argument))
+                        (when *native-private-scalar-decisions*
+                          (setf (gethash site *native-private-scalar-decisions*) :caller-preflight))
                         (return nil)))))
               ;; Publish the plans and the raw-only ABI together after preflight.
               (let ((worker (copy-seq target)))
@@ -8649,16 +8812,45 @@ the named-entry format for hosts that translate individual Wasm workers."
            (wasm-section 10 (with-wasm-bytes
              (wasm-u32 (length bodies))
              (dolist (body bodies) (wasm-u32 (length body)) (wasm-append body))))))))
-    (values bytes (if entries
-                     (mapcar (lambda (entry) (coerce (first (gethash entry *wasm-literal-groups*)) 'simple-vector)) entries)
-                     (coerce *wasm-literals* 'simple-vector))
-      (when *wasm-debug*
-        (vector bytes
-          (coerce (loop for function in *native-functions*
-                        for index = (gethash function *native-function-indices*)
-                        collect (and index (>= (hir-function-debug-level function) 2)
-                                     (+ (length *native-imports*) index))) 'simple-vector)
-          (coerce (mapcar (lambda (entry) (position entry *native-functions* :test #'eq)) entries) 'simple-vector))))))))
+    (let ((literals (if entries
+                        (mapcar (lambda (entry) (coerce (first (gethash entry *wasm-literal-groups*)) 'simple-vector)) entries)
+                        (coerce *wasm-literals* 'simple-vector)))
+          (debug (when *wasm-debug*
+                   (vector bytes
+                     (coerce (loop for function in *native-functions*
+                                   for index = (gethash function *native-function-indices*)
+                                   collect (and index (>= (hir-function-debug-level function) 2)
+                                                (+ (length *native-imports*) index))) 'simple-vector)
+                     (coerce (mapcar (lambda (entry) (position entry *native-functions* :test #'eq)) entries) 'simple-vector)))))
+      (when *native-decision-statistics*
+        (when (plusp (hash-table-count *native-private-scalar-decisions*))
+          (native-decision-statistic :decision-coverage/private-scalar-call :measured
+            (hash-table-count *native-private-scalar-decisions*)))
+        (dolist (site *wasm-private-scalar-sites*)
+          (setf (gethash site *native-private-scalar-decisions*)
+                (cond (*wasm-private-scalar-argument* :applied/i64-argument)
+                      ((eq *wasm-private-scalar-type* 'character) :applied/character)
+                      (t :applied/i64))))
+        (maphash (lambda (site outcome)
+                   (declare (ignore site))
+                   (native-decision-statistic :decision/private-scalar-call outcome))
+                 *native-private-scalar-decisions*)
+        (maphash (lambda (site outcome)
+                   (declare (ignore site))
+                   (if (eq outcome :function)
+                       (native-decision-statistic :decision-coverage/native-tail-call :measured)
+                       (native-decision-statistic :decision/native-tail-call outcome)))
+                 *native-tail-decisions*)
+        (let* ((emitted (hash-table-count *native-integer-arithmetic-emissions*))
+               (pending (- (hash-table-count *wasm-proven-integer-arithmetic*) emitted)))
+          (maphash (lambda (proof outcome)
+                     (declare (ignore proof))
+                     (native-decision-statistic :decision/checked-integer-arithmetic outcome))
+                   *native-integer-arithmetic-emissions*)
+          (when (plusp pending)
+            (native-decision-statistic :decision/checked-integer-arithmetic :not-emitted pending)))
+        (publish-native-decision-statistics *native-decision-statistics*))
+      (values bytes literals debug))))))
 
 (defun compile-native-hir (payload &key name)
   "Compile stored HIR directly, without reconstructing or retaining source."
@@ -8741,7 +8933,8 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     native-private-scalar-return-source native-private-scalar-contract native-plan-private-scalar-site native-private-scalar-edges-valid-p
     native-plan-reusable-scalar native-reusable-scalar-section native-boxed-scalar-worker
     native-scalar-work-loop native-batch-scalar-work native-epoch-poll-body
-    compilation-statistics-report compiler-input-summary
+    compilation-statistics-report publish-native-decision-statistics record-native-decision-statistic record-compilation-size
+    native-observe-raw-integer-operand native-observe-tail-candidates compiler-input-summary
     hir-assert-form hir-correctable-place-form hir-restart-options
     hir-condition-initializer hir-define-condition hir-restart-expression
     hir-literal-counter-cells hir-bounded-integer-cells hir-literal-clock-cells

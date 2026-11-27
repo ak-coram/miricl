@@ -20,7 +20,8 @@ try {
     if (name.startsWith('/mcclim/Auxiliary/data/') || name.startsWith('/mcclim/Examples/'))
       vm.mountFile(name, bytes);
   vm.mountFile('/mcclim-input.wasm', await fs.readFile(input));
-  await collectCompilationStatistics(vm, {workload: 'mcclim', phase: 'native bundle'}, () => vm.evaluateAsync(`
+  await collectCompilationStatistics(vm, {workload: 'mcclim', workloadScope: 'application',
+    phase: 'native bundle', compilationMode: 'native'}, () => vm.evaluateAsync(`
     (js:define-import mcclim-native-progress ("mcclimBuild" "progress") (:string :i32) :void)
     (miricl-compiler:compile-native-bundle "/mcclim-input.wasm" "/mcclim-native.wasm"
       :load t :progress (lambda (file count)
@@ -30,7 +31,9 @@ try {
   new WebAssembly.Module(bytes);
   await fs.mkdir(path.dirname(output), {recursive:true});
   await fs.writeFile(output, bytes);
-  await writeCompilationStatistics({workload: 'mcclim', phase: 'native output', status: 'complete', recordType: 'measurement', counters: [], runtimeBytes: (await fs.stat(runtime)).size, inputBytes: (await fs.stat(input)).size, outputBytes: bytes.length});
+  await writeCompilationStatistics({workload: 'mcclim', workloadScope: 'application',
+    phase: 'native output', compilationMode: 'native', status: 'complete', recordType: 'measurement', counters: [],
+    runtimeBytes: (await fs.stat(runtime)).size, inputBytes: (await fs.stat(input)).size, outputBytes: bytes.length});
   console.log(`Wrote native McCLIM library ${output} (${bytes.length} bytes).`);
 } catch (error) {
   console.error(`McCLIM native failed at initializer ${count}: ${file}`);

@@ -53,6 +53,7 @@ export async function buildImage(runtime, asdf, output, options = {}) {
       if (digest(bytes) !== manifest.sha256) throw new Error('LEM image cache digest mismatch.');
       await checkImage(bytes, {onOutput});
       await writeCompilationStatistics({workload: 'lem', phase: 'guest ASDF image cache', status: 'cached',
+        workloadScope: 'application', compilationMode: 'portable',
         counters: [], reason: 'Guest compilation reused; no current-run compiler counters.'});
       return {...manifest, cached: true, output};
     }
@@ -60,6 +61,7 @@ export async function buildImage(runtime, asdf, output, options = {}) {
   const started = performance.now();
   const stage = name => onOutput(`[LEM ${name}] ${JSON.stringify(process.memoryUsage())}\n`);
   const marker = await writeCompilationStatistics({workload: 'lem', phase: 'complete guest image',
+    workloadScope: 'application', compilationMode: 'portable',
     recordType: 'measurement', status: 'partial', counters: [], failure: 'Image build and fresh restore have not completed.'});
   let vm, bytes, manifest;
   try {
@@ -87,9 +89,10 @@ export async function buildImage(runtime, asdf, output, options = {}) {
       await evaluate(`(dolist (file '(${definitions.map(lispString).join(' ')})) (asdf:load-asd file)) (values)`);
       stage('guest-ASDF-start');
       await collectCompilationStatistics(vm, {workload: 'lem', phase: 'guest ASDF portable compilation',
-        recordType: 'measurement', reason: 'Portable COMPILE-FILE and LOAD; this is not a native application bundle.'},
+        workloadScope: 'application', compilationMode: 'portable', reason: 'Guest ASDF COMPILE-FILE and LOAD.'},
         () => evaluate('(asdf:load-system "lem-browser-lisp-mode") (values)'));
       await writeCompilationStatistics({workload: 'lem', phase: 'native application compilation', status: 'skipped',
+        workloadScope: 'application', compilationMode: 'native',
         counters: [], reason: 'This build emits portable guest FASLs; no native application bundle stage runs.'});
       stage('application-check');
       await evaluate(applicationCheck);

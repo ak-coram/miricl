@@ -37,7 +37,8 @@ let core;
 try {
   vm.mountFile('/ironclad-build.lisp', buildSource);
   await vm.evaluateAsync('(load "/ironclad-build.lisp") (values)', {eof: true});
-  await collectCompilationStatistics(vm, {workload: 'ironclad', phase: 'compile and load portable files'},
+  await collectCompilationStatistics(vm, {workload: 'ironclad', workloadScope: 'application',
+    phase: 'compile and load portable files', compilationMode: 'portable'},
     async () => {
       for (const [index, name] of files.entries()) {
         const guest = `/ironclad/${name}`;
@@ -54,7 +55,8 @@ try {
     });
   vm.mountFile('/ironclad-portable.wasm', Buffer.concat(parts));
   parts.length = 0;
-  core = await collectCompilationStatistics(vm, {workload: 'ironclad', phase: 'emit native bundle'},
+  core = await collectCompilationStatistics(vm, {workload: 'ironclad', workloadScope: 'application',
+    phase: 'emit native bundle', compilationMode: 'native'},
     async () => {
       try {
         await vm.evaluateAsync('(ironclad-build-native-bundle "/ironclad-portable.wasm" "/ironclad-native.wasm")', {eof: true});

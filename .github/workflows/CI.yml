@@ -155,7 +155,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: compiler-statistics-runtime
+          name: compiler-statistics-runtime-attempt-${{ github.run_attempt }}
           path: build/compiler-statistics/*.json
           if-no-files-found: warn
 
@@ -204,8 +204,18 @@ jobs:
         run: node tests/soundness.mjs miricl.wasm
       - name: Check optimization capabilities on Node
         run: node tests/optimizations.mjs miricl.wasm
+      - name: Check compiler decision statistics
+        env:
+          MIRICL_COMPILER_STATISTICS_DIRECTORY: ${{ github.workspace }}/build/compiler-statistics
+        run: node tests/compiler-decisions.mjs miricl.wasm
       - name: Check Node and WASI implementation behavior
         run: node tests/implementation.mjs miricl.wasm miricl-repl.wasm
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compiler-statistics-core-checks-attempt-${{ github.run_attempt }}
+          path: build/compiler-statistics/*.json
+          if-no-files-found: ignore
 
   applications:
     name: Application / ${{ matrix.app }}
@@ -377,7 +387,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: compiler-statistics-${{ matrix.app }}
+          name: compiler-statistics-${{ matrix.app }}-attempt-${{ github.run_attempt }}
           path: build/compiler-statistics/*.json
           if-no-files-found: warn
 
@@ -480,7 +490,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: compiler-statistics-acl2
+          name: compiler-statistics-acl2-attempt-${{ github.run_attempt }}
           path: build/compiler-statistics/*.json
           if-no-files-found: warn
 
@@ -588,7 +598,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: compiler-statistics-coalton
+          name: compiler-statistics-coalton-attempt-${{ github.run_attempt }}
           path: build/compiler-statistics/*.json
           if-no-files-found: warn
 
@@ -791,10 +801,13 @@ jobs:
             fs.mkdirSync('build/compiler-report-input', {recursive: true});
             fs.writeFileSync('build/compiler-report-jobs.json', JSON.stringify({jobs}));
       - name: Render complete or partial compilation report
-        run: node scripts/build-compiler-report.mjs build/compiler-report-input build/compiler-report/compiler-statistics.html build/compiler-report-jobs.json
+        run: |
+          node tests/compiler-report.mjs
+          node scripts/build-compiler-report.mjs build/compiler-report-input build/compiler-report/compiler-statistics.html build/compiler-report-jobs.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: compiler-statistics
           path: build/compiler-report/
+          overwrite: true
           if-no-files-found: error
