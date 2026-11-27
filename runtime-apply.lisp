@@ -82,27 +82,60 @@
 
 (define-runtime-function $fixed-byte-apply
     (($name :nullable-object) ($id i32) ($a :nullable-object) ($b :nullable-object)) (externref)
+  (:locals ($spec (ref $obj)) ($field i64) ($result :nullable-object))
+  ;; CALL2 has checked the operands, run its checkpoint and selected the
+  ;; ordinary APPLY entry. Retain APPLY0's checkpoint before the frame and
+  ;; any reads of the bytespec. The admitted ID bounds the canonical lookup.
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(block $ordinary
+    (br_if $ordinary (global.get $debug-evaluating))
+    (br_if $ordinary (i32.eqz (ref.eq (local.get $name)
+      (array.get $objects (global.get $canonical-builtin-functions) (i32.shl (local.get $id) (i32.const 1))))))
+    (br_if $ordinary (i32.ne (struct.get $obj $n (ref.cast (ref $obj) (local.get $name)))
+      (i32.add (local.get $id) (i32.const 1))))
+    (block $framed
+      ;; Both admitted paths do bounded work with no guest calls or polls.
+      ;; Clear values before constructing the result, including a fresh cons
+      ;; for BYTE or a boxed integer when LDB needs one.
+      (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'byte)))
+        (then
+          (br_if $framed (i32.eqz (i32.and
+            (ref.test (ref i31) (local.get $a)) (ref.test (ref i31) (local.get $b)))))
+          (br_if $framed (i32.lt_s (i32.or
+            (i31.get_s (ref.cast (ref i31) (local.get $a)))
+            (i31.get_s (ref.cast (ref i31) (local.get $b)))) (i32.const 0)))
+          (call $clear-values)
+          (return (extern.convert_any (call $cons (local.get $a) (local.get $b))))))
+      ,(wat-symbol-branch '(local.get $id) '(ldb ldb-test)
+        (runtime-wat-sequence
+          ;; Read both live slots only after the second checkpoint. A miss
+          ;; leaves the original arguments for the signaling worker.
+          #@(br_if $framed (i32.eqz (ref.test (ref $obj) (local.get $a))))
+          #@(local.set $spec (ref.cast (ref $obj) (local.get $a)))
+          #@(br_if $framed (i32.ne (i32.and (struct.get $obj $tag (local.get $spec)) (i32.const 63)) (i32.const 7)))
+          #@(call $try-scalar-integer-field (local.get $b)
+            (struct.get $obj $a (local.get $spec)) (struct.get $obj $b (local.get $spec)))
+          #@(br_if $framed)
+          #@(local.set $field)
+          #@(call $clear-values)
+          #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'ldb-test)))
+            (then (return (extern.convert_any (call $bool (i64.ne (local.get $field) (i64.const 0)))))))
+          #@(return (extern.convert_any (call $int64 (local.get $field)))))))
+    (return_call $fixed-byte-apply-framed (local.get $name) (local.get $id) (local.get $a) (local.get $b)))
+  ;; Resume the original ordinary entry after its checkpoint.
+  #@(local.set $result (call $apply0-ready (local.get $name)
+    (call $cons2 (local.get $a) (local.get $b) (ref.null eq))))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
+(define-runtime-function $fixed-byte-apply-framed
+    (($name :nullable-object) ($id i32) ($a :nullable-object) ($b :nullable-object)) (externref)
   (:locals ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
            ($handlers :nullable-object) ($restarts :nullable-object)
            ($restart-associations :nullable-object) ($catches :nullable-object) ($targets :nullable-object)
            ($thrown i32) ($backtrace-depth i32) ($backtrace-slot i32)
            ($backtrace-frame :nullable-object) ($result :nullable-object))
-  ;; CALL2 has checked the operands, run its checkpoint and selected the
-  ;; ordinary APPLY entry. Retain APPLY0's checkpoint before the frame and
-  ;; any reads of the bytespec. The admitted ID bounds the canonical lookup.
-  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
-  #@(block $called
-    (block $ordinary
-      (br_if $ordinary (global.get $debug-evaluating))
-      (br_if $ordinary (i32.eqz (ref.eq (local.get $name)
-        (array.get $objects (global.get $canonical-builtin-functions) (i32.shl (local.get $id) (i32.const 1))))))
-      (br_if $ordinary (i32.ne (struct.get $obj $n (ref.cast (ref $obj) (local.get $name)))
-        (i32.add (local.get $id) (i32.const 1))))
-      (drop ,(wat-apply-frame #@(call $binary-byte-operation (local.get $id) (local.get $a) (local.get $b))))
-      (br $called))
-    ;; Resume the original ordinary entry after its checkpoint.
-    (local.set $result (call $apply0-ready (local.get $name)
-      (call $cons2 (local.get $a) (local.get $b) (ref.null eq)))))
+  #@(drop ,(wat-apply-frame #@(call $binary-byte-operation (local.get $id) (local.get $a) (local.get $b))))
   #@(call $clear-values)
   #@(extern.convert_any (local.get $result)))
 
@@ -343,7 +376,9 @@
            ($binding :nullable-object)
            ($power :object)
            ($r :object)
-           ($negative i32))
+           ($negative i32)
+           ($bit-packet (ref $objects)) ($bit-operation i32) ($bit-count i32)
+           ($bit-index i32) ($bit-value :nullable-object) ($bit-word i64) ($bit-next i64))
   #@(if (call $symbolp (local.get $name))
       (then (local.set $name (call $fdefinition (local.get $name)))))
   #@(if (i32.ne (call $tag (local.get $name)) (i32.const 8))
@@ -371,9 +406,49 @@
   ;; of whether the public HIR body contains CHECK-ARGUMENTS.
   #@(if (i32.eq (local.get $code) (i32.const 2147483641))
     (then (return_call $hir-apply (local.get $name) (local.get $args))))
-  ;; Source/builtin/public-MOP protocols genuinely consume Lisp lists.
   #@(if (ref.test (ref $objects) (local.get $args))
-    (then (local.set $args (call $native-arguments-list (local.get $args)))))
+    (then
+      (block $bit-packet-miss
+        ;; APPLY0 admitted the owned slots before its checkpoint. Match the
+        ;; actual resolved function after that checkpoint and frame setup.
+        (br_if $bit-packet-miss
+          (i32.gt_u (local.tee $bit-operation
+            (i32.sub (local.get $code) (i32.const ,(1+ (runtime-symbol-id 'logand)))))
+            (i32.const ,(1- (length *variadic-integer-bit-operations*)))))
+        (br_if $bit-packet-miss (global.get $debug-evaluating))
+        (local.set $bit-packet (ref.cast (ref $objects) (local.get $args)))
+        ;; Bound the fold to four through eight slots, with no guest calls or polls.
+        (br_if $bit-packet-miss
+          (i32.gt_u (i32.sub (local.tee $bit-count (array.len (local.get $bit-packet)))
+            (i32.const 4)) (i32.const 4)))
+        (br_if $bit-packet-miss (i32.eqz (ref.eq (local.get $name)
+          (array.get $objects (global.get $canonical-builtin-functions)
+            (i32.shl (i32.sub (local.get $code) (i32.const 1)) (i32.const 1))))))
+        (local.set $bit-operation (i32.and (i32.const 15)
+          (i32.shr_u (i32.const ,(loop with first = (runtime-symbol-id 'logand)
+                                      for (name op) in *variadic-integer-bit-operations*
+                                      for i from 0
+                                      do (assert (= (runtime-symbol-id name) (+ first i)))
+                                      sum (ash op (* i 4))))
+            (i32.shl (local.get $bit-operation) (i32.const 2)))))
+        ;; Check every slot in order, even after an absorbing value. A decoding
+        ;; miss leaves the original arguments and values for normal dispatch.
+        (local.set $bit-value (array.get $objects (local.get $bit-packet) (i32.const 0)))
+        ,(wat-decode-scalar-integer '$bit-value '$bit-word '$bit-packet-miss)
+        (local.set $bit-index (i32.const 1))
+        (block $bit-packet-done
+          (loop $bit-packet-next
+            (br_if $bit-packet-done (i32.eq (local.get $bit-index) (local.get $bit-count)))
+            (local.set $bit-value (array.get $objects (local.get $bit-packet) (local.get $bit-index)))
+            ,(wat-decode-scalar-integer '$bit-value '$bit-next '$bit-packet-miss)
+            (local.set $bit-word (call $boole64-word (local.get $bit-operation)
+              (local.get $bit-word) (local.get $bit-next)))
+            (local.set $bit-index (i32.add (local.get $bit-index) (i32.const 1)))
+            (br $bit-packet-next)))
+        ;; The application frame already cleared secondary values.
+        (return_call $int64 (local.get $bit-word)))
+      ;; Source, remaining builtins and public MOP protocols consume Lisp lists.
+      (local.set $args (call $native-arguments-list (local.get $args)))))
   ;; Source and direct closures need no builtin dispatch. Keep the checked
   ;; packet-to-list conversion above this early dispatch.
   #@(if (i32.eqz (local.get $code))
@@ -660,7 +735,7 @@
   #@(ref.null eq))
 
 (define-runtime-section apply-runtime-wat ()
-  ($apply0) ($apply0-ready) ($fixed-byte-apply)
+  ($apply0) ($apply0-ready) ($fixed-byte-apply) ($fixed-byte-apply-framed)
   (if *source-bootstrap-p* ($apply-source) "")
   ($spread-arguments) ($native-spread-arguments) ($native-spread-list) ($copy-apply-arguments)
   ($native-apply-list-selected) ($native-apply-list-ready) ($native-apply-list) ($native-apply-captured-list)

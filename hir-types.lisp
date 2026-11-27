@@ -1334,6 +1334,87 @@ name proves semantics, never identity of its runtime function object."
              (return (and (standard-function-name-p name) name))))
           (otherwise (return nil)))))))
 
+(defun hir-literal-byte-field-chain (ldb function barriers fuel &optional direct-counts-p)
+  "Find a candidate literal BYTE chain and its counts before auditing uses."
+  (labels ((charge ()
+             (when (minusp (decf (car fuel)))
+               (return-from hir-literal-byte-field-chain nil)))
+           (count-value (value)
+             (if direct-counts-p
+                 (let ((producer (hir-value-producer value)))
+                   (charge)
+                   (when (and (%hir-instruction-p producer)
+                              (eq (hir-instruction-opcode producer) :constant))
+                     (first (hir-instruction-attributes producer))))
+                 (hir-primary-constant value)))
+           (binary-call-p (instruction name)
+             (let* ((inputs (hir-instruction-inputs instruction))
+                    (reference (second inputs)))
+               (and (eq (hir-instruction-opcode instruction) :call)
+                    (eq (hir-standard-operation-leaf reference) name)
+                    (not (eq (second (hir-instruction-attributes (hir-value-producer reference))) 'notinline))
+                    (cdddr inputs) (null (cddddr inputs))
+                    (eql (standard-function-result-count name 2) 1)))))
+    (unless (and (< (hir-function-debug-level function) 2) (not (gethash function barriers))
+                 (binary-call-p ldb 'ldb))
+      (return-from hir-literal-byte-field-chain nil))
+    (let ((consumer ldb) (value (third (hir-instruction-inputs ldb)))
+          (uses nil) (width nil) (position nil))
+      (dotimes (depth 32)
+        (charge)
+        (let ((producer (hir-value-producer value)))
+          (unless (and (%hir-instruction-p producer) (not (gethash value barriers)))
+            (return-from hir-literal-byte-field-chain nil))
+          (push (cons value consumer) uses)
+          (case (hir-instruction-opcode producer)
+            ((:copy :primary) (setq consumer producer value (first (hir-instruction-inputs producer))))
+            (:call
+             (when (binary-call-p producer 'byte)
+               (let ((inputs (hir-instruction-inputs producer)))
+                 (setq width (count-value (third inputs))
+                       position (count-value (fourth inputs)))
+                 (when (and (typep width '(integer 0 63))
+                            (typep position '(integer 0 #x3fffffff)))
+                   (return))))
+             (return-from hir-literal-byte-field-chain nil))
+            (otherwise (return-from hir-literal-byte-field-chain nil)))))
+      (when width (values uses width position)))))
+
+(defun hir-literal-byte-field-type (ldb function barriers fuel &optional details)
+  "Prove a successful LDB result from an unexposed literal BYTE in its block.
+With DETAILS, return the private use chain and width instead of the type."
+  (multiple-value-bind (uses width position)
+      (hir-literal-byte-field-chain ldb function barriers fuel)
+    (when (and uses (eql position 0))
+      ;; Validated SSA orders each definition before its use. Audit the whole
+      ;; owner for additional uses, including terminators and closure operands.
+      (let ((remaining uses) (complete nil))
+        (flet ((charge ()
+                 (when (minusp (decf (car fuel)))
+                   (return-from hir-literal-byte-field-type nil))))
+          (dolist (block (hir-function-blocks function))
+            (charge)
+            (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
+              (charge)
+              (when (member (hir-instruction-opcode instruction) '(:debug-step :debug-resume))
+                (return-from hir-literal-byte-field-type nil))
+              (when (and remaining (eq (hir-instruction-output instruction) (caar remaining)))
+                (pop remaining))
+              (loop for input in (hir-instruction-inputs instruction) for position from 0 do
+                (charge)
+                (let ((use (assoc input uses :test #'eq)))
+                  (when (and use (not (and (eq instruction (cdr use))
+                                           (= position (if (eq instruction ldb) 2 0)))))
+                    (return-from hir-literal-byte-field-type nil))))
+              (when (eq instruction ldb)
+                (when remaining (return-from hir-literal-byte-field-type nil))
+                (setq complete t)))
+            (when (and (not complete) (not (eq remaining uses)))
+              (return-from hir-literal-byte-field-type nil)))
+          (when complete
+            (if details (values uses width)
+                (list 'integer 0 (1- (ash 1 width))))))))))
+
 (defun hir-integer-identity (name left right)
   "Return :LEFT or :RIGHT when integer types prove a binary result is that operand."
   (declare (type symbol name))
@@ -1822,7 +1903,7 @@ operation can still have finite bounds, as with a nonnegative LOGAND operand."
                    (hir-type-restrict type (gethash cell invariants t)))) proofs))
     (or invariants proofs)))
 
-(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts operation-facts guard-facts certificates)
+(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts operation-facts guard-facts certificates barrier-facts)
   "Internal inference kernel; UNIT and ROOTS have passed the public boundary.
 Return primary type facts, executable branch premises and open functions.
 Optional metadata is internal: it must describe this same owned UNIT and must
@@ -1838,8 +1919,9 @@ be discarded after mutation. The public inference boundary accepts no maps."
         (escaped (make-hash-table :test 'eq)) (sites (make-hash-table :test 'eq))
         (opaque (make-hash-table :test 'eq)) (queued (make-hash-table :test 'eq))
         (required (make-hash-table :test 'eq)) (growth (make-hash-table :test 'eq)) (work nil)
-        (intrinsics (make-hash-table :test 'eq))
-        (*hir-standard-operations* (or operation-facts (hir-standard-operations unit)))
+        (intrinsics (make-hash-table :test 'eq)) (byte-field-fuel (list 65536))
+        (barriers (or barrier-facts (hir-optimization-barriers unit)))
+        (*hir-standard-operations* (or operation-facts (hir-standard-operations unit barriers)))
         ;; Internal callers may reuse structural premises while retaining
         ;; ownership of this unchanged, validated HIR. These are not inferred
         ;; types and do not carry declarations into a PROVEN-ONLY query.
@@ -1850,7 +1932,7 @@ be discarded after mutation. The public inference boundary accepts no maps."
         (integer-cells (hir-bounded-integer-cells unit
                          (when (and literal-lengths (plusp (hash-table-count literal-lengths)))
                            (hir-literal-counter-cells unit literal-lengths))))
-        (callees (or callee-facts (hir-result-callees unit (hir-optimization-barriers unit)))))
+        (callees (or callee-facts (hir-result-callees unit barriers))))
     (declare (type hash-table facts sources users calls references candidates escaped
                    sites opaque queued required growth guards)
              (type list work))
@@ -1952,7 +2034,10 @@ be discarded after mutation. The public inference boundary accepts no maps."
                      (if target (progn (setf (gethash value calls) target) (edge target value))
                          (let ((primitive (hir-inline-primitive producer)))
                            (when primitive
-                             (setf (gethash value intrinsics) primitive)
+                             (setf (gethash value intrinsics)
+                               (or (and (eq primitive 'ldb) (plusp (car byte-field-fuel))
+                                        (hir-literal-byte-field-type producer function barriers byte-field-fuel))
+                                   primitive))
                              (dolist (input (cddr inputs)) (edge input value))))))))))))
         (dolist (block (hir-function-blocks function))
           (let* ((terminator (hir-block-terminator block)) (inputs (hir-instruction-inputs terminator))
@@ -2012,12 +2097,14 @@ be discarded after mutation. The public inference boundary accepts no maps."
                                    (if proven-only t (hir-value-type-at (hir-value-type group) index)))))
                             (:closure 'function)
                             (:call
-                             (cond ((gethash value calls) (joined value))
-                                   ((gethash value intrinsics)
-                                    (hir-inline-result-type (gethash value intrinsics)
-                                      (mapcar (lambda (input) (gethash input facts)) (cddr inputs)) (cddr inputs)))
-                                   (t (if proven-only t
-                                          (hir-value-type-at (hir-function-result-type (hir-value-type (second inputs))) 0)))))
+                             (let ((intrinsic (gethash value intrinsics)))
+                               (cond ((gethash value calls) (joined value))
+                                     ((and (consp intrinsic) (eq (car intrinsic) 'integer)) intrinsic)
+                                     (intrinsic
+                                      (hir-inline-result-type intrinsic
+                                        (mapcar (lambda (input) (gethash input facts)) (cddr inputs)) (cddr inputs)))
+                                     (t (if proven-only t
+                                            (hir-value-type-at (hir-function-result-type (hir-value-type (second inputs))) 0))))))
                             (otherwise t))))))
                ;; Guard elimination needs facts established by executable
                ;; producers and closed data flow, not unchecked declarations

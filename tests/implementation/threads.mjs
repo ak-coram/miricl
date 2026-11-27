@@ -193,9 +193,13 @@ vm.evaluate(`(defvar *thread-rank1-fired* nil)
       (setq *thread-rank1-fired* t)
       (values :callback :noise)))) (values)`, {eof: true});
 const rank1Aref = applyObject("#'aref"), rank1Setter = applyObject("(fdefinition '(setf aref))");
+const rank1ArefCode = Number(vm.evaluate(
+  "(miricl-compiler::native-canonical-builtin-code 'aref)", {eof: true}).output.trim());
+assert.ok(Number.isInteger(rank1ArefCode) && rank1ArefCode > 0, 'AREF has a canonical standard identity.');
 const rank1Index = applyObject('3'), rank1Value = applyObject('-9');
 for (const [access, expected] of [
   [array => vm.vm['native-call2'](rank1Aref, array, rank1Index), 94n],
+  [array => vm.vm['native-standard-call2'](rank1ArefCode, array, rank1Index), 94n],
   [array => vm.vm['native-aref-i31-index'](array, 3), 94n],
   [array => vm.vm['native-call3'](rank1Setter, rank1Value, array, rank1Index), -9n],
 ]) {

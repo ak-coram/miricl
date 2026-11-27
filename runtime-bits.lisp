@@ -17,13 +17,10 @@
     (then (call $list-type-error (local.get $x) (i32.const ,(runtime-symbol-id 'integer)))))
   #@(ref.as_non_null (local.get $x)))
 
-(define-runtime-function $ash-native (($x :nullable-object) ($count :nullable-object)) (:nullable-object)
-  (:locals ($value :object) ($amount :object) ($digits :digits) ($result :object)
+(define-runtime-function $ash-integer-digits (($value :object) ($amount :object)) (:nullable-object)
+  (:locals ($digits :digits) ($result :object)
            ($sign i32) ($right i32) ($bits i32) ($offset i32) ($shift i32)
-           ($length i32) ($n i32) ($i i32) ($v i32) ($carry i32) ($discarded i32)
-           ($scalar i64) ($shifted i64))
-  #@(local.set $value (call $require-integer (local.get $x)))
-  #@(local.set $amount (call $require-integer (local.get $count)))
+           ($length i32) ($n i32) ($i i32) ($v i32) ($carry i32) ($discarded i32))
   #@(local.set $sign (call $value-n (local.get $value)))
   #@(if (i32.or (i32.eqz (local.get $sign)) (i32.eqz (call $value-n (local.get $amount))))
     (then (return (local.get $value))))
@@ -34,17 +31,6 @@
       ,(wat-fail :allocation)))
   #@(local.set $bits (i32.or (call $digit (local.get $amount) (i32.const 0))
     (i32.shl (call $digit (local.get $amount) (i32.const 1)) (i32.const 15))))
-  #@(if (call $scalar-integer-p (local.get $value))
-    (then
-      (local.set $scalar (call $scalar-integer-value (local.get $value)))
-      (if (local.get $right)
-        (then (if (i32.ge_u (local.get $bits) (i32.const 64))
-          (then (return (call $int (select (i32.const -1) (i32.const 0) (i32.lt_s (local.get $sign) (i32.const 0)))))))
-          (return (call $int64 (i64.shr_s (local.get $scalar) (i64.extend_i32_u (local.get $bits)))))))
-      (if (i32.lt_u (local.get $bits) (i32.const 64))
-        (then (local.set $shifted (i64.shl (local.get $scalar) (i64.extend_i32_u (local.get $bits))))
-          (if (i64.eq (i64.shr_s (local.get $shifted) (i64.extend_i32_u (local.get $bits))) (local.get $scalar))
-            (then (return (call $int64 (local.get $shifted)))))))))
   #@(local.set $length (call $integer-length (ref.as_non_null (local.get $value))))
   #@(local.set $offset (i32.div_u (local.get $bits) (i32.const 15)))
   #@(local.set $shift (i32.rem_u (local.get $bits) (i32.const 15)))
@@ -73,8 +59,10 @@
               (i32.sub (i32.shl (i32.const 1) (local.get $shift)) (i32.const 1)))))
           (if (local.get $discarded) (then (local.set $result (call $iadd (local.get $result) (call $int (i32.const -1))))))))
       (return (local.get $result))))
-  ;; Bound result size before allocating; huge negative counts above need no buffer.
-  (wat-fail-when #@(i32.gt_u (local.get $bits) (i32.sub (i32.const 536870910) (call $bitlength (local.get $value)))) :allocation)
+  ;; Use a widened sum before allocating, including when the input alone
+  ;; exceeds the result limit. Huge negative counts above need no buffer.
+  (wat-fail-when #@(i64.gt_u (i64.add (i64.extend_i32_u (local.get $bits))
+    (i64.extend_i32_u (call $bitlength (local.get $value)))) (i64.const 536870910)) :allocation)
   #@(local.set $n (i32.add (i32.add (local.get $length) (local.get $offset)) (i32.ne (local.get $shift) (i32.const 0))))
   #@(local.set $digits (array.new_default $digits (local.get $n)))
   #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $length)))
@@ -84,6 +72,85 @@
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
   #@(if (local.get $shift) (then (array.set $digits (local.get $digits) (i32.sub (local.get $n) (i32.const 1)) (local.get $carry))))
   #@(call $integer (local.get $sign) (local.get $digits)))
+
+(define-runtime-function $validate-bit-integer-layout (($operand (ref null any))) ()
+  (:locals ($object (ref $obj)) ($digits (ref null $digits)) ($length i32)
+           ($tag i32) ($sign i32) ($scalar i64))
+  ;; A decoder miss can include a private GC value or a foreign host reference.
+  (wat-fail-when #@(i32.eqz (i32.or
+    (ref.test (ref null i31) (local.get $operand))
+    (ref.test (ref $obj) (local.get $operand)))) :malformed-form)
+  #@(if (ref.test (ref $obj) (local.get $operand))
+    (then
+      (local.set $object (ref.cast (ref $obj) (local.get $operand)))
+      (local.set $tag (i32.and (struct.get $obj $tag (local.get $object)) (i32.const 63)))
+      (local.set $sign (struct.get $obj $n (local.get $object)))
+      (if (ref.test (ref $fixnum) (local.get $object))
+        (then
+          (local.set $scalar (struct.get $fixnum $value (ref.cast (ref $fixnum) (local.get $object))))
+          ,(wat-fail-when #@(i32.or (i32.ne (local.get $tag) (i32.const 1))
+            (i32.ne (local.get $sign) (i32.sub (i64.gt_s (local.get $scalar) (i64.const 0))
+              (i64.lt_s (local.get $scalar) (i64.const 0))))) :malformed-form))
+        (else
+          ;; The digit worker assumes a nonempty, normalized magnitude.
+          ;; A Lisp integer tag alone does not establish that storage.
+          (if (i32.eq (local.get $tag) (i32.const 1))
+            (then
+              ,(wat-fail-when #@(i32.and (i32.ne (local.get $sign) (i32.const -1))
+                (i32.ne (local.get $sign) (i32.const 1))) :malformed-form)
+              (local.set $digits (struct.get $obj $digits (local.get $object)))
+              ,(wat-fail-when #@(ref.is_null (local.get $digits)) :malformed-form)
+              (local.set $length (array.len (local.get $digits)))
+              ,(wat-fail-when #@(i32.or (i32.eqz (local.get $length))
+                (i32.gt_u (local.get $length) (i32.const ,(floor #xffffffff 15)))) :malformed-form)
+              ,(wat-fail-when #@(i32.ge_u
+                (i32.sub (array.get $digits (local.get $digits)
+                  (i32.sub (local.get $length) (i32.const 1))) (i32.const 1))
+                (i32.const 32767)) :malformed-form))))))))
+
+(define-runtime-function $require-ash-integer (($operand (ref null any))) (:object)
+  #@(call $validate-bit-integer-layout (local.get $operand))
+  #@(return_call $require-integer (ref.cast (ref null eq) (local.get $operand))))
+
+(defun wat-checked-scalar-shift (value shift result overflow)
+  ;; Both inputs are checked scalar integers. The caller handles identity.
+  ;; Clamp before negating MIN-I64, and reverse left shifts with sign extension
+  ;; so -1 shifted by 63 is accepted while overflowing shifts miss.
+  (wat-fragment
+    #@(if (i64.lt_s (local.get ,shift) (i64.const 0))
+      (then (local.set ,result (i64.shr_s (local.get ,value)
+        (if (result i64) (i64.le_s (local.get ,shift) (i64.const -63))
+          (then (i64.const 63))
+          (else (i64.sub (i64.const 0) (local.get ,shift)))))))
+      (else
+        (br_if ,overflow (i64.ge_u (local.get ,shift) (i64.const 64)))
+        (local.set ,result (i64.shl (local.get ,value) (local.get ,shift)))
+        (br_if ,overflow (i64.ne (local.get ,value)
+          (i64.shr_s (local.get ,result) (local.get ,shift))))))))
+
+(define-runtime-function $ash-native (($x (ref null any)) ($count (ref null any))) (:nullable-object)
+  (:locals ($value :nullable-object) ($amount :nullable-object)
+           ($scalar i64) ($shift i64) ($shifted i64))
+  #@(block $miss
+    (block $foreign (result (ref null any))
+      (local.set $value (br_on_cast_fail $foreign (ref null any) (ref null eq) (local.get $x)))
+      ,(wat-decode-scalar-integer '$value '$scalar '$miss)
+      (local.set $amount (br_on_cast_fail $foreign (ref null any) (ref null eq) (local.get $count)))
+      ,(wat-decode-scalar-integer '$amount '$shift '$miss)
+      (if (i32.or (i64.eqz (local.get $scalar)) (i64.eqz (local.get $shift)))
+        (then (return (local.get $value))))
+      (block $overflow
+        ,(wat-checked-scalar-shift '$scalar '$shift '$shifted '$overflow)
+        (return_call $int64 (local.get $shifted)))
+      ;; The digit path reads the stored integer signs after scalar overflow.
+      (call $validate-bit-integer-layout (local.get $value))
+      (call $validate-bit-integer-layout (local.get $amount))
+      (return_call $ash-integer-digits
+        (ref.as_non_null (local.get $value)) (ref.as_non_null (local.get $amount))))
+    (drop))
+  ;; Validate the physical shape and Lisp type of X before COUNT.
+  #@(return_call $ash-integer-digits
+    (call $require-ash-integer (local.get $x)) (call $require-ash-integer (local.get $count))))
 
 (define-runtime-function $integer-bit-measure (($x :nullable-object) ($lengthp i32)) (:nullable-object)
   (:locals ($value :object) ($i i32) ($v i32) ($digit i32) ($borrow i32) ($result i32) ($scalar i64))
@@ -310,5 +377,7 @@
   #@(local.get $result))
 
 (define-runtime-section integer-bits-runtime-wat ()
-  ($require-integer-cl) ($require-integer) ($ash-native) ($integer-bit-measure) ($logbitp-native-cl) ($logbitp-native)
+  ($require-integer-cl) ($require-integer) ($ash-integer-digits)
+  ($validate-bit-integer-layout) ($require-ash-integer) ($ash-native)
+  ($integer-bit-measure) ($logbitp-native-cl) ($logbitp-native)
   ($boole-word) ($boole64-word) ($boole-native) ($binary-byte-operation) ($integer-bits-apply) ($fixed-scalar-integer-bits))

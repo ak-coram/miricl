@@ -977,6 +977,40 @@
     (call $native-checked-value (local.get $function))
     ,(native-object '(call $native-ingress-arguments (local.get $args))))))
 
+(defun native-primary-call5-packet-wat ()
+  (wat-fragment #@(array.new_fixed $objects 5
+    (local.get $a) (local.get $b) (local.get $c) (local.get $d) (local.get $e))))
+
+(define-runtime-function $native-primary-call5-ready
+    (($name :nullable-object) ($a :nullable-object) ($b :nullable-object)
+     ($c :nullable-object) ($d :nullable-object) ($e :nullable-object)) (externref)
+  (:locals ($result :nullable-object))
+  #@(local.set $result
+    (call $apply0-ready (local.get $name) ,(native-primary-call5-packet-wat)))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
+(define-runtime-function $native-primary-call5
+    (($function externref) ($first externref) ($second externref) ($third externref)
+     ($fourth externref) ($fifth externref)) (externref)
+  (:export-raw "native-primary-call5")
+  (:locals ($name :nullable-object) ($a :nullable-object) ($b :nullable-object)
+           ($c :nullable-object) ($d :nullable-object) ($e :nullable-object))
+  #@(local.set $name (call $native-checked-value (local.get $function)))
+  #@(local.set $a (call $native-checked-value (local.get $first)))
+  #@(local.set $b (call $native-checked-value (local.get $second)))
+  #@(local.set $c (call $native-checked-value (local.get $third)))
+  #@(local.set $d (call $native-checked-value (local.get $fourth)))
+  #@(local.set $e (call $native-checked-value (local.get $fifth)))
+  ;; Match APPLY0's entry decision before the checkpoint. The debugging path
+  ;; manages checkpoint suppression and restoration inside ordinary application.
+  #@(if (global.get $debug-evaluating)
+    (then (return (extern.convert_any
+      (call $native-primary-apply (local.get $name) ,(native-primary-call5-packet-wat))))))
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(return_call $native-primary-call5-ready
+    (local.get $name) (local.get $a) (local.get $b) (local.get $c) (local.get $d) (local.get $e)))
+
 (define-runtime-function $native-return (($values externref)) (externref)
   (:export-raw "native-return")
   #@(extern.convert_any (call $return-values ,(native-object '(local.get $values)))))
@@ -1181,7 +1215,7 @@
       (if (i64.eq (i64.shr_s (local.get $computed) (local.get $right)) (local.get $left))
         (then (return (extern.convert_any (call $int64 (local.get $computed))))))))
   ;; Positive shifts that overflow i64 use arbitrary-precision arithmetic.
-  #@(extern.convert_any (call $ash-native
+  #@(extern.convert_any (call $ash-integer-digits
     (call $int64 (local.get $left)) (call $int64 (local.get $right)))))
 (define-native-integer-entry $native-add-int64-checked "native-add-int64-checked" + i64.add $box-int64 t)
 (define-native-integer-entry $native-sub-int64-checked "native-sub-int64-checked" - i64.sub $box-int64 t)
@@ -1547,7 +1581,7 @@
 (define-runtime-function $native-ash-general-inline (($value externref) ($count externref)) (externref)
   (:export-raw "native-ash-general-inline")
   #@(extern.convert_any (call $ash-native
-    ,(native-object '(local.get $value)) ,(native-object '(local.get $count)))))
+    (any.convert_extern (local.get $value)) (any.convert_extern (local.get $count)))))
 
 (define-runtime-function $native-logand-general-inline (($left externref) ($right externref)) (externref)
   (:export-raw "native-logand-general-inline")
@@ -2140,7 +2174,7 @@
     (return (local.get $body)))
   #@(ref.null eq))
 
-(defun native-symbol-fixed-call-wat (arity)
+(defun native-symbol-fixed-call-wat (arity &optional (function-object (native-object '(local.get $function))))
   ;; Keep actual-function and builtin fast paths ahead of this speculative
   ;; fallback. DIRECT-RESULT is scratch until either this hit or ordinary APPLY.
   (let ((arguments (case arity (1 '((local.get $a)))
@@ -2149,14 +2183,16 @@
                      (4 (mapcar (lambda (name) (native-object `(local.get ,name))) '($a $b $c $d))))))
     (wat-fragment #@(block $symbol-miss
       (local.set $direct-result (call $native-symbol-fixed-function
-        ,(native-object '(local.get $function)) (i32.const ,arity)))
+        ,function-object (i32.const ,arity)))
       (br_if $symbol-miss (ref.is_null (local.get $direct-result)))
       (return_call $native-direct-apply-ready
         (ref.cast (ref $native-function) (local.get $direct-result))
         ,@(loop for index below 4 collect (if (< index arity) (nth index arguments) '(ref.null eq)))
         (i32.const 1))))))
 
-(defun native-generic-fast-call-wat (arity &optional ready)
+(defun native-generic-fast-call-wat (arity &optional ready
+                                    (function-object '(call $native-checked-value (local.get $function)))
+                                    arguments)
   (let* ((names (case arity (0 nil) (1 '($value)) (2 '($left $right))
                          (3 '($a $b $c)) (4 '($a $b $c $d))))
          (id (if (zerop arity) `(call $native-builtin-id ,(native-object '(local.get $function))) '(local.get $id)))
@@ -2166,9 +2202,10 @@
       (then
         ,@(unless ready '((if (global.get $thread-active) (then (call $thread-checkpoint)))))
         (local.set $direct-result (call $native-fixed-apply-ready
-          (call $native-checked-value (local.get $function))
+          ,function-object
           ,@(loop for index below 4 collect (if (< index arity)
-               `(call $native-checked-value (local.get ,(nth index names))) '(ref.null eq)))
+               (if arguments (nth index arguments)
+                   `(call $native-checked-value (local.get ,(nth index names)))) '(ref.null eq)))
           (i32.const ,arity)))
         (call $clear-values)
         (return (extern.convert_any (local.get $direct-result))))))))
@@ -2259,12 +2296,14 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (%%array-adjust-metadata 3 $array-adjust-metadata-value)
     (%%slot-operation 4 $slot-operation-fixed)))
 
-(defun native-fixed-primitive-call-wat (arity)
+(defun native-fixed-primitive-call-wat (arity &optional arguments)
   ;; NATIVE-BUILTIN-ID reads the actual function object's code, independently
   ;; of its current name. Interpreted/native closures (code zero), replacements
   ;; and other arities continue through ordinary APPLY, including its errors.
-  (let ((arguments (ecase arity (1 '($value)) (2 '($left $right))
-                               (3 '($a $b $c)) (4 '($a $b $c $d))))
+  (let ((operands (or arguments
+                      (mapcar (lambda (name) (native-object `(local.get ,name)))
+                        (ecase arity (1 '($value)) (2 '($left $right))
+                                     (3 '($a $b $c)) (4 '($a $b $c $d))))))
         (id '(local.get $id)))
     (runtime-wat-forms
       (loop for (name count target) in (native-fixed-primitive-entries)
@@ -2274,7 +2313,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
                                    (if (= arity 3) (- -1 code) (1- code)))))
            (then
              (local.set $direct-result
-               (call ,target ,@(mapcar (lambda (name) (native-object `(local.get ,name))) arguments)))
+               (call ,target ,@operands))
              ;; These entry points can call CL workers and leave transient
              ;; multiple values. This ABI promises only the primary value.
              (call $clear-values)
@@ -2645,12 +2684,19 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
 (define-runtime-function $native-call2
     (($function externref) ($left externref) ($right externref)) (externref)
   (:export-raw "native-call2")
+  #@(return_call $native-call2-checked
+    (call $native-checked-value (local.get $function))
+    (call $native-checked-value (local.get $left))
+    (call $native-checked-value (local.get $right))))
+
+;; Each entry has checked the Lisp-value shape of all three references.
+;; The actual callable's ID is read before polling, while dispatch observes
+;; live bindings, frames and array storage after the checkpoint.
+(define-runtime-function $native-call2-checked
+    (($function-object :nullable-object) ($a :nullable-object) ($b :nullable-object)) (externref)
   (:locals ($direct-result :nullable-object) ($hit i32) ($id i32) ($at i32) ($bt i32) ($index i32) ($cmp i32)
-           ($a :nullable-object) ($b :nullable-object) ($cell :nullable-object) ($vector (ref $array))
-           ($small-left (ref i31)) ($small-right (ref i31)) ($function-object :nullable-object))
-  #@(local.set $function-object (call $native-checked-value (local.get $function)))
-  #@(local.set $a (call $native-checked-value (local.get $left)))
-  #@(local.set $b (call $native-checked-value (local.get $right)))
+           ($cell :nullable-object) ($vector (ref $array))
+           ($small-left (ref i31)) ($small-right (ref i31)))
   #@(local.set $id (call $native-builtin-id (local.get $function-object)))
   (native-small-number-call-wat)
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
@@ -2733,7 +2779,8 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
       #@(if (i32.and (i32.le_u (i32.sub (local.get $at) (i32.const 1)) (i32.const 3))
                      (i32.le_u (i32.sub (local.get $bt) (i32.const 1)) (i32.const 3)))
         (then
-          (call $native-rounding-primary-inline (local.get $left) (local.get $right)
+          (call $native-rounding-primary-inline
+            (extern.convert_any (local.get $a)) (extern.convert_any (local.get $b))
             (i32.sub (local.get $id) (i32.const ,(runtime-symbol-id 'floor))))
           (call $clear-values)
           (return))))
@@ -2759,12 +2806,12 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
               (if (i32.lt_u (local.get $index) (array.len (call $vector-data (local.get $a))))
                 (then (return (extern.convert_any (array.get $objects
                   (call $vector-data (local.get $a)) (local.get $index))))))))))))
-  #@(if (ref.test (ref $direct-function) ,(native-object '(local.get $function)))
+  #@(if (ref.test (ref $direct-function) (local.get $function-object))
     (then (if (i32.eq (struct.get $direct-function $mode
-        (ref.cast (ref $direct-function) ,(native-object '(local.get $function)))) (i32.const 1))
+        (ref.cast (ref $direct-function) (local.get $function-object))) (i32.const 1))
       (then (return (extern.convert_any (call $structure-access (local.get $b)
-        (struct.get $direct-function $owner (ref.cast (ref $direct-function) ,(native-object '(local.get $function))))
-        (struct.get $direct-function $slot (ref.cast (ref $direct-function) ,(native-object '(local.get $function))))
+        (struct.get $direct-function $owner (ref.cast (ref $direct-function) (local.get $function-object)))
+        (struct.get $direct-function $slot (ref.cast (ref $direct-function) (local.get $function-object)))
         (local.get $a) (i32.const 1))))))))
   ;; Specialized rank-one arrays retain their live dimension and backing.
   ;; SVREF's SIMPLE-VECTOR contract stays on its ordinary path.
@@ -2781,11 +2828,11 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
             (local.get $index) (ref.null eq) (i32.const 0)))
           (call $clear-values)
           (return (extern.convert_any (local.get $direct-result)))))))
-  (native-fixed-primitive-call-wat 2)
+  (native-fixed-primitive-call-wat 2 '((local.get $a) (local.get $b)))
   (native-fixed-integer-bits-wat 2)
-  (native-generic-fast-call-wat 2 t)
-  (native-symbol-fixed-call-wat 2)
-  #@(extern.convert_any (call $native-primary-apply ,(native-object '(local.get $function))
+  (native-generic-fast-call-wat 2 t '(local.get $function-object) '((local.get $a) (local.get $b)))
+  (native-symbol-fixed-call-wat 2 '(local.get $function-object))
+  #@(extern.convert_any (call $native-primary-apply (local.get $function-object)
     ,(native-fixed-fallback-arguments-wat 2))))
 
 (define-runtime-function $native-call3
@@ -2959,6 +3006,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
 (define-runtime-function $native-standard-call2
     (($code i32) ($left externref) ($right externref)) (externref)
   (:export-raw "native-standard-call2")
+  (:locals ($a :nullable-object) ($b :nullable-object))
   ;; The fixed standard identity and actual immediate operands establish both
   ;; the operation and valid Lisp input without repeating callable ingress.
   ;; Keep the ordinary checkpoint before arithmetic and preserve promotion.
@@ -3001,11 +3049,143 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
             (any.convert_extern (local.get $left)))))
           (i64.extend_i32_s (i31.get_s (ref.cast (ref i31)
             (any.convert_extern (local.get $right)))))))))))
-  #@(drop (call $native-checked-value (local.get $left)))
-  #@(drop (call $native-checked-value (local.get $right)))
-  #@(return_call $native-call2
-    (extern.convert_any (call $standard-function-code (local.get $code)))
-    (local.get $left) (local.get $right)))
+  #@(local.set $a (call $native-checked-value (local.get $left)))
+  #@(local.set $b (call $native-checked-value (local.get $right)))
+  ;; Lookup validates the signed identity. The selected slot still needs
+  ;; the same Lisp-value shape check as a raw callable argument.
+  #@(return_call $native-call2-checked
+    (call $native-checked-value (extern.convert_any (call $standard-function-code (local.get $code))))
+    (local.get $a) (local.get $b)))
+
+(defun native-low-field-binding-wat (name)
+  (let ((id (runtime-symbol-id name)))
+    (runtime-wat-sequence
+      #@(local.set $binding (array.get $objects (local.get $bindings) (i32.const ,id)))
+      #@(br_if $miss (i32.eqz (ref.test (ref $obj) (local.get $binding))))
+      #@(br_if $miss (i32.eqz (ref.eq (local.get $binding)
+        (array.get $objects (global.get $canonical-builtin-functions) (i32.const ,(* 2 id))))))
+      #@(br_if $miss (i32.ne (call $native-builtin-id (local.get $binding)) (i32.const ,id))))))
+
+(defun native-low-field-operand-wat (raw result)
+  (runtime-wat-sequence
+    #@(local.set $operand (any.convert_extern (local.get ,raw)))
+    #@(br_if $miss (i32.eqz (ref.test (ref null eq) (local.get $operand))))
+    #@(local.set $object (ref.cast (ref null eq) (local.get $operand)))
+    (wat-decode-scalar-integer '$object result '$miss)))
+
+(defun native-low-field-guards-wat (&optional (check-width t))
+  (runtime-wat-sequence
+    (if check-width #@(br_if $miss (i32.gt_u (local.get $width) (i32.const 63))) "")
+    #@(br_if $miss (global.get $debug-evaluating))
+    #@(local.set $bindings (struct.get $symbol-index $dense (global.get $standard-function-bindings)))
+    (native-low-field-binding-wat 'byte)
+    (native-low-field-binding-wat 'ldb)))
+
+(defun native-low-field-commit-wat (value)
+  ;; BYTE and LDB each visit CALL2 and fixed APPLY. The admitted arithmetic
+  ;; adds no checkpoint. Commit only if none of the four can service the queue.
+  (runtime-wat-sequence
+    (wat-fragment (miricl-cross::thread-work-gate-wat
+      '(br_if $miss (i32.or (i32.le_s (global.get $thread-budget) (i32.const 4))
+                           (i32.eqz (ref.is_null (global.get $thread-pending)))))
+      '(global.set $thread-budget (i32.sub (global.get $thread-budget) (i32.const 4)))))
+    #@(call $clear-values)
+    #@(return (extern.convert_any (call $int64 (i64.and (local.get ,value)
+      (i64.sub (i64.shl (i64.const 1) (i64.extend_i32_u (local.get $width))) (i64.const 1))))))))
+
+(defun native-low-field-fallback-wat (arithmetic)
+  ;; Resolve BYTE first, then LDB after the checked arithmetic. BYTE can
+  ;; service pending work, so the second call must do its own live lookup.
+  (runtime-wat-sequence
+    #@(local.set $spec (call $native-standard-call2 (i32.const ,(1+ (runtime-symbol-id 'byte)))
+      (extern.convert_any (call $int (local.get $width))) (extern.convert_any (ref.i31 (i32.const 0)))))
+    arithmetic
+    #@(return_call $native-standard-call2
+      (i32.const ,(1+ (runtime-symbol-id 'ldb))) (local.get $spec) (local.get $result))))
+
+(define-runtime-function $validate-low-field-box (($operand (ref null any))) ()
+  #@(block $other (result (ref null any))
+    ,(wat-fail-when
+      #@(i32.ne (i32.and (struct.get $obj $tag
+        (br_on_cast_fail $other (ref null any) (ref $fixnum) (local.get $operand)))
+        (i32.const 63)) (i32.const 1)) :malformed-form)
+    (return))
+  #@(drop))
+
+(define-runtime-function $native-low-field-add
+    (($width i32) ($raw-left externref) ($raw-right externref)) (externref)
+  (:export-raw "native-low-field-add")
+  (:locals ($bindings (ref $objects)) ($binding :nullable-object)
+           ($operand (ref null any)) ($object :nullable-object)
+           ($left i64) ($right i64) ($computed i64)
+           ($spec externref) ($result externref))
+  #@(block $miss
+    ,(native-low-field-guards-wat)
+    ,(native-low-field-operand-wat '$raw-left '$left)
+    ,(native-low-field-operand-wat '$raw-right '$right)
+    (local.set $computed (i64.add (local.get $left) (local.get $right)))
+    ;; The ordinary signed overflow path promotes and uses framed LDB.
+    (br_if $miss (i32.eqz ,(native-integer-fit-wat '+)))
+    ,(native-low-field-commit-wat '$computed))
+  ;; The raw ABI also admits foreign references. Check boxed tags after
+  ;; BYTE and leave left-before-right argument errors to the ordinary ADD.
+  (native-low-field-fallback-wat
+    (runtime-wat-sequence
+      #@(local.set $operand (any.convert_extern (local.get $raw-left)))
+      #@(call $validate-low-field-box (local.get $operand))
+      #@(if (i32.or (ref.test (ref i31) (local.get $operand))
+                    (ref.test (ref $fixnum) (local.get $operand)))
+        (then (call $validate-low-field-box (any.convert_extern (local.get $raw-right)))))
+      #@(local.set $result (call $native-add-integer (local.get $raw-left) (local.get $raw-right))))))
+
+(define-runtime-function $native-low-field-ash
+    (($width i32) ($raw-value externref) ($raw-count externref)) (externref)
+  (:export-raw "native-low-field-ash")
+  (:locals ($bindings (ref $objects)) ($binding :nullable-object)
+           ($operand (ref null any)) ($object :nullable-object)
+           ($value i64) ($shift i64) ($shifted i64)
+           ($spec externref) ($result externref))
+  #@(block $miss
+    ,(native-low-field-guards-wat)
+    ,(native-low-field-operand-wat '$raw-value '$value)
+    ,(native-low-field-operand-wat '$raw-count '$shift)
+    ;; Even width zero checks both operands and requires the exact signed
+    ;; intermediate. Overflow and wide operands retain general ASH behavior.
+    (local.set $shifted (local.get $value))
+    (if (i32.and (i64.ne (local.get $value) (i64.const 0))
+                 (i64.ne (local.get $shift) (i64.const 0)))
+      (then ,(wat-checked-scalar-shift '$value '$shift '$shifted '$miss)))
+    ,(native-low-field-commit-wat '$shifted))
+  (native-low-field-fallback-wat
+    #@(local.set $result (call $native-ash-general-inline (local.get $raw-value) (local.get $raw-count)))))
+
+(define-runtime-function $native-literal-byte-extract
+    (($width i32) ($position i32) ($raw-value externref)) (externref)
+  (:export-raw "native-literal-byte-extract")
+  (:locals ($bindings (ref $objects)) ($binding :nullable-object)
+           ($operand (ref null any)) ($object :nullable-object)
+           ($value i64) ($shifted i64) ($spec externref))
+  ;; The unsigned bounds also reject negative raw metadata before narrowing.
+  (wat-fail-when #@(i32.or
+    (i32.gt_u (local.get $width) (i32.const 63))
+    (i32.gt_u (local.get $position) (i32.const 1073741823))) :malformed-form)
+  #@(block $miss
+    ,(native-low-field-guards-wat nil)
+    ,(native-low-field-operand-wat '$raw-value '$value)
+    ;; Shifting by 63 produces the sign bits for every higher position.
+    (local.set $shifted
+      (i64.shr_s (local.get $value) (i64.extend_i32_u
+        (select (local.get $position) (i32.const 63)
+          (i32.lt_u (local.get $position) (i32.const 63))))))
+    ,(native-low-field-commit-wat '$shifted))
+  ;; The probe has left the checkpoint budget and Lisp values alone.
+  ;; Resolve LDB after BYTE returns, with LDB's ordinary checked ingress.
+  #@(local.set $spec (call $native-standard-call2
+    (i32.const ,(1+ (runtime-symbol-id 'byte)))
+    (extern.convert_any (ref.i31 (local.get $width)))
+    (extern.convert_any (ref.i31 (local.get $position)))))
+  #@(return_call $native-standard-call2 (i32.const ,(1+ (runtime-symbol-id 'ldb)))
+    (local.get $spec) (local.get $raw-value)))
 
 (define-runtime-function $native-standard-call3
     (($code i32) ($a externref) ($b externref) ($c externref)) (externref)
@@ -3143,7 +3323,8 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-control) ($native-restart-signal) ($native-throw)
   ($native-global-read) ($native-global-write) ($native-function-reference) ($native-standard-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
   ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-write)
-  ($native-call) ($native-primary-call) ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
+  ($native-call) ($native-primary-call) ($native-primary-call5-ready) ($native-primary-call5)
+  ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1) ($native-return2) ($native-return3)
   ($native-return-counted8) ($native-check-result-spine) ($native-captured-result-ref) ($native-captured-extra-list)
   ($native-int64) ($native-unbox-int64) ($native-check-int64) ($native-add-int64) ($native-sub-int64) ($native-mul-int64)
@@ -3181,8 +3362,9 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
   ($native-symbol-fixed-function) ($native-fixed-apply-ready) ($native-fixed-call)
   ($native-call-values1-ready) ($native-capture-result) ($native-call-values1) ($native-call-captured1)
-  ($native-call0) ($native-call1) ($native-call2) ($native-call3) ($native-call4)
+  ($native-call0) ($native-call1) ($native-call2) ($native-call2-checked) ($native-call3) ($native-call4)
   ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
+  ($validate-low-field-box) ($native-low-field-add) ($native-low-field-ash) ($native-literal-byte-extract)
   ($native-aref-scalar-index) ($native-aref-scalar) ($native-aref-int64) ($native-aref-i31-index)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)
   ($native-generic-fixed-tail-call)

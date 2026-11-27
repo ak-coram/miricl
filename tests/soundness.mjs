@@ -259,6 +259,19 @@ try {
         (equal (multiple-value-list (probe class))
                (multiple-value-list (miricl-mop:class-finalized-p class))))))`);
   console.log('Soundness: unary MOP callbacks retain next methods, full values, live bindings and nonlocal cleanup.');
+  // A native dynamic call with five operands exercises the general argument
+  // transport. A late scalar miss must leave each operand for ordinary dispatch.
+  check(`(let ((invoke (compile-native '(lambda (function a b c d e)
+                   (declare (optimize (safety 1) (debug 0)))
+                   (funcall function a b c d e))))
+               (wide (ash 1 80)))
+    (and (equal (multiple-value-list (funcall invoke #'logeqv 1 2 4 8 wide))
+                (list (+ wide 15)))
+         (handler-case (progn (funcall invoke #'logand 0 2 4 8 :last) nil)
+           (type-error (condition)
+             (and (eq (type-error-datum condition) :last)
+                  (eq (type-error-expected-type condition) 'integer))))
+         (equal (multiple-value-list (funcall invoke #'logeqv 1 2 4 8 16)) '(31))))`);
   // The private fixed-call ABI must recognize saved function objects, including
   // after rebinding their names, and retain the ordinary checked boundary.
   check(`(let* ((tail-name (compiler-primitive 10 1 "%%NTHCDR"))
@@ -1927,6 +1940,17 @@ try {
     rejectPacketOperation(() => vm.vm['native-check-int64'](invalid));
   }
   assert.equal(vm.vm['native-check-int64'](freshOne), freshOne);
+  // Keep an actual scalar box while giving it a non-integer object header.
+  const malformedIntegerFields = integerFields.slice();
+  malformedIntegerFields[0] = coreFields(pair).values[0];
+  const malformedInteger = vm.vm[`core-new:${integerType}`](
+    ...immutableIntegerFields.map(index => malformedIntegerFields[index]));
+  vm.vm[`core-set:${integerType}`](malformedInteger,
+    ...mutableIntegerFields.map(index => malformedIntegerFields[index]));
+  const lowFieldAdd = vm.vm['native-low-field-add'];
+  rejectPacketOperation(() => lowFieldAdd(3, malformedInteger, freshOne));
+  rejectPacketOperation(() => lowFieldAdd(3, freshOne, malformedInteger));
+  assert.equal(vm.javascript.integer(lowFieldAdd(3, freshOne, byteInput)), 7n);
   for (const [name, expected] of [['add', 2n], ['sub', 0n], ['mul', 1n]]) {
     const operation = vm.vm[`native-${name}-integer`];
     assert.equal(operation(freshOne, freshOne), freshInteger(expected),
@@ -3630,6 +3654,25 @@ try {
         (let* ((unit (compile-to-hir source))
                (facts (hir-result-arities-checked unit)))
           (eql expected (gethash (first (hir-unit-functions unit)) facts)))))`);
+  // A private literal bytespec bounds a successful field result. An escaped
+  // bytespec and a dynamic width keep the ordinary full-width path.
+  check(`(let ((compare (compile-native '(lambda (x)
+                    (declare (optimize (safety 1) (debug 1)))
+                    (< (ldb (byte 32 0) x) #x80000000))))
+               (dynamic (compile-native '(lambda (width x)
+                    (declare (optimize (safety 1) (debug 1)))
+                    (< (ldb (byte width 0) x) #x80000000)))))
+    (and (hir-type-proves-p
+           (soundness-proven-result '(lambda (x) (ldb (byte 32 0) x))) '(unsigned-byte 32))
+         (not (hir-type-proves-p
+           (soundness-proven-result '(lambda (x observe)
+                (let ((spec (byte 32 0))) (funcall observe spec) (ldb spec x)))) '(unsigned-byte 32)))
+         (equal (multiple-value-list (funcall compare #x7fffffff)) '(t))
+         (equal (multiple-value-list (funcall compare #x80000000)) '(nil))
+         (equal (multiple-value-list (funcall compare (+ (ash 1 100) 1))) '(t))
+         (equal (multiple-value-list (funcall dynamic 100 (ash 1 99))) '(nil))
+         (handler-case (progn (funcall compare :invalid) nil) (type-error () t))
+         (equal (multiple-value-list (funcall compare -1)) '(nil))))`);
   // Canonical numeric predicates refine unbounded and bignum integer ranges;
   // their truth facts must not depend on a scalar Wasm representation.
   for (const type of ['integer', '(integer -1267650600228229401496703205376 1267650600228229401496703205376)']) {
@@ -4077,6 +4120,60 @@ try {
         '(${expected} :extra))
         (equal effects '(:right :left))))`);
   }
+  // The compound shift and field extraction must preserve both operand
+  // snapshots and the field across subsequent calls and value transport.
+  check(`(let ((calls 0)
+        (function (compile-native '(lambda (value count suffix)
+          (declare (optimize (safety 1) (debug 0)))
+          (let ((field (ldb (byte 63 0) (ash value count))))
+            (funcall suffix field value count field))))))
+      (flet ((record (field value count again)
+               (incf calls)
+               (values field value count again)))
+        (and (equal (multiple-value-list (funcall function 2147483649 1 #'record))
+                    '(4294967298 2147483649 1 4294967298))
+             (handler-case (progn (funcall function :value :count #'record) nil)
+               (type-error (condition) (eq (type-error-datum condition) :value)))
+             (handler-case (progn (funcall function 0 :count #'record) nil)
+               (type-error (condition) (eq (type-error-datum condition) :count)))
+             (equal (multiple-value-list (funcall function 1 63 #'record))
+                    '(0 1 63 0))
+             (= calls 2))))`);
+  // A private literal BYTE can feed LDB without changing suffix values or
+  // the checked behavior of a discarded extraction.
+  check(`(let ((field (compile-native '(lambda (value)
+                 (declare (optimize (debug 0)))
+                 (values (ldb (byte 13 64) value) value))))
+               (discard (compile-native '(lambda (value)
+                 (declare (optimize (debug 0)))
+                 (ldb (byte 0 17) value)
+                 :done))))
+      (and (equal (multiple-value-list (funcall field -1)) '(8191 -1))
+           (equal (multiple-value-list (funcall field 9223372036854775807))
+                  '(0 9223372036854775807))
+           (equal (multiple-value-list (funcall field 115292150460684697600))
+                  '(6 115292150460684697600))
+           (handler-case (progn (funcall discard :wrong-type) nil)
+             (type-error (condition) (eq (type-error-datum condition) :wrong-type)))
+           (eq (funcall discard 17) :done)))`);
+  // The shared deposit worker preserves the order of checked errors and
+  // leaves the native caller usable after a miss, including at width zero.
+  for (const [operation, expected] of [['dpb', 42333], ['deposit-field', 93]]) {
+    check(`(let ((deposit (compile-native '(lambda (replacement spec destination)
+                   (${operation} (values replacement :extra) spec destination)))))
+      (flet ((reject (replacement spec destination datum expected-type)
+               (handler-case (progn (funcall deposit replacement spec destination) nil)
+                 (type-error (condition)
+                   (and (eq (type-error-datum condition) datum)
+                        (eq (type-error-expected-type condition) expected-type))))))
+        (and (reject :replacement :spec :destination :destination 'integer)
+             (reject :replacement :spec 0 :replacement 'integer)
+             (reject 1 :spec 0 :spec 'list)
+             (reject 1 nil 0 nil 'unsigned-byte)
+             (reject :replacement (byte 0 7) 0 :replacement 'integer)
+             (equal (multiple-value-list (funcall deposit 165 (byte 8 8) 93))
+                    '(${expected})))))`);
+  }
   // Non-NIL proofs share the target's numeric/array rules. General sequences
   // and symbols can contain NIL; an opaque restriction supplies no new fact.
   check(`(and
@@ -4518,6 +4615,35 @@ try {
                  (equal (multiple-value-list (funcall function 1)) '(:replacement :extra))) callers)
             (handler-case (progn (funcall ordinary-apply 2) nil)
               (type-error (condition) (eq (type-error-datum condition) :replacement))))))))`);
+  // A named call saves its callable before operand effects and still uses
+  // the live definition on the next invocation. Exercise primary cleanup
+  // for a callee returning secondary values and for a callee returning none.
+  check(`(let* ((name 'soundness-shadow::five-primary)
+      (original (lambda (a b c d e) (values (list a b c d e) :secondary)))
+      (replacement (lambda (a b c d e) (declare (ignore a b c d e)) (values)))
+      (events nil))
+    (unwind-protect
+         (progn
+           (setf (fdefinition name) original)
+           (let ((caller (compile-native '(lambda (a b c d e observe)
+                    (declare (optimize (space 2) (speed 1) (safety 1) (debug 0)))
+                    (let ((result (soundness-shadow::five-primary
+                                    (progn (funcall observe :a) a)
+                                    (progn (funcall observe :b) b)
+                                    (progn (funcall observe :c) c)
+                                    (progn (funcall observe :d) d)
+                                    (progn (funcall observe :e) e))))
+                      (values result))))))
+             (and (equal (multiple-value-list
+                           (funcall caller 1 2 3 4 5
+                             (lambda (event)
+                               (push event events)
+                               (when (eq event :a) (setf (fdefinition name) replacement)))))
+                         '((1 2 3 4 5)))
+                  (equal (reverse events) '(:a :b :c :d :e))
+                  (equal (multiple-value-list (funcall caller 1 2 3 4 5 #'identity))
+                         '(nil)))))
+      (fmakunbound name)))`);
   // Exercise both fixed and packet argument transport with fresh standard LIST
   // results, primary argument values, and observable left-to-right effects.
   for (const count of [9, 129]) {

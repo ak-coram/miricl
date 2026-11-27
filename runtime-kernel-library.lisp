@@ -10,7 +10,7 @@
            #:vector-list-copy #:reverse-simple-vector-in-place #:fill-vector-from-list
            #:pair-lists-onto #:sequence-key #:reduce-pair #:ordering-predicate #:merge-list-runs
            #:require-list-value #:callable-value #:put-property-box #:remove-property-box
-           #:byte-spec-component #:natural-count-value
+           #:natural-count-value
            #:read-list-path #:write-list-path #:pop-argument-box #:bounded-index-value
            #:check-keyword-pairs #:list-cursor-buffer
            #:property-value #:nthcdr-general #:public-nth-value #:check-generic-arguments
@@ -318,18 +318,6 @@ result in bit 4. Bounds and callable definitions are validated before entry."
               (if (minusp object) (error 'type-error :datum object :expected-type 'unsigned-byte)
                   (if (> object limit) limit object))
               (error 'type-error :datum object :expected-type 'unsigned-byte))))
-
-(defun byte-spec-component (spec position-p)
-  "Validate both components in order and return the original size or position."
-  (declare (optimize (safety 0) (debug 0)) (inline checked-car checked-cdr))
-  (values (let* ((size (checked-car spec)) (position (checked-cdr spec)))
-            (if (integerp size)
-                (if (minusp size) (error 'type-error :datum size :expected-type 'unsigned-byte))
-                (error 'type-error :datum size :expected-type 'unsigned-byte))
-            (if (integerp position)
-                (if (minusp position) (error 'type-error :datum position :expected-type 'unsigned-byte))
-                (error 'type-error :datum position :expected-type 'unsigned-byte))
-            (if position-p position size))))
 
 (defun pair-lists-onto (keys data alist)
   "Pair equal-length proper lists in their input order, sharing ALIST."

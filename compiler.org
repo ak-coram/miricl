@@ -194,6 +194,13 @@ excludes exceptional entries, and uses the continuing counter range only
 for reads that precede its store. Unknown ranges and exhausted analyses
 leave the ordinary arithmetic and overflow promotion available.
 
+A successful LDB call has a bounded unsigned result when its bytespec
+comes from a directly called BYTE with a small literal width and position
+zero. A bounded audit requires each primary-value forwarding step to stay
+in the same block and have only its expected use. The calls retain their
+entry checks and polling. Scalar consumers use the interval with the
+ordinary checked producer and the full scalar integer representation.
+
 Source-owned sealed modules can propagate executable argument facts through
 audited lexical function cells. The audit identifies the actual initializer
 and every read, and requires used snapshots to feed known calls directly.
@@ -299,6 +306,22 @@ physical representation of the selected value. Ordinary REST
 bindings materialize a fresh list where required. Proven private
 observations may use the packet.
 
+An ordinary non-tail named call with five operands can pass its saved
+callable and arguments as boxed references to the primary-result adapter.
+The call must have primary or discard demand and no full-group consumer.
+The emitter checks that each forwarded read and the unused environment
+read are boxed locals. Function lookup and operand producers remain at
+their original positions. The adapter checks the incoming references and
+constructs one owned packet for ordinary application, preserving the entry
+checkpoint, debugger dispatch and primary-value cleanup.
+
+Raw and standard two-argument native calls share an internal dispatch
+entry for references whose Lisp-value shape has been checked. The raw
+entry checks the callable before the operands. The standard fallback
+checks its operands before resolving the signed identity and checking
+the selected callable. Dispatch reads the callable's builtin ID before
+the checkpoint and observes live bindings and storage after it.
+
 Native, HIR and source references share a checked resolver for live
 function bindings, including bounded SETF names. Each mode retains its
 original lookup point and saved function objects retain identity after
@@ -368,6 +391,33 @@ overflow promotion, general numeric contagion and errors. Native arithmetic
 chains can use raw SSA locals to avoid intermediate boxes. Fresh executable
 range facts can justify checked-policy i32 or i64 lowering, with the
 selected widths based on both operand and result bounds.
+
+The shared ASH worker checks both operands for immediate or boxed scalar
+integer representations. It saturates right shifts through sign extension
+and admits left shifts whose signed reverse shift recovers the operand.
+Zero operands preserve the input value after both operands are checked.
+Other representations and overflowing results use the arbitrary-precision
+worker. On a scalar decode miss, the worker checks each operand's physical
+shape and Lisp type in argument order before accessing integer digits.
+The digit path checks that claimed integer storage has a usable magnitude.
+
+An LDB of a private literal BYTE can use a shared checked runtime entry
+for widths through 63 and positions representable as nonnegative i31
+integers. At position zero, a binary integer sum or general shift can
+also be included. Sum admission probes the terminal result. Shift and
+standalone extraction admission start at a standard LDB in a single
+block and verify the exact uses of intermediate results and their copies
+throughout the block. Only ordinary argument snapshots and effect-free
+forwarding may span the covered calls. Shift and standalone extraction
+keep the LDB result available to subsequent instructions, which can also
+read the original operands.
+
+The runtime checks the live BYTE and LDB bindings, scalar representations,
+debugger state and scheduling state. It extracts the field from a signed scalar
+or exact signed intermediate, including for zero-width fields. When each
+original checkpoint can proceed without service, it charges the corresponding
+work and returns the normalized field. A miss runs the original operations in
+order, including their binding lookups, checks and checkpoints.
 
 A checked argument snapshot can seed an executable fact at the actual
 check. Admission discards tentative checks, facts and consumers together
@@ -580,13 +630,25 @@ the ordinary call checkpoint. MASK-FIELD shifts the extracted bits back
 to their original position. Arbitrary-precision operands and wider fields
 use the exact Common Lisp kernel.
 
-Fixed native calls to BYTE, LDB, LDB-TEST and MASK-FIELD pass both
-operands directly to the workers used by general application. The runtime
-keeps the call and application checkpoints, authenticates the captured
-builtin after both, and uses the ordinary backtrace frame and dynamic
-cleanup even when the worker signals. Debugger evaluation and dispatch
-misses follow general application. MASK-FIELD rereads the bytespec
-position after extraction.
+DPB and DEPOSIT-FIELD share a checked runtime worker inside ordinary
+application. It reads the live bytespec and both scalar integers, then
+updates the selected bits while preserving the destination's sign and
+outside bits. DPB shifts the replacement into place. DEPOSIT-FIELD uses
+the replacement's bits at their original positions. A zero-width field
+returns the validated destination. Wider operands or a field that reaches
+the sign bit use the arbitrary-precision kernel. Fallback validates the
+destination, replacement and bytespec in order. It checks the live byte
+counts again before the kernel reads them after a possible poll.
+
+Fixed native calls to BYTE, LDB, LDB-TEST and MASK-FIELD keep the call
+and application checkpoints and authenticate the captured builtin after
+both. BYTE with immediate nonnegative counts returns a fresh bytespec
+without an application frame. LDB and LDB-TEST share the bounded scalar
+worker and omit the frame when the live bytespec and integer pass its
+checks. These paths return one value and keep ordinary result allocation.
+Input misses and MASK-FIELD use the framed worker with dynamic cleanup.
+MASK-FIELD rereads the bytespec position after extraction. Debugger
+evaluation and dispatch misses follow general application.
 
 Fixed native calls with two or three operands to LOGAND, LOGIOR, LOGXOR
 and LOGEQV share a scalar fold. After the call checkpoint, the runtime
@@ -594,6 +656,13 @@ checks the captured builtin against its canonical identity and accepts
 immediate signed i31 and boxed signed i64 operands. The fold uses signed
 64-bit words and normalizes one result. General application handles
 debugger evaluation, arbitrary-precision operands and type errors.
+
+General application also folds four through eight operands for those
+same builtins when they arrive in a checked, owned argument packet. The
+ordinary application checkpoint and frame precede the canonical identity
+check. Application checks each scalar operand in order and normalizes the
+result once. An active debugger evaluation flag or a failed check sends
+the original arguments through ordinary list conversion and dispatch.
 
 Generic dispatch caches method selection under runtime ownership, with
 checks on the actual discriminator, type and method state, argument
