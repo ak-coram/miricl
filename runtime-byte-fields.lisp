@@ -100,13 +100,13 @@
           (i32.sub (i64.gt_s (local.get ,destination) (i64.const 0))
                    (i64.lt_s (local.get ,destination) (i64.const 0)))))))))
 
-(define-runtime-function $deposit-native
+(define-runtime-function $try-deposit-scalar
     (($new :nullable-object) ($spec :nullable-object) ($x :nullable-object) ($aligned i32)) (:nullable-object)
   (:locals ($value i64) ($replacement i64) ($size i64) ($position i64) ($delta i64)
            ($bytespec (ref $obj)) ($component :nullable-object))
   #@(block $fallback
-    ;; The caller has already selected the operation, validated arity and
-    ;; entered the application frame. A miss leaves the operands untouched.
+    ;; This probe neither polls nor signals. NIL means that the caller still
+    ;; owns the original operands, validation order and application frame.
     ,(wat-decode-deposit-scalar '$x '$value '$fallback)
     ,(wat-decode-deposit-scalar '$new '$replacement '$fallback)
     ;; The numeric subtype must retain its own tag. Ordinary boxed numbers
@@ -137,6 +137,14 @@
         (local.get $position))))
     (if (i64.eqz (local.get $delta)) (then (return (local.get $x))))
     (return_call $int64 (i64.xor (local.get $value) (local.get $delta))))
+  #@(ref.null eq))
+
+(define-runtime-function $deposit-native
+    (($new :nullable-object) ($spec :nullable-object) ($x :nullable-object) ($aligned i32)) (:nullable-object)
+  (:locals ($result :nullable-object))
+  #@(local.set $result (call $try-deposit-scalar
+    (local.get $new) (local.get $spec) (local.get $x) (local.get $aligned)))
+  #@(if (i32.eqz (ref.is_null (local.get $result))) (then (return (local.get $result))))
   #@(local.set $x (call $require-ash-integer (local.get $x)))
   #@(local.set $new (call $require-ash-integer (local.get $new)))
   #@(drop (call $byte-component (local.get $spec) (i32.const 1)))
@@ -148,4 +156,4 @@
 
 (define-runtime-section byte-fields-runtime-wat ()
   ($check-byte-count-layout) ($byte-spec-component) ($byte-component) ($extract-integer-field-cl)
-  ($try-scalar-integer-field) ($ldb-native) ($deposit-native-cl) ($deposit-native))
+  ($try-scalar-integer-field) ($ldb-native) ($deposit-native-cl) ($try-deposit-scalar) ($deposit-native))

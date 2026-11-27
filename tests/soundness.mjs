@@ -1036,11 +1036,14 @@ try {
   const callStandard2 = vm.vm['native-standard-call2'];
   const byteSize = vm.vm['native-int64'](3n), byteInput = vm.vm['native-int64'](14n);
   const byteSpec = callStandard2(canonicalCode('byte'), byteSize, integerOne);
-  const ldbCode = canonicalCode('ldb'), privateArray = packets.empty();
+  const ldbCode = canonicalCode('ldb'), dpbCode = canonicalCode('dpb');
+  const callStandard3 = vm.vm['native-standard-call3'], privateArray = packets.empty();
   for (const [size, position] of [[privateArray, integerOne], [byteSize, privateArray]]) {
     const malformed = vm.vm['native-cons'](size, position);
     rejectPacketOperation(() => callStandard2(ldbCode, malformed, byteInput));
     assert.equal(vm.javascript.integer(callStandard2(ldbCode, byteSpec, byteInput)), 7n);
+    rejectPacketOperation(() => callStandard3(dpbCode, integerOne, malformed, byteInput));
+    assert.equal(vm.javascript.integer(callStandard3(dpbCode, integerOne, byteSpec, byteInput)), 2n);
   }
   console.log('Soundness: canonical standard calls and list paths reject malformed ingress with recovery.');
 
@@ -4160,7 +4163,9 @@ try {
   // leaves the native caller usable after a miss, including at width zero.
   for (const [operation, expected] of [['dpb', 42333], ['deposit-field', 93]]) {
     check(`(let ((deposit (compile-native '(lambda (replacement spec destination)
-                   (${operation} (values replacement :extra) spec destination)))))
+                   (${operation} (values replacement :extra) spec destination))))
+                 (fixed (compile-native '(lambda (replacement spec destination)
+                   (values (${operation} replacement spec destination) :kept)))))
       (flet ((reject (replacement spec destination datum expected-type)
                (handler-case (progn (funcall deposit replacement spec destination) nil)
                  (type-error (condition)
@@ -4172,7 +4177,11 @@ try {
              (reject 1 nil 0 nil 'unsigned-byte)
              (reject :replacement (byte 0 7) 0 :replacement 'integer)
              (equal (multiple-value-list (funcall deposit 165 (byte 8 8) 93))
-                    '(${expected})))))`);
+                    '(${expected}))
+             (equal (multiple-value-list (funcall fixed 165 (byte 8 8) 93))
+                    '(${expected} :kept))
+             (equal (multiple-value-list (funcall fixed 0 (byte 4 60) -1))
+                    '(-17293822569102704641 :kept)))))`);
   }
   // Non-NIL proofs share the target's numeric/array rules. General sequences
   // and symbols can contain NIL; an opaque restriction supplies no new fact.

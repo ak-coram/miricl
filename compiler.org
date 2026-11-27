@@ -630,15 +630,20 @@ the ordinary call checkpoint. MASK-FIELD shifts the extracted bits back
 to their original position. Arbitrary-precision operands and wider fields
 use the exact Common Lisp kernel.
 
-DPB and DEPOSIT-FIELD share a checked runtime worker inside ordinary
-application. It reads the live bytespec and both scalar integers, then
-updates the selected bits while preserving the destination's sign and
-outside bits. DPB shifts the replacement into place. DEPOSIT-FIELD uses
-the replacement's bits at their original positions. A zero-width field
+DPB and DEPOSIT-FIELD share a checked runtime worker. It reads the live
+bytespec and both scalar integers, then updates the selected bits while
+preserving the destination's sign and outside bits. DPB shifts the
+replacement into place. DEPOSIT-FIELD uses the replacement's bits at
+their original positions. A zero-width field
 returns the validated destination. Wider operands or a field that reaches
 the sign bit use the arbitrary-precision kernel. Fallback validates the
 destination, replacement and bytespec in order. It checks the live byte
 counts again before the kernel reads them after a possible poll.
+
+Fixed native calls keep both the call and application checkpoints. After
+both checkpoints, a canonical builtin with admitted scalar operands
+returns one value without allocating an argument list or entering an
+application frame. Other cases use ordinary framed application.
 
 Fixed native calls to BYTE, LDB, LDB-TEST and MASK-FIELD keep the call
 and application checkpoints and authenticate the captured builtin after

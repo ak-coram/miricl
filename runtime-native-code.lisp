@@ -2835,6 +2835,26 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   #@(extern.convert_any (call $native-primary-apply (local.get $function-object)
     ,(native-fixed-fallback-arguments-wat 2))))
 
+(define-runtime-function $fixed-deposit-apply
+    (($function :nullable-object) ($id i32)
+     ($new :nullable-object) ($spec :nullable-object) ($base :nullable-object)) (externref)
+  (:locals ($result :nullable-object))
+  ;; CALL3 has completed its entry checkpoint and selected ordinary APPLY.
+  ;; APPLY0's checkpoint precedes the live bytespec reads and any fast result.
+  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
+  #@(if (i32.and (i32.eqz (global.get $debug-evaluating))
+      (i32.and (ref.eq (local.get $function)
+        (array.get $objects (global.get $canonical-builtin-functions) (i32.shl (local.get $id) (i32.const 1))))
+        (i32.eq (call $native-builtin-id (local.get $function)) (local.get $id))))
+    (then
+      (local.set $result (call $try-deposit-scalar (local.get $new) (local.get $spec)
+        (local.get $base) (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'deposit-field)))))))
+  #@(if (ref.is_null (local.get $result))
+    (then (local.set $result (call $apply0-ready (local.get $function)
+      (call $cons (local.get $new) (call $cons2 (local.get $spec) (local.get $base) (ref.null eq)))))))
+  #@(call $clear-values)
+  #@(extern.convert_any (local.get $result)))
+
 (define-runtime-function $native-call3
     (($function externref) ($a externref) ($b externref) ($c externref)) (externref)
   (:export-raw "native-call3")
@@ -2847,6 +2867,16 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   #@(drop (call $native-checked-value (local.get $c)))
   #@(local.set $id (i32.sub (i32.const -2)
     (call $native-builtin-id (local.get $function-object))))
+  (wat-integer-branch '(local.get $id)
+    (mapcar (lambda (name) (- -2 (runtime-symbol-id name))) '(dpb deposit-field))
+    (runtime-wat-sequence
+      #@(if (i32.and (i32.eqz (global.get $debug-evaluating))
+          (ref.eq (local.get $function-object) (array.get $objects
+            (global.get $canonical-builtin-functions)
+            (i32.shl (i32.sub (i32.const -2) (local.get $id)) (i32.const 1)))))
+        (then (return_call $fixed-deposit-apply (local.get $function-object)
+          (i32.sub (i32.const -2) (local.get $id))
+          ,(native-object '(local.get $a)) ,(native-object '(local.get $b)) ,(native-object '(local.get $c)))))))
   #@(if (ref.test (ref $native-function) ,(native-object '(local.get $function)))
     (then (if (f64.eq (struct.get $obj $f (ref.cast (ref $obj) ,(native-object '(local.get $function)))) (f64.const 5))
       (then ,(native-direct-call-wat 3 t nil nil nil t)
@@ -3362,7 +3392,8 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
   ($native-symbol-fixed-function) ($native-fixed-apply-ready) ($native-fixed-call)
   ($native-call-values1-ready) ($native-capture-result) ($native-call-values1) ($native-call-captured1)
-  ($native-call0) ($native-call1) ($native-call2) ($native-call2-checked) ($native-call3) ($native-call4)
+  ($native-call0) ($native-call1) ($native-call2) ($native-call2-checked)
+  ($fixed-deposit-apply) ($native-call3) ($native-call4)
   ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
   ($validate-low-field-box) ($native-low-field-add) ($native-low-field-ash) ($native-literal-byte-extract)
   ($native-aref-scalar-index) ($native-aref-scalar) ($native-aref-int64) ($native-aref-i31-index)
