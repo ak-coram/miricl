@@ -505,6 +505,31 @@ evaluated operands. Calls with full value demand use the ordinary result
 convention. DEBUG levels 0 and 1 and SPACE levels 0 through 2 admit the
 transport independently of SPEED.
 
+Fixed-arity generic calls can use this result convention after the runtime
+selects a cached effective plan consisting of a single primary method. The
+selected method body must have a matching, authenticated scalar entry.
+Dispatch and authority checks run after the entry checkpoint. The runtime
+commits to the worker without an intervening poll or callback and supplies
+its method context when needed. A representation or worker miss uses
+the selected boxed plan. A dispatch miss resumes live dispatch.
+
+A single-use scalar feeding an eligible retained call can also carry an
+input without its Lisp box under the same policy. The live fixed selector
+requires the argument position to be unused for method selection, including
+EQL specializers. Alongside the boxed adapter checks, the loader can verify
+that the final worker forwards the operand or consumes it through checked
+float arithmetic, and has no method-context observations. The runtime
+grants this permission to the installed worker and checks the operand's
+representation. On a dispatch or worker miss, it materializes the original
+representation before continuing. The arithmetic helper also materializes
+it for ordinary numeric fallback. Method changes, live function bindings,
+custom discriminators and full-value calls retain their existing call
+semantics.
+
+Compiler statistics count retained result and operand emissions separately
+by representation. Runtime dispatch and worker admission determine which
+invocations take the raw path.
+
 Shared fixed-call adapters cover up to four operands. A matching worker can
 avoid the input packet while the shared executor still owns frames, dynamic
 state, result admission and cleanup. On a binary dispatch miss, fixed and

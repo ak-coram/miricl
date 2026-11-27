@@ -332,7 +332,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-poll-token" nil :i64)
     ("native-low-field-add" (:i32 :object :object) :object)
     ("native-low-field-ash" (:i32 :object :object) :object)
-    ("native-literal-byte-extract" (:i32 :i32 :object) :object)))
+    ("native-literal-byte-extract" (:i32 :i32 :object) :object)
+    ("native-scalar-call-with-operand" (:object :object :object :object :object :i32 :i32 :i64 :i32)
+     (:i64 :i32 :object))))
 
 (defun wasm-byte (byte)
   (declare (type (unsigned-byte 8) byte))
@@ -3585,14 +3587,36 @@ exhausted work budgets keep every incoming value group."
 
 (defvar *wasm-float-pairs* nil)
 
-(defun emit-native-retained-scalar-call (inputs kind)
-  (dolist (input (cdr inputs)) (wasm-get input))
-  (if (and (= kind 1) (= (length inputs) 4))
+(defun emit-native-retained-scalar-call (inputs kind &optional operand)
+  (unless (or operand (null *wasm-unboxed-values*) (> (length inputs) 5))
+    (loop for value in (cddr inputs) for index from 1
+          for raw = (native-value-slot *wasm-unboxed-values* value)
+          when (and raw (eq (svref raw 4) :result) (<= (svref raw 5) 1)
+                    (not (eq (svref raw 1) *wasm-private-scalar-ingress*)))
+            do (setq operand (list raw index (if (native-immediate-integer-result-p raw) 5 1)))
+               (return)))
+  (native-decision-statistic :lowering/retained-scalar-result
+    (nth (1- kind) '(:i64 :character :f32 :f64)))
+  (wasm-get (second inputs))
+  (loop for value in (cddr inputs) for index from 1 do
+    (if (and operand (= index (second operand)) (null (fourth operand)))
+        (wasm-null)
+        (wasm-get value)))
+  (if (and (null operand) (= kind 1) (= (length inputs) 4))
       (wasm-call "native-scalar-call2")
       (progn
         (loop repeat (- 6 (length inputs)) do (wasm-null))
         (wasm-integer (- (length inputs) 2)) (wasm-integer kind)
-        (wasm-call "native-scalar-call"))))
+        (if operand
+            (destructuring-bind (snapshot position input-kind &optional status) operand
+              (native-decision-statistic :lowering/retained-scalar-operand
+                (nth (1- input-kind) '(:i64 :character :f32 :f64 :i31 :bit)))
+              (wasm-local (svref snapshot 0))
+              (when status (wasm-local status))
+              (wasm-integer (+ (ash input-kind 2) position))
+              (when status (wasm-byte #x6c))
+              (wasm-call "native-scalar-call-with-operand"))
+            (wasm-call "native-scalar-call")))))
 
 (defun native-scalar-argument-index (value &optional kind)
   (let* ((origin (native-predicate-source value *wasm-reused-values*))
@@ -3626,7 +3650,12 @@ exhausted work budgets keep every incoming value group."
          (left (and transport (native-scalar-argument-index (third inputs) :number)))
          (right (and transport (native-scalar-argument-index (fourth inputs) :number))))
     (cond ((and producer (svref record 7))
-           (emit-native-retained-scalar-call inputs kind))
+           (emit-native-retained-scalar-call inputs kind (when (> (length record) 8) (svref record 8))))
+          ((and producer (eql kind 2))
+           (wasm-get (third inputs))
+           (emit-native-character-code-at inputs t)
+           (wasm-integer 1)
+           (wasm-null))
           ((eql kind 2)
            (wasm-local (svref record 6))
            (wasm-byte #x04) (wasm-type :object)
@@ -5673,13 +5702,10 @@ initializer and store facts, independently of declarations. Unknown uses keep bo
                   (< (logand 3 (ash (hir-function-optimization-policy function) -2)) 3)
                   (not (gethash instruction *wasm-inline-vector-calls*))
                   (not (native-known-callee (second inputs)))
-                  (not (native-standard-operation (second inputs)))
-                  (let ((reference (hir-value-producer (second inputs))))
-                    (or (not (%hir-instruction-p reference))
-                        (not (eq (hir-instruction-opcode reference) :function-reference))
-                        (native-scalar-call-name inputs))))
+                  (not (native-standard-operation (second inputs))))
              ;; Preserve the value produced by the original callable
-             ;; observation, including a computed FUNCALL designator.
+             ;; observation, including a NOTINLINE or FUNCALL designator.
+             ;; The checked helper still invokes the selected body out of line.
              :call)))))
 
 (defun native-snapshot-masks (function blocks &optional forward)
@@ -5854,7 +5880,7 @@ initializer and store facts, independently of declarations. Unknown uses keep bo
           (let ((value (or (and *wasm-reused-values* (native-value-slot *wasm-reused-values* value)) value)))
             (setf (native-value-slot uses value)
                   (if (native-value-slot uses value) :shared instruction))))))
-    (dolist (candidate (append candidates (nreverse calls)))
+    (dolist (candidate (append (nreverse calls) candidates))
       (destructuring-bind (block producer kind) candidate
         (unless (gethash producer claimed)
           (let ((value (hir-instruction-output producer)))
@@ -5869,16 +5895,26 @@ initializer and store facts, independently of declarations. Unknown uses keep bo
                     ((:primary :copy) (setq value (hir-instruction-output use)))
                     (:call
                      (let* ((inputs (hir-instruction-inputs use))
+                            (retained-plan (gethash use claimed))
                             (transport
-                              (cond ((native-float-call-op use)
+                              (cond ((and (or (null kind) (member kind '(3 4))) (native-float-call-op use))
                                      (or kind (native-float-precision (third inputs))
                                               (native-float-precision (fourth inputs))))
                                     ((and (null kind) (eq (gethash use *wasm-inline-simple-calls*) :character-code)) 2))))
-                       (when (and transport (not (gethash use claimed))
-                                  (eq (third inputs) value)
-                                  (native-value-slot *wasm-scalar-groups* (hir-instruction-output use)))
-                         (setf (gethash use claimed) t (gethash producer claimed) t)
-                         (push (list producer transport use (null kind)) plans)))
+                       (cond ((and transport (null retained-plan)
+                                   (eq (third inputs) value)
+                                   (native-value-slot *wasm-scalar-groups* (hir-instruction-output use)))
+                              (let ((plan (list producer transport use (null kind) nil)))
+                                (setf (gethash use claimed) t
+                                      (gethash producer claimed) (if kind t plan))
+                                (push plan plans)))
+                             ((and (consp retained-plan) (member kind '(2 3 4))
+                                   (null (fifth retained-plan)) (<= (length inputs) 5)
+                                   (null *wasm-reusable-scalar-result*))
+                              (let ((index (position value (cddr inputs) :test #'eq)))
+                                (when index
+                                  (setf (gethash producer claimed) t
+                                        (fifth retained-plan) (list producer kind (1+ index))))))))
                      (return))
                     (otherwise (return))))))))))
     plans))
@@ -5942,6 +5978,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                  (bit-op (and typed-result-p (member kind '(:logand-general :ash-general :standard-call))))
                  (ingress (eq output *wasm-private-scalar-ingress*)))
             (when (and float-enabled (eq kind :character-code)) (setq retained-consumer t))
+            (when (and float-enabled (eq kind :character-ref))
+              (push (list block instruction 2) float-candidates))
             (when (and float-enabled (eq kind :standard-call) (native-float-call-op instruction))
               (let* ((inputs (hir-instruction-inputs instruction))
                      (precision (or (native-float-precision (third inputs))
@@ -6001,16 +6039,29 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
     (dolist (plan (append (when (and (null *wasm-reusable-scalar-identity*)
                                     (member *wasm-reusable-scalar-result* '(3 4)))
                            (list (list (hir-value-producer *wasm-private-scalar-return*)
-                                       *wasm-reusable-scalar-result* nil)))
+                                       *wasm-reusable-scalar-result* nil nil nil)))
                          (when (or float-candidates retained-consumer)
                            (native-scalar-pair-plans function float-candidates retained-consumer))))
-      (destructuring-bind (producer kind consumer &optional retained) plan
-        (let ((output (hir-instruction-output producer)))
+      (destructuring-bind (producer kind consumer retained operand) plan
+        (let ((output (hir-instruction-output producer))
+              (operand-value (and operand (hir-instruction-output (first operand))))
+              (transport nil))
           (unless (and table (or (native-value-slot table output)
                                 (and consumer (native-value-slot table (hir-instruction-output consumer)))))
             (unless table (setq table (native-value-table function)))
             (unless float-pairs (setq float-pairs (make-hash-table :test 'eq)))
-            (let ((record (vector (+ offset count) output kind nil :float-snapshot 0 (+ offset statuses) retained)))
+            ;; Commit the input snapshot with its only consumer. If a scalar
+            ;; plan already owns that SSA value, retain the boxed input path.
+            (when (and operand (not (native-value-slot table operand-value)))
+              (let ((snapshot (vector (+ offset count) operand-value (second operand)
+                                      nil :float-snapshot 0 (+ offset statuses) nil)))
+                (setf (native-value-slot table operand-value) snapshot
+                      (gethash (first operand) float-pairs) snapshot
+                      transport (list snapshot (third operand) (second operand) (svref snapshot 6)))
+                (incf count)
+                (incf statuses)))
+            (let ((record (vector (+ offset count) output kind nil :float-snapshot 0 (+ offset statuses) retained
+                                  transport)))
               (setf (native-value-slot table output) record
                     (gethash producer float-pairs) record)
               (when consumer (setf (gethash consumer float-pairs) record)))

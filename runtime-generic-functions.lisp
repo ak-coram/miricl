@@ -850,7 +850,7 @@
 ;; selection through the fixed-arity proof is nonpolling; execution can yield.
 (define-runtime-function $generic-recent-plan-ready
     (($gf :nullable-object) ($count i32) ($a :nullable-object) ($b :nullable-object)
-     ($c :nullable-object) ($d :nullable-object))
+     ($c :nullable-object) ($d :nullable-object) ($omitted-class-bit i32))
     (:nullable-object :nullable-object :nullable-object :nullable-object :nullable-object)
   (:locals ($info (ref $obj)) ($metadata :nullable-object) ($recent (ref $objects))
            ($row-object :nullable-object) ($row (ref $objects)) ($phase i32) ($mode i32) ($target-mode i32) ($position i32)
@@ -906,6 +906,7 @@
         (local.set $mode (call $natural-count (array.get $objects (local.get $row) (i32.const 3))))
         (br_if $row-miss (i32.eqz (local.get $mode)))
         (br_if $row-miss (i32.ne (i32.and (local.get $mode) (i32.const 7)) (local.get $count)))
+        (br_if $row-miss (i32.and (local.get $mode) (local.get $omitted-class-bit)))
         (if (i32.and (local.get $mode) (i32.const 4096))
           (then (br_if $row-miss (i32.eqz (ref.eq (global.get $slot-access-token)
             (array.get $objects (local.get $row) (i32.const 5)))))))
@@ -1037,30 +1038,39 @@
     (($gf :nullable-object) ($count i32) ($a :nullable-object) ($b :nullable-object)
      ($c :nullable-object) ($d :nullable-object)) (:nullable-object i32)
   (:locals ($selected :nullable-object) ($function :nullable-object)
-           ($method :nullable-object) ($rest :nullable-object) ($next :nullable-object)
-           ($body (ref null $native-function)) ($context :nullable-object))
+           ($method :nullable-object) ($rest :nullable-object) ($next :nullable-object))
   #@(call $generic-recent-plan-ready (local.get $gf) (local.get $count)
-    (local.get $a) (local.get $b) (local.get $c) (local.get $d))
+    (local.get $a) (local.get $b) (local.get $c) (local.get $d) (i32.const 0))
   #@(local.set $next) #@(local.set $rest) #@(local.set $method)
   #@(local.set $function) #@(local.set $selected)
   #@(if (ref.is_null (local.get $selected)) (then (return (ref.null eq) (i32.const 0))))
+  #@(call $generic-recent-invoke-ready (local.get $gf) (local.get $count)
+    (local.get $a) (local.get $b) (local.get $c)
+    (ref.cast (ref $direct-function) (local.get $selected))
+    (local.get $function) (local.get $method) (local.get $rest) (local.get $next))
+  #@(i32.const 1))
+
+;; Execute a committed plan without repeating the lookup or polling.
+(define-runtime-function $generic-recent-invoke-ready
+    (($gf :nullable-object) ($count i32) ($a :nullable-object) ($b :nullable-object)
+     ($c :nullable-object) ($selected (ref $direct-function)) ($function :nullable-object)
+     ($method :nullable-object) ($rest :nullable-object) ($next :nullable-object)) (:nullable-object)
+  (:locals ($body (ref $native-function)) ($context :nullable-object))
   ;; A NIL body denotes one of the already-proved scalar plan modes4/15/16.
   #@(if (ref.is_null (local.get $function))
     (then (return (call $generic-recent-scalar-call
-      (ref.cast (ref $direct-function) (local.get $selected)) (local.get $a) (local.get $b)) (i32.const 1))))
+      (local.get $selected) (local.get $a) (local.get $b)))))
   #@(local.set $body (ref.cast (ref $native-function) (local.get $function)))
-  #@(local.set $context (call $generic-recent-context (local.get $gf) (ref.as_non_null (local.get $body))
+  #@(local.set $context (call $generic-recent-context (local.get $gf) (local.get $body)
     (local.get $method) (local.get $rest) (local.get $next) (local.get $count)
     (local.get $a) (local.get $b) (local.get $c)))
-  #@(if (i32.eq (struct.get $direct-function $mode
-        (ref.cast (ref $direct-function) (local.get $selected))) (i32.const 19))
+  #@(if (i32.eq (struct.get $direct-function $mode (local.get $selected)) (i32.const 19))
     (then (return (ref.cast (ref null eq) (any.convert_extern
-      (call $native-direct-apply-ready (ref.as_non_null (local.get $body)) (local.get $context)
-        (ref.null eq) (ref.null eq) (ref.null eq) (i32.const 0)))) (i32.const 1))))
+      (call $native-direct-apply-ready (local.get $body) (local.get $context)
+        (ref.null eq) (ref.null eq) (ref.null eq) (i32.const 0)))))))
   #@(ref.cast (ref null eq) (any.convert_extern
-    (call $native-direct-apply-ready (ref.as_non_null (local.get $body)) (local.get $context)
-      (local.get $a) (local.get $b) (local.get $c) (i32.const 0))))
-  #@(i32.const 1))
+    (call $native-direct-apply-ready (local.get $body) (local.get $context)
+      (local.get $a) (local.get $b) (local.get $c) (i32.const 0)))))
 
 ;; This internal helper cannot call Lisp or poll. Retain original operands in
 ;; an owned packet only when the worker reads its method or effective context.
@@ -1486,6 +1496,7 @@
   #@(global $generic-dispatch-metadata-function (mut (ref null eq)) (ref.null eq))
   #@(global $generic-metadata-proof (mut (ref null eq)) (ref.null eq))
   ($generic-metadata-properties)
+  ($generic-recent-invoke-ready)
   ($generic-dispatch-metadata-function) ($generic-dispatch-metadata-call) ($generic-dispatch-metadata-value) ($generic-dispatch-invalid)
   ($dispatch-eql-key-cl) ($generic-fixed-arity-cl) ($generic-cache-permitted-cl) ($generic-key-match-cl)
   #@(type $method-context (sub final $obj (struct

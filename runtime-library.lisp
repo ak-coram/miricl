@@ -5,6 +5,8 @@
   '(%%while %%arithmetic-step %%case-form %%list-test %%list-accumulate
     %%numeric-collect %%parallel-place-form %last-cell))
 
+(defvar *runtime-library-compiler-statistics* t)
+
 ;; Libraries execute in the guest evaluator. No host macroexpansion or reader
 ;; is needed at runtime, and their uninterned symbols cannot capture user names.
 (defun lower-runtime-library (form)
@@ -18,6 +20,10 @@
                   (macroexpand-1 form)
                   (case (car form)
                 (quote (return-from lower-runtime-library form))
+                (miricl-compiler::compiler-statistic
+                 (unless *runtime-library-compiler-statistics*
+                   (return-from lower-runtime-library nil))
+                 form)
                 ((case ecase ccase typecase etypecase ctypecase)
                  ;; Clause keys and type specifiers are data. Recursing into
                  ;; them as calls would turn (NULL NOT) into (NOT NOT), or

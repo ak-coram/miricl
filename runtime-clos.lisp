@@ -153,7 +153,9 @@ Generate only source forms here; the compiler-free guest needs no contract table
   ;; Record-macro expansion creates fresh lexical symbols. Keep their names
   ;; compact and independent of how much ASDF compiled before loading us.
   ;; GENSYM still creates distinct symbols throughout this library read.
-  (let ((*gensym-counter* 0))
+  ;; The shared HIR frontend also serves the compiler-free image, where
+  ;; diagnostic forms must lower away with their omitted statistics library.
+  (let ((*gensym-counter* 0) (*runtime-library-compiler-statistics* compiler))
   (loop for file in '("clos-library.lisp" "method-combination-library.lisp" "development-library.lisp" "pathname-library.lisp"
                                   "logical-pathname-library.lisp" "filesystem-library.lisp" "time-library.lisp" "compiler-library.lisp" "file-compiler-library.lisp" "environment-library.lisp" "pretty-library.lisp" "javascript-library.lisp" "thread-library.lisp" "debugger-library.lisp" "bundle-library.lisp" "core-library.lisp" "fasl-utilities.lisp" "hir-code.lisp" "fasl-format.lisp" "whole-program.lisp" "compiler-input.lisp" "hir.lisp" "hir-interpreter.lisp" "hir-reconstruction.lisp" "compiler-statistics.lisp" "standard-contracts.lisp" "hir-types.lisp" "hir-optimize.lisp" "wasm-compiler.lisp" "wasm-optimizer.lisp" "wasm-disassembly.lisp" "evaluation-library.lisp" "interpreter-library.lisp")
     unless (and (not compiler)
@@ -172,6 +174,9 @@ Generate only source forms here; the compiler-free guest needs no contract table
                                            (second (assoc (second form) *native-javascript-functions* :test #'equal))))))
                           (lower-runtime-library
                             (if native `(setf (fdefinition ',(second form)) (function ,native)) form))))))
+        (when (and (not compiler) (equal file "hir.lisp"))
+          ;; Lexical inlining also consults the collection flag directly.
+          (push '(defvar miricl-compiler::*compilation-statistics* nil) forms))
         (when (equal file "development-library.lisp")
           ;; Standardized places have fixed semantics, while an explicitly
           ;; invoked implementation setter keeps its ordinary live binding.
