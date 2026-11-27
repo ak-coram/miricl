@@ -41,7 +41,7 @@
   form)
 
 (defun core-field-code (type)
-  (cond ((consp type) (if (member (car (last type)) '($native-entry $native-direct-entry) :test #'string-equal) #\e #\r))
+  (cond ((consp type) (if (member (car (last type)) '($native-entry $native-direct-entry func) :test #'string-equal) #\e #\r))
         ((string-equal type 'i32) #\i)
         ((or (string-equal type 'i64) (string-equal type 'f64)) #\l)
         (t (error "Unsupported core image field type ~S" type))))
@@ -63,7 +63,10 @@
   (case (core-field-code type)
     (#\e `(block (result ,type)
             ,(wat-fail-when
-              (wat-fragment (wat-string `(i32.eqz (ref.test ,type ,expression)))) :malformed-form)
+              (wat-fragment (wat-string
+                (if (string-equal (second type) 'func)
+                    `(i32.eqz (call $native-entry-valid ,expression (i32.const 3)))
+                    `(i32.eqz (ref.test ,type ,expression))))) :malformed-form)
             (ref.cast ,type ,expression)))
     (#\r `(ref.cast ,type (any.convert_extern ,expression)))
     (otherwise (if (and (symbolp type) (string-equal type 'f64))

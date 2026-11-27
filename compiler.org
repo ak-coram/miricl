@@ -320,9 +320,11 @@ no such calls.
 Lisp values use WasmGC references. Native function objects retain their
 entry identity, literals, captures and available debug metadata. Public
 entry points validate function and argument representations. Eligible
-private fixed workers have a context and four reference operand slots.
-Checked adapters verify actual signatures before attachment. Operand-use
-masks do not exempt ignored operands from public validation.
+fixed workers take a context and either four reference operand slots for
+arities zero through four or sixteen slots for arities five through sixteen.
+Checked adapters verify the actual signature against the arity before
+attachment. Operand-use masks do not exempt ignored operands from public
+validation.
 
 Native lowering eliminates unused values by following dependencies from
 terminators and instructions it must retain. Eligible pure instructions,
@@ -536,9 +538,12 @@ representation. Retained operand statistics count one emission per raw
 operand position, by input representation. Runtime dispatch and worker
 admission determine which invocations take the raw path.
 
-Shared fixed-call adapters cover up to four operands. A matching worker can
-avoid the input packet while the shared executor still owns frames, dynamic
-state, result admission and cleanup. On a binary dispatch miss, fixed and
+Shared fixed-call adapters cover up to sixteen operands. A matching worker
+can avoid the input packet while the shared executor still owns frames,
+dynamic state, result admission and cleanup. The separate wide signature
+keeps padding out of calls with up to four operands. Fixed lexical calls and
+tail calls select the same worker widths. Reusable raw scalar transport
+retains its four-operand signature. On a binary dispatch miss, fixed and
 scalar callers share ordinary binary call storage selection. Native, HIR
 and generic entries can receive owned slots, while list consumers receive
 a fresh argument spine directly. The ordinary invocation owns frames and

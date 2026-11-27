@@ -13,6 +13,11 @@
       "(defparameter *host-native-test-closure*
          (funcall (miricl-compiler:compile-native '(lambda (x) (lambda (y) (+ x y)))) 40))
        (funcall *host-native-test-closure* 2)")))
+  (assert (= 16
+    (evaluate-string vm
+      "(let ((outer (miricl-compiler:compile-native
+                      '(lambda () (lambda (a b c d e f g h i j k l m n o p) p)))))
+         (funcall (funcall outer) 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))")))
   (wt:check-error (wt::wasmtime-context-gc (interpreter-context vm)))
   (assert (= 43 (evaluate-string vm "(funcall *host-native-test-closure* 3)")))
   (assert (= 19
@@ -34,7 +39,7 @@
                               (miricl-compiler::wasm-byte 0)
                               (let ((payload (miricl-compiler::with-wasm-bytes
                                                (miricl-compiler::wasm-name "miricl.entries")
-                                               (dolist (byte '(1 1 1 255)) (miricl-compiler::wasm-byte byte)))))
+                                               (dolist (byte '(2 1 1 255)) (miricl-compiler::wasm-byte byte)))))
                                 (miricl-compiler::wasm-u32 (length payload))
                                 (miricl-compiler::wasm-append payload)))))))
     (dolist (bytes malformed)

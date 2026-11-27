@@ -267,7 +267,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-cell-write" (:object :object) :object)
     ("native-call" (:object :object :object) :object)
     ("native-primary-call" (:object :object :object) :object)
-    ("native-primary-call5" (:object :object :object :object :object :object) :object)
     ("native-return" (:object) :object)
     ("native-attach-direct" (:object :function) :object)
     ("native-attach-scalar" (:object :function) :object)
@@ -327,6 +326,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-tail-call2" (:object :object :object) :object)
     ("native-tail-call3" (:object :object :object :object) :object)
     ("native-tail-call4" (:object :object :object :object :object) :object)
+    ("native-wide-call" (:object :object :object :object :object :object :object :object :object
+                         :object :object :object :object :object :object :object :object :i32) :object)
     ("native-work-limit" (:i32) :i32)
     ("native-work-complete" (:i32) nil)
     ("native-poll-token" nil :i64)
@@ -1141,7 +1142,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (dolist (value (hir-function-values function))
       (let ((producer (hir-value-producer value)))
         (when (and (%hir-instruction-p producer) (eq (hir-instruction-opcode producer) :call)
-                   (<= (length (hir-instruction-inputs producer)) 6) (native-value-slot scalar value))
+                   (<= (length (hir-instruction-inputs producer)) 18) (native-value-slot scalar value))
           (setf (native-value-slot calls value) t))))
     calls))
 
@@ -1693,7 +1694,7 @@ exhausted work budgets keep every incoming value group."
                                 ;; Check certificate membership before scanning
                                 ;; the target's entry, and bound a wide proper
                                 ;; call before forcing any caller lowering plan.
-                                (null (nthcdr 4 (cddr inputs)))
+                                (null (nthcdr 16 (cddr inputs)))
                                 (eql (length (cddr inputs))
                                      (if scoped-callees (gethash target scoped-callees)
                                          (native-fixed-arity target)))
@@ -1889,10 +1890,11 @@ exhausted work budgets keep every incoming value group."
                      *wasm-multiple-result-functions* (gethash source *wasm-multiple-result-functions*))))
     (list (cond (reusable '(:object :object :object :object :object :i64 :i64 :i64 :i64 :i32))
                 ((and (eq function *wasm-private-scalar-worker*) *wasm-private-scalar-argument*)
-                 (let ((parameters (make-list 5 :initial-element :object)))
+                 (let ((parameters (make-list (1+ (native-worker-width (native-fixed-arity source)))
+                                              :initial-element :object)))
                    (setf (nth (1+ *wasm-private-scalar-argument*) parameters) :i64)
                    parameters))
-                (source '(:object :object :object :object :object))
+                (source (make-list (1+ (native-worker-width (native-fixed-arity source))) :initial-element :object))
                 (t '(:object :object)))
           (cond (reusable '(:i64 :i32 :object))
                 ((eq function *wasm-private-scalar-worker*)
@@ -2098,7 +2100,7 @@ exhausted work budgets keep every incoming value group."
           ;; read is a local or a pure literal lookup, preserving closure context.
           (progn (wasm-get (second inputs)) (wasm-call "native-tail-enter") (wasm-byte #x1a)))
       (emit-native-call-operands inputs)
-      (dotimes (i (- 4 arity)) (wasm-null))
+      (dotimes (i (- (native-worker-width arity) arity)) (wasm-null))
       (pushnew worker *wasm-referenced-functions*)
       (wasm-byte #x10)
       (push (list (length *wasm-bytes*) worker)
@@ -2125,7 +2127,7 @@ exhausted work budgets keep every incoming value group."
       ;; permits frame omission, and the body needs no dynamic-scope cleanup.
       (wasm-call "native-poll")
       (emit-native-call-operands inputs)
-      (dotimes (i (- 4 arity)) (wasm-null))
+      (dotimes (i (- (native-worker-width arity) arity)) (wasm-null))
       (pushnew worker *wasm-referenced-functions*)
       (wasm-byte #x10)
       (push (list (length *wasm-bytes*) worker)
@@ -2190,7 +2192,8 @@ exhausted work budgets keep every incoming value group."
       (compiler-statistic :optimization/direct-scoped-call)
       (emit-native-call-frame-enter inputs :object)
       (emit-native-call-operands inputs)
-      (dotimes (i (- 4 (length (cddr inputs)))) (wasm-null))
+      (let ((arity (length (cddr inputs))))
+        (dotimes (i (- (native-worker-width arity) arity)) (wasm-null)))
       (pushnew worker *wasm-referenced-functions*)
       (wasm-byte #x10)
       (push (list (length *wasm-bytes*) worker)
@@ -2199,20 +2202,32 @@ exhausted work budgets keep every incoming value group."
       (emit-native-call-frame-leave nil)
       t)))
 
+(defun emit-native-wide-call (inputs mode)
+  (let ((arity (length (cddr inputs))))
+    (emit-native-call-operands inputs)
+    (dotimes (i (- 16 arity)) (wasm-null))
+    (wasm-integer (logior arity mode))
+    (let ((start (length *wasm-bytes*)))
+      (wasm-call "native-wide-call")
+      (when (= mode 64) (setf (aref *wasm-bytes* start) #x12)))))
+
 (defun emit-native-fixed-value-call (inputs output)
   ;; Transport is independent of target identity, result cardinality and
   ;; effects. The shared checked runtime selects the actual live callee.
   (let ((arity (length (cddr inputs))))
     (when (and (not *wasm-fixed-call-emitter*)
-               (not *wasm-closed-worker-functions*) (<= arity 4))
+               (not *wasm-closed-worker-functions*) (<= arity 16))
       (let ((primary (or (native-value-slot *wasm-scalar-groups* output)
                          (not (native-value-slot *wasm-live-values* output)))))
         (compiler-statistic :optimization/fixed-value-transport
           (if primary :primary :full))
-        (emit-native-call-operands inputs)
-        (dotimes (i (- 4 arity)) (wasm-null))
-        (wasm-integer (logior arity (if primary 8 0)))
-        (wasm-call "native-fixed-call")
+        (if (> arity 4)
+            (emit-native-wide-call inputs (if primary 32 0))
+            (progn
+              (emit-native-call-operands inputs)
+              (dotimes (i (- 4 arity)) (wasm-null))
+              (wasm-integer (logior arity (if primary 8 0)))
+              (wasm-call "native-fixed-call")))
         t))))
 
 (defun emit-native-fixed-call (inputs)
@@ -2221,9 +2236,14 @@ exhausted work budgets keep every incoming value group."
   (when (emit-native-local-call inputs) (return-from emit-native-fixed-call nil))
   (when (emit-native-scoped-call inputs) (return-from emit-native-fixed-call nil))
   (compiler-statistic :lowering/ordinary-call (length (cddr inputs)))
-  (emit-native-call-operands inputs)
-  (wasm-call (nth (length (cddr inputs))
-               '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4"))))
+  (let ((arity (length (cddr inputs))))
+    (cond ((<= arity 4)
+           (emit-native-call-operands inputs)
+           (wasm-call (nth arity '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4"))))
+          ((and (<= arity 16) (not *wasm-fixed-call-emitter*))
+           (emit-native-wide-call inputs 32))
+          (t (wasm-null) (wasm-get (second inputs))
+             (wasm-arguments (cddr inputs)) (wasm-call "native-primary-call")))))
 
 (defun native-type-integer-width (type)
   ;; One target CL type domain drives declarations, module summaries and
@@ -3391,6 +3411,10 @@ exhausted work budgets keep every incoming value group."
                   (member (hir-instruction-opcode instruction) '(:call :multiple-value-call))
                   (native-tail-environment-p (first (hir-instruction-inputs instruction)) function)
                   (or (not (native-value-slot *wasm-single-calls* output))
+                      ;; Wide scalar sites previously used ordinary tail
+                      ;; dispatch. The fixed primary convention must not
+                      ;; take those calls out of tail position.
+                      (nthcdr 6 (hir-instruction-inputs instruction))
                       (native-named-single-call-p instruction function))
                   (eq output (if (eq (hir-instruction-opcode terminator) :block-return)
                                  (third (hir-instruction-inputs terminator))
@@ -3476,7 +3500,7 @@ exhausted work budgets keep every incoming value group."
         ;; the worker's calling contract without a list or checked adapter.
         (if direct
             (let ((usage (native-call-usage inputs)))
-              (dotimes (i 4)
+              (dotimes (i (native-worker-width (native-fixed-arity target)))
                 (if (and (< i (length (cddr inputs))) (or (null usage) (logbitp i usage)))
                     (wasm-get (nth (+ i 2) inputs)) (wasm-null))))
             (wasm-arguments (cddr inputs)))
@@ -3489,9 +3513,15 @@ exhausted work budgets keep every incoming value group."
         (setf (gethash instruction *native-tail-decisions*)
               (cond (*wasm-debug* :applied/guarded-direct) (named :applied/named-direct) (t :applied/direct))))
       (if *wasm-debug* (wasm-byte #x0b) (return-from emit-native-tail-call nil))))
-  ;; Small calls share a guarded runtime helper. The ordinary adapter only
+  ;; Fixed calls share guarded runtime helpers. The ordinary adapter only
   ;; allocates a packet when the selected target cannot use its fixed worker.
   (let ((count (length (cddr inputs))))
+    (when (<= 5 count 16)
+      (emit-native-wide-call inputs 64)
+      (when (and *native-tail-decisions*
+                 (not (eq (gethash instruction *native-tail-decisions*) :applied/guarded-direct)))
+        (setf (gethash instruction *native-tail-decisions*) :applied/guarded-dispatch))
+      (return-from emit-native-tail-call nil))
     (if (<= count 4)
         (emit-native-call-operands inputs)
         (progn (wasm-get (second inputs)) (wasm-arguments (cddr inputs))))
@@ -3508,7 +3538,10 @@ exhausted work budgets keep every incoming value group."
     (when (eq (hir-instruction-opcode instruction) :check-arguments)
       (let ((limits (hir-instruction-attributes instruction)))
         (return-from native-fixed-arity
-          (and (= (first limits) (second limits)) (<= 0 (first limits) 4) (first limits)))))))
+          (and (= (first limits) (second limits)) (<= 0 (first limits) 16) (first limits)))))))
+
+(defun native-worker-width (arity)
+  (if (<= arity 4) 4 16))
 
 (defun native-immediate-integer-result-p (record)
   (member (gethash (hir-value-producer (svref record 1)) *wasm-inline-simple-calls*)
@@ -3804,47 +3837,6 @@ exhausted work budgets keep every incoming value group."
          (wasm-get (third inputs)) (wasm-local (svref record 6))
          (wasm-call "native-aref-i31-index")))
   (wasm-byte #x05))
-
-(defun native-boxed-local-p (value)
-  ;; Match WASM-GET's precedence. Captures and multiple results are checked
-  ;; before reuse, while materialization and constants use the reused value.
-  (and (not (and *wasm-captured-result-locals*
-                 (native-value-slot *wasm-captured-result-locals* value)))
-       (not (and *wasm-multiple-result-locals*
-                 (native-value-slot *wasm-multiple-result-locals* value)))
-       (let* ((source (or (and *wasm-reused-values*
-                              (native-value-slot *wasm-reused-values* value))
-                         value))
-              (raw (and *wasm-unboxed-values*
-                        (native-value-slot *wasm-unboxed-values* source))))
-         (and (not (and *wasm-tiered-values*
-                        (native-value-slot *wasm-tiered-values* source)))
-              (not (and raw (eq (svref raw 4) :result)))
-              (not (and *wasm-inline-constants*
-                        (native-value-slot *wasm-inline-constants* source)))
-              (native-value-slot *wasm-locals* source)))))
-
-(defun emit-native-primary-call5 (inputs usage output)
-  (declare (type list inputs))
-  (when (and (null usage) (= (length inputs) 7)
-             (not *wasm-debug*) (not *wasm-fixed-call-emitter*)
-             (not *wasm-closed-worker-functions*)
-             (not (native-value-slot *wasm-full-groups* output)))
-    (let ((producer (hir-value-producer (second inputs))))
-      (when (and (%hir-instruction-p producer)
-                 (eq (hir-instruction-opcode producer) :function-reference)
-                 (destructuring-bind (name &optional policy) (hir-instruction-attributes producer)
-                   (not (eq (or policy
-                                (and (boundp 'miricl::%global-inline-policy)
-                                     miricl::%global-inline-policy
-                                     (gethash name miricl::%global-inline-policy)))
-                            'notinline)))
-                 (every #'native-boxed-local-p inputs))
-        ;; The environment read is unused by the ordinary adapter. Keep the
-        ;; original producers and forward the saved callable and arguments.
-        (dolist (value (cdr inputs)) (wasm-get value))
-        (wasm-call "native-primary-call5")
-        t))))
 
 (defun emit-native-instruction (instruction &optional end)
   (declare (type simple-vector instruction) (type (or null simple-vector) end))
@@ -4296,7 +4288,8 @@ exhausted work budgets keep every incoming value group."
                          (wasm-local (svref argument 0)))
                        (if (or (null usage) (logbitp index usage)) (wasm-get input) (wasm-null)))))
                (emit-native-call-operands inputs))
-           (dotimes (i (- 4 (length (cddr inputs)))) (wasm-null))
+           (let ((arity (length (cddr inputs))))
+             (dotimes (i (- (native-worker-width arity) arity)) (wasm-null)))
            (wasm-byte #x10)
            (push (list (length *wasm-bytes*) worker)
                  (gethash *wasm-current-function* *wasm-function-relocations*))
@@ -4353,10 +4346,9 @@ exhausted work budgets keep every incoming value group."
                               (not (native-value-slot *wasm-live-values* output)))))
              ;; Primary-only and discarded results need no value list,
              ;; even when the resolved callee's value count is unknown.
-             (unless (and primary (emit-native-primary-call5 inputs usage output))
-               (wasm-get (first inputs)) (wasm-get (second inputs))
-               (wasm-arguments (cddr inputs) usage)
-               (wasm-call (if primary "native-primary-call" "native-call"))))))
+             (wasm-get (first inputs)) (wasm-get (second inputs))
+             (wasm-arguments (cddr inputs) usage)
+             (wasm-call (if primary "native-primary-call" "native-call")))))
       (:control-call
        (wasm-get (first inputs)) (wasm-integer (first attributes)) (wasm-get (second inputs))
        (if (member (first attributes) '(1 2 4 5 6 7)) (wasm-list (nthcdr 4 inputs) nil) (wasm-get (fourth inputs)))
@@ -7206,7 +7198,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
          (argument (position "native-argument" *native-imports* :key #'first :test #'equal))
          (check (position "native-check-arguments" *native-imports* :key #'first :test #'equal))
          (ingress (position "native-ingress-arguments" *native-imports* :key #'first :test #'equal))
-         (size (length ops)) (raw-reads 0))
+         (size (length ops)) (raw-reads 0) (parameters (1+ (native-worker-width arity))))
     (labels ((op (index code &optional value (valuep nil))
                (and (< index size) (= (native-op-code (aref ops index)) code)
                     (or (not valuep) (eql (native-op-argument (aref ops index)) value)))))
@@ -7234,7 +7226,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                (wasm-byte code)
                (wasm-u32 (cond ((and reusable (<= #x10000000 index #x10000004))
                                 (+ 5 (- index #x10000000)))
-                               ((>= index 2) (+ index (if reusable 8 3)))
+                               ((>= index 2) (+ index (- parameters 2) (if reusable 5 0)))
                                (t index)))))
             (t (wasm-append body (native-op-start record) (native-op-end record)))))
         (when (and raw-argument (/= raw-reads 1))
@@ -7242,7 +7234,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
 
 (defun native-optimize-typed-body (body parameters &optional raw-argument reusable)
   ;; Mixed scalar/reference locals need exact types during coloring. This
-  ;; also supplies the direct worker's actual five-parameter signature.
+  ;; also supplies the direct worker's exact parameter signature.
   (let ((position 0) (groups nil) (locals nil) (count 0))
     (multiple-value-setq (groups position) (native-read-uleb body position))
     (dotimes (i groups)
@@ -7273,7 +7265,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
       (wasm-u32 0)
       (wasm-local 1) (wasm-integer arity) (wasm-integer arity) (wasm-call "native-check-arguments")
       (wasm-local 0)
-      (dotimes (i 4)
+      (dotimes (i (native-worker-width arity))
         (if (< i arity) (progn (wasm-local 1) (wasm-integer i) (wasm-call "native-argument")) (wasm-null)))
       ;; The adapter must itself be a tail call. Otherwise a recursive worker
       ;; accumulates an adapter frame even when its own call is RETURN_CALL.
@@ -7288,7 +7280,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
         (count (gethash function *wasm-multiple-result-functions*)))
     (with-wasm-bytes
       (wasm-u32 0)
-      (dotimes (i 5) (wasm-local i))
+      (dotimes (i (1+ (native-worker-width (native-fixed-arity function)))) (wasm-local i))
       (wasm-byte #x10)
       (wasm-u32 (+ (length *native-imports*) (gethash worker *native-function-indices*)))
       (case count
@@ -7474,7 +7466,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                        (setf (gethash function *wasm-function-relocations*)
                          (native-direct-relocations body relocation-functions))
                        (unless (or adapter (seventh reusable) (and reusable-worker (not private-scalar)))
-                         (setq body (native-optimize-typed-body body (if (and reusable private-scalar) 10 5)
+                         (setq body (native-optimize-typed-body body (if (and reusable private-scalar) 10
+                                          (1+ (native-worker-width (native-fixed-arity source))))
                                       (and private-scalar *wasm-private-scalar-argument*)
                                       (and reusable private-scalar)))))
                      (setf (gethash function workers) (or body (native-direct-fallback source)))
@@ -8100,18 +8093,18 @@ the named-entry format for hosts that translate individual Wasm workers."
                  (when references
                    (wasm-u32 3) (wasm-byte 0) (wasm-u32 (length references))
                    (dolist (index references) (wasm-u32 index)))))
-               ;; Version 1: count, mode, then one packed direct descriptor
+               ;; Version 2: count, mode, then one unsigned LEB128 descriptor
                ;; per entry in mode 1. Zero means no direct worker; otherwise
-               ;; low three bits are arity+1 and high bits are usage-mask+1.
+               ;; low five bits are arity+1 and high bits are usage-mask+1.
                (wasm-section 0 (with-wasm-bytes
-                 (wasm-name "miricl.entries") (wasm-u32 1) (wasm-u32 count)
+                 (wasm-name "miricl.entries") (wasm-u32 2) (wasm-u32 count)
                  (wasm-byte (if direct-exports 1 0))
                  (when direct-exports
                    (let ((descriptors (make-array count :initial-element 0)))
                      (dolist (entry direct-exports)
                        (setf (aref descriptors (fifth entry))
-                             (+ (1+ (third entry)) (if (fourth entry) (ash (1+ (fourth entry)) 3) 0))))
-                     (loop for descriptor across descriptors do (wasm-byte descriptor)))))))))
+                             (+ (1+ (third entry)) (if (fourth entry) (ash (1+ (fourth entry)) 5) 0))))
+                     (loop for descriptor across descriptors do (wasm-u32 descriptor)))))))))
       (if (< (+ (length table) (length compact)) (length named))
           (values table compact) (values nil named)))))
 
@@ -8326,7 +8319,7 @@ the named-entry format for hosts that translate individual Wasm workers."
         (wasm-byte #x0b)))))
 
 (defun native-plan-reusable-scalar (function)
-  (let ((veto (cond ((not (native-fixed-arity function)) :fixed-arity)
+  (let ((veto (cond ((not (<= (or (native-fixed-arity function) 17) 4)) :fixed-arity)
                     ((>= (hir-function-value-count function) 48) :function-size)
                     ((= (logand 3 (ash (hir-function-optimization-policy function) -2)) 3) :space-policy)
                     ((not (gethash function *wasm-direct-workers*)) :no-fixed-worker)
@@ -8660,7 +8653,7 @@ the named-entry format for hosts that translate individual Wasm workers."
                    (null (cdr direct-exports)) (eq (second descriptor) worker)
                    (eql (third descriptor) arity) (eql (fifth descriptor) 0)
                    (equal (native-result-signature worker)
-                          '((:object :object :object :object :object) :object))
+                          (list (make-list (1+ (native-worker-width arity)) :initial-element :object) :object))
                    (assoc (if *wasm-shared-entries* "native-shared-entry" "native-check-arguments")
                           *native-imports* :test #'equal)
                    (or *wasm-shared-entries* (zerop arity)
@@ -8747,7 +8740,10 @@ the named-entry format for hosts that translate individual Wasm workers."
          (*native-call-stack-effects*
            (concatenate 'simple-vector
              (mapcar (lambda (import) (native-signature-stack-effect (cdr import))) *native-imports*)
-             (mapcar (lambda (function) (if (gethash function *wasm-worker-origins*) 11 5)) *native-functions*)))
+             (mapcar (lambda (function)
+                       (let ((source (gethash function *wasm-worker-origins*)))
+                         (if source (+ 3 (* 2 (native-worker-width (native-fixed-arity source)))) 5)))
+                     *native-functions*)))
          (*wasm-function-relocations* (make-hash-table :test 'eq))
          (*wasm-import-counts* (make-hash-table :test 'equal))
          (*native-import-indices* nil)
@@ -8802,12 +8798,13 @@ the named-entry format for hosts that translate individual Wasm workers."
             (setf (svref *native-call-stack-effects*
                     (+ (length *native-imports*)
                        (gethash (gethash function *wasm-direct-workers*) *native-function-indices*)))
-                  (cons 5 count))
+                  (cons (1+ (native-worker-width (native-fixed-arity function))) count))
             (let ((adapter (copy-seq function)))
               (setf (gethash function *wasm-boxed-result-workers*) adapter
                     (gethash adapter *wasm-worker-origins*) function)
               (setq *native-functions* (append *native-functions* (list adapter))
-                    *native-call-stack-effects* (concatenate 'simple-vector *native-call-stack-effects* (vector 11))))))))
+                    *native-call-stack-effects* (concatenate 'simple-vector *native-call-stack-effects*
+                      (vector (native-signature-stack-effect (native-result-signature adapter))))))))))
       (setq *native-function-indices* (native-function-indices *native-functions*)))
     (setq *wasm-local-call-functions* (native-local-call-functions unit))
     (when (and *wasm-private-scalar-enabled* (not sealed) (not *wasm-debug*)
@@ -8852,7 +8849,8 @@ the named-entry format for hosts that translate individual Wasm workers."
                 (setf (gethash worker *wasm-worker-origins*) target
                       (gethash worker *native-function-indices*) (length *native-functions*))
                 (setq *native-functions* (append *native-functions* (list worker))
-                      *native-call-stack-effects* (concatenate 'simple-vector *native-call-stack-effects* (vector 11)))))))))
+                      *native-call-stack-effects* (concatenate 'simple-vector *native-call-stack-effects*
+                        (vector (native-signature-stack-effect (native-result-signature worker)))))))))))
     (setq *wasm-scoped-call-functions* (native-scoped-call-functions unit))
     (when (and named-recursion *wasm-result-arities* *wasm-scoped-call-functions*)
       (let* ((function (car named-recursion))
@@ -9115,7 +9113,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-canonical-builtin-code emit-native-object-types wasm-literal wasm-list wasm-arguments
                    native-active-branch-test native-removable-p native-live-inputs native-direct-cells native-forward-blocks native-reachable-blocks native-loop-region-order native-loop-plan native-live-values native-local-layout native-single-calls native-full-groups native-proven-truth native-proof-reachable-blocks native-scalar-groups native-plan-branch-tests native-stable-predicate-p native-predicate-source native-predicate-key native-plan-cons-forwarding native-plan-predicate-reuse native-predicate-aliases native-block-targets native-single-return-target-p
                    native-argument-usage native-primary-functions native-plan-argument-usages native-call-usage emit-native-call-operands
-                   native-boxed-local-p emit-native-primary-call5 native-direct-workers native-direct-worker-body native-optimize-typed-body native-direct-wrapper native-boxed-result-worker native-direct-fallback native-direct-relocations
+                   native-direct-workers native-direct-worker-body native-optimize-typed-body native-direct-wrapper native-boxed-result-worker native-direct-fallback native-direct-relocations
                    native-simple-body-p native-simple-callee-p native-multiple-result-functions native-multiple-result-bodies native-local-call-functions emit-native-local-call
                    native-named-call-p native-named-call-mode native-named-single-call-p native-plan-named-call-sites native-named-single-result-p native-named-worker-protocol-p native-named-worker-edges-valid-p native-scoped-call-functions native-scoped-call-target native-scoped-call-sites-p emit-native-call-frame-enter emit-native-call-frame-leave emit-native-scoped-call
                    native-no-prefix-apply-p native-captured-call-p native-captured-result-groups emit-native-captured-test emit-native-captured-list
@@ -9127,7 +9125,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-plan-inline-simple native-plan-dynamic-rests native-cell-storage-roots native-plan-checked-integer-copies native-plan-proven-integers native-plan-proven-integer-arithmetic emit-native-proven-integer-arithmetic native-plan-proven-integer-comparisons emit-native-proven-integer-comparison
                    native-plan-character-code-fusion native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-builtin emit-native-tail-call
-                   native-fixed-arity native-immediate-integer-result-p native-raw-aref-index native-scalar-call-name native-raw-array-store
+                   native-fixed-arity native-worker-width emit-native-wide-call native-immediate-integer-result-p native-raw-aref-index native-scalar-call-name native-raw-array-store
                    emit-native-snapshot-arithmetic emit-native-snapshot-mask emit-native-scalar-snapshot
                    native-float-call-op native-float-precision native-scalar-pair-plans emit-native-scalar-pair
                    emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-unused-context emit-native-restore emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward

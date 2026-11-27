@@ -699,6 +699,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
            (ops (miricl-compiler::native-read-ops body))
            (input (miricl-compiler::wasm-input body)) (locals nil) (raw-truth nil)
            (vector-read nil) (vector-write nil) (vector-index nil) (vector-object nil) (vector-value nil)
+           (parameters (1+ (miricl-compiler::native-worker-width arity)))
            (call-slots 0) (call-base 0) (integer-call nil) (integer-left 0) (integer-right 0))
       (dotimes (i (miricl-compiler::module-uleb input))
         (let ((count (miricl-compiler::module-uleb input))
@@ -711,11 +712,11 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
           (kernel-literal-plan ops imports literals)
       ;; An entry has no closure object or padded arguments. Prove those
       ;; private ABI inputs dead before changing their slots into zeroed locals.
-      (miricl-compiler::native-op-liveness flow-ops (+ 5 (length locals))
+      (miricl-compiler::native-op-liveness flow-ops (+ parameters (length locals))
         (miricl-compiler::native-op-flow flow-ops))
       (let ((live (miricl-compiler::native-op-live-in (aref flow-ops 0))))
         (when (or (logbitp 0 live)
-                  (loop for i from (1+ arity) below 5 thereis (logbitp i live)))
+                  (loop for i from (1+ arity) below parameters thereis (logbitp i live)))
           (error "Runtime kernel depends on a closure or padded argument: ~S." name)))
       (loop for op across ops
             when (and (= (miricl-compiler::native-op-code op) #x10)
@@ -751,16 +752,16 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                                 "native-check-arguments" "native-argument-present"
                                 "native-keyword-present" "native-keyword-argument" "native-check-keywords") :test #'equal)
             (setf integer-call t call-slots (max call-slots 3)))))
-      (setf vector-index (+ 5 (length locals)) vector-object (1+ vector-index) vector-value (+ 2 vector-index)
+      (setf vector-index (+ parameters (length locals)) vector-object (1+ vector-index) vector-value (+ 2 vector-index)
             call-base (+ vector-index (if vector-write 3 (if vector-read 1 0)))
             integer-left (+ call-base call-slots) integer-right (1+ integer-left)
             locals (nreverse locals))
       (with-output-to-string (out)
         (format out "(func ~A (param~{ ~A~}) (result ~A)~%" name
-          (make-list (if *kernel-worker-preserve-abi* 5 arity) :initial-element "(ref null eq)")
+          (make-list (if *kernel-worker-preserve-abi* parameters arity) :initial-element "(ref null eq)")
           (if (eq result :truth) "i32" "(ref null eq)"))
         (format out "(local~{ ~A~})~%" (append (unless *kernel-worker-preserve-abi*
-                                              (make-list (- 5 arity) :initial-element "(ref null eq)"))
+                                              (make-list (- parameters arity) :initial-element "(ref null eq)"))
                                                         locals
                                                         (when (or vector-read vector-write) '("i32"))
                                                         (when vector-write '("(ref null eq)" "(ref null eq)"))
@@ -1196,7 +1197,7 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
           (make-list arity :initial-element "(ref null eq)")
           (if (eq result :truth) "i32" "(ref null eq)"))
         (dotimes (i arity) (format out "local.get ~D~%" i))
-        (dotimes (i (- 4 arity)) (write-line "ref.null eq" out))
+        (dotimes (i (- (miricl-compiler::native-worker-width arity) arity)) (write-line "ref.null eq" out))
         (format out "call ~A~%" (gethash selected-index *kernel-module-workers*))
         (when (eq result :truth) (write-line "ref.is_null i32.eqz" out))
         (write-line ")" out)))))

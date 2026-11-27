@@ -1434,6 +1434,23 @@ try {
       rejectPacketOperation(() => vm.vm[name](invalid));
   }
   console.log('Soundness: scalar and fixed tail calls reject malformed functions and ignored operands with recovery.');
+  check('(check-wide-native-calls)');
+  const wideWorker = packetFunction(`(compile-native
+    '(lambda (a b c d e f g h i j k l m n o p)
+       (declare (ignore a b c d e f g h i j k l m n o) (optimize (debug 1)))
+       p))`);
+  const wideCall = (args, flags) => vm.vm['native-wide-call'](wideWorker, ...args, flags);
+  const wideArgs = [...Array(15).fill(null), elements[0]];
+  for (const flags of [16 | 32, 16 | 64]) {
+    assert.equal(wideCall(wideArgs, flags), elements[0]);
+    for (const invalid of [foreign, packets.empty()]) {
+      for (const index of [0, 14, 15])
+        rejectPacketOperation(() => wideCall(wideArgs.with(index, invalid), flags));
+    }
+    assert.equal(wideCall(wideArgs, flags), elements[0]);
+  }
+  rejectPacketOperation(() => wideCall(wideArgs, 17));
+  console.log('Soundness: wide direct and packet calls preserve tail calls, values, checked operands and arity recovery.');
   // Fixed transport keeps ordinary checking and complete values even when
   // its actual callee misses the native-worker path.
   const knownCall = (function_, args, primary = false) => vm.vm['native-fixed-call'](
@@ -1561,6 +1578,8 @@ try {
   ])), {m: {value: rawResult}}).exports;
   const uncheckedResult = vm.vm['native-attach-direct-root'](
     vm.vm['core-native-function'](rawEntries.entry, null, null, 0, null), rawEntries.direct, 1);
+  rejectPacketOperation(() => vm.vm['native-attach-direct-root'](
+    vm.vm['core-native-function'](rawEntries.entry, null, null, 0, null), rawEntries.direct, 16));
   for (const invalid of [foreign, packets.empty()]) {
     for (const invoke of [() => vm.vm['native-call1'](uncheckedResult, null),
       () => vm.vm['native-call-values1'](uncheckedResult, null),

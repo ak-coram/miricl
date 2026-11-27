@@ -3,7 +3,7 @@
 
 (defvar *native-service-interpreters* (make-hash-table))
 
-(defstruct host-native-module instance entries descriptors code storage)
+(defstruct host-native-module instance entries descriptors exports code storage)
 
 (defun host-native-fail (reason &rest arguments)
   (error "Invalid native module: ~A" (apply #'format nil reason arguments)))
@@ -73,20 +73,20 @@
                           (when (and (> end (1+ start)) (zerop (aref payload (1- end))))
                             (host-native-fail "noncanonical entry metadata integer"))
                           value)))
-               (unless (= 1 (word)) (host-native-fail "unsupported entry metadata version"))
+               (unless (= 2 (word)) (host-native-fail "unsupported entry metadata version"))
                (let* ((count (word)) (mode (native-link-byte section)))
                  (unless (<= 1 count (length bytes)) (host-native-fail "entry count exceeds module bounds"))
                  (unless (member mode '(0 1)) (host-native-fail "unknown entry descriptor mode"))
-                 (unless (= (- (native-link-reader-limit section) (native-link-reader-position section))
-                            (if (= mode 1) count 0))
-                   (host-native-fail "entry descriptor extent"))
-                 (let ((descriptors (if (= mode 1) (native-link-span section count)
-                                        (make-array count :element-type '(unsigned-byte 8) :initial-element 0)))
+                 (let ((descriptors (make-array count :initial-element 0))
                        (direct-count 0))
+                   (when (= mode 1)
+                     (dotimes (i count) (setf (aref descriptors i) (word))))
+                   (unless (= (native-link-reader-position section) (native-link-reader-limit section))
+                     (host-native-fail "entry descriptor extent"))
                    (loop for descriptor across descriptors
-                         for arity = (logand descriptor 7) for usage = (ash descriptor -3) do
+                         for arity = (logand descriptor 31) for usage = (ash descriptor -5) do
                      (cond ((zerop arity) (unless (zerop descriptor) (host-native-fail "usage without direct entry")))
-                           (t (unless (and (<= arity 5) (or (zerop usage) (< (1- usage) (ash 1 (1- arity)))))
+                           (t (unless (and (<= arity 17) (or (zerop usage) (< (1- usage) (ash 1 (1- arity)))))
                                 (host-native-fail "invalid direct arity or argument usage"))
                               (incf direct-count))))
                    (unless (<= (+ count direct-count) (length bytes))
@@ -141,10 +141,10 @@
             ((or entry-table table) (host-native-fail "missing metadata for entry table"))))
     (values (nreverse imports) metadata exports)))
 
-(defun host-native-module-entry (interpreter module name)
+(defun host-native-module-entry (interpreter module name &optional (signature 0))
   (wt:with-export (export (interpreter-context interpreter) (host-native-module-instance module) name 0)
     (let ((value (host-native-function-value (wt:extern-payload export 'wt::func))))
-      (unless (host-native-entry-valid-p interpreter value 0)
+      (unless (host-native-entry-valid-p interpreter value signature)
         (host-native-free value) (host-native-fail "entry ~S has the wrong signature" name))
       value)))
 
@@ -152,7 +152,6 @@
   (let ((engine (interpreter-engine interpreter)) (context (interpreter-context interpreter)))
     (native-link-validate engine bytes)
     (multiple-value-bind (imports metadata exports) (host-native-module-description bytes)
-      (declare (ignore exports))
       (let ((module (wt:compile-module engine bytes))
             (instance (cffi:foreign-alloc '(:struct wt::wasmtime-instance)))
             (raw-imports nil) (entries nil) (code nil) (owned-storage nil) (success nil))
@@ -169,19 +168,24 @@
                  (wt:with-export (table context instance "entries" 2)
                    (unless (= (wt::wasmtime-table-size context (wt:extern-payload table 'wt::table)) (second metadata))
                      (host-native-fail "actual entry table size mismatch"))
-                   (dotimes (i (second metadata))
-                     (let ((entry (cffi:foreign-alloc '(:struct wt::wasmtime-val))))
-                       (unless (wt::wasmtime-table-get context (wt:extern-payload table 'wt::table) i entry)
-                         (cffi:foreign-free entry) (host-native-fail "missing entry table slot ~D" i))
-                       (push entry entries)
-                       (unless (host-native-entry-valid-p interpreter entry (if (< i (first metadata)) 0 1))
-                         (host-native-fail "entry ~D has the wrong signature" i))))))
+                   (let ((signatures (append (make-list (first metadata) :initial-element 0)
+                                            (loop for descriptor across (third metadata)
+                                                  unless (zerop descriptor)
+                                                    collect (if (<= (logand descriptor 31) 5) 1 2)))))
+                     (loop for signature in signatures for i from 0 do
+                       (let ((entry (cffi:foreign-alloc '(:struct wt::wasmtime-val))))
+                         (unless (wt::wasmtime-table-get context (wt:extern-payload table 'wt::table) i entry)
+                           (cffi:foreign-free entry) (host-native-fail "missing entry table slot ~D" i))
+                         (push entry entries)
+                         (unless (host-native-entry-valid-p interpreter entry signature)
+                           (host-native-fail "entry ~D has the wrong signature" i)))))))
                (with-host-native-results (value interpreter "snapshot"
                          (list (cons 0 start) (cons 0 length)) 1 (interpreter-native-service-instance interpreter))
                  (setq code (host-native-clone value)))
                (setq owned-storage (host-native-clone storage))
                (prog1 (make-host-native-module :instance instance :entries (and entries (coerce (nreverse entries) 'vector))
-                          :descriptors (and metadata (third metadata)) :code code :storage owned-storage)
+                          :descriptors (and metadata (third metadata)) :exports exports
+                          :code code :storage owned-storage)
                  (setq success t)))
           (wt::wasmtime-module-delete module)
           (dolist (import raw-imports) (wt::wasmtime-extern-delete import) (cffi:foreign-free import))
@@ -222,6 +226,32 @@
       (wt::wasmtime-val-clone value results)
       (wt:write-value (host-native-value results 1) 0 1))))
 
+(defun host-native-direct-entry (interpreter module index entry-name)
+  (let ((descriptors (host-native-module-descriptors module)))
+    (if descriptors
+        (let ((descriptor (aref descriptors index)))
+          (unless (zerop descriptor)
+            (let ((usage (ash descriptor -5))
+                  (slot (+ (length descriptors) (count-if-not #'zerop descriptors :end index))))
+              (values (aref (host-native-module-entries module) slot)
+                      (1- (logand descriptor 31)) (unless (zerop usage) (1- usage))))))
+        (let ((exports (host-native-module-exports module)))
+          (loop for arity from 0 to 16
+                for name = (format nil "direct-~A-~D" entry-name arity)
+                when (assoc name exports :test #'string=) do
+                  (let* ((usage-name (format nil "argument-usage-~A" entry-name))
+                         (usage (when (assoc usage-name exports :test #'string=)
+                                  (let ((context (interpreter-context interpreter)))
+                                    (wt:with-export (export context (host-native-module-instance module) usage-name 1)
+                                      (cffi:with-foreign-object (value '(:struct wt::wasmtime-val))
+                                        (wt::wasmtime-global-get context (wt:extern-payload export 'wt::global) value)
+                                        (unwind-protect
+                                             (when (zerop (cffi:foreign-slot-value value '(:struct wt::wasmtime-val) 'wt::kind))
+                                               (wt:read-value value))
+                                          (wt::wasmtime-val-unroot value))))))))
+                    (return (values (host-native-module-entry interpreter module name (if (<= arity 4) 1 2))
+                                    arity usage t))))))))
+
 (defun host-native-install (interpreter args results)
   ;; The Wasm bridge checked the input representation, copied bytes and checked
   ;; the entry index before crossing C. Do not reenter guest input validators.
@@ -252,17 +282,29 @@
                      (push module (gethash bytes (interpreter-native-modules interpreter))) module)))
              (entries (host-native-module-entries compiled))
              (count (length (host-native-module-descriptors compiled)))
+             (entry-name (if (minusp index) "entry" (format nil "entry~D" index)))
              (entry (if entries
                         (progn (unless (< -1 index count) (host-native-fail "entry index exceeds table bounds"))
                                (aref entries index))
-                        (host-native-module-entry interpreter compiled
-                          (if (minusp index) "entry" (format nil "entry~D" index))))))
+                        (host-native-module-entry interpreter compiled entry-name))))
         (unwind-protect
              (with-host-native-results (function interpreter "core-native-function"
                  (list entry literals name (cons 0 length) (host-native-module-code compiled)) 1)
-               ;; Checked packet entries are sufficient for bootstrap. No
-               ;; compiler metadata grants certified-call authority.
-               (wt::wasmtime-val-clone function results)
+               ;; This host attaches the checked worker ABI without granting
+               ;; permission to skip the ordinary call frame.
+               (multiple-value-bind (direct arity usage owned)
+                   (host-native-direct-entry interpreter compiled index entry-name)
+                 (unwind-protect
+                      (if direct
+                          (with-host-native-results (attached interpreter "native-attach-direct-root"
+                              (list function direct (cons 0 arity)) 1)
+                            (if usage
+                                (with-host-native-results (configured interpreter "native-set-argument-usage"
+                                    (list attached (cons 0 usage)) 1)
+                                  (wt::wasmtime-val-clone configured results))
+                                (wt::wasmtime-val-clone attached results)))
+                          (wt::wasmtime-val-clone function results))
+                   (when owned (host-native-free direct))))
                (wt:write-value (host-native-value results 1) 0 0))
           (unless entries (host-native-free entry)))))))
 

@@ -108,7 +108,7 @@
     (local.get $arity) (local.get $slot)))
 
 (define-runtime-function $native-with-arity (($function :nullable-object) ($arity i32)) (:nullable-object)
-  (wat-fail-when #@(i32.or (i32.gt_u (local.get $arity) (i32.const 4))
+  (wat-fail-when #@(i32.or (i32.gt_u (local.get $arity) (i32.const 16))
     (i32.eqz (ref.test (ref $native-function) (local.get $function)))) :expected-designator)
   ;; The installer has already set the arity of a checked direct root.
   ;; Preserve that owner's identity. Incompatible copies acquire no grant.
@@ -122,7 +122,11 @@
     (struct.get $obj $c (ref.cast (ref $obj) (local.get $function)))
     (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $function)))
     (struct.get $native-function $code-size (ref.cast (ref $native-function) (local.get $function)))
-    (struct.get $native-function $direct (ref.cast (ref $native-function) (local.get $function)))))
+    (if (result (ref null $native-direct-code))
+      (i32.eq (i32.gt_u (local.get $arity) (i32.const 4))
+              (f64.gt (struct.get $obj $f (ref.cast (ref $obj) (local.get $function))) (f64.const 6)))
+      (then (struct.get $native-function $direct (ref.cast (ref $native-function) (local.get $function))))
+      (else (ref.null $native-direct-code)))))
 
 (define-runtime-function $native-code-size (($function :nullable-object)) (:nullable-object)
   (:locals ($size i32))
@@ -696,9 +700,20 @@
 
 (define-runtime-function $native-entry-valid (($entry funcref) ($direct i32)) (i32)
   (:export-raw "native-entry-valid")
-  #@(if (result i32) (local.get $direct)
-    (then (ref.test (ref $native-direct-entry) (local.get $entry)))
-    (else (ref.test (ref $native-entry) (local.get $entry)))))
+  #@(if (result i32) (i32.eqz (local.get $direct))
+    (then (ref.test (ref $native-entry) (local.get $entry)))
+    (else (i32.or
+      (i32.and (local.get $direct) (ref.test (ref $native-direct-entry) (local.get $entry)))
+      (i32.and (i32.shr_u (local.get $direct) (i32.const 1))
+        (ref.test (ref $native-wide-entry) (local.get $entry)))))))
+
+(define-runtime-function $native-narrow-entry (($code (ref $native-direct-code))) ((ref $native-direct-entry))
+  (:locals ($entry (ref func)))
+  #@(local.set $entry (struct.get $native-direct-code $entry (local.get $code)))
+  #@(block $narrow (result (ref $native-direct-entry))
+    (br_on_cast $narrow (ref func) (ref $native-direct-entry) (local.get $entry))
+    drop
+    ,(wat-fail :malformed-form) unreachable))
 
 (define-runtime-function $native-module-error (($message externref)) (externref)
   (:export-raw "native-module-error")
@@ -981,40 +996,6 @@
   #@(extern.convert_any (call $native-primary-apply
     (call $native-checked-value (local.get $function))
     ,(native-object '(call $native-ingress-arguments (local.get $args))))))
-
-(defun native-primary-call5-packet-wat ()
-  (wat-fragment #@(array.new_fixed $objects 5
-    (local.get $a) (local.get $b) (local.get $c) (local.get $d) (local.get $e))))
-
-(define-runtime-function $native-primary-call5-ready
-    (($name :nullable-object) ($a :nullable-object) ($b :nullable-object)
-     ($c :nullable-object) ($d :nullable-object) ($e :nullable-object)) (externref)
-  (:locals ($result :nullable-object))
-  #@(local.set $result
-    (call $apply0-ready (local.get $name) ,(native-primary-call5-packet-wat)))
-  #@(call $clear-values)
-  #@(extern.convert_any (local.get $result)))
-
-(define-runtime-function $native-primary-call5
-    (($function externref) ($first externref) ($second externref) ($third externref)
-     ($fourth externref) ($fifth externref)) (externref)
-  (:export-raw "native-primary-call5")
-  (:locals ($name :nullable-object) ($a :nullable-object) ($b :nullable-object)
-           ($c :nullable-object) ($d :nullable-object) ($e :nullable-object))
-  #@(local.set $name (call $native-checked-value (local.get $function)))
-  #@(local.set $a (call $native-checked-value (local.get $first)))
-  #@(local.set $b (call $native-checked-value (local.get $second)))
-  #@(local.set $c (call $native-checked-value (local.get $third)))
-  #@(local.set $d (call $native-checked-value (local.get $fourth)))
-  #@(local.set $e (call $native-checked-value (local.get $fifth)))
-  ;; Match APPLY0's entry decision before the checkpoint. The debugging path
-  ;; manages checkpoint suppression and restoration inside ordinary application.
-  #@(if (global.get $debug-evaluating)
-    (then (return (extern.convert_any
-      (call $native-primary-apply (local.get $name) ,(native-primary-call5-packet-wat))))))
-  #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
-  #@(return_call $native-primary-call5-ready
-    (local.get $name) (local.get $a) (local.get $b) (local.get $c) (local.get $d) (local.get $e)))
 
 (define-runtime-function $native-return (($values externref)) (externref)
   (:export-raw "native-return")
@@ -1865,7 +1846,7 @@
           (return_call_ref $native-direct-entry
             (extern.convert_any (local.get $name)) (extern.convert_any (local.get $a))
             (extern.convert_any (local.get $b)) (extern.convert_any (local.get $c)) (extern.convert_any (local.get $d))
-            (struct.get $native-direct-code $entry
+            (call $native-narrow-entry
               (ref.as_non_null (struct.get $native-function $direct (ref.as_non_null (local.get $body)))))))))
     (if (i32.and (i32.le_u (local.get $count) (i32.const 3))
           (i32.eq (call $native-builtin-id (local.get $name)) (i32.const 2147483644)))
@@ -1984,7 +1965,7 @@
     (return_call_ref $native-direct-entry
       (extern.convert_any (local.get $body-object)) (extern.convert_any (local.get $context))
       (extern.convert_any (local.get $a)) (extern.convert_any (local.get $b)) (extern.convert_any (local.get $c))
-      (struct.get $native-direct-code $entry
+      (call $native-narrow-entry
         (ref.as_non_null (struct.get $native-function $direct (ref.as_non_null (local.get $body)))))))
   ;; This fallback intentionally retains the existing APPLY cleanup contract.
   #@(extern.convert_any (call $apply (local.get $gf) (if (result (ref null eq)) (ref.is_null (local.get $args))
@@ -2025,17 +2006,18 @@
   (:export-raw "native-attach-direct")
   (:locals ($fn (ref $native-function)))
   (wat-fail-when #@(i32.eqz (ref.test (ref $native-function) ,(native-object '(local.get $function)))) :malformed-form)
-  (wat-fail-when #@(i32.eqz (ref.test (ref $native-direct-entry) (local.get $entry))) :malformed-form)
   #@(local.set $fn (ref.cast (ref $native-function) ,(native-object '(local.get $function))))
   (wat-fail-when #@(i32.or (f64.lt (struct.get $obj $f (local.get $fn)) (f64.const 2))
-                         (f64.gt (struct.get $obj $f (local.get $fn)) (f64.const 6))) :malformed-form)
+                         (f64.gt (struct.get $obj $f (local.get $fn)) (f64.const 18))) :malformed-form)
+  (wat-fail-when #@(i32.eqz (call $native-entry-valid (local.get $entry)
+    (i32.add (i32.const 1) (f64.gt (struct.get $obj $f (local.get $fn)) (f64.const 6))))) :malformed-form)
   ;; Static closure caches can return the same function object repeatedly.
   #@(if (i32.eqz (ref.is_null (struct.get $native-function $direct (local.get $fn))))
     (then (return (local.get $function))))
   #@(struct.set $native-function $direct (local.get $fn)
     (struct.new $native-direct-code (call $allocate-object-tag (i32.const 55)) (i32.const 0) (f64.const 0)
       (struct.get $obj $digits (local.get $fn)) (ref.null eq) (ref.null eq) (ref.null eq)
-      (ref.cast (ref $native-direct-entry) (local.get $entry)) (i32.const 0)))
+      (ref.as_non_null (local.get $entry)) (i32.const 0)))
   #@(local.get $function))
 
 (define-runtime-function $native-attach-direct-root
@@ -2058,8 +2040,9 @@
   (:export-raw "core-native-attach-certified-root")
   (:locals ($fn (ref $native-function)) ($code (ref $native-direct-code)) ($slot i32))
   (wat-fail-when #@(i32.eqz (ref.test (ref $native-function) ,(native-object '(local.get $function)))) :malformed-form)
-  (wat-fail-when #@(i32.eqz (ref.test (ref $native-direct-entry) (local.get $entry))) :malformed-form)
-  (wat-fail-when #@(i32.gt_u (local.get $arity) (i32.const 4)) :malformed-form)
+  (wat-fail-when #@(i32.gt_u (local.get $arity) (i32.const 16)) :malformed-form)
+  (wat-fail-when #@(i32.eqz (call $native-entry-valid (local.get $entry)
+    (i32.add (i32.const 1) (i32.gt_u (local.get $arity) (i32.const 4))))) :malformed-form)
   #@(local.set $fn (ref.cast (ref $native-function) ,(native-object '(local.get $function))))
   (wat-fail-when #@(i32.eqz (ref.is_null (struct.get $native-function $direct (local.get $fn)))) :malformed-form)
   #@(local.set $fn (ref.cast (ref $native-function)
@@ -2068,14 +2051,21 @@
   #@(local.set $code (struct.new $native-direct-code
     (call $allocate-object-tag (i32.const 55)) (i32.const 0) (f64.const 0)
     (struct.get $obj $digits (local.get $fn)) (ref.null eq) (ref.null eq) (ref.null eq)
-    (ref.cast (ref $native-direct-entry) (local.get $entry))
-    (i32.or (i32.shl (local.get $slot) (i32.const 3)) (i32.add (local.get $arity) (i32.const 1)))))
+    (ref.as_non_null (local.get $entry))
+    (i32.or (i32.shl (local.get $slot) (i32.const 5)) (i32.add (local.get $arity) (i32.const 1)))))
   ;; Canonical WasmGC types can be reproduced by supplied modules. The hint
   ;; alone is not authority: own this exact immutable code object privately.
   #@(array.set $objects (global.get $native-call-proofs) (local.get $slot) (local.get $code))
   #@(global.set $native-call-proof-next (i32.and (i32.add (local.get $slot) (i32.const 1)) (i32.const 15)))
   #@(struct.set $native-function $direct (local.get $fn) (local.get $code))
   #@(extern.convert_any (local.get $fn)))
+
+(defun native-call-proof-wat ()
+  #@(i32.and
+    (ref.eq (local.get $direct) (array.get $objects (global.get $native-call-proofs)
+      (i32.and (i32.shr_u (local.get $proof) (i32.const 5)) (i32.const 15))))
+    (f64.eq (struct.get $obj $f (ref.cast (ref $native-function) (local.get $name)))
+      (f64.convert_i32_u (i32.add (i32.and (local.get $proof) (i32.const 31)) (i32.const 1))))))
 
 (define-runtime-function $native-direct-apply
     (($name (ref $native-function)) ($a :nullable-object) ($b :nullable-object)
@@ -2100,18 +2090,14 @@
         (i32.and (i32.eqz (global.get $debug-evaluating))
           (i32.eqz (ref.test (ref $native-debug-function) (local.get $name)))))
     (then
-      (if (i32.and
-            (ref.eq (local.get $direct) (array.get $objects (global.get $native-call-proofs)
-              (i32.and (i32.shr_u (local.get $proof) (i32.const 3)) (i32.const 15))))
-            (f64.eq (struct.get $obj $f (local.get $name))
-              (f64.convert_i32_u (i32.add (i32.and (local.get $proof) (i32.const 7)) (i32.const 1)))))
+      (if ,(wat-fragment (native-call-proof-wat))
         (then
           ;; The audited worker cannot observe or change dynamic roots, poll,
           ;; trap or signal, and its final RETURN1 normalizes exactly one value.
           (return_call_ref $native-direct-entry (extern.convert_any (local.get $name))
               (extern.convert_any (local.get $a)) (extern.convert_any (local.get $b))
               (extern.convert_any (local.get $c)) (extern.convert_any (local.get $d))
-              (struct.get $native-direct-code $entry (local.get $direct)))))))
+              (call $native-narrow-entry (local.get $direct)))))))
   #@(local.set $backtrace-depth (global.get $backtrace-depth))
   #@(local.set $backtrace-slot (i32.and (local.get $backtrace-depth) (i32.const 63)))
   #@(local.set $backtrace-frame (array.get $objects (global.get $backtrace-frames) (local.get $backtrace-slot)))
@@ -2125,7 +2111,7 @@
       (call_ref $native-direct-entry (extern.convert_any (local.get $name))
         (extern.convert_any (local.get $a)) (extern.convert_any (local.get $b))
         (extern.convert_any (local.get $c)) (extern.convert_any (local.get $d))
-        (struct.get $native-direct-code $entry (local.get $direct))))
+        (call $native-narrow-entry (local.get $direct))))
     :cleanup #@(block
       (array.set $objects (global.get $backtrace-frames) (local.get $backtrace-slot) (local.get $backtrace-frame))
       (global.set $backtrace-depth (local.get $backtrace-depth)))))
@@ -2142,29 +2128,118 @@
   (wat-fail-when #@(ref.is_null (struct.get $native-function $direct (local.get $body))) :malformed-form)
   #@(local.set $arity (i32.sub (i32.trunc_f64_u (struct.get $obj $f (local.get $body))) (i32.const 2)))
   (wat-fail-when #@(i32.ge_u (local.get $usage) (i32.shl (i32.const 1) (local.get $arity))) :malformed-form)
-  ;; Zero denotes an unknown usage mask for older compiled modules.
+  ;; Zero denotes an unknown argument usage mask.
   #@(struct.set $obj $n (ref.as_non_null (struct.get $native-function $direct (local.get $body)))
     (i32.add (local.get $usage) (i32.const 1)))
   #@(local.get $function))
 
+(define-runtime-function $native-shared-argument
+    (($args externref) ($usage i32) ($index i32)) (externref)
+  #@(if (result externref) (i32.and (i32.shr_u (local.get $usage) (local.get $index)) (i32.const 1))
+    (then (return_call $native-argument (local.get $args) (local.get $index)))
+    (else (ref.null extern))))
+
+(defun native-packed-argument-wat (index)
+  `(call $native-shared-argument (local.get $args) (local.get $usage) (i32.const ,index)))
+
 (define-runtime-function $native-shared-entry (($function externref) ($args externref)) (externref)
   (:export-raw "native-shared-entry")
-  (:locals ($body (ref $native-function)) ($arity i32) ($usage i32))
-  ;; The caller established its Lisp frame and cleanup. This shared checked
-  ;; adapter must tail-call the worker without adding another Lisp frame.
-  (wat-fail-when #@(i32.eqz (ref.test (ref $native-function) ,(native-object '(local.get $function)))) :malformed-form)
-  #@(local.set $body (ref.cast (ref $native-function) ,(native-object '(local.get $function))))
+  (:locals ($body (ref $native-function)) ($arity i32) ($usage i32) ($code (ref $native-direct-code))
+           ($entry (ref func)) ($mask i32))
+  ;; The caller established its Lisp frame and cleanup. Tail-call the worker
+  ;; from this checked adapter without adding another Lisp frame.
+  (wat-fail-when #@(i32.eqz (ref.test (ref $native-function) (any.convert_extern (local.get $function)))) :malformed-form)
+  #@(local.set $body (ref.cast (ref $native-function) (any.convert_extern (local.get $function))))
   (wat-fail-when #@(ref.is_null (struct.get $native-function $direct (local.get $body))) :malformed-form)
-  #@(local.set $arity (i32.sub (i32.trunc_f64_u (struct.get $obj $f (local.get $body))) (i32.const 2)))
-  #@(local.set $usage (struct.get $obj $n (ref.as_non_null (struct.get $native-function $direct (local.get $body)))))
+  #@(local.set $arity (i32.sub (i32.trunc_sat_f64_u (struct.get $obj $f (local.get $body))) (i32.const 2)))
+  (wat-fail-when #@(i32.gt_u (local.get $arity) (i32.const 16)) :malformed-form)
+  #@(local.set $code (ref.as_non_null (struct.get $native-function $direct (local.get $body))))
+  #@(local.set $usage (struct.get $obj $n (local.get $code)))
+  #@(local.set $mask (i32.sub (i32.shl (i32.const 1) (local.get $arity)) (i32.const 1)))
+  #@(if (local.get $usage)
+    (then (local.set $usage (i32.and (local.get $mask) (i32.sub (local.get $usage) (i32.const 1)))))
+    (else (local.set $usage (local.get $mask))))
   #@(call $native-check-arguments (local.get $args) (local.get $arity) (local.get $arity))
-  #@(return_call_ref $native-direct-entry (local.get $function)
-    ,@(loop for index below 4 collect
-      `(if (result externref) (i32.and (i32.gt_u (local.get $arity) (i32.const ,index))
-             (i32.or (i32.eqz (local.get $usage))
-               (i32.ne (i32.and (i32.sub (local.get $usage) (i32.const 1)) (i32.const ,(ash 1 index))) (i32.const 0))))
-         (then (call $native-argument (local.get $args) (i32.const ,index))) (else (ref.null extern))))
-    (struct.get $native-direct-code $entry (ref.as_non_null (struct.get $native-function $direct (local.get $body))))))
+  #@(if (i32.le_u (local.get $arity) (i32.const 4))
+    (then (return_call_ref $native-direct-entry (local.get $function)
+      ,@(loop for index below 4 collect (native-packed-argument-wat index))
+      (call $native-narrow-entry (local.get $code)))))
+  #@(local.set $entry (struct.get $native-direct-code $entry (local.get $code)))
+  (wat-fail-when #@(i32.eqz (ref.test (ref $native-wide-entry) (local.get $entry))) :malformed-form)
+  #@(return_call_ref $native-wide-entry (local.get $function)
+    ,@(loop for index below 16 collect (native-packed-argument-wat index))
+    (ref.cast (ref $native-wide-entry) (local.get $entry))))
+
+(defmacro define-native-wide-call ()
+  (let* ((arguments (loop for i below 16 collect (intern (format nil "$ARG~D" i) :miricl)))
+         (operands (mapcar (lambda (name) `(local.get ,name)) arguments))
+         (call-operands `((extern.convert_any (local.get $name)) ,@operands
+                          (ref.as_non_null (local.get $entry)))))
+    `(define-runtime-function $native-wide-call
+         (($function externref) ,@(mapcar (lambda (name) (list name 'externref)) arguments) ($flags i32)) (externref)
+       (:export-raw "native-wide-call")
+       (:locals ($name :nullable-object) ($args (ref $objects)) ($arity i32)
+                ($tail i32) ($body (ref $native-function)) ($target funcref) ($entry (ref null $native-wide-entry))
+                ($direct (ref $native-direct-code)) ($proof i32)
+                ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
+                ($handlers :nullable-object) ($restarts :nullable-object)
+                ($restart-associations :nullable-object) ($catches :nullable-object) ($targets :nullable-object)
+                ($thrown i32) ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object)
+                ($result :nullable-object))
+       #@(local.set $arity (i32.and (local.get $flags) (i32.const 31)))
+       (wat-fail-when #@(i32.or (i32.gt_u (local.get $flags) (i32.const 80))
+         (i32.or (i32.lt_u (local.get $arity) (i32.const 5))
+                 (i32.gt_u (local.get $arity) (i32.const 16)))) :malformed-form)
+       #@(local.set $name (call $native-checked-value (local.get $function)))
+       ,@(loop for operand in operands collect `(wat-fragment (wat-string '(drop (call $native-checked-value ,operand)))))
+       #@(local.set $tail (i32.and (local.get $flags) (i32.const 64)))
+       #@(if (i32.or (local.get $tail) (global.get $thread-active)) (then (call $thread-checkpoint)))
+       #@(if (call $symbolp (local.get $name))
+         (then (local.set $name (call $fdefinition (local.get $name)))))
+       #@(block $wide-result (block $fallback
+         (br_if $fallback (global.get $debug-evaluating))
+         (br_if $fallback (i32.eqz (ref.test (ref $native-function) (local.get $name))))
+         (br_if $fallback (ref.test (ref $native-debug-function) (local.get $name)))
+         (local.set $body (ref.cast (ref $native-function) (local.get $name)))
+         (br_if $fallback (f64.ne (struct.get $obj $f (local.get $body))
+           (f64.convert_i32_u (i32.add (local.get $arity) (i32.const 2)))))
+         (br_if $fallback (ref.is_null (struct.get $native-function $direct (local.get $body))))
+         (local.set $direct (ref.as_non_null (struct.get $native-function $direct (local.get $body))))
+         (local.set $target (struct.get $native-direct-code $entry (local.get $direct)))
+         (br_if $fallback (i32.eqz (ref.test (ref $native-wide-entry) (local.get $target))))
+         (local.set $entry (ref.cast (ref $native-wide-entry) (local.get $target)))
+         (if (local.get $tail)
+           (then
+             (if (global.get $backtrace-depth)
+               (then (array.set $objects (global.get $backtrace-frames)
+                 (i32.and (i32.sub (global.get $backtrace-depth) (i32.const 1)) (i32.const 63)) (local.get $name))))
+             (call $clear-values)
+             (return_call_ref $native-wide-entry ,@',call-operands)))
+         (local.set $proof (struct.get $native-direct-code $call-proof (local.get $direct)))
+         (if (i32.ne (local.get $proof) (i32.const 0))
+           (then (if ,(wat-fragment (native-call-proof-wat))
+             (then
+               (local.set $result (call $native-checked-value (call_ref $native-wide-entry ,@',call-operands)))
+               (br $wide-result)))))
+         ,(wat-apply-frame #@(call $native-checked-value (call_ref $native-wide-entry ,@',call-operands)))
+         (drop)
+         (br $wide-result))
+       (local.set $args (array.new_default $objects (local.get $arity)))
+       (block $packet-ready
+         ,@',(loop for operand in operands for index from 0 append
+                 (when (>= index 5)
+                   (list `(br_if $packet-ready (i32.eq (local.get $arity) (i32.const ,index)))))
+                 collect `(array.set $objects (local.get $args) (i32.const ,index) (ref.cast (ref null eq) (any.convert_extern ,operand)))))
+       (if (local.get $tail)
+         (then (return_call $native-tail-dispatch (extern.convert_any (local.get $name))
+           (extern.convert_any (local.get $args)) (i32.const 1))))
+       (local.set $result (call $apply-ready (local.get $name) (local.get $args))))
+       #@(if (i32.eqz (i32.and (local.get $flags) (i32.const 32)))
+         (then (local.set $result (call $value-list (local.get $result)))))
+       #@(call $clear-values)
+       #@(extern.convert_any (local.get $result)))))
+
+(define-native-wide-call)
 
 (define-runtime-function $native-attach-direct-usage
     (($function externref) ($entry funcref) ($usage i32)) (externref)
@@ -4047,6 +4122,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   #@(type $native-entry (func (param externref externref) (result externref)))
   #@(type $native-service (func (param externref externref externref) (result externref)))
   #@(type $native-direct-entry (func (param externref externref externref externref externref) (result externref)))
+  #@(type $native-wide-entry (func (param ,@(make-list 17 :initial-element 'externref)) (result externref)))
   #@(type $native-scalar-entry (func (param externref externref externref externref externref i64 i64 i64 i64 i32)
     (result i64 i32 externref)))
   #@(type $native-scalar-worker (struct
@@ -4059,7 +4135,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   #@(type $native-direct-code (sub final $obj (struct
     (field $tag i32) (field $n (mut i32)) (field $f f64) (field $digits (ref null $digits))
     (field $a (mut (ref null eq))) (field $b (mut (ref null eq))) (field $c (mut (ref null eq)))
-    (field $entry (ref $native-direct-entry)) (field $call-proof i32))))
+    (field $entry (ref func)) (field $call-proof i32))))
   ;; A bounded, process-local identity authority. Eviction only loses a proof;
   ;; neither this registry nor its hints survive image serialization.
   #@(global $native-call-proofs (ref $objects) (array.new_default $objects (i32.const 16)))
@@ -4079,7 +4155,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($compiler-image-function)
   ($native-install) ($native-function) ($native-function-with-code) ($native-close-with-arity) ($native-close) ($native-close-fixed) ($native-close-cached) ($native-close-static) ($native-with-arity) ($native-code-size) ($native-capture) ($native-code-storage) ($native-code-entry) ($native-code-bytes) ($native-literal)
   ($native-debug-wrap) ($native-debug-attach) ($native-debug-close) ($native-debug-info)
-  ($native-attach-direct) ($native-attach-scalar) ($native-attach-direct-root) ($native-attach-certified-root) ($native-set-argument-usage) ($native-attach-direct-usage) ($native-direct-apply) ($native-direct-apply-ready) ($native-shared-entry)
+  ($native-wide-call) ($native-narrow-entry) ($native-attach-direct) ($native-attach-scalar) ($native-attach-direct-root) ($native-attach-certified-root) ($native-shared-argument) ($native-set-argument-usage) ($native-attach-direct-usage) ($native-direct-apply) ($native-direct-apply-ready) ($native-shared-entry)
   #@(global $native-argument-empty (mut (ref null eq)) (ref.null eq))
   ($native-checked-object) ($native-checked-value) ($native-arguments) ($native-argument-set) ($native-validate-packet) ($native-ingress-arguments) ($native-prepend-argument) ($native-packet-tail)
   ($native-packet-length-cl) ($native-packet-ref-cl) ($native-arguments-list)
@@ -4091,7 +4167,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-control) ($native-restart-signal) ($native-throw)
   ($native-global-read) ($native-global-write) ($native-function-reference) ($native-standard-function-reference) ($native-literal-function) ($native-entry-valid) ($native-module-error)
   ($native-cons) ($native-cons2) ($native-list2) ($native-cell) ($native-primary) ($native-cell-write)
-  ($native-call) ($native-primary-call) ($native-primary-call5-ready) ($native-primary-call5)
+  ($native-call) ($native-primary-call)
   ($native-value-arguments-cl) ($native-value-arguments) ($native-multiple-value-call) ($native-tail-multiple-value-call)
   ($native-return) ($native-return1) ($native-return2) ($native-return3)
   ($native-return-counted8) ($native-check-result-spine) ($native-captured-result-ref) ($native-captured-extra-list)

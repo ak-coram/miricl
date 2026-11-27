@@ -35,7 +35,7 @@
   (:locals ($dynamic-package :nullable-object) ($dynamic-variables :nullable-object)
            ($handlers :nullable-object) ($restarts :nullable-object)
            ($restart-associations :nullable-object) ($catches :nullable-object) ($targets :nullable-object)
-           ($thrown i32) ($direct-arity i32) ($direct-usage i32)
+           ($thrown i32)
            ($backtrace-depth i32) ($backtrace-slot i32) ($backtrace-frame :nullable-object)
            ($result :nullable-object))
   ;; Resolved native functions already carry a typed entry. Preserve the same
@@ -48,36 +48,9 @@
           (then (ref.cast (ref null eq) (any.convert_extern
             (call_ref $native-entry (extern.convert_any (local.get $name)) (extern.convert_any (local.get $args))
               (struct.get $native-function $entry (ref.cast (ref $native-function) (local.get $name)))))))
-          (else
-            (local.set $direct-arity (i32.sub (i32.trunc_f64_u (struct.get $obj $f (ref.cast (ref $obj) (local.get $name)))) (i32.const 2)))
-            (local.set $direct-usage (struct.get $obj $n (ref.as_non_null
-              (struct.get $native-function $direct (ref.cast (ref $native-function) (local.get $name))))))
-            (call $native-check-arguments (extern.convert_any (local.get $args))
-              (local.get $direct-arity) (local.get $direct-arity))
-            (ref.cast (ref null eq) (any.convert_extern
-              (call_ref $native-direct-entry (extern.convert_any (local.get $name))
-                (if (result externref) (i32.and (i32.gt_u (local.get $direct-arity) (i32.const 0))
-                    (i32.or (i32.eqz (local.get $direct-usage))
-                      (i32.ne (i32.and (i32.sub (local.get $direct-usage) (i32.const 1)) (i32.const 1)) (i32.const 0))))
-                  (then (call $native-argument (extern.convert_any (local.get $args)) (i32.const 0)))
-                  (else (ref.null extern)))
-                (if (result externref) (i32.and (i32.gt_u (local.get $direct-arity) (i32.const 1))
-                    (i32.or (i32.eqz (local.get $direct-usage))
-                      (i32.ne (i32.and (i32.sub (local.get $direct-usage) (i32.const 1)) (i32.const 2)) (i32.const 0))))
-                  (then (call $native-argument (extern.convert_any (local.get $args)) (i32.const 1)))
-                  (else (ref.null extern)))
-                (if (result externref) (i32.and (i32.gt_u (local.get $direct-arity) (i32.const 2))
-                    (i32.or (i32.eqz (local.get $direct-usage))
-                      (i32.ne (i32.and (i32.sub (local.get $direct-usage) (i32.const 1)) (i32.const 4)) (i32.const 0))))
-                  (then (call $native-argument (extern.convert_any (local.get $args)) (i32.const 2)))
-                  (else (ref.null extern)))
-                (if (result externref) (i32.and (i32.gt_u (local.get $direct-arity) (i32.const 3))
-                    (i32.or (i32.eqz (local.get $direct-usage))
-                      (i32.ne (i32.and (i32.sub (local.get $direct-usage) (i32.const 1)) (i32.const 8)) (i32.const 0))))
-                  (then (call $native-argument (extern.convert_any (local.get $args)) (i32.const 3)))
-                  (else (ref.null extern)))
-                (struct.get $native-direct-code $entry (ref.as_non_null
-                  (struct.get $native-function $direct (ref.cast (ref $native-function) (local.get $name)))))))))))
+          (else (call $native-checked-value
+            (call $native-shared-entry (extern.convert_any (local.get $name))
+              (extern.convert_any (local.get $args)))))))
       (else (call $apply1 (local.get $name) (local.get $args))))))
 
 (define-runtime-function $fixed-byte-apply
