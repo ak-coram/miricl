@@ -48,21 +48,68 @@ function proveReusableScalar(claim, imports, types, functionTypes, bodies) {
     if (!bytes(entry, 18) || entry.word() !== boxed || !bytes(entry, 11) ||
         entry.position !== entry.bytes.length) return false;
     claim.omittable = 0;
+    const kindOf = parameter => argumentsCode >>> (3 * (parameter - 1)) & 7;
+    const packedKinds = (reader, left, right) => bytes(reader, 65) &&
+      reader.word() === ((left << 2) | (right << 5)) &&
+      !(reader.bytes[reader.position - 1] & 64) && bytes(reader, 106);
+    const floatTransport = reader =>
+      call(reader, "float-transport", [127, 127, 127, 126, 111, 111, 126, 127], tuple);
+    const numericKind = parameter => [1, 3, 4, 5, 6].includes(kindOf(parameter));
+    const permit = (checked, used) => {
+      // Only these complete bodies also prove the method context is unused.
+      for (let parameter = 2; parameter <= arity; ++parameter)
+        if (!used.includes(parameter) && kindOf(parameter) === 0)
+          checked |= 1 << (parameter - 1);
+      claim.omittable = checked & ~1;
+    };
     const worker = body(raw);
     const identity = worker.bytes[2];
     // The identity body forwards exactly one argument and its checked bits.
     // Its boxed operand is used only as the miss result.
     if (identity >= 2 && identity <= arity) {
-      const kind = argumentsCode >>> (3 * (identity - 1)) & 7;
+      const kind = kindOf(identity);
       if (kind && (kind >= 5 ? 1 : kind) === result &&
           worker.bytes.length === (result === 1 ? 18 : 21) &&
           bytes(worker, 0, 32, identity, 33, 0, 32, identity + 4, 32, 9,
             65, 1 << (identity - 1), 113, 65, 0, 71) &&
           (result === 1 || bytes(worker, 65, result, 108)) &&
           bytes(worker, 32, 0, 11) && worker.position === worker.bytes.length) {
-        claim.omittable = 1 << (identity - 1);
+        permit(1 << (identity - 1), [identity]);
         return true;
       }
+    }
+    if (result >= 3 && worker.bytes[0] === 3) {
+      // Verify the entire ordered two-operation body. The only consumers of
+      // boxed arguments are the matching checked transports, which can
+      // reconstruct all omitted operands even on an arithmetic miss.
+      const chain = body(raw);
+      const small = opcode => bytes(chain, opcode) ? chain.take(1)[0] : -1;
+      const header = kind => {
+        const op = small(65), precision = small(65);
+        return op >= 0 && op <= 2 && (precision === 3 || precision === 4) &&
+          (!kind || precision === kind) && bytes(chain, 65, 0) ? precision : 0;
+      };
+      const argument = () => {
+        const parameter = small(32);
+        return parameter >= 1 && parameter <= arity ? parameter : 0;
+      };
+      const status = parameter => bytes(chain, 32, 9, 65, 1 << (parameter - 1), 113, 65, 0, 71);
+      const transport = (leftKind, rightKind) =>
+        bytes(chain, 65, 2, 108, 106) && packedKinds(chain, leftKind, rightKind) && floatTransport(chain);
+      if (!bytes(chain, 3, 1, 126, 1, 127, 1, 111)) return true;
+      const precision = header(), leftBits = small(32), left = argument(), middle = argument();
+      if (!precision || !left || !middle || leftBits !== left + 4 ||
+          !bytes(chain, 32, middle + 4) || !status(left) || !status(middle) ||
+          !transport(kindOf(left), kindOf(middle)) ||
+          !bytes(chain, 33, 12, 33, 11, 33, 10) || !header(result) ||
+          !bytes(chain, 32, 10, 32, 12)) return true;
+      const right = argument(), used = [left, middle, right];
+      if (!right || !used.every(numericKind) ||
+          !bytes(chain, 32, right + 4, 32, 11) || !status(right) ||
+          !transport(precision, kindOf(right)) || !bytes(chain, 33, 12, 65, result, 108, 32, 12, 11) ||
+          chain.position !== chain.bytes.length) return true;
+      permit(used.reduce((mask, parameter) => mask | 1 << (parameter - 1), 0), used);
+      return true;
     }
     if (result >= 3 && worker.bytes.length >= 36) {
       // A complete arithmetic body may observe its operands solely through
@@ -76,14 +123,14 @@ function proveReusableScalar(claim, imports, types, functionTypes, bodies) {
       if (!bytes(arithmetic, 32)) return true;
       const right = arithmetic.take(1)[0];
       if (left < 2 || left > arity || right < 2 || right > arity ||
+          !numericKind(left) || !numericKind(right) ||
           leftBits !== left + 4 || !bytes(arithmetic, 32, right + 4, 32, 9, 65, 1 << (left - 1), 113, 65, 0, 71,
             32, 9, 65, 1 << (right - 1), 113, 65, 0, 71, 65, 2, 108, 106) ||
-          !call(arithmetic, "float-transport", [127, 127, 127, 126, 111, 111, 126, 127], tuple) ||
+          !packedKinds(arithmetic, kindOf(left), kindOf(right)) || !floatTransport(arithmetic) ||
           !bytes(arithmetic, 33, 0, 65, result, 108, 32, 0, 11) || arithmetic.position !== arithmetic.bytes.length)
         return true;
-      for (const parameter of [left, right])
-        if ((argumentsCode >>> (3 * (parameter - 1)) & 7) === result)
-          claim.omittable |= 1 << (parameter - 1);
+      const used = [left, right];
+      permit((1 << (left - 1)) | (1 << (right - 1)), used);
     }
     return true;
   } catch {

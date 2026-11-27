@@ -850,7 +850,7 @@
 ;; selection through the fixed-arity proof is nonpolling; execution can yield.
 (define-runtime-function $generic-recent-plan-ready
     (($gf :nullable-object) ($count i32) ($a :nullable-object) ($b :nullable-object)
-     ($c :nullable-object) ($d :nullable-object) ($omitted-class-bit i32))
+     ($c :nullable-object) ($d :nullable-object) ($omitted i32))
     (:nullable-object :nullable-object :nullable-object :nullable-object :nullable-object)
   (:locals ($info (ref $obj)) ($metadata :nullable-object) ($recent (ref $objects))
            ($row-object :nullable-object) ($row (ref $objects)) ($phase i32) ($mode i32) ($target-mode i32) ($position i32)
@@ -906,7 +906,9 @@
         (local.set $mode (call $natural-count (array.get $objects (local.get $row) (i32.const 3))))
         (br_if $row-miss (i32.eqz (local.get $mode)))
         (br_if $row-miss (i32.ne (i32.and (local.get $mode) (i32.const 7)) (local.get $count)))
-        (br_if $row-miss (i32.and (local.get $mode) (local.get $omitted-class-bit)))
+        ;; The owned row encodes the live class and EQL dispatch profiles.
+        (br_if $row-miss (i32.and (local.get $mode)
+          (i32.mul (local.get $omitted) (i32.const 272))))
         (if (i32.and (local.get $mode) (i32.const 4096))
           (then (br_if $row-miss (i32.eqz (ref.eq (global.get $slot-access-token)
             (array.get $objects (local.get $row) (i32.const 5)))))))

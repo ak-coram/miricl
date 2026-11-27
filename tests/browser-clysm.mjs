@@ -76,7 +76,7 @@ browser.stdio[4].on('data', bytes => {
     const request = pending.get(message.id);
     if (!request) continue;
     pending.delete(message.id); clearTimeout(request.timer);
-    if (message.error) request.reject(new Error(JSON.stringify(message.error)));
+    if (message.error) request.reject(new Error(`${request.method}: ${JSON.stringify(message.error)}`));
     else request.resolve(message.result);
   }
 });
@@ -86,7 +86,7 @@ function send(method, params = {}, sessionId) {
     const timer = setTimeout(() => {
       pending.delete(id); reject(new Error(`Timed out: ${method}. ${diagnostics}`));
     }, 45000);
-    pending.set(id, {resolve, reject, timer});
+    pending.set(id, {method, resolve, reject, timer});
     browser.stdio[3].write(JSON.stringify({id, method, params, sessionId}) + '\0');
   });
 }
@@ -131,11 +131,16 @@ try {
   // page uses an explicitly selected source image without a server.
   await command('Network.emulateNetworkConditions',
     {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
-  await command('Page.navigate', {url: pathToFileURL(standalone).href});
-  await waitFor('document.querySelector("input[type=file]") !== null');
-  const {root: documentRoot} = await command('DOM.getDocument');
-  const {nodeId} = await command('DOM.querySelector', {nodeId: documentRoot.nodeId, selector: 'input[type=file]'});
-  await command('DOM.setFileInputFiles', {nodeId, files: [archive]});
+  const localURL = pathToFileURL(standalone).href;
+  await command('Page.navigate', {url: localURL});
+  await waitFor(`location.href === ${JSON.stringify(localURL)} && document.querySelector("#filesystem-file") !== null`);
+  const {result: input, exceptionDetails} = await command('Runtime.evaluate', {
+    expression: 'document.querySelector("#filesystem-file")',
+  });
+  assert.equal(exceptionDetails, undefined, JSON.stringify(exceptionDetails));
+  assert.ok(input.objectId, 'Expected the local filesystem upload control.');
+  await command('DOM.setFileInputFiles', {objectId: input.objectId, files: [archive]});
+  await command('Runtime.releaseObject', {objectId: input.objectId});
   await waitFor(canStart);
   assert.equal(await js('document.querySelector("#evaluate").disabled'), true);
   await js('document.querySelector("#start").click()');

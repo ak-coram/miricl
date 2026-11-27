@@ -57,14 +57,22 @@ function exerciseTransport(runtime) {
   assert.deepEqual(invoke('single', 3, half, half), [floatBits(0.25), 1, null]);
 }
 
+function callWithOperands(runtime, generic, arity, result, operands, ...boxed) {
+  const kinds = operands.reduce((mask, operand, i) => mask | ((operand?.[0] ?? 0) << (3 * i)), 0);
+  const payloads = Array.from({length: 3}, (_, i) => operands[i]?.[1] ?? 0n);
+  return runtime.vm['native-scalar-call-with-operands'](
+    generic, ...Array.from({length: 4}, (_, i) => boxed[i] ?? null),
+    arity, result, ...payloads, kinds);
+}
+
 function exerciseGenericTransport(runtime) {
   const evaluate = source => runtime.evaluate(source, {eof: true}).output;
   const generic = lispValue(runtime, "#'soundness-transport-generic");
   const left = lispValue(runtime, '3.0f0');
   const right = lispValue(runtime, '-0.0f0');
   const call = () => runtime.vm['native-scalar-call'](generic, left, right, null, null, 2, 3);
-  const callWithFloat = value => runtime.vm['native-scalar-call-with-operand'](
-    generic, left, null, null, null, 2, 3, floatBits(value), (3 << 2) | 2);
+  const callWithFloat = value => callWithOperands(
+    runtime, generic, 2, 3, [null, [3, floatBits(value)]], left);
   const warm = () => assert.equal(evaluate(`(and
     (equal (multiple-value-list (soundness-transport-generic 3 4)) '(7 :integer))
     (= (soundness-transport-generic-consumer 3.0f0 4.0f0) 24.0f0)
@@ -73,8 +81,8 @@ function exerciseGenericTransport(runtime) {
   warm();
   assert.deepEqual(call(), [floatBits(-0), 1, null]);
   assert.deepEqual(callWithFloat(-0), [floatBits(-0), 1, null]);
-  assert.throws(() => runtime.vm['native-scalar-call-with-operand'](
-    generic, left, right, null, null, 2, 3, floatBits(1), (3 << 2) | 2),
+  assert.throws(() => callWithOperands(
+    runtime, generic, 2, 3, [null, [3, floatBits(1)]], left, right),
   WebAssembly.Exception);
   // A new EQL specializer makes the raw slot relevant to method selection.
   // The transport must reconstruct it before continuing normal dispatch.
@@ -120,8 +128,8 @@ function exerciseGenericTransport(runtime) {
       (setf (fdefinition 'soundness-transport-generic) original)))`), 'T\n');
 
   const forward = lispValue(runtime, "#'soundness-transport-generic-forward");
-  const invokeForward = (key, input, result, bits) => runtime.vm['native-scalar-call-with-operand'](
-    forward, key, null, null, null, 2, result, bits, (input << 2) | 2);
+  const invokeForward = (key, input, result, bits) => callWithOperands(
+    runtime, forward, 2, result, [null, [input, bits]], key);
   for (const [selector, input, result, bits] of [
     [':character', 2, 2, 0x110000n],
     [':immediate', 5, 1, 1073741824n],
@@ -148,28 +156,148 @@ function exerciseGenericTransport(runtime) {
   assert.equal(evaluate('(soundness-transport-generic-integer #(35184372088839) 0)'), '7\n');
 }
 
-export async function checkScalarTransport(image) {
+async function observeScalarCalls(records, load) {
+  const Instance = WebAssembly.Instance;
+  WebAssembly.Instance = new Proxy(Instance, {
+    construct(target, [module, imports]) {
+      const entry = 'scalar-call-with-operands';
+      const invoke = imports?.m?.[entry];
+      if (invoke) {
+        imports = {...imports, m: {...imports.m, [entry]: (...args) => {
+          const result = invoke(...args);
+          records.push({kinds: args.at(-1), payloads: args.slice(-4, -1), result: result.slice(0, 2)});
+          return result;
+        }}};
+      }
+      return Reflect.construct(target, [module, imports]);
+    },
+  });
+  try {
+    return await load();
+  } finally {
+    WebAssembly.Instance = Instance;
+  }
+}
+
+function exerciseMultiTransport(runtime, records) {
+  const evaluate = source => runtime.evaluate(source, {eof: true}).output;
+  const pair = '(soundness-transport-pair-caller 3.0f0 4.0f0)';
+  const triple = '(soundness-transport-triple-caller 3.0f0 4.0d0 #(7))';
+  const expectRaw = (form, expected, kinds, payloads, result) => {
+    const resultBits = typeof result === 'bigint' ? result : floatBits(result);
+    assert.equal(evaluate(form), expected); // Populate or refresh the live row.
+    assert.equal(evaluate(form), expected);
+    records.length = 0;
+    assert.equal(evaluate(form), expected);
+    assert.ok(records.some(call => call.kinds === kinds &&
+      payloads.every((bits, i) => call.payloads[i] === bits) &&
+      call.result[0] === resultBits && call.result[1] === 1),
+    JSON.stringify(records, (_, value) => typeof value === 'bigint' ? String(value) : value));
+  };
+  expectRaw(pair, '48.0\n', 3 | (3 << 3), [floatBits(4), floatBits(6)], 24);
+  records.length = 0;
+  assert.equal(evaluate('(soundness-transport-pair-caller 3.0d0 4.0f0)'), '48.0d0\n');
+  assert.ok(records.some(call => call.kinds === (3 << 3) && call.result[1] === 0));
+  records.length = 0;
+  assert.equal(evaluate(`(let ((original #'soundness-transport-pair))
+    (unwind-protect
+      (progn
+        (setf (fdefinition 'soundness-transport-pair) #'soundness-transport-single)
+        ${pair})
+      (setf (fdefinition 'soundness-transport-pair) original)))`), '48.0\n');
+  assert.ok(records.some(call => call.kinds === (3 | (3 << 3)) && call.result[1] === 1));
+  const kinds = 3 | (4 << 3) | (1 << 6);
+  const payloads = [floatBits(4), floatBits(6), 7n];
+  expectRaw(triple, '62.0d0\n', kinds, payloads, 31);
+  const generic = lispValue(runtime, "#'soundness-transport-triple");
+  const operands = [[3, payloads[0]], [4, payloads[1]], [1, payloads[2]]];
+  const raw = entries => callWithOperands(runtime, generic, 3, 4, entries);
+  for (const malformed of [
+    [[7, 0n], ...operands.slice(1)],
+    [operands[0], [4, floatBits(Infinity)], operands[2]],
+    [...operands.slice(0, 2), [2, 0xd800n]],
+    [...operands.slice(0, 2), [5, 1073741824n]],
+    [...operands.slice(0, 2), [6, 2n]],
+    [...operands, [1, 0n]],
+  ]) {
+    assert.throws(() => raw(malformed), WebAssembly.Exception);
+    assert.deepEqual(raw(operands), [floatBits(31), 1, null]);
+  }
+  assert.throws(() => callWithOperands(runtime, generic, 3, 4, operands,
+    null, lispValue(runtime, '6.0d0')), WebAssembly.Exception);
+  assert.deepEqual(raw(operands), [floatBits(31), 1, null]);
+  assert.throws(() => runtime.vm['native-scalar-call-with-operands'](
+    generic, null, null, null, null, 3, 4, 1n, 0n, 0n, 0), WebAssembly.Exception);
+  assert.deepEqual(raw(operands), [floatBits(31), 1, null]);
+
+  for (const [type, specializer, expected] of [
+    ['integer', "(find-class 'integer)", '82.0d0\n'],
+    ['(eql 7)', '(miricl-mop:intern-eql-specializer 7)', '82.0d0\n'],
+  ]) {
+    try {
+      evaluate(`(eval '(defmethod soundness-transport-triple (a b (c ${type}))
+        (declare (ignore a b c)) (values 41.0d0 :edited))) (values)`);
+      records.length = 0;
+      assert.equal(evaluate(triple), expected);
+      assert.equal(evaluate(triple), expected);
+      assert.ok(records.some(call => call.kinds === kinds && call.result[1] === 0));
+      assert.equal(evaluate("(multiple-value-list (soundness-transport-triple 4.0f0 6.0d0 7))"),
+        "(41.0d0 :EDITED)\n");
+    } finally {
+      evaluate(`(remove-method #'soundness-transport-triple
+        (find-method #'soundness-transport-triple nil
+          (list (find-class t) (find-class t) ${specializer}))) (values)`);
+    }
+  }
+  expectRaw(triple, '62.0d0\n', kinds, payloads, 31);
+
+  const forward = lispValue(runtime, "#'soundness-transport-triple-forward");
+  evaluate("(soundness-transport-triple-forward -20 1 #\\Q)");
+  evaluate("(soundness-transport-triple-forward -20 1 #\\Q)");
+  assert.deepEqual(callWithOperands(runtime, forward, 3, 2, [[5, -20n], [6, 1n], [2, 81n]]),
+    [81n, 1, null]);
+  expectRaw('(soundness-transport-triple-forward-caller #*1 "AQ")', '81\n',
+    5 | (6 << 3) | (2 << 6), [65n, 1n, 81n], 81n);
+  const small = lispValue(runtime, "#'soundness-transport-triple-small");
+  for (let i = 0; i < 2; ++i)
+    assert.equal(evaluate('(soundness-transport-triple-small 4.0f0 1 -20)'), '-15.0\n');
+  assert.deepEqual(callWithOperands(runtime, small, 3, 3, [[3, floatBits(4)], [6, 1n], [5, -20n]]),
+    [floatBits(-15), 1, null]);
+  expectRaw('(soundness-transport-triple-small-caller 3.0f0 #*1 "A")', '140.0\n',
+    3 | (6 << 3) | (5 << 6), [floatBits(4), 1n, 65n], 70);
+}
+
+export async function checkScalarTransport(image, {sourceCompiler = false} = {}) {
+  const records = [];
   let runtime = await Miricl.instantiate(image);
   try {
     runtime.mountFile('/scalar-transport.lisp',
       await readFile(new URL('./soundness-scalar-transport.lisp', import.meta.url)));
-    runtime.evaluate(`
+    if (sourceCompiler) {
+      runtime.mountFile('/wasm-compiler.lisp', await readFile(new URL('../wasm-compiler.lisp', import.meta.url)));
+      runtime.evaluate(`(setq miricl-compiler:*compile-evaluations* nil
+        miricl-compiler::*compiler-state* :interpreted)
+        (load "/wasm-compiler.lisp") (values)`, {eof: true});
+    }
+    await observeScalarCalls(records, () => runtime.evaluate(`
       (setq miricl-compiler:*compile-evaluations* nil)
       (compile-file "/scalar-transport.lisp" :output-file "/scalar-portable.fasl" :verbose nil :print nil)
       (miricl-compiler:compile-native-bundle "/scalar-portable.fasl" "/scalar-native.fasl")
       (load "/scalar-native.fasl")
-      (values)`, {eof: true});
+      (values)`, {eof: true}));
     exerciseTransport(runtime);
     exerciseGenericTransport(runtime);
+    exerciseMultiTransport(runtime, records);
     runtime.mountFile('/scalar-consumers.lisp',
       await readFile(new URL('./soundness-scalar-consumers.lisp', import.meta.url)));
     runtime.evaluate('(load "/scalar-consumers.lisp") (values)', {eof: true});
     assert.equal(runtime.evaluate('(soundness-scalar-consumers)', {eof: true}).output, 'T\n');
     const saved = runtime.saveImage();
     runtime.close();
-    runtime = await Miricl.instantiate(saved);
+    runtime = await observeScalarCalls(records, () => Miricl.instantiate(saved));
     exerciseTransport(runtime);
     exerciseGenericTransport(runtime);
+    exerciseMultiTransport(runtime, records);
   } finally {
     runtime.close();
   }

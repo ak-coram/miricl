@@ -83,3 +83,48 @@
   (logand (soundness-transport-generic-forward
             :integer (logand (aref array index) 36028797018963967))
           127))
+
+(defgeneric soundness-transport-pair (a b))
+
+(defmethod soundness-transport-pair (a b)
+  (declare (single-float b))
+  (* a b))
+
+(defun soundness-transport-pair-caller (a b)
+  (declare (single-float b) (notinline soundness-transport-pair))
+  (* (soundness-transport-pair (+ a 1.0f0) (+ b 2.0f0)) 2.0f0))
+
+(defgeneric soundness-transport-triple (a b c))
+
+(defmethod soundness-transport-triple (a b c)
+  (declare (single-float a) (double-float b) (integer c))
+  (+ (* a b) c))
+
+(defun soundness-transport-triple-caller (a b array)
+  (declare (single-float a) (double-float b) (notinline soundness-transport-triple))
+  (* (soundness-transport-triple (+ a 1.0f0) (+ b 2.0d0)
+       (logand (aref array 0) 36028797018963967))
+     2.0d0))
+
+(defgeneric soundness-transport-triple-forward (a b c))
+
+(defmethod soundness-transport-triple-forward (a b c)
+  (declare (ignore a b) (character c))
+  c)
+
+(defun soundness-transport-triple-forward-caller (bits text)
+  (declare (notinline soundness-transport-triple-forward))
+  (char-code (soundness-transport-triple-forward
+    (char-code (char text 0)) (sbit bits 0) (char text 1))))
+
+(defgeneric soundness-transport-triple-small (a b c))
+
+(defmethod soundness-transport-triple-small (a b c)
+  (declare (single-float a) (bit b) (type (signed-byte 31) c))
+  (+ (+ a b) c))
+
+(defun soundness-transport-triple-small-caller (a bits text)
+  (declare (single-float a) (notinline soundness-transport-triple-small))
+  (* (soundness-transport-triple-small (+ a 1.0f0) (sbit bits 0)
+       (char-code (char text 0)))
+     2.0f0))

@@ -513,22 +513,28 @@ commits to the worker without an intervening poll or callback and supplies
 its method context when needed. A representation or worker miss uses
 the selected boxed plan. A dispatch miss resumes live dispatch.
 
-A single-use scalar feeding an eligible retained call can also carry an
-input without its Lisp box under the same policy. The live fixed selector
-requires the argument position to be unused for method selection, including
-EQL specializers. Alongside the boxed adapter checks, the loader can verify
-that the final worker forwards the operand or consumes it through checked
-float arithmetic, and has no method-context observations. The runtime
-grants this permission to the installed worker and checks the operand's
-representation. On a dispatch or worker miss, it materializes the original
-representation before continuing. The arithmetic helper also materializes
-it for ordinary numeric fallback. Method changes, live function bindings,
+An eligible retained call can carry raw inputs in any of its three public
+method operand positions. Each position has its own representation and
+validity, so a call can mix scalar kinds with each other and with boxed
+operands. The selector checks the live class and EQL profiles for every
+omitted position. The loader audits the complete installed worker for
+simultaneous omission and checks that the worker leaves the hidden method
+context unused. Admitted bodies forward a scalar or consume it through
+checked arithmetic, which can retain an intermediate through a second
+operation. The ordinary boxed wrapper uses the same worker.
+
+The raw call boundary validates every supplied position and payload.
+On a dispatch or worker miss, the runtime reconstructs the original operand
+values and resumes live boxed dispatch.
+Arithmetic fallback inside an admitted worker likewise reconstructs the
+values used by the operation. Method changes, live function bindings,
 custom discriminators and full-value calls retain their existing call
 semantics.
 
-Compiler statistics count retained result and operand emissions separately
-by representation. Runtime dispatch and worker admission determine which
-invocations take the raw path.
+Retained result statistics count one emission per call, by requested result
+representation. Retained operand statistics count one emission per raw
+operand position, by input representation. Runtime dispatch and worker
+admission determine which invocations take the raw path.
 
 Shared fixed-call adapters cover up to four operands. A matching worker can
 avoid the input packet while the shared executor still owns frames, dynamic
