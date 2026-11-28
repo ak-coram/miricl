@@ -301,6 +301,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-aref-snapshot" (:object :object) (:i64 :i32 :object))
     ("native-aref-snapshot64" (:object :i64) (:i64 :i32 :object))
     ("native-aref-snapshot-transport" (:object :object :i64 :i32) (:i64 :i32 :object))
+    ("native-integer-flow" (:i32 :i64 :i32 :object :i64 :i32 :object) (:i64 :i32 :object))
+    ("native-integer-flow-box" (:i64 :i32 :object) :object)
     ("native-set-aref-int64" (:object :i64 :object :object) nil)
     ("native-search-list" (:object :object :i32) :object)
     ("native-poll" nil nil)
@@ -3734,22 +3736,24 @@ exhausted work budgets keep every incoming value group."
                     (wasm-byte #x21) (wasm-u32 (svref record 0)))
           ((/= kind 2) (wasm-byte #x1a) (wasm-byte #x1a)))))
 
+(defun emit-native-aref-snapshot (instruction inputs)
+  (wasm-get (third inputs))
+  (let ((index (native-raw-aref-index instruction inputs :standard-call *wasm-unboxed-values*))
+        (argument (and *wasm-reusable-scalar-arguments*
+                       (native-scalar-argument-index (fourth inputs) 1))))
+    (cond (argument (wasm-get (fourth inputs))
+                    (emit-native-scalar-argument argument)
+                    (emit-native-scalar-argument-status argument 0)
+                    (wasm-call "native-aref-snapshot-transport"))
+          (index (wasm-local (svref index 0)) (wasm-call "native-aref-snapshot64"))
+          (t (wasm-get (fourth inputs)) (wasm-call "native-aref-snapshot")))))
+
 (defun emit-native-scalar-snapshot (instruction inputs output raw)
   (cond
     ((and raw (member (svref raw 4) '(:array-snapshot :call-snapshot)))
      (if (eq (svref raw 4) :call-snapshot)
          (emit-native-retained-scalar-call inputs 1)
-         (progn
-           (wasm-get (third inputs))
-           (let ((index (native-raw-aref-index instruction inputs :standard-call *wasm-unboxed-values*))
-                 (argument (and *wasm-reusable-scalar-arguments*
-                                (native-scalar-argument-index (fourth inputs) 1))))
-             (cond (argument (wasm-get (fourth inputs))
-                             (emit-native-scalar-argument argument)
-                             (emit-native-scalar-argument-status argument 0)
-                             (wasm-call "native-aref-snapshot-transport"))
-                   (index (wasm-local (svref index 0)) (wasm-call "native-aref-snapshot64"))
-                   (t (wasm-get (fourth inputs)) (wasm-call "native-aref-snapshot"))))))
+         (emit-native-aref-snapshot instruction inputs))
      (wasm-set output)
      (wasm-byte #x21) (wasm-u32 (svref raw 6))
      (wasm-byte #x21) (wasm-u32 (svref raw 0))
@@ -5213,26 +5217,84 @@ exhausted work budgets keep every incoming value group."
   (loop repeat 32 do
     (let ((producer (hir-value-producer value)))
       (unless (and (%hir-instruction-p producer)
-                   (member (hir-instruction-opcode producer) '(:copy :primary)))
+                   (not (and *wasm-checked-integer-copies* (gethash value *wasm-checked-integer-copies*)))
+                   (or (eq (hir-instruction-opcode producer) :copy)
+                       (and (eq (hir-instruction-opcode producer) :primary)
+                            (native-value-slot *wasm-scalar-groups* (first (hir-instruction-inputs producer))))))
         (return-from native-tiered-source value))
       (setq value (first (hir-instruction-inputs producer)))))
   nil)
 
-(defun native-plan-tiered-counters (function blocks raw)
-  "Admit private canonical successor/predecessor cells after existing raw facts.
-All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
-  ;; Three physical tiers duplicate classification, update and materialization
-  ;; arms. Keep that growth local to speed-oriented callers; proven raw storage
-  ;; and shared checked arithmetic remain available under compact policy.
-  (when (or (let ((policy (hir-function-optimization-policy function)))
-              (<= (logand policy 3) (logand 3 (ash policy -2))))
-            (>= (hir-function-debug-level function) 2)
-            (hir-block-predecessors (hir-function-entry function))
-            (and *wasm-optimization-barriers* (gethash function *wasm-optimization-barriers*)))
-    (return-from native-plan-tiered-counters nil))
-  (native-compute-tiered-counters function blocks raw))
+(defun native-tiered-flow-update (function update cell raw)
+  ;; Mixed inference guides admission. The runtime still establishes the
+  ;; representation of each evaluated operand and checks arithmetic overflow.
+  (let* ((inputs (hir-instruction-inputs update))
+         (name (and (eq (gethash update *wasm-inline-simple-calls*) :standard-call)
+                    (fourth inputs) (null (cddddr inputs))
+                    (native-scalar-call-name inputs))))
+    (when (member name '(+ -))
+      (let ((integer-read nil) (load nil))
+        (dolist (input (cddr inputs))
+          (let* ((source (native-tiered-source input))
+                 (producer (and source (hir-value-producer source)))
+                 (integerp (or (hir-type-proves-p (hir-value-type input) 'integer)
+                               (and *wasm-inferred-types*
+                                    (hir-type-proves-p (gethash input *wasm-inferred-types* t) 'integer)))))
+            (cond ((and (%hir-instruction-p producer)
+                        (eq (hir-instruction-opcode producer) :cell-read)
+                        (eq (first (hir-instruction-inputs producer)) cell))
+                   (when integerp (setq integer-read t)))
+                  ((and (%hir-instruction-p producer)
+                        (eq (native-snapshot-source producer function) :load)
+                        (native-value-slot *wasm-scalar-groups* source)
+                        (not (or (and raw (native-value-slot raw source))
+                                 (and *wasm-reused-values* (native-value-slot *wasm-reused-values* source))
+                                 (and *wasm-hoisted-values* (native-value-slot *wasm-hoisted-values* source)))))
+                   (setq load producer))
+                  ((not (or integerp (native-compute-integer-width input)))
+                   (return-from native-tiered-flow-update nil)))))
+        (when integer-read (cons name load))))))
 
-(defun native-compute-tiered-counters (function blocks raw)
+(defun native-plan-tiered-counters (function blocks raw structured)
+  "Admit guarded updates after existing raw storage and executable facts."
+  (let* ((policy (hir-function-optimization-policy function))
+         (speed (> (logand policy 3) (logand 3 (ash policy -2))))
+         (regions (and structured (not *wasm-dynamic-bindings*) (not *wasm-fixed-call-emitter*)
+                       (not *wasm-closed-worker-functions*) (cdr structured)))
+         (flows nil) (fuel 4096))
+    (declare (type (or null simple-vector) regions raw) (type (integer -1 4096) fuel))
+    (when (or (not (or speed regions))
+              (>= (hir-function-debug-level function) 2)
+              (hir-block-predecessors (hir-function-entry function))
+              (and *wasm-optimization-barriers* (gethash function *wasm-optimization-barriers*)))
+      (return-from native-plan-tiered-counters nil))
+    ;; Discover binary updates in the loop body before the whole-function
+    ;; ownership audit. The common compact function has no candidate cell.
+    (when regions
+      (block discover
+        (loop for region across regions when region do
+          (dolist (block (svref region 3))
+            (dolist (instruction (hir-block-instructions block))
+              (when (minusp (decf fuel))
+                (setq flows nil)
+                (return-from discover))
+              (when (eq (hir-instruction-opcode instruction) :cell-write)
+                (let* ((inputs (hir-instruction-inputs instruction))
+                       (cell (first inputs)))
+                  (when (and (native-value-slot *wasm-local-cells* cell)
+                             (not (and raw (native-value-slot raw cell))))
+                    (let* ((source (native-tiered-source (second inputs)))
+                           (update (and source (hir-value-producer source)))
+                           (plan (and (%hir-instruction-p update)
+                                      (native-tiered-flow-update function update cell raw))))
+                      (when plan
+                        (unless flows (setq flows (make-hash-table :test 'eq)))
+                        (setf (gethash cell flows) t
+                              (gethash instruction flows) (cons source plan))))))))))))
+    (when (or speed flows)
+      (native-compute-tiered-counters function blocks raw speed flows))))
+
+(defun native-compute-tiered-counters (function blocks raw speed flows)
   (let ((cells (native-value-table function)) (table (native-value-table function))
         (chosen nil) (fuel 4096) (emitted (make-hash-table :test 'eq)))
     (dolist (block blocks) (setf (gethash block emitted) t))
@@ -5241,14 +5303,15 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
         (when (minusp (decf fuel)) (return-from native-compute-tiered-counters nil))
         (let ((cell (hir-instruction-output instruction)))
           (when (and (eq (hir-instruction-opcode instruction) :cell-new)
+                     (or speed (gethash cell flows))
                      (native-value-slot *wasm-local-cells* cell)
                      (native-value-slot *wasm-live-values* cell)
                      *wasm-optimization-barriers*
                      (not (gethash cell *wasm-optimization-barriers*))
                      (not (and raw (native-value-slot raw cell)))
                      (eq (hir-value-kind (first (hir-instruction-inputs instruction))) :single))
-            ;; Read count, write count, canonical update instructions, valid.
-            (setf (native-value-slot cells cell) (vector 0 0 nil t))))))
+            ;; Read count, write count, update instructions, validity, flow plan.
+            (setf (native-value-slot cells cell) (vector 0 0 nil t nil))))))
     ;; Audit all actual operands, including unreachable/captured paths.
     (dolist (block (hir-function-blocks function))
       (dolist (instruction (cons (hir-block-terminator block) (hir-block-instructions block)))
@@ -5266,18 +5329,25 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
                   ((and (gethash block emitted) (zerop index) (eq opcode :cell-write)
                         (eq (hir-value-kind (hir-instruction-output instruction)) :single)
                         (eq (hir-value-kind (second (hir-instruction-inputs instruction))) :single))
-                   (let* ((source (native-tiered-source (second (hir-instruction-inputs instruction))))
+                   (let* ((candidate (and flows (gethash instruction flows)))
+                          (source (if candidate (car candidate)
+                                      (and speed (native-tiered-source (second (hir-instruction-inputs instruction))))))
                           (update (and source (hir-value-producer source)))
-                          (name (and (%hir-instruction-p update) (native-tiered-unary update)))
+                          (flow (cdr candidate))
+                          (name (and (not flow) speed (%hir-instruction-p update) (native-tiered-unary update)))
                           (argument (and name (native-tiered-source (third (hir-instruction-inputs update)))))
                           (read (and argument (hir-value-producer argument))))
-                     (if (and name (%hir-instruction-p read)
-                              (eq (hir-instruction-opcode read) :cell-read)
-                              (eq (first (hir-instruction-inputs read)) input)
+                     (if (and (or (and flow (zerop (svref record 1)))
+                                  (and name (not (svref record 4)) (%hir-instruction-p read)
+                                       (eq (hir-instruction-opcode read) :cell-read)
+                                       (eq (first (hir-instruction-inputs read)) input)))
                               (native-value-slot *wasm-scalar-groups* source)
                               (not (and raw (native-value-slot raw source)))
+                              (not (and *wasm-hoisted-values* (native-value-slot *wasm-hoisted-values* source)))
+                              (not (and *wasm-reused-values* (native-value-slot *wasm-reused-values* source)))
                               (not (member update *wasm-tail-calls* :test #'eq)))
-                         (progn (incf (svref record 1)) (pushnew update (svref record 2)))
+                         (progn (incf (svref record 1)) (pushnew update (svref record 2))
+                                (when flow (setf (svref record 4) flow)))
                          (setf (svref record 3) nil))))
                   (t (setf (svref record 3) nil)))))))))
     (dolist (value (hir-function-values function))
@@ -5285,10 +5355,15 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
       (let ((record (native-value-slot cells value)))
         (when (and record (svref record 3) (plusp (svref record 0)) (plusp (svref record 1)))
           ;; Four indices are assigned only after ordinary body-local layout.
-          (setf (native-value-slot table value) (make-array 4))
-          (push value chosen)
-          (dolist (update (svref record 2))
-            (setf (native-value-slot table (hir-instruction-output update)) (make-array 4))))))
+          (let ((flow (svref record 4)))
+            (setf (native-value-slot table value) (if flow (vector 0 0 0 0 :flow) (make-array 4)))
+            (push value chosen)
+            (dolist (update (svref record 2))
+              (setf (native-value-slot table (hir-instruction-output update))
+                    (if flow (vector 0 0 0 0 (car flow)) (make-array 4))))
+            (when (and flow (cdr flow))
+              (setf (native-value-slot table (hir-instruction-output (cdr flow)))
+                    (vector 0 0 0 0 :load)))))))
     (when (or (null chosen) (> (length chosen) 4))
       (return-from native-compute-tiered-counters nil))
     (dolist (block blocks)
@@ -5296,10 +5371,15 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
         (when (minusp (decf fuel)) (return-from native-compute-tiered-counters nil))
         (let* ((opcode (hir-instruction-opcode instruction))
                (output (hir-instruction-output instruction))
-               (cell (and (member opcode '(:cell-read :cell-write))
-                          (member (first (hir-instruction-inputs instruction)) chosen :test #'eq))))
-          (when (and cell (native-value-slot *wasm-live-values* output))
-            (setf (native-value-slot table output) (make-array 4))))))
+               (cell (first (hir-instruction-inputs instruction)))
+               (storage (and (member opcode '(:cell-read :cell-write))
+                             (member cell chosen :test #'eq)
+                             (native-value-slot table cell))))
+          (when (and storage (native-value-slot *wasm-live-values* output))
+            (setf (native-value-slot table output)
+                  (if (> (length storage) 4)
+                      (vector 0 0 0 0 :flow)
+                      (make-array 4)))))))
     ;; Flatten accepted single-value aliases, independently of HIR ID order.
     (dolist (value (hir-function-values function))
       (when (minusp (decf fuel)) (return-from native-compute-tiered-counters nil))
@@ -5329,15 +5409,15 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
                             (eq (hir-instruction-opcode producer) :function-reference)
                             (not (eq (second (hir-instruction-attributes producer)) 'notinline))
                             (first (hir-instruction-attributes producer)))))
-            (when (and (= (length inputs) 4) (member name '(< > <= >= = /=))
-                       (or (native-value-slot table (third inputs))
-                           (native-value-slot table (fourth inputs))))
-              (when (> (incf count) 16) (return-from native-compute-tiered-comparisons :exhausted))
-              (setf (gethash instruction comparisons)
-                (vector (or (native-value-slot table (third inputs)) (make-array 4))
-                        (or (native-value-slot table (fourth inputs)) (make-array 4))
-                        (not (native-value-slot table (third inputs)))
-                        (not (native-value-slot table (fourth inputs))) name))))))
+            (when (and (= (length inputs) 4) (member name '(< > <= >= = /=)))
+              (let ((left (native-value-slot table (third inputs)))
+                    (right (native-value-slot table (fourth inputs))))
+                (when (and (or left right)
+                           (not (or (and left (> (length left) 4)) (and right (> (length right) 4)))))
+                  (when (> (incf count) 16) (return-from native-compute-tiered-comparisons :exhausted))
+                  (setf (gethash instruction comparisons)
+                        (vector (or left (make-array 4)) (or right (make-array 4))
+                                (not left) (not right) name))))))))
     comparisons))
 
 (defun native-assign-tiered-locals (table comparisons offset)
@@ -5362,7 +5442,8 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
 (defun emit-native-tiered-copy (source destination)
   (unless (eq source destination)
     (dotimes (i 4)
-      (wasm-local (svref source i)) (wasm-byte #x21) (wasm-u32 (svref destination i)))))
+      (unless (and (= i 1) (> (length source) 4))
+        (wasm-local (svref source i)) (wasm-byte #x21) (wasm-u32 (svref destination i))))))
 
 (defun emit-native-tiered-small (record)
   (wasm-local (svref record 1)) (wasm-gc #x16 #x6c) (wasm-gc #x1d))
@@ -5374,6 +5455,10 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
   (wasm-byte #x05) (wasm-local (svref record 2)) (wasm-byte #x0b))
 
 (defun emit-native-tiered-materialize (record)
+  (when (> (length record) 4)
+    (emit-native-integer-flow-get record)
+    (wasm-call "native-integer-flow-box")
+    (return-from emit-native-tiered-materialize nil))
   ;; Keep an existing original scalar object until arithmetic changes it.
   ;; This also preserves zero-trip object identity without another local.
   (wasm-local (svref record 3)) (wasm-byte #xd1)
@@ -5467,6 +5552,29 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
   (when *wasm-tiered-values*
     (emit-native-tiered-instruction-worker instruction)))
 
+(defun emit-native-integer-flow-get (record)
+  (wasm-local (svref record 2))
+  (wasm-local (svref record 0))
+  (wasm-local (svref record 3)))
+
+(defun emit-native-integer-flow-store (record)
+  (wasm-byte #x21) (wasm-u32 (svref record 3))
+  (wasm-byte #x21) (wasm-u32 (svref record 0))
+  (wasm-byte #x21) (wasm-u32 (svref record 2)))
+
+(defun emit-native-integer-flow-operand (value)
+  (let ((record (native-value-slot *wasm-tiered-values* value))
+        (raw (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* value))))
+    (cond ((and record (> (length record) 4))
+           (emit-native-integer-flow-get record))
+          ((and (null record) raw (eq (svref raw 4) :result))
+           (wasm-local (svref raw 0))
+           (wasm-integer (if (native-immediate-integer-result-p raw) 1 2))
+           (wasm-null))
+          (t
+           (wasm-byte #x42) (wasm-s32 0)
+           (wasm-integer 0) (wasm-get value)))))
+
 (defun emit-native-tiered-instruction-worker (instruction)
   (when *wasm-tiered-values*
     (let* ((opcode (hir-instruction-opcode instruction))
@@ -5476,7 +5584,11 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
       (cond
         ((and record (member opcode '(:copy :primary))) t)
         ((and record (eq opcode :cell-new))
-         (wasm-get (first inputs)) (emit-native-tiered-classify record) t)
+         (if (> (length record) 4)
+             (progn (emit-native-integer-flow-operand (first inputs))
+                    (emit-native-integer-flow-store record))
+             (progn (wasm-get (first inputs)) (emit-native-tiered-classify record)))
+         t)
         ((and record (eq opcode :cell-read))
          (emit-native-tiered-copy (native-value-slot *wasm-tiered-values* (first inputs)) record) t)
         ((and (eq opcode :cell-write) (native-value-slot *wasm-tiered-values* (first inputs)))
@@ -5484,8 +5596,19 @@ All physical entry checks are nonsignaling. Exhaustion discards the whole plan."
            (emit-native-tiered-copy source (native-value-slot *wasm-tiered-values* (first inputs)))
            (when record (emit-native-tiered-copy source record))) t)
         ((and record (eq opcode :call))
-         (emit-native-tiered-update (native-value-slot *wasm-tiered-values* (third inputs))
-                                   record (native-tiered-unary instruction)) t)))))
+         (cond ((= (length record) 4)
+                (emit-native-tiered-update (native-value-slot *wasm-tiered-values* (third inputs))
+                                          record (native-tiered-unary instruction)))
+               (t
+                (if (eq (svref record 4) :load)
+                    (emit-native-aref-snapshot instruction inputs)
+                    (progn
+                      (wasm-integer (if (eq (svref record 4) '+) 0 1))
+                      (emit-native-integer-flow-operand (third inputs))
+                      (emit-native-integer-flow-operand (fourth inputs))
+                      (wasm-call "native-integer-flow")))
+                (emit-native-integer-flow-store record)))
+         t)))))
 
 (defun emit-native-tiered-comparison (instruction &optional raw)
   (when *wasm-tiered-comparisons*
@@ -6755,7 +6878,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
             (setf (gethash record shifted) t)
             (incf (svref record 0) statuses)))
         (incf raw-count statuses)))
-    (setq tiered (native-plan-tiered-counters function blocks unboxed)
+    (setq tiered (native-plan-tiered-counters function blocks unboxed structured)
           tiered-comparisons (native-plan-tiered-comparisons blocks tiered))
     (when (eq tiered-comparisons :exhausted) (setq tiered nil tiered-comparisons nil))
     (multiple-value-setq (unboxed wide-count)
@@ -9065,11 +9188,12 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
   ;; interpreted call on the compact compiler's normal path. The image builder
   ;; may compile these functions in its disposable bootstrap generation.
   '(emit-native-i31-operand emit-native-i31-step-worker emit-native-i31-comparison-worker
-    native-tiered-unary native-tiered-source native-compute-tiered-counters
+    native-tiered-unary native-tiered-source native-tiered-flow-update
     native-compute-tiered-comparisons native-compute-tiered-locals
     emit-native-tiered-copy emit-native-tiered-small emit-native-tiered-i64
     emit-native-tiered-materialize emit-native-tiered-classify emit-native-tiered-update
     emit-native-tiered-instruction-worker emit-native-tiered-comparison-worker
+    emit-native-integer-flow-get emit-native-integer-flow-store emit-native-integer-flow-operand
     native-ordinary-snapshot-p native-vector-snapshot-source native-plan-low-field-add
     native-plan-low-field-ash-candidate native-plan-low-field-ash native-low-field-ash-chain
     native-plan-low-field-chain native-plan-literal-byte-extract
@@ -9144,7 +9268,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-expand-parallel-places hir-expand-arithmetic-step hir-restart-options hir-correctable-place-form
                    hir-condition-initializer hir-define-condition hir-restart-expression hir-control-form verify-hir verify-hir-contents
                    native-inline-constants native-loop-literals native-loop-dominates-p native-hoist-source native-hoist-width native-hoist-type native-hoist-immediate-result-p native-plan-loop-hoists native-finalize-loop-hoists emit-native-invariant-value emit-native-hoisted-primitive native-tiered-unary native-tiered-source native-plan-tiered-counters native-plan-tiered-comparisons
-                   native-assign-tiered-locals emit-native-tiered-copy emit-native-tiered-small emit-native-tiered-i64
+                   native-compute-tiered-counters native-assign-tiered-locals emit-native-tiered-copy emit-native-tiered-small emit-native-tiered-i64
                    emit-native-tiered-materialize emit-native-tiered-classify emit-native-tiered-update
                    emit-native-tiered-instruction emit-native-tiered-comparison
                    native-plan-vector-snapshots emit-native-vector-snapshot-prefix emit-native-vector-snapshot-mode

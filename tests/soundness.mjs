@@ -1254,6 +1254,20 @@ try {
   console.log('Soundness: fixed rank-one array access preserves live dimensions, backing, element checks and rejection recovery.');
   const rank1Snapshot = vm.vm['native-aref-snapshot'];
   const rank1WideSnapshot = vm.vm['native-aref-snapshot64'];
+  const integerFlow = vm.vm['native-integer-flow'];
+  const integerFlowBox = vm.vm['native-integer-flow-box'];
+  for (const invalid of [foreign, rank1Private, packets.empty()]) {
+    rejectPacketOperation(() => integerFlow(0, 0n, 0, invalid, 1n, 1, null));
+    rejectPacketOperation(() => integerFlow(0, 0n, 1, invalid, 1n, 1, null));
+    rejectPacketOperation(() => integerFlowBox(0n, 0, invalid));
+  }
+  rejectPacketOperation(() => integerFlow(2, 0n, 1, null, 0n, 1, null));
+  rejectPacketOperation(() => integerFlow(0, 0n, 1, null, 0n, 3, null));
+  rejectPacketOperation(() => integerFlowBox(0n, -1, null));
+  rank1Equal(integerFlowBox(...integerFlow(0, 1073741823n, 1, null, 1n, 1, null)),
+    rank1Value('1073741824'));
+  rank1Equal(integerFlowBox(...integerFlow(1, 1n, 1, null, 0n, 0, rank1Value('1/2'))),
+    rank1Value('1/2'));
   const rank1WideStore = vm.vm['native-set-aref-int64'];
   const boxedNil = rank1Value('(vector nil)');
   const immediateZero = rank1Value('0');
@@ -2901,6 +2915,8 @@ try {
                (handler-case (progn (funcall escaped "invalid") nil) (type-error () t))
                (= (funcall escaped 40) 42))))
       (delete-package package)))`);
+
+  check(await fs.readFile(new URL('./soundness-integer-flow.lisp', import.meta.url), 'utf8'));
 
   // A character read remains an observation across the fixed call and a
   // callback. The caller uses the old character and the live destination.

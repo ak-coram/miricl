@@ -1206,6 +1206,72 @@
 (define-native-integer-entry $native-add-int64-checked "native-add-int64-checked" + i64.add $box-int64 t)
 (define-native-integer-entry $native-sub-int64-checked "native-sub-int64-checked" - i64.sub $box-int64 t)
 (define-native-integer-entry $native-mul-int64-checked "native-mul-int64-checked" * i64.mul $box-int64 t)
+
+;; A snapshot carries either its original object (0), an integer with the
+;; normal i31/i64 conversion (1), or an integer already in the i64 tier (2).
+(define-runtime-function $native-integer-flow-object
+    (($bits i64) ($status i32) ($object externref)) (:nullable-object)
+  #@(if (i32.eqz (local.get $status))
+    (then (return (call $native-checked-value (local.get $object)))))
+  (wat-fail-when #@(i32.or (i32.gt_u (local.get $status) (i32.const 2))
+    (i32.eqz (ref.is_null (local.get $object)))) :malformed-form)
+  #@(if (result (ref eq)) (i32.eq (local.get $status) (i32.const 2))
+    (then (call $box-int64 (local.get $bits)))
+    (else (call $int64 (local.get $bits)))))
+
+(define-runtime-function $native-integer-flow-box
+    (($bits i64) ($status i32) ($object externref)) (externref)
+  (:export-raw "native-integer-flow-box")
+  #@(extern.convert_any (call $native-integer-flow-object
+    (local.get $bits) (local.get $status) (local.get $object))))
+
+(defun native-integer-flow-operand-wat (bits status object boxed)
+  (runtime-wat-sequence
+    #@(if (local.get ,status)
+      (then
+        ,(wat-fail-when #@(i32.or (i32.gt_u (local.get ,status) (i32.const 2))
+          (i32.eqz (ref.is_null (local.get ,object)))) :malformed-form)
+        (local.set $wide (i32.or (local.get $wide)
+          (i32.or (i32.eq (local.get ,status) (i32.const 2))
+            (i64.gt_u (i64.add (local.get ,bits) (i64.const 1073741824)) (i64.const 2147483647))))))
+      (else
+        (local.set ,boxed (call $native-checked-value (local.get ,object)))
+        (local.set $wide (i32.or (local.get $wide) (ref.test (ref $fixnum) (local.get ,boxed))))
+        ,(wat-decode-scalar-integer boxed bits '$miss)))))
+
+(define-runtime-function $native-integer-flow
+    (($op i32) ($left i64) ($left-status i32) ($left-object externref)
+     ($right i64) ($right-status i32) ($right-object externref)) (i64 i32 externref)
+  (:export-raw "native-integer-flow")
+  (:locals ($a :nullable-object) ($b :nullable-object) ($wide i32) ($computed i64))
+  (wat-fail-when #@(i32.gt_u (local.get $op) (i32.const 1)) :malformed-form)
+  #@(block $miss
+    (br_if $miss (global.get $debug-evaluating))
+    ,(native-integer-flow-operand-wat '$left '$left-status '$left-object '$a)
+    ,(native-integer-flow-operand-wat '$right '$right-status '$right-object '$b)
+    (if (i32.eqz (local.get $op))
+      (then
+        (local.set $computed (i64.add (local.get $left) (local.get $right)))
+        (br_if $miss (i32.eqz ,(native-integer-fit-wat '+))))
+      (else
+        (local.set $computed (i64.sub (local.get $left) (local.get $right)))
+        (br_if $miss (i32.eqz ,(native-integer-fit-wat '-)))))
+    ;; The arithmetic inputs are immutable snapshots. Service the original
+    ;; operation entry before publishing the computed result.
+    (if (global.get $thread-active) (then (call $thread-checkpoint)))
+    (return (local.get $computed) (i32.add (i32.const 1) (local.get $wide)) (ref.null extern)))
+  ;; No checkpoint has run on this path. Reconstruct only missing objects
+  ;; and let the ordinary checked operation own the checkpoint and promotion.
+  ;; Decoding only overwrites bits when the original object is present.
+  #@(local.set $a (call $native-integer-flow-object
+    (local.get $left) (local.get $left-status) (local.get $left-object)))
+  #@(local.set $b (call $native-integer-flow-object
+    (local.get $right) (local.get $right-status) (local.get $right-object)))
+  #@(i64.const 0)
+  #@(i32.const 0)
+  #@(call $native-call2-checked (call $native-checked-value (extern.convert_any
+      (call $standard-function-code (i32.add (local.get $op) (i32.const ,(1+ (runtime-symbol-id '+)))))))
+    (local.get $a) (local.get $b)))
 (define-native-integer-entry $native-lt-int64 "native-lt-int64" < i64.lt_s $bool)
 (define-native-integer-entry $native-gt-int64 "native-gt-int64" > i64.gt_s $bool)
 (define-native-integer-entry $native-le-int64 "native-le-int64" <= i64.le_s $bool)
@@ -3903,11 +3969,34 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (then (call $array-check-bit-capacity (local.get $length) (array.len (local.get $data)))))
   #@(local.get $data))
 
+(define-runtime-function $native-displaced-fixnum-backing
+    (($array :nullable-object) ($index i64)) ((ref null $array-i64-data) i64)
+  (:locals ($view (ref $array)) ($shape :digits) ($length i32) ($offset i32)
+           ($target-index i64))
+  ;; A single rank-one view can reuse the owned storage check. Anything else
+  ;; goes through the checked resolver with the original full-width index.
+  #@(block $miss
+    (br_if $miss (i32.eqz (ref.test (ref $array) (local.get $array))))
+    (local.set $view (ref.cast (ref $array) (local.get $array)))
+    (br_if $miss (i32.ne (call $tag (local.get $view)) (i32.const 35)))
+    (br_if $miss (i32.ne (i32.and (struct.get $obj $n (local.get $view)) (i32.const -5)) (i32.const 24)))
+    (local.set $shape (struct.get $array $shape (local.get $view)))
+    (br_if $miss (i32.ne (array.len (local.get $shape)) (i32.const 1)))
+    (local.set $length (array.get $digits (local.get $shape) (i32.const 0)))
+    (local.set $offset (struct.get $array $offset (local.get $view)))
+    (br_if $miss (i32.or (i32.gt_u (i32.or (local.get $length) (local.get $offset)) (i32.const 536870910))
+      (i64.ge_u (local.get $index) (i64.extend_i32_u (local.get $length)))))
+    (local.set $target-index (i64.add (i64.extend_i32_u (local.get $offset)) (local.get $index)))
+    (return (call $array-owned-rank1-fixnum-backing (struct.get $obj $a (local.get $view))
+      (local.get $target-index)) (local.get $target-index)))
+  #@(ref.null $array-i64-data)
+  #@(i64.const 0))
+
 (define-runtime-function $native-aref-snapshot-worker
     (($array externref) ($subscript externref) ($wide i64) ($raw-index i32)) (i64 i32 externref)
   (:locals ($a :nullable-object) ($b :nullable-object) ($function :nullable-object)
            ($id i32) ($canonical i32) ($data (ref null $array-i64-data)) ($boxed externref)
-           ($bits (ref $digits)) ($index i32))
+           ($bits (ref $digits)) ($index i32) ($storage-index i64))
   #@(local.set $a (call $native-checked-value (local.get $array)))
   #@(if (i32.ne (local.get $raw-index) (i32.const 1))
     (then (local.set $b (call $native-checked-value (local.get $subscript)))))
@@ -3923,11 +4012,17 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
         (br_if $miss (i32.eqz (local.get $canonical)))
         (if (i32.eqz (local.get $raw-index))
           (then ,(wat-decode-scalar-integer '$b '$wide '$miss)))
+        (local.set $storage-index (local.get $wide))
         (local.set $data (call $array-owned-rank1-fixnum-backing (local.get $a) (local.get $wide)))
+        (if (ref.is_null (local.get $data))
+          (then
+            (call $native-displaced-fixnum-backing (local.get $a) (local.get $wide))
+            (local.set $storage-index)
+            (local.set $data)))
         (if (i32.eqz (ref.is_null (local.get $data)))
           (then
             (call $clear-values)
-            (return (array.get $array-i64-data (local.get $data) (i32.wrap_i64 (local.get $wide)))
+            (return (array.get $array-i64-data (local.get $data) (i32.wrap_i64 (local.get $storage-index)))
               (i32.const 1) (ref.null extern))))
         (block $not-bit
           (local.set $bits (br_on_null $not-bit
@@ -4175,6 +4270,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-add-integer) ($native-sub-integer) ($native-mul-integer)
   ($native-logand-int64) ($native-logior-int64) ($native-logxor-int64) ($native-ash-int64)
   ($native-add-int64-checked) ($native-sub-int64-checked) ($native-mul-int64-checked)
+  ($native-integer-flow) ($native-integer-flow-box) ($native-integer-flow-object)
   ($native-lt-int64) ($native-gt-int64) ($native-le-int64) ($native-ge-int64) ($native-eq-int64) ($native-ne-int64)
   ($native-vector-ref) ($native-boolean)
   ($native-eq-inline) ($native-eq-test) ($native-eql-inline) ($native-eql-test) ($native-length-inline) ($native-list-length-inline) ($native-vector-length-inline)
@@ -4217,7 +4313,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($validate-low-field-box) ($native-low-field-add) ($native-low-field-ash) ($native-literal-byte-extract)
   ($native-canonical-aref-p) ($native-check-aref-miss) ($native-primary-apply-ready)
   ($native-aref-snapshot) ($native-aref-snapshot64) ($native-aref-snapshot-transport)
-  ($native-aref-snapshot-worker) ($native-set-aref-int64)
+  ($native-aref-snapshot-worker) ($native-displaced-fixnum-backing) ($native-set-aref-int64)
   ($native-flat-bit-backing)
   ($native-aref-scalar-index) ($native-aref-scalar) ($native-aref-scalar-miss) ($native-aref-int64) ($native-aref-i31-index)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)

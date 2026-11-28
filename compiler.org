@@ -707,6 +707,24 @@ for some private counters. The ordinary numeric path handles unsupported
 representations and overflow. Floating-point flow remains conservative,
 and broad REAL declarations establish no floating-point representation.
 
+At either space or speed policy, a private cell in a structured loop can
+carry the scalar snapshot of a canonical binary addition or subtraction
+back to the next iteration. The planner discovers candidate updates
+using single-value SSA copies and integer type facts, then audits the
+cell's uses across the function. The snapshot has separate raw bits,
+representation status and an ordinary Lisp value for the miss arm. Reads have independent
+snapshots, so a later write leaves earlier observations intact. A checked
+array read and an already admitted raw integer result can feed this same
+storage. Other inputs enter through the checked scalar decoder.
+
+The shared arithmetic worker distinguishes normal i31/i64 conversion
+from a result that must stay in the i64 tier after cancellation. It checks
+signed overflow before publishing the result and keeps the entry checkpoint.
+Unsupported operands and overflow use the original evaluated operands
+at the ordinary operation. Boxed consumers materialize a scalar at the use
+and keep the original object when one is available. Full-value calls and
+captured cells use the ordinary representation.
+
 Single-use predicates can feed forward branches without boxing a boolean.
 When scoped proofs establish the condition's truth, native emission can
 use that direction with the existing operand effects and checkpoints.
@@ -741,6 +759,10 @@ the checked rank-one reader. It checks the full subscript before narrowing
 and resolves displaced storage through the ordinary live backing path.
 The raw entry validates external references and checks physical backing
 extents when that path follows a displaced view.
+The snapshot reader can keep a rank-one fixnum access raw through a
+single displaced view into owned rank-one storage. It checks the live
+view bounds and translated subscript after the entry checkpoint.
+Other layouts continue through the checked resolver at the same access.
 General dispatch and rank or bounds errors reconstruct the original index.
 A rank-one AREF followed by a single use through a bounded LOGAND mask
 can retain the checked read as a raw i64 or its original Lisp result.
