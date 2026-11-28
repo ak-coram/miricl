@@ -124,8 +124,9 @@
 (defparameter *interpreter-wasm-compact* nil)
 (defparameter *interpreter-native-compiler-wasm* nil)
 (defparameter *interpreter-only-wasm* nil)
-(defun compact-runtime-code (engine bytes first-helper)
-  (let ((compact (miricl-compiler::compact-linked-wasm-code bytes first-helper)))
+(defun compact-runtime-code (engine bytes first-helper &key compact-storage-p)
+  (let ((compact (miricl-compiler::compact-linked-wasm-code bytes first-helper
+                   :layout-globals compact-storage-p)))
     (unless (eq bytes compact) (native-link-validate engine compact))
     (dolist (rewrite '(miricl-compiler::module-terminal-branches
                        miricl-compiler::module-untargeted-scopes)
@@ -139,9 +140,40 @@
               (progn (native-link-validate engine candidate) (setf compact candidate))
             (miricl-compiler::compiler-input-error () nil)))))))
 
+(defun compact-packaged-runtime-code (engine raw first-helper &key (space 3))
+  (let ((stripped (wasm-without-debug-names raw)))
+    (unless (= space 3)
+      (return-from compact-packaged-runtime-code
+        (compact-runtime-code engine stripped first-helper)))
+    (let* ((policies (miricl-compiler::linked-module-function-policies raw))
+           (eligible-p (when policies
+                         (lambda (index)
+                           (let ((policy (aref policies index)))
+                             (or (null policy)
+                                 (and (= 3 (ldb (byte 2 2) policy))
+                                      (< (ldb (byte 2 0) policy) 3))))))))
+      (flet ((admit (candidate)
+               (unless (eq candidate stripped)
+                 (handler-case
+                     (progn (native-link-validate engine candidate) (setf stripped candidate) t)
+                   (miricl-compiler::compiler-input-error () nil)))))
+        (admit (miricl-compiler::rewrite-linked-wasm-control stripped
+                 #'miricl-compiler::module-retain-local-values eligible-p))
+        (admit (miricl-compiler::module-pool-constants stripped eligible-p))
+        (multiple-value-bind (candidate first-gc-helper)
+            (miricl-compiler::module-outline-gc-reads stripped eligible-p)
+          (when (admit candidate)
+            (setf first-helper (or first-helper first-gc-helper))))))
+    (compact-runtime-code engine stripped first-helper :compact-storage-p t)))
+
+(defun compact-interpreter-code (raw)
+  (wt:with-engine (engine)
+    (let ((raw (coerce raw '(simple-array (unsigned-byte 8) (*)))))
+      (native-link-validate engine raw)
+      (compact-packaged-runtime-code engine raw nil))))
+
 (defun compact-outlined-runtime-code (engine outlined first-helper)
-  (let ((compact (compact-runtime-code engine (wasm-without-debug-names outlined)
-                                       first-helper)))
+  (let ((compact (compact-packaged-runtime-code engine outlined first-helper)))
     ;; Outlining changes local uses and exposes new simplifications. Keep the
     ;; existing helper indices until compact-runtime-code can relocate them.
     (or (handler-case
@@ -151,8 +183,7 @@
               (unless (eq optimized outlined)
                 (let ((raw (coerce optimized '(simple-array (unsigned-byte 8) (*)))))
                   (native-link-validate engine raw)
-                  (let ((candidate (compact-runtime-code engine (wasm-without-debug-names raw)
-                                                         first-helper)))
+                  (let ((candidate (compact-packaged-runtime-code engine raw first-helper)))
                     (when (< (length candidate) (length compact))
                       (native-link-validate engine candidate)
                       candidate)))))
@@ -187,7 +218,7 @@ DEBUG-NAMES retains native debugging names."
     ((not compiler)
       (unless *interpreter-only-wasm*
         (let ((raw (optimize-runtime-wat (interpreter-wat :compiler nil))))
-          (setf *interpreter-only-wasm* (list raw (wasm-without-debug-names raw)))))
+          (setf *interpreter-only-wasm* (list raw (compact-interpreter-code raw)))))
       (copy-seq (if debug-names (first *interpreter-only-wasm*) (second *interpreter-only-wasm*))))
     (wasi
       (let* ((image (ensure-native-compiler-image))
@@ -213,7 +244,7 @@ DEBUG-NAMES retains native debugging names."
                     (optimize-runtime-wat (interpreter-wat))))))
         (copy-seq (if debug-names raw
           (cdr (if (eq raw (car *interpreter-wasm-compact*)) *interpreter-wasm-compact*
-            (setf *interpreter-wasm-compact* (cons raw (wasm-without-debug-names raw)))))))))))
+            (setf *interpreter-wasm-compact* (cons raw (compact-interpreter-code raw)))))))))))
 (defun write-interpreter-wasm (pathname &key wasi native-compiler debug-names (compiler t))
   "Write a standalone interpreter image or the WASI 0.3 terminal command.
 NATIVE-COMPILER includes the bootstrapped compiler in the import-free image.

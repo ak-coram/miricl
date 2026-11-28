@@ -895,8 +895,9 @@ Module processing pools literals, merges equal code bodies, removes
 unreachable functions and imports, and relocates references. It can fuse
 literal/function lookup sequences and use an existing cell helper for
 CONS with a NIL tail when the final layout permits a smaller encoding.
-Factory and table layouts are chosen by encoded cost. Equal bodies
-can share code without merging observable function or literal identities.
+Factory and table layouts are chosen by encoded cost. Equal bodies with
+the same Wasm signature can share code while retaining separate function
+and literal identities.
 Generated modules assign short function and import indices to heavily
 referenced entries. Relocation follows body sharing and the final import
 selection, keeping references bound to the same targets.
@@ -945,13 +946,45 @@ appended helpers. It swaps private function bodies and their type entries
 and relocates direct calls and tail calls. Exports, table entries, and
 targets of function references retain the indices used by snapshot
 restoration.
-The same compact pass combines an adjacent local null test, branch, and
+At packaging SPACE 3, the compact layout assigns short indices to
+frequently accessed private globals in import-free cores. It moves
+complete definitions and relocates all reads and writes while keeping
+exported global slots fixed. The layout requires independent initializers
+and a complete scan of sections and instructions that can reference globals.
+
+Before layout changes function indices, a straight-line pass keeps a
+saved local value on the stack
+when the intervening instructions use only operands they push themselves.
+It removes the matching read and preserves the original assignment,
+including when a call throws and its handler reads the local. Control
+boundaries and writes to the local end the search.
+It runs at packaging SPACE 3 and honors recorded function policies, applying
+only when SPACE is 3 and SPEED is lower.
+
+The same policy admits constant pooling in stripped import-free cores.
+Repeated Wasm numeric and i31 reference constants can share a private
+immutable global when the encoded reads repay the initializer and section
+costs. The pass preserves exact floating-point bits, including NaN
+payloads and signed zero. Global layout can then shorten references to
+frequently used pooled values.
+
+The same packaging policy can outline adjacent reference casts and GC
+reads, optionally including the preceding conversion from an external
+reference. Small private helpers consume the original stack operand and
+return the precise unpacked field, packed integer, array length, or i31
+result type. Complete instruction encodings identify shareable sites.
+The helper keeps the original cast and read order, preserving checked
+traps and mutable field reads.
+
+The compact pipeline combines an adjacent local null test, branch, and
 reread into a null branch that carries the reference on fallthrough.
 The branch depth and local assignment are preserved.
 The host validates fallthrough simplifications with the original scopes
 in place. It then removes unused void wrappers and merges adjacent
 blocks with matching signatures, adjusting branch and catch depths.
-Each stage keeps the previous bytes when validation rejects its candidate.
+The compact pipeline also runs on the stripped cold and compiler-free
+browser cores. Control and local-value rewrites keep the previous bytes
+when validation rejects a candidate.
 
 ** Runtime optimization and extensions
 

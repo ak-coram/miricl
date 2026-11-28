@@ -70,5 +70,20 @@
                      (if (zerop n) (+ a b c)
                          (funcall self (1- n) self a b c))))))
     (assert (= 42 (funcall worker 100000 worker 12 14 16))))
+  ;; Body sharing must keep equal narrow and wide bodies callable through
+  ;; both closure attachment and bundle entry installation.
+  (let ((source '(lambda ()
+                   (declare (optimize (debug 0)))
+                   (list (lambda (a) (declare (ignore a)) :same)
+                         (lambda (a b c d e) (declare (ignore a b c d e)) :same)))))
+    (flet ((check (narrow wide)
+             (assert (eq (funcall narrow nil) :same))
+             (assert (eq (funcall wide nil nil nil nil nil) :same))))
+      (apply #'check (funcall (compile-native source)))
+      (let* ((unit (compile-to-hir source))
+             (entries (sort (copy-list (rest (hir-unit-functions unit))) #'< :key #'native-fixed-arity)))
+        (multiple-value-bind (bytes literals) (emit-native-module unit :entries entries)
+          (apply #'check (loop for pool in literals for index from 0
+                               collect (compiler-primitive 17 (cons bytes index) pool nil)))))))
   t)
 (values)

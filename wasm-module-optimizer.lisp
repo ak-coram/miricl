@@ -32,14 +32,14 @@
 (defun module-type-vector (input)
   (loop repeat (module-uleb input) collect (module-value-type input)))
 
-(defun module-types (bytes)
-  ;; Records: composite kind, parameter types, result types, struct field count.
+(defun module-types (bytes &key struct-fields)
+  ;; Records: composite kind, parameter types, result types, struct field
+  ;; count, and optional struct storage types.
   ;; Recursive groups are flattened only in this metadata, never in the module.
   (let ((input (wasm-input bytes)) (types nil))
     (labels ((field ()
-               (if (member (aref bytes (wasm-input-position input)) '(#x77 #x78))
-                   (module-byte input) (module-value-type input))
-               (module-byte input))
+               (prog1 (module-value-type input)
+                 (module-byte input)))
              (subtype ()
                (let ((kind (module-byte input)))
                  (when (member kind '(#x4f #x50))
@@ -48,8 +48,12 @@
                  (push (case kind
                          (#x60 (let ((parameters (module-type-vector input)))
                                   (vector kind parameters (module-type-vector input) 0)))
-                         (#x5f (let ((count (module-uleb input)))
-                                  (dotimes (i count) (field)) (vector kind nil nil count)))
+                         (#x5f (let* ((count (module-uleb input))
+                                      (fields (when struct-fields (make-array count))))
+                                  (dotimes (i count)
+                                    (let ((type (field)))
+                                      (when fields (setf (aref fields i) type))))
+                                  (vector kind nil nil count fields)))
                          (#x5e (field) (vector kind nil nil 0))
                          (#x5d (module-uleb input) (vector kind nil nil 0))
                          (otherwise (unsupported-wasm-optimization))) types))))
@@ -389,6 +393,21 @@ and the first appended helper index when outlining adds helpers."
                            (policy (gethash name *wasm-outline-policies*)))
                       (when (and policy (< index (length policies))) (setf (aref policies index) policy)))))))))))))
 
+(defun linked-module-function-policies (bytes)
+  ;; Query the named module before stripping metadata or moving functions.
+  (let ((input (wasm-input bytes 8)) (names nil) (count nil))
+    (loop while (< (wasm-input-position input) (length bytes))
+          for id = (module-byte input)
+          for payload = (module-span input (module-uleb input))
+          do (case id
+               (0 (push (cons id payload) names))
+               (2 (return-from linked-module-function-policies nil))
+               (3 (setf count (module-uleb (wasm-input payload))))))
+    (when count
+      (let ((policies (make-array count :initial-element nil)))
+        (module-outline-names names policies)
+        policies))))
+
 (defun native-module-outline-policies (bytes module)
   ;; Recover the named linker identities of a compiler-produced module.
   (let ((input (wasm-input bytes 8)) (sections nil))
@@ -399,7 +418,7 @@ and the first appended helper index when outlining adds helpers."
       (loop for policy across policies for i from 0 collect
         (cons (format nil "compiler-~D-~D" module i) policy)))))
 
-(defstruct module-call-pair
+(defstruct module-outline-candidate
   helper sites (gross-saving 0))
 
 (defun module-runtime-export-indices (exports count)
@@ -443,7 +462,7 @@ and the first appended helper index when outlining adds helpers."
     ;; handlers. Its live effects occur after the unchanged first body.
     (wasm-byte #x12) (wasm-u32 second) (wasm-byte #x0b)))
 
-(defun module-select-call-pairs (records candidates function-index type-index)
+(defun module-select-outline-sites (records candidates function-index type-index)
   (let* ((count (length records))
          (occupied (make-array count :initial-element nil))
          (replacements (make-array count :initial-element nil))
@@ -468,14 +487,14 @@ and the first appended helper index when outlining adds helpers."
                                              :element-type 'bit :initial-element 0)))))
                  (loop for pos from start below end do (setf (sbit bits pos) 1))
                  (push (list start end function-index) (aref replacements function)))))
-      (loop for candidate in (stable-sort candidates #'> :key #'module-call-pair-gross-saving)
+      (loop for candidate in (stable-sort candidates #'> :key #'module-outline-candidate-gross-saving)
             for call-width = (1+ (wasm-u32-width function-index))
-            for helper = (module-call-pair-helper candidate)
+            for helper = (module-outline-candidate-helper candidate)
             for sites = nil for gain = 0
             for previous-function = -1 for previous-end = 0
             while (< (length helpers) 64) do
         ;; Sites were discovered in increasing function and instruction order.
-        (dolist (site (nreverse (module-call-pair-sites candidate)))
+        (dolist (site (nreverse (module-outline-candidate-sites candidate)))
           (destructuring-bind (function start end) site
             (let ((saving (- end start call-width)))
               (when (and (plusp saving)
@@ -568,14 +587,14 @@ and the first appended helper index when outlining adds helpers."
                         (unless (or present (>= (hash-table-count groups) 4096))
                           (let ((helper (helper first second)))
                             (when helper
-                              (setq group (make-module-call-pair :helper helper))
+                              (setq group (make-module-outline-candidate :helper helper))
                               (push group candidates))
                             (setf (gethash key groups) group)))
                         (when group
-                          (push (list function start end) (module-call-pair-sites group))
-                          (incf (module-call-pair-gross-saving group) saving)
+                          (push (list function start end) (module-outline-candidate-sites group))
+                          (incf (module-outline-candidate-gross-saving group) saving)
                           (incf site-count)))))))))))
-      (module-select-call-pairs records (nreverse candidates) function-index type-index))))
+      (module-select-outline-sites records (nreverse candidates) function-index type-index))))
 
 (defun module-outline-record (body signature types functions)
   (let ((effects (make-hash-table :test 'eq)))
@@ -585,6 +604,37 @@ and the first appended helper index when outlining adds helpers."
           (declare (ignore parameters locals))
           (list body ops local-types effects))
       (unsupported-wasm-optimization () (list body nil nil nil)))))
+
+(defun module-write-outlined-wasm (bytes sections replacements helpers type-count &optional policies)
+  (with-wasm-bytes
+    (wasm-append bytes 0 8)
+    (dolist (section sections)
+      (module-write-section (car section)
+        (case (car section)
+          ((1 3)
+           (let ((payload (wasm-input (cdr section))))
+             (with-wasm-bytes
+               (wasm-u32 (+ (module-uleb payload) (length helpers)))
+               (wasm-append (wasm-input-bytes payload) (wasm-input-position payload))
+               (loop for helper in helpers for i from type-count do
+                 (if (= (car section) 3) (wasm-u32 i)
+                     (progn
+                       (wasm-byte #x60)
+                       (dolist (value-types (cdr helper))
+                         (wasm-u32 (length value-types))
+                         (dolist (type value-types) (dolist (byte type) (wasm-byte byte))))))))))
+          (10 (with-wasm-bytes
+                (wasm-u32 (+ (length replacements) (length helpers)))
+                (dolist (body (append replacements (mapcar #'first helpers)))
+                  (wasm-u32 (length body)) (wasm-append body))))
+          (0 (let ((input (wasm-input (cdr section))))
+               (if (equalp (module-name input) #(109 105 114 105 99 108 46 112 111 108 105 99 121))
+                   (with-wasm-bytes
+                     (wasm-name "miricl.policy") (wasm-u32 (+ (length policies) (length helpers)))
+                     (loop for policy across policies do (wasm-byte policy))
+                     (dotimes (i (length helpers)) (wasm-byte 0)))
+                   (cdr section))))
+          (otherwise (cdr section)))))))
 
 (defun outline-wasm-module (bytes &optional (budget *native-outlining-budget*) (default-policy 25)
                                            runtime-call-pairs)
@@ -651,35 +701,7 @@ and the first appended helper index when outlining adds helpers."
                 (when pair-helpers
                   (setq replacements bodies helpers (append helpers pair-helpers)))))))))
     (unless helpers (return-from outline-wasm-module bytes))
-    (values (with-wasm-bytes
-      (wasm-append bytes 0 8)
-      (dolist (section sections)
-        (module-write-section (car section)
-          (case (car section)
-            ((1 3)
-             (let ((payload (wasm-input (cdr section))))
-               (with-wasm-bytes
-                 (wasm-u32 (+ (module-uleb payload) (length helpers)))
-                 (wasm-append (wasm-input-bytes payload) (wasm-input-position payload))
-                 (loop for helper in helpers for i from (length types) do
-                   (if (= (car section) 3) (wasm-u32 i)
-                       (progn
-                         (wasm-byte #x60)
-                         (dolist (list (cdr helper))
-                           (wasm-u32 (length list))
-                           (dolist (type list) (dolist (byte type) (wasm-byte byte))))))))))
-            (10 (with-wasm-bytes
-                  (wasm-u32 (+ (length replacements) (length helpers)))
-                  (dolist (body (append replacements (mapcar #'first helpers)))
-                    (wasm-u32 (length body)) (wasm-append body))))
-            (0 (let ((input (wasm-input (cdr section))))
-                 (if (equalp (module-name input) #(109 105 114 105 99 108 46 112 111 108 105 99 121))
-                     (with-wasm-bytes
-                       (wasm-name "miricl.policy") (wasm-u32 (+ (length policies) (length helpers)))
-                       (loop for policy across policies do (wasm-byte policy))
-                       (dotimes (i (length helpers)) (wasm-byte 0)))
-                     (cdr section))))
-            (otherwise (cdr section))))))
+    (values (module-write-outlined-wasm bytes sections replacements helpers (length types) policies)
       (+ (length imported) (length defined)))))
 
 (defun module-layout-constant-expression (input pin)
@@ -695,6 +717,7 @@ and the first appended helper index when outlining adds helpers."
       (#xfb (case (module-uleb input)
               ((0 1 6 7) (module-uleb input))
               (8 (module-uleb input) (module-uleb input))
+              (28 nil) ; ref.i31
               (otherwise (unsupported-wasm-optimization))))
       (otherwise (unsupported-wasm-optimization)))))
 
@@ -722,6 +745,37 @@ and the first appended helper index when outlining adds helpers."
             (when depth (wasm-u32 depth))
             (setf position to))
           (wasm-append body position)))))
+
+(defun module-retain-local-values (body signature types functions)
+  (let* ((*native-module-stack-effects* (make-hash-table :test 'eq))
+         (ops (module-read-body body signature types functions *native-module-stack-effects*))
+         (store nil) (height 0) (edits nil))
+    (loop for op across ops
+          for code = (native-op-code op) do
+      (cond
+        ((member code '(#x00 #x02 #x03 #x04 #x05 #x08 #x0b #x0c #x0d #x0e #x0f #x1f))
+         (setf store nil))
+        ((= code #x21)
+         (setf store op height 0))
+        (store
+         (cond
+           ((and (= code #x20) (zerop height)
+                 (= (native-op-argument op) (native-op-argument store)))
+            ;; Keep the assignment at its original point, including when a
+            ;; call can throw. Only the fallthrough operand stack changes.
+            (let ((start (native-op-start store)))
+              (push (list start (1+ start) '(#x22)) edits))
+            (push (list (native-op-start op) (native-op-end op)) edits)
+            (setf store nil))
+           ((and (= code #x22) (= (native-op-argument op) (native-op-argument store)))
+            (setf store nil))
+           (t
+            (multiple-value-bind (consumed produced) (native-op-stack op)
+              ;; The saved value must sit below every intervening operand.
+              (if (> consumed height)
+                  (setf store nil)
+                  (incf height (- produced consumed)))))))))
+    (module-write-control-edits body (nreverse edits))))
 
 (defun module-terminal-branches (body signature types functions)
   (let ((frames (list nil)) (edits nil)
@@ -814,7 +868,7 @@ and the first appended helper index when outlining adds helpers."
             unless (= depth old-depth) do (push (list start end nil depth) edits)))
     (module-write-control-edits body (sort edits #'< :key #'car))))
 
-(defun rewrite-linked-wasm-control (bytes rewrite-body)
+(defun rewrite-linked-wasm-control (bytes rewrite-body &optional eligible-p)
   "Propose a control-flow rewrite of validated, stripped and fully linked core code."
   (handler-case
       (let* ((sections (module-linked-code-sections bytes))
@@ -837,9 +891,11 @@ and the first appended helper index when outlining adds helpers."
               (dotimes (i count)
                 (let* ((body (module-span code (module-uleb code)))
                        (rewritten
-                         (handler-case
-                             (funcall rewrite-body body (aref types (aref functions i)) types functions)
-                           (unsupported-wasm-optimization () body))))
+                         (if (and eligible-p (not (funcall eligible-p i)))
+                             body
+                             (handler-case
+                                 (funcall rewrite-body body (aref types (aref functions i)) types functions)
+                               (unsupported-wasm-optimization () body)))))
                   (unless (eq body rewritten) (setf changed t))
                   (wasm-u32 (length rewritten))
                   (wasm-append rewritten)))))
@@ -855,13 +911,215 @@ and the first appended helper index when outlining adds helpers."
               bytes)))
     (unsupported-wasm-optimization () bytes)))
 
-(defun module-pin-function-indices (sections count)
-  (let ((pinned (make-array count :element-type 'bit :initial-element 0)))
+(defstruct module-pooled-constant
+  bytes key type (uses 0) index)
+
+(defun module-constant-sites (body signature types functions pool)
+  (let ((pending nil) (sites nil))
+    (labels ((record-constant (start end type)
+               (when (> (- end start) 3)
+                 (let* ((bytes (subseq body start end))
+                        ;; Include all immediate bytes, including float NaN payloads.
+                        (key (map 'string #'code-char bytes))
+                        (entry (or (gethash key pool)
+                                   (setf (gethash key pool)
+                                         (make-module-pooled-constant :bytes bytes :key key :type type)))))
+                   (incf (module-pooled-constant-uses entry))
+                   (push (list start end entry) sites)))))
+      (module-read-body body signature types functions nil nil
+        (lambda (opcode operand start end)
+          (declare (ignore operand))
+          (let ((i31 (and pending (= opcode #xfb) (= (aref body (1+ start)) 28))))
+            (when pending
+              (if i31
+                  (record-constant pending end '(#x64 #x6c))
+                  (record-constant pending start '(#x7f)))
+              (setf pending nil))
+            (case opcode
+              (#x41 (setf pending start))
+              (#x42 (record-constant start end '(#x7e)))
+              (#x43 (record-constant start end '(#x7d)))
+              (#x44 (record-constant start end '(#x7c))))))))
+    (nreverse sites)))
+
+(defun module-pool-constants (bytes eligible-p)
+  "Pool repeated immediate values in a validated, stripped and import-free core."
+  (handler-case
+      (let* ((sections (module-linked-code-sections bytes))
+             (declarations (cdr (assoc 3 sections)))
+             (code-section (assoc 10 sections))
+             (type-section (cdr (assoc 1 sections))))
+        (unless (and declarations code-section type-section)
+          (return-from module-pool-constants bytes))
+        (let* ((function-input (wasm-input declarations))
+               (code-input (wasm-input (cdr code-section)))
+               (types (module-types type-section))
+               (functions (make-array (module-uleb function-input)))
+               (bodies (make-array (length functions)))
+               (sites (make-array (length functions) :initial-element nil))
+               (pool (make-hash-table :test 'equal))
+               (global-section (assoc 6 sections))
+               (global-input (wasm-input (cdr global-section)))
+               (global-count (if global-section (module-uleb global-input) 0))
+               (selected nil))
+          (dotimes (i (length functions))
+            (setf (aref functions i) (module-uleb function-input)))
+          (module-layout-check-end function-input)
+          (unless (= (module-uleb code-input) (length bodies))
+            (unsupported-wasm-optimization))
+          (dotimes (i (length bodies))
+            (let ((body (module-span code-input (module-uleb code-input))))
+              (setf (aref bodies i) body)
+              (when (or (null eligible-p) (funcall eligible-p i))
+                (setf (aref sites i)
+                  (module-constant-sites body (aref types (aref functions i)) types functions pool)))))
+          (module-layout-check-end code-input)
+          (maphash
+           (lambda (key entry)
+             (declare (ignore key))
+             ;; Charge two operand bytes even for small indices. Later
+             ;; global layout may shorten the most frequently accessed ones.
+             (let* ((size (length (module-pooled-constant-bytes entry)))
+                    (definition (+ size (length (module-pooled-constant-type entry)) 2)))
+               (when (> (* (module-pooled-constant-uses entry) (- size 3)) definition)
+                 (push entry selected))))
+           pool)
+          (unless (and selected (<= (+ global-count (length selected)) 16384))
+            (return-from module-pool-constants bytes))
+          ;; Give small indices to frequent values if the module has room.
+          ;; The byte key breaks ties independently of hash traversal order.
+          (setf selected
+            (sort selected
+              (lambda (a b)
+                (let ((a-uses (module-pooled-constant-uses a))
+                      (b-uses (module-pooled-constant-uses b)))
+                  (if (= a-uses b-uses)
+                      (string< (module-pooled-constant-key a) (module-pooled-constant-key b))
+                      (> a-uses b-uses))))))
+          (let ((globals
+                  (with-wasm-bytes
+                    (wasm-u32 (+ global-count (length selected)))
+                    (when global-section
+                      (wasm-append (cdr global-section) (wasm-input-position global-input)))
+                    (loop for entry in selected for index from global-count do
+                      (setf (module-pooled-constant-index entry) index)
+                      (dolist (byte (module-pooled-constant-type entry)) (wasm-byte byte))
+                      (wasm-byte 0) ; immutable
+                      (wasm-append (module-pooled-constant-bytes entry))
+                      (wasm-byte #x0b)))))
+            (if global-section
+                (setf (cdr global-section) globals)
+                (let ((previous (position-if (lambda (section) (member (car section) '(7 9 12 10 11)))
+                                             sections)))
+                  (push (cons 6 globals) (cdr (nthcdr (1- previous) sections)))))
+            (setf (cdr code-section)
+              (with-wasm-bytes
+                (wasm-u32 (length bodies))
+                (loop for body across bodies for edits across sites
+                      for rewritten = (module-write-control-edits body
+                        (loop for (start end entry) in edits
+                              for index = (module-pooled-constant-index entry)
+                              when index collect (list start end '(#x23) index)))
+                      do (wasm-u32 (length rewritten)) (wasm-append rewritten))))
+            (let ((result (with-wasm-bytes
+                            (wasm-append bytes 0 8)
+                            (loop for (id . payload) in sections do
+                              (module-write-section id payload)))))
+              (if (< (length result) (length bytes))
+                  (coerce result '(simple-array (unsigned-byte 8) (*)))
+                  bytes)))))
+    (unsupported-wasm-optimization () bytes)))
+
+(defun module-gc-read-result (body start opcode types)
+  (case opcode
+    (2
+     (let ((input (wasm-input body (1+ start))))
+       (module-uleb input)
+       (let ((type (aref types (module-uleb input))))
+         (aref (aref type 4) (module-uleb input)))))
+    ((3 4 15 29 30) '(#x7f))))
+
+(defun module-collect-gc-reads (body index signature types functions groups)
+  (let ((prior nil) (prior-start nil) (earlier nil) (earlier-start nil))
+    (module-read-body body signature types functions nil nil
+      (lambda (opcode argument start end)
+        (declare (ignore argument))
+        (let ((sub (when (= opcode #xfb) (native-read-uleb body (1+ start)))))
+          (when (and (member prior '(22 23)) (member sub '(2 3 4 15 29 30)))
+            (let* ((external-p (eql earlier 26))
+                   (from (if external-p earlier-start prior-start))
+                   (key (map 'string #'code-char (subseq body from end)))
+                   (group (gethash key groups)))
+              (when (or group (< (hash-table-count groups) 4096))
+                (unless group
+                  (setf group
+                    (make-module-outline-candidate
+                      :helper (list (with-wasm-bytes
+                                      (wasm-byte 0) ; no local declarations
+                                      (wasm-byte #x20) (wasm-byte 0)
+                                      (wasm-append body from end)
+                                      (wasm-byte #x0b))
+                                    (if external-p '((#x6f)) '((#x6e)))
+                                    (list (module-gc-read-result body start sub types)))))
+                  (setf (gethash key groups) group))
+                (push (list index from end) (module-outline-candidate-sites group))
+                (incf (module-outline-candidate-gross-saving group) (- end from)))))
+          (psetf earlier prior earlier-start prior-start prior sub prior-start start))))))
+
+(defun module-outline-gc-reads (bytes eligible-p)
+  "Share adjacent GC casts and reads in a validated, stripped import-free core."
+  (handler-case
+      (let* ((sections (module-linked-code-sections bytes))
+             (type-section (assoc 1 sections))
+             (function-section (assoc 3 sections))
+             (code-section (assoc 10 sections)))
+        (unless (and type-section function-section code-section)
+          (return-from module-outline-gc-reads bytes))
+        (let* ((input (wasm-input (cdr function-section)))
+               (code (wasm-input (cdr code-section)))
+               (types (module-types (cdr type-section) :struct-fields t))
+               (functions (make-array (module-uleb input)))
+               (records (make-array (length functions)))
+               (groups (make-hash-table :test 'equal))
+               (*native-outlining-minimum-saving* 16))
+          (dotimes (i (length functions))
+            (setf (aref functions i) (module-uleb input)))
+          (module-layout-check-end input)
+          (unless (= (module-uleb code) (length functions))
+            (unsupported-wasm-optimization))
+          ;; The original module verifies the cast and the read. A helper
+          ;; takes only the original reference, with the cast's broad input
+          ;; type, and returns the exact decoded field or integer result.
+          (dotimes (i (length functions))
+            (let ((body (module-span code (module-uleb code))))
+              (setf (aref records i) (list body))
+              (when (or (null eligible-p) (funcall eligible-p i))
+                (module-collect-gc-reads body i (aref types (aref functions i)) types functions groups))))
+          (module-layout-check-end code)
+          (let ((candidates (loop for key being the hash-keys of groups collect key)))
+            (multiple-value-bind (replacements helpers)
+                (module-select-outline-sites records
+                  (mapcar (lambda (key) (gethash key groups)) (sort candidates #'string<))
+                  (length functions) (length types))
+              (when helpers
+                (let ((candidate (module-write-outlined-wasm bytes sections replacements helpers (length types))))
+                  (when (< (length candidate) (length bytes))
+                    (return-from module-outline-gc-reads
+                      (values (coerce candidate '(simple-array (unsigned-byte 8) (*))) (length functions))))))))))
+    (unsupported-wasm-optimization () nil))
+  bytes)
+
+(defun module-layout-pins (sections count)
+  (let ((pinned (make-array count :element-type 'bit :initial-element 0))
+        (global-definitions nil) (global-pins nil))
     (flet ((pin (index) (setf (sbit pinned index) 1)))
       (loop for (id . payload) in sections
             when (member id '(4 6 7 9 11)) do
-              (let ((input (wasm-input payload)))
-                (dotimes (i (module-uleb input))
+              (let* ((input (wasm-input payload)) (entries (module-uleb input)))
+                (when (= id 6)
+                  (setf global-definitions (make-array entries)
+                        global-pins (make-array entries :element-type 'bit :initial-element 0)))
+                (dotimes (i entries)
                   (case id
                     (4 ; Plain funcref table with minimum and optional maximum.
                      (unless (= (module-byte input) #x70) (unsupported-wasm-optimization))
@@ -869,11 +1127,18 @@ and the first appended helper index when outlining adds helpers."
                        (0 (module-uleb input))
                        (1 (module-uleb input) (module-uleb input))
                        (otherwise (unsupported-wasm-optimization))))
-                    (6 (module-value-type input) (module-byte input)
-                       (module-layout-constant-expression input #'pin))
+                    (6 (let ((start (wasm-input-position input)))
+                         ;; Global initializers must be independent of all
+                         ;; globals, so moving them cannot change evaluation.
+                         (module-value-type input) (module-byte input)
+                         (module-layout-constant-expression input #'pin)
+                         (setf (aref global-definitions i)
+                               (cons start (wasm-input-position input)))))
                     (7 (module-name input)
                        (let* ((kind (module-byte input)) (index (module-uleb input)))
-                         (when (zerop kind) (pin index))))
+                         (case kind
+                           (0 (pin index))
+                           (3 (setf (sbit global-pins index) 1)))))
                     (9 ; Active index vector with explicit table and i32 offset.
                      (unless (= (module-uleb input) 2) (unsupported-wasm-optimization))
                      (module-uleb input)
@@ -887,14 +1152,30 @@ and the first appended helper index when outlining adds helpers."
                      (let ((size (module-uleb input)))
                        (incf (wasm-input-position input) size)))))
                 (module-layout-check-end input))))
-    pinned))
+    (values pinned global-definitions global-pins)))
 
-(defun module-write-compact-body (body edits indices)
+(defun module-short-index-swaps (counts pinned &optional first-helper)
+  (let* ((count (length counts))
+         (indices (make-array count :initial-element nil)))
+    ;; The linked image uses up to two ULEB bytes for these indices.
+    (when (< 128 count 16384)
+      (let ((short (loop for i below (min 128 (or first-helper count))
+                         when (zerop (sbit pinned i)) collect i))
+            (long (loop for i from (max 128 (or first-helper 0)) below count
+                        when (zerop (sbit pinned i)) collect i)))
+        (flet ((uses (index) (aref counts index)))
+          (loop for low in (stable-sort short #'< :key #'uses)
+                for high in (stable-sort long #'> :key #'uses)
+                while (< (uses low) (uses high))
+                do (setf (aref indices low) high (aref indices high) low)))))
+    indices))
+
+(defun module-write-compact-body (body edits indices globals)
   (let ((start 0))
     (loop for (from end kind argument operand-end) in edits do
       (ecase kind
-        (:call
-         (let ((index (aref indices argument)))
+        ((:call :global)
+         (let ((index (aref (if (eq kind :call) indices globals) argument)))
            (when index
              (wasm-append body start from)
              (wasm-u32 index)
@@ -906,15 +1187,14 @@ and the first appended helper index when outlining adds helpers."
          (setf start end))))
     (wasm-append body start)))
 
-(defun compact-linked-wasm-code (bytes first-helper)
-  "Shorten helper calls and null branches in a validated, stripped and fully linked core."
+(defun compact-linked-wasm-code (bytes first-helper &key layout-globals)
+  "Shorten private indices and null branches in a validated, stripped and fully linked core."
   (handler-case
       (let ((sections (module-linked-code-sections bytes)))
         (unless (and (assoc 1 sections) (assoc 3 sections) (assoc 10 sections))
           (return-from compact-linked-wasm-code bytes))
         (let* ((function-input (wasm-input (cdr (assoc 3 sections))))
                (count (module-uleb function-input))
-               (pinned (when first-helper (module-pin-function-indices sections count)))
                (types (module-types (cdr (assoc 1 sections))))
                (functions (make-array count))
                (bodies (make-array count))
@@ -922,84 +1202,88 @@ and the first appended helper index when outlining adds helpers."
                (counts (make-array count :initial-element 0))
                (changed nil)
                (code (wasm-input (cdr (assoc 10 sections)))))
-          (dotimes (i count)
-            (setf (aref functions i) (module-uleb function-input)))
-          (module-layout-check-end function-input)
-          (unless (= (module-uleb code) count) (unsupported-wasm-optimization))
-          (dotimes (i count)
-            (let ((body (module-span code (module-uleb code)))
-                  (local nil) (test-start nil) (branch-operand nil) (branch-end nil))
-              (setf (aref bodies i) body)
-              (module-read-body body (aref types (aref functions i)) types functions nil
-                (when first-helper
-                  (lambda (opcode index start end)
-                    (if (= opcode #xd2)
-                        (setf (sbit pinned index) 1)
-                        (progn
-                          (incf (aref counts index))
-                          (push (list (1+ start) end :call index) (aref edits i))))))
-                (lambda (opcode argument start end)
-                  (cond
-                    ((and branch-end (= opcode #x20) (= argument local))
-                     ;; The taken edge discards the null reference. The
-                     ;; fallthrough keeps the same reference that the second
-                     ;; local.get would read. Retain the initial get or tee.
-                     (push (list test-start end :null-branch branch-operand branch-end)
-                           (aref edits i))
-                     (setf changed t local nil test-start nil branch-end nil))
-                    ((and test-start (not branch-end) (= opcode #x0d))
-                     (setf branch-operand (1+ start) branch-end end))
-                    ((and local (not test-start) (= opcode #xd1))
-                     (setf test-start start))
-                    (t
-                     (setf local (when (member opcode '(#x20 #x22)) argument)
-                           test-start nil branch-end nil)))))
-              (setf (aref edits i) (nreverse (aref edits i)))))
-          (module-layout-check-end code)
-          (let ((indices (make-array count :initial-element nil)))
-            (when first-helper
-              (let ((short (loop for i below (min 128 first-helper)
-                                 when (zerop (sbit pinned i)) collect i))
-                    (helpers (loop for i from (max 128 first-helper) below count
-                                   when (zerop (sbit pinned i)) collect i)))
-                ;; Stable ordering gives ties to the lower original indices.
-                (flet ((uses (index) (aref counts index)))
-                  (loop for low in (stable-sort short #'< :key #'uses)
-                        for high in (stable-sort helpers #'> :key #'uses)
-                        while (< (uses low) (uses high))
-                        do (setf (aref indices low) high (aref indices high) low changed t)))))
-            (unless changed (return-from compact-linked-wasm-code bytes))
-            ;; A function's body and type move together. All escaping indices
-            ;; are pinned. For relocation, rewrite only the immediates of
-            ;; direct calls and direct tail calls found in the final bodies.
-            (let ((result
-                    (with-wasm-bytes
-                      (wasm-append bytes 0 8)
-                      (loop for (id . payload) in sections do
-                        (module-write-section id
-                          (case id
-                            (3 (with-wasm-bytes
-                                 (wasm-u32 count)
-                                 (dotimes (i count)
-                                   (wasm-u32 (aref functions (or (aref indices i) i))))))
-                            (10 (with-wasm-bytes
-                                  (wasm-u32 count)
-                                  (dotimes (i count)
-                                    (let* ((index (or (aref indices i) i))
-                                           (body (aref bodies index))
-                                           (body-edits (aref edits index))
-                                           (rewritten
-                                             (if (some (lambda (edit)
-                                                         (or (eq (third edit) :null-branch)
-                                                             (aref indices (fourth edit))))
-                                                       body-edits)
-                                                 (with-wasm-bytes
-                                                   (module-write-compact-body body body-edits indices))
-                                                 body)))
-                                      (wasm-u32 (length rewritten))
-                                      (wasm-append rewritten)))))
-                            (otherwise payload)))))))
-              (if (< (length result) (length bytes))
-                  (coerce result '(simple-array (unsigned-byte 8) (*)))
-                  bytes)))))
+          (multiple-value-bind (pinned global-definitions global-pins)
+              (when (or first-helper layout-globals)
+                (handler-case (module-layout-pins sections count)
+                  (unsupported-wasm-optimization (condition)
+                    (when first-helper (error condition)))))
+            (let ((global-counts (when layout-globals
+                                   (make-array (length global-definitions) :initial-element 0))))
+              (dotimes (i count)
+                (setf (aref functions i) (module-uleb function-input)))
+              (module-layout-check-end function-input)
+              (unless (= (module-uleb code) count) (unsupported-wasm-optimization))
+              (dotimes (i count)
+                (let ((body (module-span code (module-uleb code)))
+                      (local nil) (test-start nil) (branch-operand nil) (branch-end nil))
+                  (setf (aref bodies i) body)
+                  (module-read-body body (aref types (aref functions i)) types functions nil
+                    (when first-helper
+                      (lambda (opcode index start end)
+                        (if (= opcode #xd2)
+                            (setf (sbit pinned index) 1)
+                            (progn
+                              (incf (aref counts index))
+                              (push (list (1+ start) end :call index) (aref edits i))))))
+                    (lambda (opcode argument start end)
+                      (when (and global-counts (member opcode '(#x23 #x24)))
+                        (incf (aref global-counts argument))
+                        (push (list (1+ start) end :global argument) (aref edits i)))
+                      (cond
+                        ((and branch-end (= opcode #x20) (= argument local))
+                         ;; The taken edge discards the null reference. The
+                         ;; fallthrough keeps the same reference that the second
+                         ;; local.get would read. Retain the initial get or tee.
+                         (push (list test-start end :null-branch branch-operand branch-end)
+                               (aref edits i))
+                         (setf changed t local nil test-start nil branch-end nil))
+                        ((and test-start (not branch-end) (= opcode #x0d))
+                         (setf branch-operand (1+ start) branch-end end))
+                        ((and local (not test-start) (= opcode #xd1))
+                         (setf test-start start))
+                        (t
+                         (setf local (when (member opcode '(#x20 #x22)) argument)
+                               test-start nil branch-end nil)))))
+                  (setf (aref edits i) (nreverse (aref edits i)))))
+              (module-layout-check-end code)
+              (let ((indices (when first-helper (module-short-index-swaps counts pinned first-helper)))
+                    (globals (when global-counts (module-short-index-swaps global-counts global-pins))))
+                (unless (or changed (some #'identity indices) (some #'identity globals))
+                  (return-from compact-linked-wasm-code bytes))
+                ;; Move each definition intact. The only unpinned function and
+                ;; global references are the instruction operands collected above.
+                (let ((result
+                        (with-wasm-bytes
+                          (wasm-append bytes 0 8)
+                          (loop for (id . payload) in sections do
+                            (module-write-section id
+                              (case id
+                                (3 (with-wasm-bytes
+                                     (wasm-u32 count)
+                                     (dotimes (i count)
+                                       (wasm-u32 (aref functions (or (and indices (aref indices i)) i))))))
+                                (6 (if globals
+                                       (with-wasm-bytes
+                                         (wasm-u32 (length globals))
+                                         (dotimes (i (length globals))
+                                           (let ((span (aref global-definitions (or (aref globals i) i))))
+                                             (wasm-append payload (car span) (cdr span)))))
+                                       payload))
+                                (10 (with-wasm-bytes
+                                      (wasm-u32 count)
+                                      (dotimes (i count)
+                                        (let* ((index (or (and indices (aref indices i)) i))
+                                               (body (aref bodies index))
+                                               (body-edits (aref edits index))
+                                               (rewritten
+                                                 (if body-edits
+                                                     (with-wasm-bytes
+                                                       (module-write-compact-body body body-edits indices globals))
+                                                     body)))
+                                          (wasm-u32 (length rewritten))
+                                          (wasm-append rewritten)))))
+                                (otherwise payload)))))))
+                  (if (< (length result) (length bytes))
+                      (coerce result '(simple-array (unsigned-byte 8) (*)))
+                      bytes)))))))
     (unsupported-wasm-optimization () bytes)))

@@ -815,6 +815,126 @@ if (mode === 'prepare') {
   for (const bytes of [plain, shared]) checkCallPairs(bytes);
   assert.ok(shared.length < plain.length, 'Sharing call pairs must reduce the complete module.');
   console.log('Native module optimizer: shared calls preserve operands, traps, effects, and handler continuations.');
+} else if (mode === 'prepare-linked-storage') {
+  // Fill the one-byte index space, then give the private mutable global
+  // repeated reads and writes. Keep a host-accessible global in that space.
+  await fs.writeFile(pathname, `(module
+    (global $host (export "host") (mut i32) (i32.const 19))
+    ${'(global i64 (i64.const -1))\n'.repeat(127)}
+    (global $counter (mut i32) (i32.const 23))
+    (func (export "bump") (result i32)
+      global.get $counter i32.const 1 i32.add global.set $counter
+      global.get $counter global.get $host i32.add)
+    (tag $fail)
+    (func $maybe-throw (param i32) local.get 0 if throw $fail end)
+    (func (export "retain") (param i32 externref) (result externref externref)
+      (local $saved externref) (local $first externref)
+      block $caught
+        try_table (catch $fail $caught)
+          local.get 1 local.set $saved
+          local.get 0 call $maybe-throw
+          local.get $saved local.set $first
+        end
+      end
+      local.get $first local.get $saved)
+    (func (export "overwrite") (param i32 i32) (result i32)
+      (local $saved i32)
+      local.get 0 local.set $saved
+      local.get 1 local.tee $saved drop
+      local.get $saved)
+    (func (export "consumes-inherited") (param i32 i32) (result i32 i32)
+      (local $saved i32)
+      local.get 0 local.get 1 local.set $saved
+      i32.const 2 i32.add
+      local.get $saved))`);
+} else if (mode === 'verify-linked-storage') {
+  for (const path of [pathname, optimizedPath]) {
+    const entries = new WebAssembly.Instance(new WebAssembly.Module(await fs.readFile(path))).exports;
+    assert.equal(entries.bump(), 43);
+    entries.host.value = 91;
+    assert.equal(entries.bump(), 116);
+    assert.equal(entries.host.value, 91);
+    const value = {};
+    assert.deepEqual(entries.retain(0, value), [value, value]);
+    assert.deepEqual(entries.retain(1, value), [null, value]);
+    assert.equal(entries.overwrite(19, 91), 91);
+    assert.deepEqual(entries['consumes-inherited'](19, 91), [21, 91]);
+  }
+  console.log('Native module optimizer: linked storage preserves global identity, operand order, and exception-visible locals.');
+} else if (mode === 'prepare-linked-constants') {
+  const constants = [
+    ['integer', 'i32', 'i32.const 2147483647'],
+    ['wide', 'i64', 'i64.const -9223372036854775808'],
+    ['immediate', 'i32', 'i32.const -1073741824 ref.i31 i31.get_s'],
+    ['f32-bits', 'i32', 'f32.const nan:0x412345 i32.reinterpret_f32'],
+    ['f64-bits', 'i64', 'f64.const -nan:0x8123456789abc i64.reinterpret_f64'],
+    ['negative-zero', 'f64', 'f64.const -0'],
+  ];
+  await fs.writeFile(pathname, `(module
+    ${constants.map(([entry, result, instructions]) => `
+      (func (export "${entry}") (result ${Array(16).fill(result).join(' ')})
+        ${(instructions + '\n').repeat(16)})`).join('\n')})`);
+} else if (mode === 'verify-linked-constants') {
+  const original = await fs.readFile(pathname), compact = await fs.readFile(optimizedPath);
+  assert.ok(compact.length < original.length, 'The constant pool must repay the complete module cost.');
+  for (const bytes of [original, compact]) {
+    const entries = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+    for (const [entry, value] of [
+      ['integer', 2147483647], ['wide', -(1n << 63n)], ['immediate', -1073741824],
+      ['f32-bits', 0x7fc12345], ['f64-bits', BigInt.asIntN(64, 0xfff8123456789abcn)],
+      ['negative-zero', -0],
+    ]) {
+      assert.deepEqual(entries[entry](), Array(16).fill(value), entry);
+    }
+  }
+  console.log('Native module optimizer: pooled constants preserve integer values, i31 representation, signed zero, and NaN bits.');
+} else if (mode === 'prepare-linked-gc-reads') {
+  const readers = [
+    ['signed', 'any.convert_extern ref.cast (ref $box) struct.get_s $box 0'],
+    ['unsigned', 'any.convert_extern ref.cast (ref null $box) struct.get_u $box 0'],
+    ['inner', 'call $bridge ref.cast (ref $box) struct.get $box 1 struct.get $inner 0'],
+    ['length', 'any.convert_extern ref.cast (ref $array) array.len'],
+    ['i31', 'any.convert_extern ref.cast (ref i31) i31.get_s'],
+  ];
+  await fs.writeFile(pathname, `(module
+    (type $inner (struct (field i32)))
+    (type $box (struct (field (mut i8)) (field (ref $inner))))
+    (type $array (array (mut i64)))
+    (func $bridge (param externref) (result anyref) local.get 0 any.convert_extern)
+    (func (export "box") (param i32 i32) (result externref)
+      local.get 0 local.get 1 struct.new $inner struct.new $box extern.convert_any)
+    (func (export "array") (param i32) (result externref)
+      local.get 0 array.new_default $array extern.convert_any)
+    (func (export "small") (param i32) (result externref)
+      local.get 0 ref.i31 extern.convert_any)
+    (func (export "write") (param externref i32)
+      local.get 0 call $bridge ref.cast (ref $box)
+      local.get 1 struct.set $box 0)
+    ${readers.map(([name, ops]) =>
+      `(func (export "${name}") (param externref) (result ${Array(16).fill('i32').join(' ')})
+        ${('local.get 0 ' + ops + '\n').repeat(16)})`).join('\n')})`);
+} else if (mode === 'verify-linked-gc-reads') {
+  const original = await fs.readFile(pathname), compact = await fs.readFile(optimizedPath);
+  assert.ok(compact.length < original.length, 'Shared GC reads must repay the complete helper and signature cost.');
+  for (const bytes of [original, compact]) {
+    const module = new WebAssembly.Module(bytes);
+    assert.deepEqual(WebAssembly.Module.exports(module),
+      WebAssembly.Module.exports(new WebAssembly.Module(original)));
+    const entries = new WebAssembly.Instance(module).exports;
+    const box = entries.box(-7, 43), array = entries.array(5), small = entries.small(-19);
+    for (const [name, input, value] of [
+      ['signed', box, -7], ['unsigned', box, 249], ['inner', box, 43],
+      ['length', array, 5], ['i31', small, -19],
+    ]) {
+      for (const bad of [null, {}, name === 'length' ? box : array]) {
+        assert.throws(() => entries[name](bad), WebAssembly.RuntimeError, name);
+      }
+      assert.deepEqual(entries[name](input), Array(16).fill(value), name);
+    }
+    entries.write(box, 91);
+    assert.deepEqual(entries.signed(box), Array(16).fill(91), 'Reads observe live fields.');
+  }
+  console.log('Native module optimizer: shared GC reads preserve field types, signedness, traps, and live reads.');
 } else if (mode === 'prepare-linked-control' || mode === 'prepare-rejected-control') {
   await fs.writeFile(pathname, mode === 'prepare-linked-control' ? linkedControlFixture : rejectedControlFixture);
 } else if (mode === 'verify-linked-control' || mode === 'verify-rejected-control') {

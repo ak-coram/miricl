@@ -7329,25 +7329,20 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
           do (push (list (1+ (native-op-start op)) (aref functions (- (native-op-argument op) imports))) result))
     result))
 
-(defun native-coalesce-bodies (bodies)
+(defun native-coalesce-bodies (bodies signatures)
   (declare (type list bodies) (inline code-char))
   ;; Equal bodies may still have different literal values and captures: both
   ;; live in the function object passed through the boxed entry convention.
+  ;; Narrow and wide workers can have identical instructions but their
+  ;; parameter types differ. Share only within the same Wasm signature.
   (let ((seen (make-hash-table :test 'equal)) (indices (make-hash-table :test 'eq))
         (unique nil) (count 0) (changed nil))
     (declare (type hash-table seen indices) (type list unique) (type (unsigned-byte 32) count))
-    (loop for function in *native-functions* for body in bodies do
-      (let ((key (or (gethash body *wasm-body-keys*)
-                     (setf (gethash body *wasm-body-keys*) (concatenate 'string
-                       (let ((source (and *wasm-worker-origins* (gethash function *wasm-worker-origins*))))
-                         (cond ((or (eq function *wasm-private-scalar-worker*)
-                                    (eq function (first (and *wasm-reusable-scalars*
-                                                             (gethash source *wasm-reusable-scalars*)))))
-                                "I")
-                               (source (format nil "D~D" (if (eq function (gethash source *wasm-direct-workers*))
-                                 (or (gethash source *wasm-multiple-result-functions*) 0) 0)))
-                               (t "G")))
-                       (map 'string (lambda (code) (code-char code)) body))))))
+    (loop for function in *native-functions* for body in bodies for signature in signatures do
+      (let ((key (cons signature
+                       (or (gethash body *wasm-body-keys*)
+                           (setf (gethash body *wasm-body-keys*)
+                                 (map 'string #'code-char body))))))
        (multiple-value-bind (index found) (gethash key seen)
         (when found (compiler-statistic :optimization/shared-body))
         (unless found
@@ -7478,12 +7473,17 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                      (setf (gethash function *wasm-function-relocations*)
                        (native-direct-relocations (gethash function workers) relocation-functions))))))
              (mapcar (lambda (function) (or (gethash function workers) (gethash function full))) *native-functions*)))
+        (signatures (mapcar (lambda (function)
+                              (if (gethash function *wasm-worker-origins*)
+                                  (native-result-signature function)
+                                  '((:object :object) :object)))
+                            *native-functions*))
         (original-indices *native-function-indices*)
         (*wasm-body-keys* (make-hash-table :test 'eq)))
     (loop
       (let ((bodies (mapcar (lambda (function body)
                              (native-relocate-body function body original-indices)) *native-functions* original)))
-        (multiple-value-bind (unique indices changed) (native-coalesce-bodies bodies)
+        (multiple-value-bind (unique indices changed) (native-coalesce-bodies bodies signatures)
           (setq *native-function-indices* indices)
           ;; Patch REF.FUNC operands when their targets merge. Literal layouts
           ;; stay unchanged; HIR and full bodies need to be emitted only once.
