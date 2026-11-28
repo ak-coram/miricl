@@ -756,9 +756,9 @@ result spine directly, using paired cons construction where possible and
 preserving the supplied LIST* tail.
 Simple list operations specialize CAR, CDR and ENDP with applicable list
 facts. At SAFETY 0, a cons proof can also specialize RPLACA and RPLACD.
-Within a block, checked proper-list facts eliminate redundant traversals,
-and known fields of a fresh cons can feed subsequent accesses directly.
-Mutation and unknown effects end these facts. Exact operation
+Literal lambda APPLY checks the argument spine for properness even at
+SAFETY 0. Known fields of a fresh cons can feed subsequent accesses directly
+until mutation or unknown effects. Exact operation
 and argument-shape checks also admit compact MAKE-ARRAY and MAKE-STRING
 paths, primary GETHASH and checked SETF GETHASH. EQL can use identity when
 proved operand types rule out its numeric and character comparisons.

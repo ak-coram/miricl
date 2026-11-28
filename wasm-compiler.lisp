@@ -107,7 +107,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-reused-values* nil)
 (defvar *wasm-checked-integer-copies* nil)
 (defvar *wasm-cons-forward-blocks* nil)
-(defvar *wasm-proper-list-checks* nil)
 (defvar *wasm-unboxed-values* nil)
 (defvar *wasm-vector-snapshot-prefixes* nil)
 (defvar *wasm-vector-snapshot-operations* nil)
@@ -721,7 +720,6 @@ Bind to NIL to interpret forms, including forms without native lowering.")
   (or (and *wasm-low-field*
            (or (eq instruction (second *wasm-low-field*))
                (eq instruction (third *wasm-low-field*))))
-      (and *wasm-proper-list-checks* (gethash instruction *wasm-proper-list-checks*))
       (and *wasm-reused-values*
            ;; A forwarded checked field access is nontrapping: its operand
            ;; was proved to be a fresh cons. Its now-unused result is dead too.
@@ -6726,7 +6724,6 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                                   (native-value-slot *wasm-single-calls* output)
                                   (gethash reference *wasm-inline-references*)
                                   (not (or (gethash call *wasm-inline-vector-calls*)
-                                           (gethash call *wasm-proper-list-checks*)
                                            (gethash call *wasm-proven-integer-arithmetic*)
                                            (member call *wasm-private-scalar-sites* :test #'eq)
                                            (native-named-call-p inputs function)
@@ -8905,15 +8902,11 @@ the named-entry format for hosts that translate individual Wasm workers."
           (*wasm-proven-integer-arithmetic* (make-hash-table :test 'eq))
           (*wasm-proven-cell-types* nil)
           (*wasm-cons-forward-blocks* (make-hash-table :test 'eq))
-          (*wasm-proper-list-checks* nil)
           (*wasm-inline-references* (make-hash-table :test 'eq)))
     (native-plan-inline-vectors unit)
     (native-plan-inline-simple unit (and certificates analysis-entries) certificates)
     (setq *wasm-dynamic-rests* (native-plan-dynamic-rests unit))
     (native-keep-shared-references unit)
-    (setq *wasm-proper-list-checks*
-      (hir-proper-list-checks unit *wasm-inline-simple-calls*
-                            *wasm-inline-references* *wasm-optimization-barriers*))
     (setq *wasm-primary-functions* (native-primary-functions unit analysis-entries))
     (when *wasm-primary-functions*
       (maphash (lambda (function present)
@@ -9279,7 +9272,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-standard-property-negative-p hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-literal-list-cells hir-literal-counter-cells hir-bounded-integer-cells hir-literal-clock-cells hir-symbolic-target-type-p hir-type-query-result-type hir-literal-byte-field-chain hir-literal-byte-field-type hir-integer-identity hir-integer-branch-type hir-integer-comparison-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
                    hir-dispatch-candidate
                    hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells
-                   hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-tail-pair-p hir-share-branch-tails hir-refresh-predecessors hir-proper-list-checks optimize-hir-checked optimize-hir
+                   hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-tail-pair-p hir-share-branch-tails hir-refresh-predecessors optimize-hir-checked optimize-hir
                    hir-lexical-function-entry hir-inline-environment hir-function-result-type hir-inline-size hir-inline-cost hir-inline-candidate hir-inline-body hir-shadow-specials
                    compiler-source-policy native-entry-sections
                    hir-bind-value hir-read-variable hir-write-variable hir-function-reference hir-direct-function-reference

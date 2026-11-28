@@ -4702,8 +4702,7 @@ try {
     }
   }
 
-  // Proper-spine proofs describe current objects, not the CL LIST type.
-  // Canonical constructors retain fresh spines, operand order and all values.
+  // Inline APPLY preserves fresh spines, operand order and all values.
   for (const safety of [0, 1, 2, 3]) {
     for (const constructor of [
       '(list (funcall effect :first) (funcall effect :second))',
@@ -4721,8 +4720,8 @@ try {
               (not (eq (car first) (car second)))
               (equal effects '(:second :first :second :first))))))`);
     }
-    // A successful traversal cannot justify another after aliased mutation,
-    // whether the mutator is visible, inline, or an unknown callback.
+    // Check the current argument spine after aliased mutation, including
+    // mutations through a callback.
     // A useful TYPE-ERROR may identify the whole bad input or its dotted tail.
     for (const mutation of [
       '(rplacd alias :dotted)',
@@ -4757,7 +4756,7 @@ try {
                   (eq (type-error-datum condition) :dotted)))))))`);
     recover();
   }
-  // The primary value's proof cannot flow to another value or across a join.
+  // Check the argument spine selected after multiple-value binding or a join.
   for (const body of [
     `(multiple-value-bind (proper arguments) (values (list 1 2) supplied)
        (declare (ignore proper)) (apply (lambda (&rest result) result) arguments))`,
