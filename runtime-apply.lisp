@@ -67,7 +67,7 @@
     (br_if $ordinary (i32.ne (struct.get $obj $n (ref.cast (ref $obj) (local.get $name)))
       (i32.add (local.get $id) (i32.const 1))))
     (block $framed
-      ;; Both admitted paths do bounded work with no guest calls or polls.
+      ;; The admitted paths do bounded work with no guest calls or polls.
       ;; Clear values before constructing the result, including a fresh cons
       ;; for BYTE or a boxed integer when LDB needs one.
       (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'byte)))
@@ -86,14 +86,28 @@
           #@(br_if $framed (i32.eqz (ref.test (ref $obj) (local.get $a))))
           #@(local.set $spec (ref.cast (ref $obj) (local.get $a)))
           #@(br_if $framed (i32.ne (i32.and (struct.get $obj $tag (local.get $spec)) (i32.const 63)) (i32.const 7)))
-          #@(call $try-scalar-integer-field (local.get $b)
-            (struct.get $obj $a (local.get $spec)) (struct.get $obj $b (local.get $spec)))
-          #@(br_if $framed)
-          #@(local.set $field)
+          #@(block $narrow-miss
+            (call $try-scalar-integer-field (local.get $b)
+              (struct.get $obj $a (local.get $spec)) (struct.get $obj $b (local.get $spec)))
+            (br_if $narrow-miss)
+            (local.set $field)
+            (call $clear-values)
+            (if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'ldb-test)))
+              (then (return (extern.convert_any (call $bool (i64.ne (local.get $field) (i64.const 0)))))))
+            (return (extern.convert_any (call $int64 (local.get $field)))))
+          ;; A narrow success never executes the width-64 checks. Admit only
+          ;; the live canonical LDB bytespec with immediate width and position.
+          #@(br_if $framed (i32.ne (local.get $id) (i32.const ,(runtime-symbol-id 'ldb))))
+          #@(br_if $framed (ref.test (ref $fixnum) (local.get $spec)))
+          #@(br_if $framed (i32.eqz (ref.eq
+            (struct.get $obj $a (local.get $spec)) (ref.i31 (i32.const 64)))))
+          #@(br_if $framed (i32.eqz (ref.eq
+            (struct.get $obj $b (local.get $spec)) (ref.i31 (i32.const 0)))))
+          (wat-decode-deposit-scalar '$b '$field '$framed)
+          #@(br_if $framed (i64.lt_s (local.get $field) (i64.const 0)))
+          ;; All source bits already lie within the requested low 64 bits.
           #@(call $clear-values)
-          #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'ldb-test)))
-            (then (return (extern.convert_any (call $bool (i64.ne (local.get $field) (i64.const 0)))))))
-          #@(return (extern.convert_any (call $int64 (local.get $field)))))))
+          #@(return (extern.convert_any (local.get $b))))))
     (return_call $fixed-byte-apply-framed (local.get $name) (local.get $id) (local.get $a) (local.get $b)))
   ;; Resume the original ordinary entry after its checkpoint.
   #@(local.set $result (call $apply0-ready (local.get $name)

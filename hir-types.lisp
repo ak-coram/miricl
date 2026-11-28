@@ -1542,6 +1542,14 @@ numbers, including bignums, and is never proved true by this rule."
           (otherwise (compiler-statistic :proof/integer-comparison-unknown name)
                      (standard-function-result-type name)))))))
 
+(defun hir-integer-bit-measure-type (type)
+  (multiple-value-bind (low high bounded) (hir-integer-bounds type)
+    (when (and bounded (<= -9223372036854775808 low high 9223372036854775807))
+      ;; The length of each endpoint bounds the population count on its
+      ;; side of -1/0. Normalize negative inputs by complementing them.
+      (values (list 'integer 0 (max (integer-length low) (integer-length high)))
+              (cond ((<= 0 low) :nonnegative) ((minusp high) :negative) (t :mixed))))))
+
 (defun hir-inline-result-type (name types &optional inputs)
   (declare (type list types))
   (when (member nil types) (return-from hir-inline-result-type nil))
@@ -1584,6 +1592,9 @@ numbers, including bignums, and is never proved true by this rule."
   (when (and (member name '(1+ 1-)) (= (length types) 1))
     (return-from hir-inline-result-type
       (hir-inline-result-type (if (eq name '1+) '+ '-) (list (first types) '(integer 1 1)))))
+  (when (and (member name '(integer-length logcount)) (= (length types) 1))
+    (return-from hir-inline-result-type
+      (or (hir-integer-bit-measure-type (first types)) fallback)))
   (when (and (eq name 'lognot) (= (length types) 1))
     (multiple-value-bind (low high known) (hir-integer-bounds (first types))
       ;; Complement reverses integer order. Bound the work and retain the

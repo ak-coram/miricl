@@ -184,6 +184,14 @@
 (define-runtime-function $logbitp-native (($index :nullable-object) ($x :nullable-object)) (:nullable-object)
   #@(local.set $x (call $require-integer (local.get $x)))
   #@(drop (call $natural-count (local.get $index)))
+  ;; Once the ordinary arguments are checked, an immediate zero index
+  ;; needs only the low bit of a validated scalar integer.
+  #@(block $ordinary
+    (br_if $ordinary (i32.eqz (ref.eq (local.get $index) (ref.i31 (i32.const 0)))))
+    (br_if $ordinary (i32.eqz (call $scalar-integer-p (local.get $x))))
+    (call $validate-bit-integer-layout (local.get $x))
+    (return (call $bool
+      (i32.and (i32.wrap_i64 (call $scalar-integer-value (local.get $x))) (i32.const 1)))))
   #@(call $logbitp-native-cl (local.get $index) (local.get $x)))
 
 (define-runtime-function $boole-word (($op i32) ($a i32) ($b i32)) (i32)

@@ -350,7 +350,13 @@ callee to primary-value return. Escaping and public entries retain complete
 groups. For an individual fixed call with primary or discard demand, the
 caller can use a primary-result adapter even when the callee is unknown.
 The adapter preserves invocation and discards the unobserved part of the
-result group. Exact-count proofs distinguish zero values from one NIL and can
+result group. Late native planning can omit demand from a secondary
+extraction after a bounded audit of all instruction and terminator operands.
+The extraction must be unused or initialize an unread private lexical cell
+as its sole use. Debug sites and captured landings retain conservative demand.
+The refinement leaves early opcode selection and callee result protocols
+intact, so newly projected calls use the applicable ordinary call transport.
+Exact-count proofs distinguish zero values from one NIL and can
 select component locals or typed Wasm results for supported tuples. The
 ordinary adapters preserve zero, secondary and overflow values across
 calls, callbacks, and cleanup. FTYPE and primary demand supply no exact
@@ -682,12 +688,14 @@ An LDB of a private literal BYTE can use a shared checked runtime entry
 for widths through 63 and positions representable as nonnegative i31
 integers. At position zero, a binary integer sum or general shift can
 also be included. Sum admission probes the terminal result. Shift and
-standalone extraction admission start at a standard LDB in a single
-block and verify the exact uses of intermediate results and their copies
-throughout the block. Only ordinary argument snapshots and effect-free
-forwarding may span the covered calls. Shift and standalone extraction
-keep the LDB result available to subsequent instructions, which can also
-read the original operands.
+standalone extraction admission start at a standard LDB and verify the
+exact uses of intermediate results and their copies throughout the block.
+Sum and shift can also fuse in the entry block of a function with an empty
+successor that returns the entry's value group unchanged. Lowering preserves
+that edge and the ordinary return. Standalone extraction requires a single
+block. Only ordinary argument snapshots and effect-free forwarding may
+span the covered calls. Shift and standalone extraction keep the LDB result
+available to subsequent instructions, which can also read the original operands.
 
 The runtime checks the live BYTE and LDB bindings, scalar representations,
 debugger state and scheduling state. It extracts the field from a signed scalar
@@ -796,9 +804,19 @@ snapshot at its own instruction and establishes a bounded integer even
 when the ordinary read returned a bignum. Checked character codes can
 enter the same raw integer transport. An unobserved CHAR object followed
 by CHAR-CODE can be represented as its code from the original checked
-read onward. Finite bit operations use the
-target interval rules and raw operands where available. Lisp consumers
-materialize the result through the ordinary scalar boxing rules.
+read onward. Finite bit operations use the target interval rules and raw
+operands where available. Direct canonical INTEGER-LENGTH and LOGCOUNT
+calls can measure a proved signed 64-bit integer with Wasm operations.
+Existing raw results and literals can feed the measure directly. When SPEED
+exceeds SPACE, a bounded boxed input can use the shared extractor for
+immediate and boxed integers. At positive SAFETY, executable facts about the
+observed operand establish the bounds and sign for boxed extraction. The
+result remains raw for scalar consumers and materializes as an immediate
+integer for Lisp consumers. LOGCOUNT preserves its call checkpoints and
+value-state cleanup. The checked LOGBITP kernel reads the low bit directly
+when the index is immediate zero and the integer has a validated scalar
+representation. Other inputs use the full integer bit operation. The ANSI
+entry retains its operation-entry checks and checkpoints.
 A discarded SETF AREF result allows the fixed call to pass the stored
 integer directly. The store checks its captured callable and live
 destination after the operation-entry checkpoint. On a miss it
@@ -864,7 +882,8 @@ bounds the work in each strip. The trip count can be unknown and the loop
 can have dynamic exits or run indefinitely.
 
 The audit requires a common latch and a fixed number of polls on every path
-that reaches it. It accepts total scalar instructions, private local
+that reaches it. It accepts a set of total scalar instructions, immediate
+i31 reference construction, nontrapping reference tests, private local
 operations and poll-free forward control flow. The ordinary and admitted
 paths share the body. On a latch or a void exit, the emitter settles the exact
 work performed, including the polls already traversed on a partially completed
@@ -1061,8 +1080,8 @@ Byte-field extraction checks the integer representations and count bounds
 before extracting fields of up to 63 bits from a scalar integer. The
 bounded path preserves sign extension and serves LDB and LDB-TEST under
 the ordinary call checkpoint. MASK-FIELD shifts the extracted bits back
-to their original position. Arbitrary-precision operands and wider fields
-use the exact Common Lisp kernel.
+to their original position. The general byte-field worker sends
+arbitrary-precision operands and wider fields to the exact Common Lisp kernel.
 
 DPB and DEPOSIT-FIELD share a checked runtime worker. It reads the live
 bytespec and both scalar integers, then updates the selected bits while
@@ -1084,7 +1103,9 @@ and application checkpoints and authenticate the captured builtin after
 both. BYTE with immediate nonnegative counts returns a fresh bytespec
 without an application frame. LDB and LDB-TEST share the bounded scalar
 worker and omit the frame when the live bytespec and integer pass its
-checks. These paths return one value and keep ordinary result allocation.
+checks. Fixed LDB also returns a checked nonnegative scalar integer
+directly when the live bytespec requests its low 64 bits at position zero.
+The scalar paths each return one value.
 Input misses and MASK-FIELD use the framed worker with dynamic cleanup.
 MASK-FIELD rereads the bytespec position after extraction. Debugger
 evaluation and dispatch misses follow general application.

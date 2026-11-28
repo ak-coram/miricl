@@ -98,6 +98,7 @@
            (#x57 . "i64.le_s") (#x58 . "i64.le_u") (#x59 . "i64.ge_s") (#x5a . "i64.ge_u")
            (#x6a . "i32.add") (#x6b . "i32.sub") (#x6c . "i32.mul")
            (#x6e . "i32.div_u") (#x71 . "i32.and")
+           (#x79 . "i64.clz") (#x7b . "i64.popcnt")
            (#x7c . "i64.add") (#x7d . "i64.sub") (#x7e . "i64.mul")
            (#x80 . "i64.div_u") (#x82 . "i64.rem_u")
            (#x83 . "i64.and") (#x84 . "i64.or") (#x85 . "i64.xor")

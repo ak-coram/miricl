@@ -177,7 +177,7 @@
           ;; These additional scalar opcodes are also outside the optimizer's
           ;; native stack model. Decode their extent and keep the raw body.
           ((member code '(#x6c #x6e)) (setq preserve t))
-          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad #xd1 #xd3)))
+          ((not (member code '(#x00 #x05 #x0b #x0f #x1a #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x79 #x7b #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad #xd1 #xd3)))
            (error "Unexpected native instruction ~D." code)))
         (when (or (not references-only) (member code '(#x10 #x12 #xd2)))
           (push (make-native-op code argument start position) ops))))
@@ -347,7 +347,7 @@
     (case code
       ((#x20 #x23 #x41 #x42 #xd0 #xd2) (values 0 1))
       ((#x21 #x1a) (values 1 0))
-      ((#x22 #x45 #x50 #xa7 #xac #xad #xd1) (values 1 1))
+      ((#x22 #x45 #x50 #x79 #x7b #xa7 #xac #xad #xd1) (values 1 1))
       (#xfb (if (= (native-op-argument op) 5) (values 2 0) (values 1 1)))
       ((#x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a #x6a #x6b #x71 #x7c #x7d #x7e #x80 #x82 #x83 #x84 #x85 #x86 #x87 #xd3) (values 2 1))
       ((#x10 #x12)

@@ -1124,6 +1124,18 @@ try {
     rejectPacketOperation(() => callStandard3(dpbCode, integerOne, malformed, byteInput));
     assert.equal(vm.javascript.integer(callStandard3(dpbCode, integerOne, byteSpec, byteInput)), 2n);
   }
+  const byteWidth64 = vm.javascript.makeInteger(64n), byteOrigin = vm.javascript.makeInteger(0n);
+  const byteSpec64 = callStandard2(canonicalCode('byte'), byteWidth64, byteOrigin);
+  const signedMax = (1n << 63n) - 1n, unsignedMax = (1n << 64n) - 1n;
+  for (const [input, expected] of [[signedMax, signedMax], [-1n, unsignedMax],
+    [(1n << 64n) + (1n << 63n), 1n << 63n]]) {
+    const source = vm.javascript.makeInteger(input);
+    assert.equal(vm.javascript.integer(callStandard2(ldbCode, byteSpec64, source)), expected);
+  }
+  for (const [size, position] of [[privateArray, byteOrigin], [byteWidth64, privateArray]]) {
+    rejectPacketOperation(() => callStandard2(ldbCode, vm.vm['native-cons'](size, position), byteInput));
+    assert.equal(vm.javascript.integer(callStandard2(ldbCode, byteSpec64, byteInput)), 14n);
+  }
   console.log('Soundness: canonical standard calls and list paths reject malformed ingress with recovery.');
 
   // Capture a Lisp function through the adapter's ordinary callback bridge,
@@ -3024,6 +3036,7 @@ try {
       (delete-package package)))`);
 
   check(await fs.readFile(new URL('./soundness-integer-flow.lisp', import.meta.url), 'utf8'));
+  check(await fs.readFile(new URL('./soundness-bit-measures.lisp', import.meta.url), 'utf8'));
   check(await fs.readFile(new URL('./soundness-double-flow.lisp', import.meta.url), 'utf8'));
 
   // A character read remains an observation across the fixed call and a
@@ -4041,6 +4054,35 @@ try {
         (let* ((unit (compile-to-hir source))
                (facts (hir-result-arities-checked unit)))
           (eql expected (gethash (first (hir-unit-functions unit)) facts)))))`);
+  // Queue after entering the native worker and snapshot immediately after
+  // the operation. The control without TRUNCATE checks that arming the
+  // interrupt alone does not deliver it before this observation.
+  const armRounding = `(funcall arm (lambda () (setq delivered t) (values :interrupt :extra)))`;
+  for (const [name, body, expected] of [
+    ['no rounding', `(progn ${armRounding} (values delivered nil :tail))`,
+      `(equal results '(nil nil :tail))`],
+    ['discarded rounding values', `(multiple-value-bind (quotient remainder)
+       (truncate (progn ${armRounding} -17) 3)
+       (values delivered nil :tail))`, `(equal results '(t nil :tail))`],
+    ['captured remainder', `(multiple-value-bind (quotient remainder)
+       (truncate (progn ${armRounding} -17) 3)
+       (values delivered (lambda () (values quotient remainder)) :tail))`,
+      `(and (eq (first results) t) (equal (cddr results) '(:tail))
+            (equal (multiple-value-list (funcall (second results))) '(-5 -2)))`],
+  ]) {
+    evaluate(`(setf (symbol-function 'soundness-rounding-checkpoint)
+      (compile-native '(lambda (arm)
+        (declare (optimize (safety 1) (debug 0)))
+        (let ((delivered nil)) ${body})))) (values)`);
+    assert.equal((await vm.evaluateAsync(`(let ((armed 0))
+      (let ((results (multiple-value-list
+        (soundness-rounding-checkpoint (lambda (mark)
+          (incf armed)
+          (miricl-threads:without-interrupts
+            (miricl-threads:interrupt-thread (miricl-threads:current-thread) mark)))))))
+        (miricl-threads:thread-yield)
+        (and (= armed 1) ${expected})))`, {eof: true})).output, 'T\n', name);
+  }
   // A private literal bytespec bounds a successful field result. An escaped
   // bytespec and a dynamic width keep the ordinary full-width path.
   check(`(let ((compare (compile-native '(lambda (x)
@@ -4508,12 +4550,22 @@ try {
         (equal effects '(:right :left))))`);
   }
   // The compound shift and field extraction must preserve both operand
-  // snapshots and the field across subsequent calls and value transport.
-  check(`(let ((calls 0)
-        (function (compile-native '(lambda (value count suffix)
-          (declare (optimize (safety 1) (debug 0)))
-          (let ((field (ldb (byte 63 0) (ash value count))))
-            (funcall suffix field value count field))))))
+  // snapshots and the field through the native bundle's function return.
+  const shiftBody = `(value count suffix)
+    (declare (optimize (safety 1) (debug 0)))
+    (let ((field (ldb (byte 63 0) (ash value count))))
+      (funcall suffix field value count field))`;
+  await vm.mountFile('/soundness-field-shift.lisp', `(in-package :miricl-compiler)
+    (defun soundness-field-shift ${shiftBody})`);
+  evaluate(`(compile-file "/soundness-field-shift.lisp" :verbose nil)
+    (load "/soundness-field-shift.wasm")
+    (compile-native-bundle "/soundness-field-shift.wasm" "/soundness-field-shift-native.wasm")
+    (load "/soundness-field-shift-native.wasm") (values)`);
+  for (const expression of [
+    `(compile-native '(lambda ${shiftBody}))`,
+    `#'soundness-field-shift`,
+  ]) {
+    check(`(let ((calls 0) (function ${expression}))
       (flet ((record (field value count again)
                (incf calls)
                (values field value count again)))
@@ -4525,7 +4577,12 @@ try {
                (type-error (condition) (eq (type-error-datum condition) :count)))
              (equal (multiple-value-list (funcall function 1 63 #'record))
                     '(0 1 63 0))
-             (= calls 2))))`);
+             (null (multiple-value-list (funcall function 1 0
+                      (lambda (field value count again)
+                        (record field value count again)
+                        (values)))))
+             (= calls 3))))`);
+  }
   // A private literal BYTE can feed LDB without changing suffix values or
   // the checked behavior of a discarded extraction.
   check(`(let ((field (compile-native '(lambda (value)
@@ -4543,6 +4600,11 @@ try {
            (handler-case (progn (funcall discard :wrong-type) nil)
              (type-error (condition) (eq (type-error-datum condition) :wrong-type)))
            (eq (funcall discard 17) :done)))`);
+  check(`(let ((field (compile-native '(lambda (spec value) (ldb spec value)))))
+      (and (equal (multiple-value-list (funcall field (byte 64 0) 9223372036854775807))
+                  '(9223372036854775807))
+           (equal (multiple-value-list (funcall field (byte 64 1) 9223372036854775807))
+                  '(4611686018427387903))))`);
   // The shared deposit worker preserves the order of checked errors and
   // leaves the native caller usable after a miss, including at width zero.
   for (const [operation, expected] of [['dpb', 42333], ['deposit-field', 93]]) {
