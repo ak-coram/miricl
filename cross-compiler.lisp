@@ -910,6 +910,8 @@ private adapter's ingress. Exhausted work and unknown provenance prove nothing."
                     (dotimes (slot count) (format out "local.get ~D extern.convert_any~%" (+ call-base slot)))
                     (format out "call $~A any.convert_extern ref.cast (ref null eq)~%" target)))
                  ((string= target "native-int64") (write-line "call $box-int64" out))
+                 ((string= target "native-integer-flow-box")
+                  (write-line "extern.convert_any call $native-integer-flow-object" out))
                  ((string= target "native-unbox-int64") (write-line "call $scalar-integer-value" out))
                  ;; These imports already represent proven simple-vector
                  ;; operations. Lower their access directly in the core ABI;

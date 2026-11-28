@@ -81,6 +81,22 @@
                    (if (if choice nil nil) 0 42)))))
   (assert (= (funcall branch t) (funcall branch nil) 42)))
 
+;; The executable bounds on the loop state justify keeping a signed right
+;; shift raw through the bitwise operations and the next iteration.
+(miricl-compiler:with-compilation-statistics (statistics)
+  (let ((worker (miricl-compiler:compile-native
+                  '(lambda ()
+                     (declare (optimize (space 2) (speed 1) (safety 1)))
+                     (let ((state 1))
+                       (dotimes (index 10000 state)
+                         (setq state (logand (logior (ash state -1) index) 65535))))))))
+    (assert (equal (multiple-value-list (funcall worker)) '(16383)))
+    (assert (find-if (lambda (row)
+                       (and (eq (first row) :decision/loop-strip-mining)
+                            (eq (second row) :applied)
+                            (plusp (third row))))
+                     (miricl-compiler:compilation-statistics-report statistics)))))
+
 (let ((inline (miricl-compiler:compile-native
                 '(lambda (value)
                    (flet ((increment (x) (1+ x)))

@@ -212,10 +212,13 @@ that operand's type.
 Local SSA flow, bounded range joins and widening, and eligible closed call
 arguments and returns propagate facts. External callers, captures and
 escaped functions restrict those facts. Dominated truth tests, standard
-predicates and integer comparisons refine the observations tested. Both
-SSA operands of a comparison can matter to a refinement. Reachability must
-be complete before excluding an edge. Bounded private-use analyses can also
-prove a quoted-list cursor or a traversal counter invariant. Mutation,
+predicates and integer comparisons refine the observations tested. Branch
+premises normalize bounded complements of nominal CONS and LIST by
+reversing the tested polarity. A false ATOM test therefore proves CONS,
+and a true LISTP test proves LIST. Both SSA operands of a comparison can
+matter to a refinement. Reachability must be complete before excluding an
+edge. Bounded private-use analyses can also prove a quoted-list cursor or
+a traversal counter invariant. Mutation,
 aliasing, captures, unresolved calls and unknown effects can invalidate
 such facts. A LIST fact permits NIL or CONS and gives no proper-spine proof.
 Checked inference invokes the interpreted literal-counter proof worker
@@ -406,10 +409,19 @@ independently proves bounded widths and the planner checks that the operation
 returns one value. The lowering preserves its required poll and keeps ordinary
 numeric dispatch for missing proofs.
 
+Direct ASH calls can share this lowering when executable facts prove a scalar
+operand, a singleton signed-i64 count, and a signed-i64 result. Left shifts
+also require a count below 64. Arithmetic right shifts saturate at the sign
+bit. The count's producer retains its effects even though the shift encodes
+the count as an immediate. The selected scalar runtime route has no polling
+checkpoint. Results can feed scalar operations and private cell snapshots
+directly, or materialize as canonical Lisp integers for object consumers.
+
 Opt-in diagnostics count one decision per call selected for these checks.
-They distinguish width failures in the preliminary and executable queries
-and a failed result-count check. An accepted plan counts as applied when its
-arithmetic lowering writes bytes, once per HIR site across worker copies.
+They distinguish width and shift-count failures in the preliminary and
+executable queries and a failed result-count check. An accepted plan counts as
+applied when its arithmetic lowering writes bytes, once per HIR site across
+worker copies.
 Applied decisions distinguish emitted i32 and i64 arithmetic.
 Plans that reach no such lowering have a separate outcome. Coverage counts
 eligible functions after the shared selection budget completes, including
@@ -770,6 +782,9 @@ operands at their original precision. This preserves numeric contagion
 and errors. A zero-trip loop can return the original initializer.
 
 Single-use predicates can feed forward branches without boxing a boolean.
+An inline-permitted ATOM uses the checked CONSP test with reversed
+polarity. LISTP accepts NIL and checks the physical object shape before
+reading the cons tag.
 When scoped proofs establish the condition's truth, native emission can
 use that direction with the existing operand effects and checkpoints.
 Potential errors and backedge polls retain their required order. Reuse and
@@ -785,8 +800,10 @@ intermediate list checks, array backing bounds, displaced storage,
 mutation, sharing and freshness. Canonical LIST and LIST* calls build their
 result spine directly, using paired cons construction where possible and
 preserving the supplied LIST* tail.
-Simple list operations specialize CAR, CDR and ENDP with applicable list
-facts. At SAFETY 0, a cons proof can also specialize RPLACA and RPLACD.
+Simple list operations specialize CAR, FIRST, CDR, REST and ENDP with
+applicable list facts. A cons proof can specialize RPLACA and RPLACD.
+At positive SAFETY, executable facts admit these specializations.
+Specialized ENDP and cons mutations preserve their entry checkpoints.
 Literal lambda APPLY checks the argument spine for properness even at
 SAFETY 0. Known fields of a fresh cons can feed subsequent accesses directly
 until mutation or unknown effects. Exact operation

@@ -1223,6 +1223,8 @@ A budget limits cost; stopping early only loses optimization opportunities."
                    (test (and (eq (hir-instruction-opcode branch) :branch)
                               (first (hir-instruction-inputs branch))))
                    (premise (and test (multiple-value-list (hir-type-truth-premise test cells reverse-comparison))))
+                   (inverse (second premise))
+                   (restriction (third premise))
                    (observed (first premise))
                    (producer (and observed (hir-value-producer observed)))
                    (cell (and (%hir-instruction-p producer)
@@ -1234,8 +1236,8 @@ A budget limits cost; stopping early only loses optimization opportunities."
                    (arms (hir-instruction-attributes branch))
                    (private (gethash cell cells)))
               (when (and (or (not reverse-comparison)
-                             (and (consp (third premise))
-                                  (eq (car (third premise)) :integer-comparison)))
+                             (and (consp restriction)
+                                  (eq (car restriction) :integer-comparison)))
                          (plusp budget) (< (hir-function-debug-level function) 2)
                          (svref reachable (hir-block-id block))
                          (eq (hir-instruction-opcode branch) :branch)
@@ -1249,12 +1251,21 @@ A budget limits cost; stopping early only loses optimization opportunities."
                                               (eq (first (hir-instruction-inputs instruction)) cell))
                                      (setq available nil))))))
                          (not (eq (first arms) (second arms))))
+                ;; CONS and LIST describe the current object's fixed shape.
+                ;; Narrow only these complements, without extending the
+                ;; lifetime of facts about mutable arrays or cons contents.
+                (let ((base restriction) (negated inverse))
+                  (loop repeat 16
+                        while (and (consp base) (eq (car base) 'not)
+                                   (consp (cdr base)) (null (cddr base)))
+                        do (setq base (second base) negated (not negated)))
+                  (when (member base '(cons list))
+                    (setq restriction base inverse negated)))
                 (loop for arm in arms for positive in '(t nil) do
                   (incf serial)
                   ;; The initial edge must itself establish the premise.
                   ;; Subsequent joins need every predecessor inside this region.
-                  (let* ((positive (if (second premise) (not positive) positive))
-                         (restriction (third premise))
+                  (let* ((positive (if inverse (not positive) positive))
                          ;; Canonical type predicates establish their type's
                          ;; complement on the false arm as well.
                          (pending (when (= (aref incoming (the (unsigned-byte 32) (hir-block-id arm))) 1)

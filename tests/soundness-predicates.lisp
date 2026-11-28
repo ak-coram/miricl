@@ -12,6 +12,29 @@
       (assert (equal (multiple-value-list (funcall query)) answer))))
   (values))
 
+;; The false ATOM branch establishes the shape of this SSA value. A callback
+;; can change its fields, and a replacement value needs its own check.
+(let ((read-live
+        (compile-native
+          '(lambda (cell update)
+             (declare (optimize (safety 1)))
+             (if (atom cell) :atom
+                 (progn (funcall update cell) (cdr cell))))))
+      (read-replacement
+        (compile-native
+          '(lambda (cell replacement)
+             (declare (optimize (safety 1)))
+             (if (atom cell) :atom
+                 (progn (setq cell replacement) (cdr cell)))))))
+  (let ((cell (cons :head :old))
+        (replacement (list :head :tail)))
+    (assert (equal (multiple-value-list
+                     (funcall read-live cell (lambda (value) (setf (cdr value) :new))))
+                   '(:new)))
+    (assert (handler-case (progn (funcall read-replacement cell :invalid) nil)
+              (type-error (condition) (eq (type-error-datum condition) :invalid))))
+    (assert (eq (funcall read-replacement cell replacement) (cdr replacement)))))
+
 ;; Executed checks can prove a current SSA observation at any safety level.
 ;; Exercise the immediate, boxed scalar and fallback representations.
 (loop for safety from 1 to 3 always
