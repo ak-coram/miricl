@@ -146,7 +146,9 @@
   #@(type $objects (array (mut (ref null eq))))
   ;; Specialized numeric payloads are private arrays, never Lisp objects.
   ;; Keep them independent of the minimal DIGITS/OBJ compiled-code groups.
+  #@(type $array-f32-data (array (mut f32)))
   #@(type $array-i64-data (array (mut i64)))
+  #@(type $array-i8-data (array (mut i8)))
   ;; Source lexical environments retain the actual name object. Transient
   ;; gensyms are deliberately absent from the global symbol-ID registry.
   #@(type $environment-binding (sub final $obj (struct

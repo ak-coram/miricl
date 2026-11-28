@@ -26,7 +26,7 @@
     (i32.and (i32.shr_u (local.get $flags) (i32.const 2)) (i32.const -4))))
 
 (define-runtime-function $array-kind-flags (($kind i32)) (i32)
-  (wat-fail-when #@(i32.gt_u (local.get $kind) (i32.const 4)) :malformed-type)
+  (wat-fail-when #@(i32.gt_u (local.get $kind) (i32.const 7)) :malformed-type)
   #@(i32.or (i32.and (local.get $kind) (i32.const 3))
     (i32.shl (i32.and (local.get $kind) (i32.const -4)) (i32.const 2))))
 
@@ -34,7 +34,7 @@
   (:locals ($kind i32))
   #@(if (i32.eq (call $tag (local.get $x)) (i32.const 35))
     (then (local.set $kind (call $array-flags-kind (call $value-n (local.get $x))))
-      ,(wat-fail-when #@(i32.gt_u (local.get $kind) (i32.const 4)) :malformed-form)
+      ,(wat-fail-when #@(i32.gt_u (local.get $kind) (i32.const 7)) :malformed-form)
       (return (local.get $kind))))
   #@(if (i32.eq (call $tag (local.get $x)) (i32.const 10))
     (then (return (select (i32.const 3) (i32.const 1) (call $value-n (local.get $x))))))
@@ -103,7 +103,7 @@
   (:locals ($code i64))
   (wat-fail-when #@(i32.eqz (call $scalar-integer-p (local.get $selector))) :malformed-type)
   #@(local.set $code (call $scalar-integer-value (local.get $selector)))
-  (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 5)) :malformed-type)
+  (wat-fail-when #@(i64.gt_u (local.get $code) (i64.const 6)) :malformed-type)
   #@(call $clear-values)
   #@(if (i64.eqz (local.get $code))
     (then (call $check-type-control-structure (local.get $value))
@@ -119,6 +119,13 @@
   #@(if (i64.eq (local.get $code) (i64.const 5))
     (then (return_call $array-type-metadata-value (call $int (i32.const 2))
       (local.get $value) (local.get $argument))))
+  #@(if (i64.eq (local.get $code) (i64.const 6))
+    (then
+      ;; The numeric type service validates the interval before selection.
+      (drop (call $real-type-worker (local.get $value) (local.get $argument) (i32.const 2)))
+      (return (call $int (select (i32.const 7) (i32.const 5)
+        (i32.or (i32.eq (call $id (local.get $argument)) (i32.const ,(runtime-symbol-id 'single-float)))
+                (i32.eq (call $id (local.get $argument)) (i32.const ,(runtime-symbol-id 'short-float)))))))))
   #@(return_call $array-type-metadata-value (local.get $selector) (local.get $value) (local.get $argument)))
 
 (define-runtime-function $upgraded-array-kind-environment (($type :nullable-object) ($env :nullable-object)) (i32)
@@ -187,64 +194,156 @@
   (wat-fail-when #@(i32.ne (call $tag (local.get $value)) (i32.const 1)) :malformed-form)
   #@(call $scalar-integer-value (local.get $value)))
 
-;; Probe live owned storage after the caller's entry checkpoint. A successful
-;; access returns a fixnum, so NIL leaves all general checks and errors to the
-;; caller. The dimension bounds AREF independently of the fill pointer.
-(define-runtime-function $array-owned-rank1-fixnum-element
+(define-runtime-function $array-byte-type () (:object)
+  #@(call $cons (call $symbol (i32.const ,(runtime-symbol-id 'unsigned-byte)))
+    (call $cons (call $int (i32.const 8)) (ref.null eq))))
+
+(define-runtime-function $array-byte-value (($value :nullable-object)) (i32)
+  (:locals ($wide i64))
+  (wat-fail-when #@(i32.eqz (i32.or (ref.test (ref null i31) (local.get $value))
+                                  (ref.test (ref $obj) (local.get $value)))) :malformed-form)
+  #@(block $wrong
+    (if (i32.eqz (call $scalar-integer-p (local.get $value))) (then (br $wrong)))
+    ,(wat-fail-when #@(i32.ne (call $tag (local.get $value)) (i32.const 1)) :malformed-form)
+    (local.set $wide (call $scalar-integer-value (local.get $value)))
+    (if (i64.le_u (local.get $wide) (i64.const 255))
+      (then (return (i32.wrap_i64 (local.get $wide))))))
+  #@(call $type-fail (local.get $value) (call $array-byte-type)
+    (i32.const ,(runtime-error-code :expected-designator)))
+  #@(unreachable))
+
+
+;; Both float packet precisions use f64 bits. A single-float payload is the
+;; exact promotion of the binary32 value in its backing or Lisp object.
+(define-runtime-function $array-numeric-bits (($kind i32) ($value :nullable-object)) (i64)
+  (:locals ($tag i32))
+  #@(if (i32.eq (local.get $kind) (i32.const 4))
+    (then (return_call $array-fixnum-value (local.get $value))))
+  #@(if (i32.eq (local.get $kind) (i32.const 6))
+    (then (return (i64.extend_i32_u (call $array-byte-value (local.get $value))))))
+  (wat-fail-when #@(i32.eqz (i32.or (ref.test (ref null i31) (local.get $value))
+                                  (ref.test (ref $obj) (local.get $value)))) :malformed-form)
+  #@(local.set $tag (select (i32.const 3) (i32.const 4) (i32.eq (local.get $kind) (i32.const 7))))
+  #@(if (i32.ne (call $tag (local.get $value)) (local.get $tag))
+    (then (call $type-fail (local.get $value) (call $array-kind-type (local.get $kind))
+      (i32.const ,(runtime-error-code :expected-designator)))))
+  #@(i64.reinterpret_f64
+    (call $checked-float (local.get $tag) (struct.get $obj $f (ref.cast (ref $obj) (local.get $value))))))
+
+(define-runtime-function $array-numeric-object (($kind i32) ($bits i64)) (:object)
+  #@(if (i32.eqz (i32.and (local.get $kind) (i32.const 1)))
+    (then (return_call $int64 (local.get $bits))))
+  #@(call $float (select (i32.const 3) (i32.const 4) (i32.eq (local.get $kind) (i32.const 7)))
+    (f64.reinterpret_i64 (local.get $bits))))
+
+(define-runtime-function $array-numeric-capacity (($kind i32) ($data :nullable-object)) (i32)
+  (apply #'runtime-wat-sequence
+    (loop for (kind test type) in '((5 i32.le_u $array-i64-data) (6 i32.eq $array-i8-data) (7 i32.eq $array-f32-data))
+          collect
+       #@(if (i32.and (,test (local.get $kind) (i32.const ,kind)) (ref.test (ref ,type) (local.get $data)))
+          (then (return (array.len (ref.cast (ref ,type) (local.get $data))))))))
+  #@(i32.const -1))
+
+;; The caller has already checked the physical backing and index.
+(define-runtime-function $array-numeric-get (($kind i32) ($data :nullable-object) ($index i32)) (i64)
+  #@(if (i32.eq (local.get $kind) (i32.const 6))
+    (then (return (i64.extend_i32_u
+      (array.get_u $array-i8-data (ref.cast (ref $array-i8-data) (local.get $data)) (local.get $index))))))
+  #@(if (i32.eq (local.get $kind) (i32.const 7))
+    (then (return (i64.reinterpret_f64 (f64.promote_f32
+      (array.get $array-f32-data (ref.cast (ref $array-f32-data) (local.get $data)) (local.get $index)))))))
+  #@(array.get $array-i64-data (ref.cast (ref $array-i64-data) (local.get $data)) (local.get $index)))
+
+(define-runtime-function $array-numeric-set
+    (($kind i32) ($data :nullable-object) ($index i32) ($bits i64)) ()
+  #@(if (i32.eq (local.get $kind) (i32.const 6))
+    (then (array.set $array-i8-data (ref.cast (ref $array-i8-data) (local.get $data))
+      (local.get $index) (i32.wrap_i64 (local.get $bits))) (return)))
+  #@(if (i32.eq (local.get $kind) (i32.const 7))
+    (then (array.set $array-f32-data (ref.cast (ref $array-f32-data) (local.get $data))
+      (local.get $index) (f32.demote_f64 (f64.reinterpret_i64 (local.get $bits)))) (return)))
+  #@(array.set $array-i64-data (ref.cast (ref $array-i64-data) (local.get $data))
+    (local.get $index) (local.get $bits)))
+
+(define-runtime-function $array-numeric-new (($kind i32) ($length i32) ($bits i64)) (:object)
+  #@(if (i32.eq (local.get $kind) (i32.const 6))
+    (then (return (array.new $array-i8-data (i32.wrap_i64 (local.get $bits)) (local.get $length)))))
+  #@(if (i32.eq (local.get $kind) (i32.const 7))
+    (then (return (array.new $array-f32-data (f32.demote_f64 (f64.reinterpret_i64 (local.get $bits))) (local.get $length)))))
+  #@(array.new $array-i64-data (local.get $bits) (local.get $length)))
+
+;; A direct rank-one header or a single rank-one displacement can supply
+;; numeric backing. Keep the result local to an access after its entry checkpoint.
+(define-runtime-function $array-rank1-numeric-backing
+    (($array :nullable-object) ($index i64) ($requested i32)) (:nullable-object i32 i32)
+  (:locals ($header (ref $array)) ($shape :digits) ($flags i32) ($kind i32) ($length i32)
+           ($offset i32) ($storage :nullable-object) ($view-kind i32))
+  #@(block $miss (loop $target
+    (br_if $miss (i32.eqz (ref.test (ref $array) (local.get $array))))
+    (local.set $header (ref.cast (ref $array) (local.get $array)))
+    (br_if $miss (i32.ne (call $tag (local.get $header)) (i32.const 35)))
+    (local.set $flags (i32.and (struct.get $obj $n (local.get $header)) (i32.const -5)))
+    ;; Numeric headers set bit 4 and use the low two bits for kinds 4 through 7.
+    (br_if $miss (i32.ne (i32.and (local.get $flags) (i32.const -12)) (i32.const 16)))
+    (local.set $kind (i32.sub (i32.and (local.get $flags) (i32.const 19)) (i32.const 12)))
+    (br_if $miss
+      (i32.eqz (i32.or (i32.eq (local.get $kind) (local.get $requested))
+        (i32.and (i32.eq (local.get $requested) (i32.const 4))
+                 (i32.eq (local.get $kind) (i32.const 6))))))
+    (br_if $miss (i32.and (i32.ne (local.get $view-kind) (i32.const 0))
+                         (i32.ne (local.get $view-kind) (local.get $kind))))
+    (local.set $shape (struct.get $array $shape (local.get $header)))
+    (br_if $miss (i32.ne (array.len (local.get $shape)) (i32.const 1)))
+    (local.set $length (array.get $digits (local.get $shape) (i32.const 0)))
+    (local.set $offset (struct.get $array $offset (local.get $header)))
+    (br_if $miss (i32.or (i32.gt_u (i32.or (local.get $length) (local.get $offset)) (i32.const 536870910))
+      (i64.ge_u (local.get $index) (i64.extend_i32_u (local.get $length)))))
+    (local.set $storage (struct.get $obj $a (local.get $header)))
+    (if (i32.and (local.get $flags) (i32.const 8))
+      (then
+        (br_if $miss (local.get $view-kind))
+        (local.set $view-kind (local.get $kind))
+        (local.set $index (i64.add (local.get $index) (i64.extend_i32_u (local.get $offset))))
+        (local.set $array (local.get $storage))
+        (br $target)))
+    (br_if $miss (local.get $offset))
+    (br_if $miss (i32.gt_s (local.get $length)
+      (call $array-numeric-capacity (local.get $kind) (local.get $storage))))
+    (return (local.get $storage) (i32.wrap_i64 (local.get $index)) (local.get $kind))))
+  #@(ref.null eq)
+  #@(i32.const 0)
+  #@(i32.const 0))
+
+;; A successful read or write returns a Lisp integer. NIL leaves generic
+;; shape, subscript and type errors to the original continuation.
+(define-runtime-function $array-rank1-integer-element
     (($array :nullable-object) ($subscript :nullable-object) ($value :nullable-object) ($write i32))
     (:nullable-object)
   #@(if (i32.eqz (ref.test (ref i31) (local.get $subscript)))
     (then (return (ref.null eq))))
-  #@(return_call $array-owned-rank1-fixnum-element64 (local.get $array)
+  #@(return_call $array-rank1-integer-element64 (local.get $array)
     (i64.extend_i32_s (i31.get_s (ref.cast (ref i31) (local.get $subscript))))
     (local.get $value) (local.get $write)))
 
-(define-runtime-function $array-owned-rank1-fixnum-element64
+(define-runtime-function $array-rank1-integer-element64
     (($array :nullable-object) ($subscript i64) ($value :nullable-object) ($write i32))
     (:nullable-object)
-  (:locals ($data (ref null $array-i64-data)) ($index i32))
-  #@(local.set $data (call $array-owned-rank1-fixnum-backing (local.get $array) (local.get $subscript)))
-  #@(if (ref.is_null (local.get $data)) (then (return (ref.null eq))))
-  #@(local.set $index (i32.wrap_i64 (local.get $subscript)))
+  (:locals ($storage :nullable-object) ($index i32) ($kind i32) ($bits i64))
+  #@(call $array-rank1-numeric-backing (local.get $array) (local.get $subscript) (i32.const 4))
+  #@(local.set $kind)
+  #@(local.set $index)
+  #@(local.set $storage)
+  #@(if (ref.is_null (local.get $storage)) (then (return (ref.null eq))))
   #@(if (local.get $write)
     (then
-      (if (i32.eqz (call $scalar-integer-p (local.get $value)))
+      (if (i32.eqz (call $scalar-integer-p (local.get $value))) (then (return (ref.null eq))))
+      (if (i32.ne (call $tag (local.get $value)) (i32.const 1)) (then (return (ref.null eq))))
+      (local.set $bits (call $scalar-integer-value (local.get $value)))
+      (if (i32.and (i32.eq (local.get $kind) (i32.const 6)) (i64.gt_u (local.get $bits) (i64.const 255)))
         (then (return (ref.null eq))))
-      (if (i32.ne (call $tag (local.get $value)) (i32.const 1))
-        (then (return (ref.null eq))))
-      (array.set $array-i64-data (local.get $data) (local.get $index)
-        (call $scalar-integer-value (local.get $value)))
+      (call $array-numeric-set (local.get $kind) (local.get $storage) (local.get $index) (local.get $bits))
       (return (local.get $value))))
-  #@(call $int64 (array.get $array-i64-data (local.get $data) (local.get $index))))
-
-;; The backing remains valid only for this access, with no intervening poll.
-(define-runtime-function $array-owned-rank1-fixnum-backing
-    (($array :nullable-object) ($subscript i64)) ((ref null $array-i64-data))
-  (:locals ($header (ref $array)) ($shape :digits) ($storage :nullable-object)
-           ($data (ref $array-i64-data)) ($dimension i32))
-  #@(if (i32.eqz (ref.test (ref $array) (local.get $array)))
-    (then (return (ref.null $array-i64-data))))
-  #@(local.set $header (ref.cast (ref $array) (local.get $array)))
-  ;; Kind 4 is encoded as flag 16. Only the adjustable flag may also be set.
-  #@(if (i32.or
-      (i32.ne (i32.and (struct.get $obj $tag (local.get $header)) (i32.const 63)) (i32.const 35))
-      (i32.or (i32.ne (i32.and (struct.get $obj $n (local.get $header)) (i32.const -5)) (i32.const 16))
-              (struct.get $array $offset (local.get $header))))
-    (then (return (ref.null $array-i64-data))))
-  #@(local.set $shape (struct.get $array $shape (local.get $header)))
-  #@(if (i32.ne (array.len (local.get $shape)) (i32.const 1))
-    (then (return (ref.null $array-i64-data))))
-  #@(local.set $dimension (array.get $digits (local.get $shape) (i32.const 0)))
-  #@(if (i32.or (i32.gt_u (local.get $dimension) (i32.const 536870910))
-                (i64.ge_u (local.get $subscript) (i64.extend_i32_u (local.get $dimension))))
-    (then (return (ref.null $array-i64-data))))
-  #@(local.set $storage (struct.get $obj $a (local.get $header)))
-  #@(if (i32.eqz (ref.test (ref $array-i64-data) (local.get $storage)))
-    (then (return (ref.null $array-i64-data))))
-  #@(local.set $data (ref.cast (ref $array-i64-data) (local.get $storage)))
-  #@(if (i32.gt_u (local.get $dimension) (array.len (local.get $data)))
-    (then (return (ref.null $array-i64-data))))
-  #@(local.get $data))
+  #@(call $int64 (call $array-numeric-get (local.get $kind) (local.get $storage) (local.get $index))))
 
 ;; Fixed AREF entries probe the live logical dimension after their checkpoint.
 (define-runtime-function $array-rank1-dimension (($array :nullable-object)) (i32)
@@ -349,10 +448,10 @@
       ,(wat-fail-when #@(i32.eqz (ref.is_null (local.get $storage))) :malformed-form)
       (return (local.get $extent))))
   #@(block $capacity-ready
-    (if (i32.eq (local.get $kind) (i32.const 4))
+    (if (i32.ge_u (local.get $kind) (i32.const 4))
       (then
-        ,(wat-fail-when #@(i32.eqz (ref.test (ref $array-i64-data) (local.get $storage))) :malformed-form)
-        (local.set $capacity (array.len (ref.cast (ref $array-i64-data) (local.get $storage))))
+        (local.set $capacity (call $array-numeric-capacity (local.get $kind) (local.get $storage)))
+        ,(wat-fail-when #@(i32.lt_s (local.get $capacity) (i32.const 0)) :malformed-form)
         (br $capacity-ready)))
     (if (i32.eqz (local.get $kind))
       (then
@@ -465,7 +564,7 @@
 (define-runtime-function $array-resolve-element
     (($array :nullable-object) ($index i32) ($value :nullable-object) ($write i32) ($checked i32)) (:nullable-object)
   (:locals ($data :digits) ($word i32) ($mask i32) ($bit i32)
-           ($storage :nullable-object) ($numeric (ref $array-i64-data)) ($wide i64) ($offset i32)
+           ($storage :nullable-object) ($capacity i32) ($wide i64) ($offset i32)
            ($anchor :nullable-object) ($distance i64) ($power i64) ($kind i32))
   #@(local.set $anchor (local.get $array))
   #@(local.set $power (i64.const 1))
@@ -486,18 +585,19 @@
     ,(wat-fail-when #@(i32.or (i32.lt_s (local.get $offset) (i32.const 0))
       (i64.gt_u (local.get $wide) (i64.const 536870910))) :malformed-form)
     (local.set $index (i32.wrap_i64 (local.get $wide)))
-    (if (i32.eq (local.get $kind) (i32.const 4))
+    (if (i32.ge_u (local.get $kind) (i32.const 4))
       (then
-        (if (ref.test (ref $array-i64-data) (local.get $storage))
+        (if (i32.eqz (i32.and (call $value-n (local.get $array)) (i32.const 8)))
           (then
-            (local.set $numeric (ref.cast (ref $array-i64-data) (local.get $storage)))
-            ,(wat-fail-when #@(i32.ge_u (local.get $index) (array.len (local.get $numeric))) :malformed-form)
+            (local.set $capacity (call $array-numeric-capacity (local.get $kind) (local.get $storage)))
+            ,(wat-fail-when #@(i32.or (local.get $offset) (i32.ge_s (local.get $index) (local.get $capacity))) :malformed-form)
             (if (local.get $write)
-              (then (array.set $array-i64-data (local.get $numeric) (local.get $index)
-                (call $array-fixnum-value (local.get $value))) (return (local.get $value))))
-            (return (call $int64 (array.get $array-i64-data (local.get $numeric) (local.get $index))))))
+              (then (call $array-numeric-set (local.get $kind) (local.get $storage) (local.get $index)
+                (call $array-numeric-bits (local.get $kind) (local.get $value))) (return (local.get $value))))
+            (return (call $array-numeric-object (local.get $kind)
+              (call $array-numeric-get (local.get $kind) (local.get $storage) (local.get $index))))))
         ,(wat-fail-when #@(i32.eqz (ref.test (ref $array) (local.get $storage))) :malformed-form)
-        ,(wat-fail-when #@(i32.ne (call $array-kind (local.get $storage)) (i32.const 4)) :malformed-form)))
+        ,(wat-fail-when #@(i32.ne (call $array-kind (local.get $storage)) (local.get $kind)) :malformed-form)))
     ;; Brent's constant-space cycle check also protects forged view headers.
     ,(wat-fail-when #@(ref.eq (local.get $storage) (local.get $anchor)) :malformed-form)
     (local.set $distance (i64.add (local.get $distance) (i64.const 1)))
@@ -659,12 +759,11 @@
   #@(if (i32.eq (local.get $kind) (i32.const 3))
     (then (local.set $storage (call $array-new (local.get $shape) (local.get $flags)
       (ref.null eq) (i32.const 0) (local.get $fill-value)))))
-  #@(if (i32.eq (local.get $kind) (i32.const 4))
+  #@(if (i32.ge_u (local.get $kind) (i32.const 4))
     (then (local.set $storage (call $array-new (local.get $shape) (local.get $flags)
-      (array.new $array-i64-data
+      (call $array-numeric-new (local.get $kind) (local.get $total)
         (if (result i64) (i32.and (local.get $supplied) (i32.const 1))
-          (then (call $array-fixnum-value (local.get $initial))) (else (i64.const 0)))
-        (local.get $total))
+          (then (call $array-numeric-bits (local.get $kind) (local.get $initial))) (else (i64.const 0))))
       (i32.const 0) (local.get $fill-value)))))
   #@(if (i32.and (local.get $supplied) (i32.const 2))
     (then (drop (call $array-initialize-contents (local.get $storage) (local.get $shape) (i32.const 0)
@@ -783,13 +882,13 @@
   #@(local.set $rank (call $array-rank-value (local.get $array)))
   #@(local.set $kind (call $array-kind (local.get $array)))
   ;; Standard #nA/#(...) syntax does not retain a numeric specialization.
-  #@(if (i32.eq (local.get $kind) (i32.const 4))
+  #@(if (i32.ge_u (local.get $kind) (i32.const 4))
     (then (call $require-printable-readably (local.get $array))))
   #@(if (i32.or (i32.ne (local.get $rank) (i32.const 1))
                  (i32.and (i32.ne (local.get $kind) (i32.const 1)) (i32.ne (local.get $kind) (i32.const 3))))
     (then (if (call $print-array-suppressed (local.get $array)) (then (return)))))
   #@(if (i32.or (i32.ne (local.get $rank) (i32.const 1))
-      (i32.or (i32.eqz (local.get $kind)) (i32.eq (local.get $kind) (i32.const 4))))
+      (i32.or (i32.eqz (local.get $kind)) (i32.ge_u (local.get $kind) (i32.const 4))))
     (then (if (i32.ge_u (local.get $depth) (call $print-limit (i32.const ,(runtime-symbol-id '*print-level*))))
       (then (call $emit-char (i32.const 35)) (return)))))
   #@(local.set $limit (call $print-limit (i32.const ,(runtime-symbol-id '*print-length*))))
@@ -818,7 +917,7 @@
     (else (call $emit-char (i32.const 35))
       (call $emit-char (select (i32.const 42) (i32.const 40) (i32.eq (local.get $kind) (i32.const 2))))))
   #@(block $done (loop $next (br_if $done (i32.eq (local.get $i) (local.get $length)))
-    (if (i32.and (i32.or (i32.eqz (local.get $kind)) (i32.eq (local.get $kind) (i32.const 4)))
+    (if (i32.and (i32.or (i32.eqz (local.get $kind)) (i32.ge_u (local.get $kind) (i32.const 4)))
         (i32.eq (local.get $i) (local.get $limit)))
       (then (if (local.get $i) (then (call $emit-char (i32.const 32)))) ,(emit-text "...") (br $done)))
     (local.set $value (call $array-raw-element (local.get $array) (local.get $i) (ref.null eq) (i32.const 0)))
@@ -880,7 +979,7 @@
   #@(local.set $rank (call $read32))
   (wat-fail-when #@(i32.or
     (i32.or (i32.ne (i32.and (local.get $flags) (i32.const -24)) (i32.const 0))
-      (i32.gt_u (call $array-flags-kind (local.get $flags)) (i32.const 4)))
+      (i32.gt_u (call $array-flags-kind (local.get $flags)) (i32.const 7)))
     (i32.ge_u (local.get $rank) (i32.const 256))) :malformed-form)
   #@(local.set $shape (array.new_default $digits (local.get $rank)))
   #@(block $shaped (loop $shape (br_if $shaped (i32.eq (local.get $i) (local.get $rank)))
@@ -910,15 +1009,16 @@
     (then (local.set $storage (call $text (array.new_default $digits (local.get $length))))))
   #@(if (i32.eq (local.get $kind) (i32.const 2))
     (then (local.set $storage (call $make-bit-vector (local.get $length) (call $int (i32.const 0))))))
-  #@(if (i32.eq (local.get $kind) (i32.const 4))
+  #@(if (i32.ge_u (local.get $kind) (i32.const 4))
     (then (local.set $storage (call $array-new (local.get $shape) (local.get $flags)
-      (array.new_default $array-i64-data (local.get $length)) (i32.const 0) (local.get $fill)))))
+      (call $array-numeric-new (local.get $kind) (local.get $length) (i64.const 0))
+      (i32.const 0) (local.get $fill)))))
   #@(if (i32.ne (local.get $kind) (i32.const 3))
     (then (local.set $i (i32.const 0))
       (block $filled (loop $fill (br_if $filled (i32.eq (local.get $i) (local.get $length)))
         (drop (call $array-raw-element (local.get $storage) (local.get $i) (call $read) (i32.const 1)))
         (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $fill)))))
-  #@(if (i32.eq (local.get $kind) (i32.const 4)) (then (return (local.get $storage))))
+  #@(if (i32.ge_u (local.get $kind) (i32.const 4)) (then (return (local.get $storage))))
   #@(if (i32.and (i32.eq (local.get $rank) (i32.const 1))
         (i32.and (i32.eqz (i32.and (local.get $flags) (i32.const 4)))
           (i32.and (i32.eq (local.get $fill) (i32.const -1)) (i32.ne (local.get $kind) (i32.const 3)))))
@@ -986,6 +1086,11 @@
   #@(drop (call $array-bit-check-cl (local.get $array) (call $bool (local.get $simple)))))
 
 (define-runtime-function $array-kind-type (($kind i32)) (:nullable-object)
+  #@(if (i32.eq (local.get $kind) (i32.const 6)) (then (return_call $array-byte-type)))
+  #@(if (i32.eq (local.get $kind) (i32.const 7))
+    (then (return (call $symbol (i32.const ,(runtime-symbol-id 'single-float))))))
+  #@(if (i32.eq (local.get $kind) (i32.const 5))
+    (then (return (call $symbol (i32.const ,(runtime-symbol-id 'double-float))))))
   #@(if (i32.eq (local.get $kind) (i32.const 3)) (then (return (ref.null eq))))
   #@(if (i32.eq (local.get $kind) (i32.const 4))
     (then (return (call $symbol (i32.const ,(runtime-symbol-id 'fixnum))))))
@@ -1150,8 +1255,10 @@
   ($array-flags-kind) ($array-kind-flags) ($array-kind)
   ($array-simple-p) ($stringp-native) ($upgraded-array-kind)
   ($array-length) ($array-dimension-value) ($array-sequence-length)
-  ($bit-value-cl) ($bit-value) ($make-bit-vector) ($array-fixnum-value)
-  ($array-owned-rank1-fixnum-element) ($array-owned-rank1-fixnum-element64) ($array-owned-rank1-fixnum-backing)
+  ($bit-value-cl) ($bit-value) ($make-bit-vector) ($array-fixnum-value) ($array-numeric-bits) ($array-numeric-object)
+  ($array-byte-type) ($array-byte-value)
+  ($array-numeric-capacity) ($array-numeric-get) ($array-numeric-set) ($array-numeric-new)
+  ($array-rank1-integer-element) ($array-rank1-integer-element64) ($array-rank1-numeric-backing)
   ($array-rank1-dimension) ($array-rank1-index) ($array-rank1-index64)
   ($array-check-raw-read-miss) ($array-check-header-layout) ($array-check-bit-capacity)
   ($array-rank2-index) ($array-raw-element) ($array-checked-character-code) ($array-resolve-element) ($array-element) ($sequence-value)

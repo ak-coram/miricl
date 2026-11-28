@@ -1315,11 +1315,12 @@ uses this worker for physical storage beyond a vector's fill pointer."
               (setq index (the (integer 0 #x7fffffff) (1+ index)) first (the (integer 0 #x7fffffff) (1+ first)))
               (go next-vector))))))))
 
-(defun concatenate-sequence-values (sequences kind)
-  (declare (type (integer 0 5) kind) (optimize (safety 0) (debug 0))
-           (inline car cdr listp length = 1+ + > cons rplacd))
+(defun concatenate-sequence-values (sequences element-type)
+  (declare (optimize (safety 0) (debug 0))
+           (inline car cdr eq listp length = 1+ + > cons rplacd))
   (values (block done
-    (let ((scan sequences) (size 0) (output 0) (head nil) (tail nil) (result nil))
+    (let ((list-result (eq element-type 'list))
+          (scan sequences) (size 0) (output 0) (head nil) (tail nil) (result nil))
       (declare (type (integer 0 #x1ffffffe) size output))
       (tagbody size
         (if scan nil (go allocate))
@@ -1328,19 +1329,17 @@ uses this worker for physical storage beyond a vector's fill pointer."
           (setq size (the (integer 0 #x1ffffffe) next) scan (cdr (the cons scan))))
         (go size)
        allocate
-        (setq result (if (= kind 0) nil
-                         (make-array size :element-type (if (= kind 1) 'character
-                           (if (= kind 3) 'bit (if (= kind 4) nil (if (= kind 5) 'fixnum t))))))
+        (setq result (if list-result nil (make-array size :element-type element-type))
               scan sequences)
        next
-        (if scan nil (return-from done (if (= kind 0) head result)))
+        (if scan nil (return-from done (if list-result head result)))
         (let* ((input (car (the cons scan))) (count (length input)) (index 0)
                (list-p (listp input)))
           (declare (type (integer 0 #x7fffffff) count index))
           (tagbody copy
             (if (= index count) (go copied))
             (let ((value (if list-p (car (the cons input)) (elt input index))))
-              (if (= kind 0)
+              (if list-result
                   (let ((cell (cons value nil)))
                     (if tail (rplacd (the cons tail) cell) (setq head cell))
                     (setq tail cell))

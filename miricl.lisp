@@ -417,9 +417,12 @@ COMPILER NIL writes the smaller interpreter-only image."
                            (kind (cond ((null element-type) 3)
                                        ((subtypep element-type 'character) 1)
                                        ((subtypep element-type 'bit) 2)
+                                       ((subtypep element-type '(unsigned-byte 8)) 6)
                                        ;; Compare host element sets with the
                                        ;; TARGET interval, not host FIXNUM.
                                        ((subtypep element-type '(integer -9223372036854775808 9223372036854775807)) 4)
+                                       ((subtypep element-type 'double-float) 5)
+                                       ((subtypep element-type 'single-float) 7)
                                        (t 0))))
                       (u32 35) (u32 (logior (logand kind 3) (ash (logandc2 kind 3) 2)
                                            (if (adjustable-array-p value) 4 0)))
@@ -461,7 +464,7 @@ COMPILER NIL writes the smaller interpreter-only image."
                            (setf (bit result (+ first j)) (ldb (byte 1 j) word)))) result))
                  (35 (let* ((flags (u32)) (rank (u32))
                             (kind (logior (logand flags 3) (logandc2 (ash flags -2) 3)))
-                            (valid (unless (and (zerop (logandc2 flags 23)) (<= kind 4) (< rank 256))
+                            (valid (unless (and (zerop (logandc2 flags 23)) (<= kind 7) (< rank 256))
                                      (error "Invalid guest array flags or rank.")))
                             (dimensions (loop repeat rank collect (u32))) (fill (u32))
                             (valid-dimensions
@@ -473,7 +476,7 @@ COMPILER NIL writes the smaller interpreter-only image."
                                            (or (= fill #xffffffff) (and (= rank 1) (<= fill size)))
                                            (or (= kind 3) (<= size (floor (- (length bytes) position) 4))))
                                 (error "Invalid or truncated guest array storage.")))
-                            (options (append (list :element-type (nth kind '(t character bit nil (signed-byte 64)))
+                            (options (append (list :element-type (nth kind '(t character bit nil (signed-byte 64) double-float (unsigned-byte 8) single-float))
                                                    :adjustable (logbitp 2 flags))
                                              (unless (= fill #xffffffff) (list :fill-pointer fill))))
                             (result (apply #'make-array dimensions options)))

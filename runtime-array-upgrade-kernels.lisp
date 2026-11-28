@@ -33,11 +33,18 @@
             (if (and (>= (the integer (funcall metadata 2 lower 0)) 0)
                      (<= (the integer (funcall metadata 2 upper 1)) 0))
                 2
-                (if (and (>= (the integer (funcall metadata 2 lower minimum)) 0)
-                         (<= (the integer (funcall metadata 2 upper maximum)) 0))
-                    4
-                    0)))
+                (if (and (>= (the integer (funcall metadata 2 lower 0)) 0)
+                         (<= (the integer (funcall metadata 2 upper 255)) 0))
+                    6
+                    (if (and (>= (the integer (funcall metadata 2 lower minimum)) 0)
+                             (<= (the integer (funcall metadata 2 upper maximum)) 0))
+                        4
+                        0))))
         0)))
+
+(defun %array-upgrade-integer-kind-p (kind)
+  (declare (type (integer 0 6) kind) (optimize (safety 0) (debug 0)) (inline =))
+  (or (= kind 2) (= kind 4) (= kind 6)))
 
 (defun %array-upgrade-join-kind (a b)
   (declare (optimize (safety 0) (debug 0))
@@ -49,8 +56,8 @@
           a
           (if (= a b)
               a
-              (if (or (and (= a 2) (= b 4)) (and (= a 4) (= b 2)))
-                  4
+              (if (and (%array-upgrade-integer-kind-p a) (%array-upgrade-integer-kind-p b))
+                  (if (or (= a 4) (= b 4)) 4 6)
                   0)))))
 
 (defun %array-upgrade-meet-kind (a b)
@@ -65,8 +72,8 @@
               a
               (if (= a b)
                   a
-                  (if (or (and (= a 2) (= b 4)) (and (= a 4) (= b 2)))
-                      2
+                  (if (and (%array-upgrade-integer-kind-p a) (%array-upgrade-integer-kind-p b))
+                      (if (or (= a 2) (= b 2)) 2 6)
                       3))))))
 
 (defun %array-upgrade-fixed-kind (specifier)
@@ -76,7 +83,7 @@
   (case specifier
     ((t integer signed-byte unsigned-byte) 0)
     ((character base-char standard-char) 1)
-    (bit 2) ((nil extended-char) 3) (fixnum 4)))
+    (bit 2) ((nil extended-char) 3) (fixnum 4) ((double-float long-float) 5) ((single-float short-float) 7)))
 
 (defun %array-upgrade-fixed-bound (bound)
   (declare (optimize (safety 0) (debug 0))
@@ -241,6 +248,8 @@
                 ;; Even exhausted recursive analysis retains exact fixed target
                 ;; facts. A surrounding AND can still use a known storage cover.
                 (case specifier
+                  ((double-float long-float) (return-from %array-upgrade-walk 5))
+                  ((single-float short-float) (return-from %array-upgrade-walk 7))
                   (fixnum (return-from %array-upgrade-walk (let* ((result-kind 4)
                              (result-lower minimum) (result-upper maximum) (result-integers t))
                         (setq output-lower result-lower output-upper result-upper output-integers result-integers)
@@ -270,6 +279,8 @@
                     (let ((class (funcall metadata 5 specifier nil)))
                       (if class (setq specifier (car class)))))
                 (case specifier
+                  ((double-float long-float) (return-from %array-upgrade-walk 5))
+                  ((single-float short-float) (return-from %array-upgrade-walk 7))
                   (fixnum (return-from %array-upgrade-walk (let* ((result-kind 4)
                              (result-lower minimum) (result-upper maximum) (result-integers t))
                         (setq output-lower result-lower output-upper result-upper output-integers result-integers)
@@ -329,6 +340,8 @@
                         (setq output-lower result-lower output-upper result-upper output-integers result-integers)
                         result-kind))))
                   (case name
+                    ((double-float long-float single-float short-float)
+                     (return-from %array-upgrade-walk (funcall metadata 6 specifier name)))
                     ((member eql)
                      (let ((scan (%array-upgrade-snapshot-parts arguments context)) (kind 3) (lower nil) (upper nil)
                            (integers t) (value nil) (candidate 0))
@@ -346,7 +359,8 @@
                                         (setq lower value))
                                     (if (or (null upper) (> (the integer (funcall metadata 2 value upper)) 0))
                                         (setq upper value)))
-                                  (setq integers nil)))
+                                  (setq integers nil candidate (if (typep value 'double-float) 5
+                                                               (if (typep value 'single-float) 7 0)))))
                           (setq kind (%array-upgrade-join-kind kind candidate) scan (cdr scan))
                           (go next)
                          done)
@@ -436,7 +450,7 @@
         kind))))
 
 (defun upgraded-array-kind-value (type environment metadata)
-  "Return target storage kind: object0, character1, bit2, empty3, fixnum4.
+  "Return target storage kind: object0, character1, bit2, empty3, fixnum4, binary64 kind 5, octet6, binary32 kind 7.
 METADATA supplies target expansion and integer endpoints. This bounded walk
 never executes SATISFIES and never depends on host integer representation."
   (declare (type function metadata) (optimize (safety 0) (debug 0))
@@ -447,7 +461,9 @@ never executes SATISFIES and never depends on host integer representation."
     ((nil) (return-from upgraded-array-kind-value 3))
     (bit (return-from upgraded-array-kind-value 2))
     (character (return-from upgraded-array-kind-value 1))
-    (fixnum (return-from upgraded-array-kind-value 4)))
+    (fixnum (return-from upgraded-array-kind-value 4))
+    ((double-float long-float) (return-from upgraded-array-kind-value 5))
+    ((single-float short-float) (return-from upgraded-array-kind-value 7)))
   (let* ((target (funcall metadata 1 'fixnum environment))
          (minimum (svref (the simple-vector target) 0))
          (maximum (svref (the simple-vector target) 1))

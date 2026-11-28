@@ -22,6 +22,17 @@
                   (declare (integer total))
                   (dotimes (i count total)
                     (setq total (- total step)))))))
+         (sum-codes
+           (miricl-compiler:compile-native
+             `(lambda (string count seed)
+                (declare (type string string) (type (integer 0 8) count) (integer seed)
+                         (optimize (speed ,speed) (space ,space) (safety 1) (debug 0)))
+                (let ((total seed))
+                  (declare (integer total))
+                  (dotimes (i count total)
+                    (setq total (+ total (char-code (char string i)))))))))
+         (text (copy-seq "aλz"))
+         (substring (make-array 2 :element-type 'character :displaced-to text :displaced-index-offset 1))
          (owned (make-array 3 :element-type 'fixnum :initial-contents '(1 2 -2)))
          (other (make-array 4 :element-type 'fixnum :initial-contents '(0 30 40 50)))
          (view (make-array 3 :element-type 'fixnum :adjustable t :displaced-to owned))
@@ -36,6 +47,8 @@
          (equal (multiple-value-list (funcall sum owned 2 1073741823 before after))
                 '(1073741826 :done))
          (= (funcall delta 2 -9223372036854775808 3) -9223372036854775814)
+         (= (funcall sum-codes text 3 0) (reduce #'+ text :key #'char-code))
+         (= (funcall sum-codes substring 2 1) (reduce #'+ substring :key #'char-code :initial-value 1))
          (progn
            (setq events nil)
            (equal (multiple-value-list (funcall sum view 2 0 before change)) '(41 :done)))

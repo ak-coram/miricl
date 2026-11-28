@@ -3377,7 +3377,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ;; SVREF's SIMPLE-VECTOR contract stays on its ordinary path.
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'aref)))
     (then
-      (local.set $direct-result (call $array-owned-rank1-fixnum-element
+      (local.set $direct-result (call $array-rank1-integer-element
         (local.get $a) (local.get $b) (ref.null eq) (i32.const 0)))
       (if (i32.eqz (ref.is_null (local.get $direct-result)))
         (then (call $clear-values) (return (extern.convert_any (local.get $direct-result)))))
@@ -3495,7 +3495,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
                   (return (local.get $a))))))))))
   #@(if (i32.eq (local.get $id) (i32.const ,(runtime-symbol-id 'aref)))
     (then
-      (local.set $direct-result (call $array-owned-rank1-fixnum-element
+      (local.set $direct-result (call $array-rank1-integer-element
         (local.get $array) (local.get $subscript) ,(native-object '(local.get $a)) (i32.const 1)))
       (if (i32.eqz (ref.is_null (local.get $direct-result)))
         (then (call $clear-values) (return (local.get $a))))
@@ -3661,6 +3661,19 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   (:export-raw "native-float-pair")
   #@(return_call $native-float-transport (local.get $op) (local.get $kind) (local.get $mode)
     (local.get $bits) (local.get $left) (local.get $right) (i64.const 0) (i32.const 0)))
+
+;; Structured-loop packets use the same checked transport as local pairs.
+(define-runtime-function $native-float-flow
+    (($op i32) ($precision i32) ($left i64) ($left-status i32) ($left-object externref)
+     ($right i64) ($right-status i32) ($right-object externref)) (i64 i32 externref)
+  (:export-raw "native-float-flow")
+  (wat-fail-when #@(i32.or
+    (i32.gt_u (i32.or (local.get $left-status) (local.get $right-status)) (i32.const 1))
+    (i32.or (i32.and (local.get $left-status) (i32.eqz (ref.is_null (local.get $left-object))))
+            (i32.and (local.get $right-status) (i32.eqz (ref.is_null (local.get $right-object)))))) :malformed-form)
+  #@(return_call $native-float-transport (local.get $op) (local.get $precision) (i32.const 0)
+    (local.get $left) (local.get $left-object) (local.get $right-object)
+    (local.get $right) (i32.or (local.get $left-status) (i32.shl (local.get $right-status) (i32.const 1)))))
 
 (define-runtime-function $native-float-raw
     (($kind i32) ($tag i32) ($bits i64)) (f64)
@@ -3941,20 +3954,28 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (($array externref) ($subscript externref)) (i64 i32 externref)
   (:export-raw "native-aref-snapshot")
   #@(return_call $native-aref-snapshot-worker
-    (local.get $array) (local.get $subscript) (i64.const 0) (i32.const 0)))
+    (local.get $array) (local.get $subscript) (i64.const 0) (i32.const 0) (i32.const 4)))
 
 (define-runtime-function $native-aref-snapshot64
     (($array externref) ($subscript i64)) (i64 i32 externref)
   (:export-raw "native-aref-snapshot64")
   #@(return_call $native-aref-snapshot-worker
-    (local.get $array) (ref.null extern) (local.get $subscript) (i32.const 1)))
+    (local.get $array) (ref.null extern) (local.get $subscript) (i32.const 1) (i32.const 4)))
 
 (define-runtime-function $native-aref-snapshot-transport
     (($array externref) ($subscript externref) ($wide i64) ($valid i32)) (i64 i32 externref)
   (:export-raw "native-aref-snapshot-transport")
   #@(return_call $native-aref-snapshot-worker
     (local.get $array) (local.get $subscript) (local.get $wide)
-    (select (i32.const 2) (i32.const 0) (local.get $valid))))
+    (select (i32.const 2) (i32.const 0) (local.get $valid)) (i32.const 4)))
+
+(define-runtime-function $native-aref-float-snapshot
+    (($array externref) ($subscript externref) ($wide i64) ($raw-index i32) ($precision i32)) (i64 i32 externref)
+  (:export-raw "native-aref-float-snapshot")
+  (wat-fail-when #@(i32.gt_u (i32.sub (local.get $precision) (i32.const 3)) (i32.const 1)) :malformed-form)
+  #@(return_call $native-aref-snapshot-worker (local.get $array) (local.get $subscript)
+    (local.get $wide) (i32.ne (local.get $raw-index) (i32.const 0))
+    (select (i32.const 7) (i32.const 5) (i32.eq (local.get $precision) (i32.const 3)))))
 
 (define-runtime-function $native-flat-bit-backing
     (($array :nullable-object) ($index i64)) ((ref null $digits))
@@ -3969,34 +3990,11 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (then (call $array-check-bit-capacity (local.get $length) (array.len (local.get $data)))))
   #@(local.get $data))
 
-(define-runtime-function $native-displaced-fixnum-backing
-    (($array :nullable-object) ($index i64)) ((ref null $array-i64-data) i64)
-  (:locals ($view (ref $array)) ($shape :digits) ($length i32) ($offset i32)
-           ($target-index i64))
-  ;; A single rank-one view can reuse the owned storage check. Anything else
-  ;; goes through the checked resolver with the original full-width index.
-  #@(block $miss
-    (br_if $miss (i32.eqz (ref.test (ref $array) (local.get $array))))
-    (local.set $view (ref.cast (ref $array) (local.get $array)))
-    (br_if $miss (i32.ne (call $tag (local.get $view)) (i32.const 35)))
-    (br_if $miss (i32.ne (i32.and (struct.get $obj $n (local.get $view)) (i32.const -5)) (i32.const 24)))
-    (local.set $shape (struct.get $array $shape (local.get $view)))
-    (br_if $miss (i32.ne (array.len (local.get $shape)) (i32.const 1)))
-    (local.set $length (array.get $digits (local.get $shape) (i32.const 0)))
-    (local.set $offset (struct.get $array $offset (local.get $view)))
-    (br_if $miss (i32.or (i32.gt_u (i32.or (local.get $length) (local.get $offset)) (i32.const 536870910))
-      (i64.ge_u (local.get $index) (i64.extend_i32_u (local.get $length)))))
-    (local.set $target-index (i64.add (i64.extend_i32_u (local.get $offset)) (local.get $index)))
-    (return (call $array-owned-rank1-fixnum-backing (struct.get $obj $a (local.get $view))
-      (local.get $target-index)) (local.get $target-index)))
-  #@(ref.null $array-i64-data)
-  #@(i64.const 0))
-
 (define-runtime-function $native-aref-snapshot-worker
-    (($array externref) ($subscript externref) ($wide i64) ($raw-index i32)) (i64 i32 externref)
+    (($array externref) ($subscript externref) ($wide i64) ($raw-index i32) ($requested i32)) (i64 i32 externref)
   (:locals ($a :nullable-object) ($b :nullable-object) ($function :nullable-object)
-           ($id i32) ($canonical i32) ($data (ref null $array-i64-data)) ($boxed externref)
-           ($bits (ref $digits)) ($index i32) ($storage-index i64))
+           ($id i32) ($canonical i32) ($data :nullable-object) ($boxed externref)
+           ($bits (ref $digits)) ($index i32) ($kind i32) ($element i64))
   #@(local.set $a (call $native-checked-value (local.get $array)))
   #@(if (i32.ne (local.get $raw-index) (i32.const 1))
     (then (local.set $b (call $native-checked-value (local.get $subscript)))))
@@ -4012,19 +4010,21 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
         (br_if $miss (i32.eqz (local.get $canonical)))
         (if (i32.eqz (local.get $raw-index))
           (then ,(wat-decode-scalar-integer '$b '$wide '$miss)))
-        (local.set $storage-index (local.get $wide))
-        (local.set $data (call $array-owned-rank1-fixnum-backing (local.get $a) (local.get $wide)))
-        (if (ref.is_null (local.get $data))
-          (then
-            (call $native-displaced-fixnum-backing (local.get $a) (local.get $wide))
-            (local.set $storage-index)
-            (local.set $data)))
+        (call $array-rank1-numeric-backing (local.get $a) (local.get $wide) (local.get $requested))
+        (local.set $kind)
+        (local.set $index)
+        (local.set $data)
         (if (i32.eqz (ref.is_null (local.get $data)))
           (then
+            (local.set $element (call $array-numeric-get (local.get $kind) (local.get $data) (local.get $index)))
+            (if (i32.and (local.get $kind) (i32.const 1))
+              (then (drop (call $checked-float
+                (select (i32.const 3) (i32.const 4) (i32.eq (local.get $kind) (i32.const 7)))
+                (f64.reinterpret_i64 (local.get $element))))))
             (call $clear-values)
-            (return (array.get $array-i64-data (local.get $data) (i32.wrap_i64 (local.get $storage-index)))
-              (i32.const 1) (ref.null extern))))
+            (return (local.get $element) (i32.const 1) (ref.null extern))))
         (block $not-bit
+          (br_if $not-bit (i32.ne (local.get $requested) (i32.const 4)))
           (local.set $bits (br_on_null $not-bit
             (call $native-flat-bit-backing (local.get $a) (local.get $wide))))
           (if (i32.and (i32.ne (local.get $raw-index) (i32.const 1))
@@ -4062,7 +4062,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (($function externref) ($value i64) ($array externref) ($subscript externref)) ()
   (:export-raw "native-set-aref-int64")
   (:locals ($function-object :nullable-object) ($a :nullable-object) ($b :nullable-object)
-           ($data (ref null $array-i64-data)) ($wide i64) ($boxed :nullable-object) ($checked i32)
+           ($data :nullable-object) ($kind i32) ($wide i64) ($boxed :nullable-object) ($checked i32)
            ($bits (ref $digits)) ($index i32) ($word i32) ($mask i32))
   #@(if (global.get $thread-active) (then (call $thread-checkpoint)))
   #@(local.set $function-object (call $native-checked-value (local.get $function)))
@@ -4072,7 +4072,10 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
     (br_if $miss (global.get $debug-evaluating))
     (br_if $miss (i32.eqz (call $native-canonical-aref-p (local.get $function-object) (i32.const 1))))
     ,(wat-decode-scalar-integer '$b '$wide '$miss)
-    (local.set $data (call $array-owned-rank1-fixnum-backing (local.get $a) (local.get $wide)))
+    (call $array-rank1-numeric-backing (local.get $a) (local.get $wide) (i32.const 4))
+    (local.set $kind)
+    (local.set $index)
+    (local.set $data)
     (if (ref.is_null (local.get $data))
       (then
         (br_if $miss (i64.gt_u (local.get $value) (i64.const 1)))
@@ -4089,7 +4092,8 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
                            (i32.xor (local.get $mask) (i32.const -1)))
                   (i32.mul (local.get $mask) (i32.wrap_i64 (local.get $value))))))
       (else
-        (array.set $array-i64-data (local.get $data) (i32.wrap_i64 (local.get $wide)) (local.get $value))))
+        (br_if $miss (i32.and (i32.eq (local.get $kind) (i32.const 6)) (i64.gt_u (local.get $value) (i64.const 255))))
+        (call $array-numeric-set (local.get $kind) (local.get $data) (local.get $index) (local.get $value))))
     (call $clear-values)
     (return))
   ;; The ordinary continuation invokes the already captured setter. Only the
@@ -4148,7 +4152,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
       (return_call $native-primary-apply-ready (local.get $function)
         (call $cons2 (local.get $a) (local.get $result) (ref.null eq)))))
   ;; The checkpoint can change array shape or backing. Read both live.
-  #@(local.set $result (call $array-owned-rank1-fixnum-element64
+  #@(local.set $result (call $array-rank1-integer-element64
     (local.get $a) (local.get $subscript) (ref.null eq) (i32.const 0)))
   #@(if (ref.is_null (local.get $result))
     (then (return_call $native-aref-scalar-miss
@@ -4306,14 +4310,14 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-call0) ($native-call1) ($native-call2) ($native-call2-checked) ($native-call2-ready)
   ($fixed-deposit-apply) ($native-call3) ($native-call3-ready) ($native-call4)
   ($native-standard-call0) ($native-standard-call1) ($native-standard-call2) ($native-standard-call3) ($native-standard-call4)
-  ($native-float-pair) ($native-float-raw) ($native-float-transport)
+  ($native-float-pair) ($native-float-flow) ($native-float-raw) ($native-float-transport)
   ($native-scalar-slot) ($native-register-scalar) ($native-scalar-decode) ($native-scalar-unpack)
   ($native-scalar-box) ($native-scalar-call) ($native-scalar-call2) ($native-scalar-validate-operand)
   ($native-scalar-materialize-operand) ($native-scalar-materialize-operands) ($native-scalar-call-with-operands)
   ($validate-low-field-box) ($native-low-field-add) ($native-low-field-ash) ($native-literal-byte-extract)
   ($native-canonical-aref-p) ($native-check-aref-miss) ($native-primary-apply-ready)
   ($native-aref-snapshot) ($native-aref-snapshot64) ($native-aref-snapshot-transport)
-  ($native-aref-snapshot-worker) ($native-displaced-fixnum-backing) ($native-set-aref-int64)
+  ($native-aref-snapshot-worker) ($native-aref-float-snapshot) ($native-set-aref-int64)
   ($native-flat-bit-backing)
   ($native-aref-scalar-index) ($native-aref-scalar) ($native-aref-scalar-miss) ($native-aref-int64) ($native-aref-i31-index)
   ($native-tail-dispatch) ($native-tail-arguments) ($native-fixed-tail-call)

@@ -466,8 +466,8 @@ i64 local with a separate status. Double-float results retain binary64
 precision. Each operation retains its entry checkpoint. A producer miss
 retains the evaluated Lisp result. A consumer miss materializes the
 intermediate at its original precision and uses ordinary numeric
-dispatch. This transport uses existing boxed float objects at the
-boundaries and leaves array storage unchanged.
+dispatch. Boxed float objects are used at the boundaries of the same-block
+transport.
 
 Fixed-arity functions with a proved single result can retain scalar workers
 in independently installed modules and compact production bundles. The
@@ -538,11 +538,12 @@ representation. Retained operand statistics count one emission per raw
 operand position, by input representation. Runtime dispatch and worker
 admission determine which invocations take the raw path.
 
-Shared fixed-call adapters cover up to sixteen operands. A matching worker
-can avoid the input packet while the shared executor still owns frames,
-dynamic state, result admission and cleanup. The separate wide signature
-keeps padding out of calls with up to four operands. Fixed lexical calls and
-tail calls select the same worker widths. Reusable raw scalar transport
+Ordinary non-tail dispatch passes up to four operands directly to a shared
+adapter. Calls with more operands pass a checked argument packet to keep
+dispatch frames compact during recursion. The shared packet entry unpacks
+arguments for a matching fixed worker. Eligible lexical calls and tail
+dispatch can pass up to sixteen operands directly without retaining a wide
+dispatch frame. Reusable raw scalar transport
 retains its four-operand signature. On a binary dispatch miss, fixed and
 scalar callers share ordinary binary call storage selection. Native, HIR
 and generic entries can receive owned slots, while list consumers receive
@@ -704,8 +705,8 @@ uses. Private raw cells need proofs for the initial value,
 each write and every relevant use, and reads retain independent snapshots.
 Speed-oriented policy can also select guarded arithmetic or tiered storage
 for some private counters. The ordinary numeric path handles unsupported
-representations and overflow. Floating-point flow remains conservative,
-and broad REAL declarations establish no floating-point representation.
+representations and overflow. Broad REAL declarations establish no
+floating-point representation.
 
 At either space or speed policy, a private cell in a structured loop can
 carry the scalar snapshot of a canonical binary addition or subtraction
@@ -724,6 +725,18 @@ Unsupported operands and overflow use the original evaluated operands
 at the ordinary operation. Boxed consumers materialize a scalar at the use
 and keep the original object when one is available. Full-value calls and
 captured cells use the ordinary representation.
+
+A structured loop with matching single-float or double-float operand hints
+can use the same private-cell and backedge machinery for binary addition
+or subtraction. The bounded ownership audit runs after candidate discovery
+in the loop body. The accumulator and checked AREF result carry raw bits,
+a validity status, and an ordinary Lisp value for the fallback arm.
+The transport represents binary32 values by exact promotion to binary64.
+Each update rounds at the operation to the result precision, preserves
+signed zero, and checks finiteness. The original entry checkpoints remain.
+On a miss, arithmetic uses the evaluated objects, materializing omitted
+operands at their original precision. This preserves numeric contagion
+and errors. A zero-trip loop can return the original initializer.
 
 Single-use predicates can feed forward branches without boxing a boolean.
 When scoped proofs establish the condition's truth, native emission can
@@ -752,18 +765,28 @@ proved operand types rule out its numeric and character comparisons.
 
 Proved simple-vector reads and writes can pass a scalar index to a
 specialized helper under SAFETY 0. Fixed AREF reads and writes can access
-owned rank-one fixnum backing after checking its live dimension, layout
-and bounds after the operation-entry checkpoint. A direct canonical AREF
-read can pass an existing raw i64 arithmetic result or cell snapshot to
-the checked rank-one reader. It checks the full subscript before narrowing
-and resolves displaced storage through the ordinary live backing path.
-The raw entry validates external references and checks physical backing
-extents when that path follows a displaced view.
-The snapshot reader can keep a rank-one fixnum access raw through a
-single displaced view into owned rank-one storage. It checks the live
-view bounds and translated subscript after the entry checkpoint.
-Other layouts continue through the checked resolver at the same access.
-General dispatch and rank or bounds errors reconstruct the original index.
+owned rank-one numeric backing. Fixnum and double-float arrays use separate
+element kinds with the same i64 backing layout. Single-float arrays use
+binary32 backing. SHORT-FLOAT and LONG-FLOAT name the same target precisions
+as SINGLE-FLOAT and DOUBLE-FLOAT, respectively. Bounded integer element types
+within 0 through 255 upgrade to packed octets when bit storage does not
+cover them. WasmGC i8 reads zero-extend octets, and stores check the value
+before changing an element. Arithmetic on an octet uses ordinary integer
+semantics, including promotion to a bignum.
+
+Fixed integer AREF and its setter share the live rank-one probe with the
+checked snapshot reader. The snapshot reader also admits each packed float
+kind and can pass octets to the integer backedge worker. After the entry
+checkpoint, the probe checks the logical index at the view and target, the
+element kinds, the physical backing and its extent. It handles owned
+storage and one rank-one displacement into owned rank-one storage. Other
+layouts follow the checked resolver with the evaluated operands, including
+the full subscript. The ordinary array interface boxes float reads and
+checks stores against the element kind. Adjustment and image restoration
+preserve the specialized kind and backing.
+Sequence construction passes the upgraded element type to the same array
+allocator for vector results, including conversions and concatenation.
+
 A rank-one AREF followed by a single use through a bounded LOGAND mask
 can retain the checked read as a raw i64 or its original Lisp result.
 Inline-call discovery identifies candidate bodies before the bounded

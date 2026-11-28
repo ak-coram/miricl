@@ -228,6 +228,39 @@ for (const [access, expected] of [
     'The queued adjustment fired before the observed operation.');
 }
 console.log('PASS fixed rank-one array access observes queued dimension and backing replacement');
+for (const [kind, precision, marker] of [['double-float', 4, 'd'], ['single-float', 3, 'f']]) {
+  vm.evaluate(`(defparameter *thread-float-base*
+      (make-array 2 :element-type '${kind} :initial-contents '(1${marker}0 2${marker}0)))
+    (defparameter *thread-float-next*
+      (make-array 3 :element-type '${kind} :initial-contents '(3${marker}0 4${marker}0 5${marker}0)))
+    (defparameter *thread-float-view*
+      (make-array 2 :element-type '${kind} :adjustable t :displaced-to *thread-float-base*))
+    (defparameter *thread-float-fired* nil) (values)`, {eof: true});
+  const floatView = applyObject('*thread-float-view*');
+  vm.evaluate(`(funcall *thread-apply-queue* 16 nil nil)
+    (funcall *thread-apply-queue* 12 (funcall *thread-apply-queue* 0 nil nil)
+      (lambda ()
+        (adjust-array *thread-float-view* 2 :displaced-to *thread-float-next* :displaced-index-offset 1)
+        (setq *thread-float-fired* t)
+        (values :callback :noise)))
+    (funcall *thread-apply-queue* 13 0 nil) (values)`, {eof: true});
+  vm.vm['thread-enter'](0); vm.vm['thread-main-state'](0);
+  vm.vm['thread-active'].value = 1;
+  let floatRead;
+  try {
+    floatRead = vm.vm['native-aref-float-snapshot'](floatView, null, 0n, 1, precision);
+  } finally {
+    vm.vm['thread-active'].value = 0;
+    vm.vm['thread-save'](); vm.vm['thread-main-state'](1);
+  }
+  const [bits, status, boxed] = floatRead;
+  const floatElement = vm.vm['native-scalar-box'](bits, status * precision, boxed, precision);
+  assert.equal(vm.javascript.toJS(floatElement), 4);
+  assert.equal(vm.evaluate(`(and *thread-float-fired*
+    (eq (array-displacement *thread-float-view*) *thread-float-next*))`).output, 'T\n',
+    'The queued replacement fired before the checked floating-point read.');
+  console.log(`PASS ${kind} snapshot observes queued displaced backing replacement`);
+}
 assert.equal(vm.evaluate('(+ 20 22)').output, '42\n', 'Synchronous evaluation remains usable.');
 await vm.evaluateAsync('(defparameter *background-worker* (miricl-threads:make-thread (lambda () (sleep 0.01) 17)))');
 assert.equal(vm.evaluate('(+ 20 22)').output, '42\n');

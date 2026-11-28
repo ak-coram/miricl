@@ -42,7 +42,7 @@
 
 (defun core-field-code (type)
   (cond ((consp type) (if (member (car (last type)) '($native-entry $native-direct-entry func) :test #'string-equal) #\e #\r))
-        ((string-equal type 'i32) #\i)
+        ((member type '(i32 i8 f32) :test #'string-equal) #\i)
         ((or (string-equal type 'i64) (string-equal type 'f64)) #\l)
         (t (error "Unsupported core image field type ~S" type))))
 
@@ -56,8 +56,9 @@
 (defun core-field-read (type expression)
   (case (core-field-code type)
     (#\r `(extern.convert_any ,expression))
-    (otherwise (if (and (symbolp type) (string-equal type 'f64))
-                   `(i64.reinterpret_f64 ,expression) expression))))
+    (otherwise (cond ((and (symbolp type) (string-equal type 'f64)) `(i64.reinterpret_f64 ,expression))
+                     ((and (symbolp type) (string-equal type 'f32)) `(i32.reinterpret_f32 ,expression))
+                     (t expression)))))
 
 (defun core-field-write (type expression)
   (case (core-field-code type)
@@ -69,8 +70,9 @@
                     `(i32.eqz (ref.test ,type ,expression))))) :malformed-form)
             (ref.cast ,type ,expression)))
     (#\r `(ref.cast ,type (any.convert_extern ,expression)))
-    (otherwise (if (and (symbolp type) (string-equal type 'f64))
-                   `(f64.reinterpret_i64 ,expression) expression))))
+    (otherwise (cond ((and (symbolp type) (string-equal type 'f64)) `(f64.reinterpret_i64 ,expression))
+                     ((and (symbolp type) (string-equal type 'f32)) `(f32.reinterpret_i32 ,expression))
+                     (t expression)))))
 
 (defun core-field-default (type)
   (cond ((atom type) `(,(intern (format nil "~A.CONST" (string-upcase type)) :miricl) 0))
@@ -96,17 +98,20 @@
                 collect `(global.set ,name ,(core-field-write type `(local.get ,(core-field-variable index)))))))))
 
 (defun core-array-functions (name id type)
-  (let ((value `(ref.cast (ref ,name) (any.convert_extern (local.get $array)))))
+  (let ((value `(ref.cast (ref ,name) (any.convert_extern (local.get $array))))
+        (packed (and (symbolp type) (string-equal type 'i8))))
     `((func (export ,(format nil "core-array:~D:~C" id (core-field-code type)))
         (param $array externref) (result i32) (array.len ,value))
       (func (export ,(format nil "core-read:~D" id))
         (param $array externref) (param $index i32) (result ,(core-external-type type))
-        ,(core-field-read type `(array.get ,name ,value (local.get $index))))
+        ,(core-field-read type `(,(if packed 'array.get_u 'array.get) ,name ,value (local.get $index))))
       (func (export ,(format nil "core-new:~D" id))
         (param $length i32) (result externref)
         (extern.convert_any (array.new_default ,name (local.get $length))))
       (func (export ,(format nil "core-set:~D" id))
         (param $array externref) (param $index i32) (param $element ,(core-external-type type))
+        ,@(when packed
+            (list (wat-fail-when #@(i32.gt_u (local.get $element) (i32.const 255)) :malformed-form)))
         (array.set ,name ,value (local.get $index) ,(core-field-write type '(local.get $element)))))))
 
 (defun core-struct-functions (name id fields)

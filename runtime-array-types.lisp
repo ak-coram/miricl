@@ -38,7 +38,7 @@
   #@(local.set $count (global.get $value-count))
   #@(block $failed (try_table (catch $transfer $failed)
     (if (i32.eq (local.get $mode) (i32.const 1))
-      (then ,(wat-fail-when #@(i32.or (i32.gt_u (local.get $flags) (i32.const 255))
+      (then ,(wat-fail-when #@(i32.or (i32.gt_u (local.get $flags) (i32.const 2047))
         (i32.lt_s (local.get $rank) (i32.const -1))) :malformed-type)))
     (if (i32.ne (local.get $mode) (i32.const 1))
       (then (call $check-type-control-structure (local.get $a))

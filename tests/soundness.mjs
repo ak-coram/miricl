@@ -84,7 +84,9 @@ try {
       numericCheck(`(and
         (every (lambda (type) (eq (upgraded-array-element-type type) 'fixnum))
           '(fixnum (signed-byte 8) (signed-byte 64) (unsigned-byte 63)
-            (member 0 2) (or bit (signed-byte 8)) (and fixnum (integer 2 5))))
+            (or bit (signed-byte 8))))
+        (every (lambda (type) (equal (upgraded-array-element-type type) '(unsigned-byte 8)))
+          '((unsigned-byte 8) (member 0 2) (or bit (integer 2 5)) (and fixnum (integer 2 5))))
         (eq (upgraded-array-element-type '(unsigned-byte 1)) 'bit)
         (eq (upgraded-array-element-type '(unsigned-byte 64)) t)
         (eq (upgraded-array-element-type '(and (member 0 :non-integer) integer)) 'bit)
@@ -93,7 +95,7 @@ try {
         (eq (upgraded-array-element-type
               (cons 'or (make-list 9000 :initial-element '(signed-byte 8)))) 'fixnum)
         (every (lambda (type)
-          (eq (upgraded-array-element-type (list 'or type type))
+          (equal (upgraded-array-element-type (list 'or type type))
               (upgraded-array-element-type type)))
           '((signed-byte 64) (unsigned-byte 63) (unsigned-byte 64)
             (unsigned-byte 1) (integer 0 1) (integer (0) (3))))
@@ -135,6 +137,65 @@ try {
           (make-array 2 :element-type '(signed-byte 64)
             :displaced-to *soundness-fixnum-base* :displaced-index-offset 1))
         (adjust-array *soundness-fixnum-base* 5 :initial-element 0) (values)`, {eof: true});
+      numericCheck(`(let ((array (make-array 2 :element-type '(double-float -1d0 1d0)
+                              :initial-contents '(-0d0 0.5d0))))
+        (and (eq (upgraded-array-element-type 'short-float) 'single-float)
+          (eq (upgraded-array-element-type 'long-float) 'double-float)
+          (eq (array-element-type array) 'double-float)
+          (typep array '(simple-array double-float (2)))
+          (nth-value 0 (subtypep '(simple-array double-float (2)) 'vector))
+          (not (stringp array))
+          (handler-case (progn (setf (aref array 1) 1.0f0) nil)
+            (type-error () (eql (aref array 1) 0.5d0)))))`);
+      numeric.evaluate(`(defparameter *soundness-double-base*
+        (make-array 3 :element-type 'double-float :adjustable t :initial-contents '(0d0 -0d0 2d0)))
+        (defparameter *soundness-double-view*
+          (make-array 2 :element-type 'double-float
+            :displaced-to *soundness-double-base* :displaced-index-offset 1))
+        (adjust-array *soundness-double-base* 4 :initial-element 3d0) (values)`, {eof: true});
+      numeric.evaluate(`(defparameter *soundness-single-base*
+        (make-array 3 :element-type '(short-float -3.0f0 3.0f0) :adjustable t
+          :initial-contents '(0.0f0 -0.0f0 2.0f0)))
+        (defparameter *soundness-single-view*
+          (make-array 2 :element-type 'single-float
+            :displaced-to *soundness-single-base* :displaced-index-offset 1))
+        (adjust-array *soundness-single-base* 4 :initial-element 3.0f0) (values)`, {eof: true});
+      numericCheck(`(and (typep *soundness-single-view* '(vector short-float 2))
+        (nth-value 0 (subtypep '(simple-array single-float (2)) 'vector))
+        (handler-case (progn (setf (aref *soundness-single-view* 1) 1d0) nil)
+          (type-error () (eql (aref *soundness-single-view* 1) 2.0f0))))`);
+      numericCheck(`(let* ((octets (coerce #(0 128 255) '(simple-array (unsigned-byte 8) (3))))
+                          (singles (make-sequence '(vector short-float 2) 2 :initial-element -0.0f0))
+                          (copy (concatenate '(vector single-float 3) singles '(2.0f0)))
+                          (doubles (coerce #(1d0 -0d0) '(simple-array double-float (2)))))
+        (and (equal (array-element-type octets) '(unsigned-byte 8))
+          (equalp octets #(0 128 255))
+          (eq (array-element-type singles) 'single-float)
+          (eq (array-element-type copy) 'single-float)
+          (minusp (float-sign (aref copy 0)))
+          (eql (aref copy 2) 2.0f0)
+          (eq (array-element-type doubles) 'double-float)
+          (minusp (float-sign (aref doubles 1)))))`);
+      numeric.evaluate(`(defparameter *soundness-byte-base*
+        (make-array 4 :element-type '(unsigned-byte 8) :adjustable t :initial-contents '(0 127 128 255)))
+        (defparameter *soundness-byte-view*
+          (make-array 2 :element-type '(unsigned-byte 8)
+            :displaced-to *soundness-byte-base* :displaced-index-offset 2))
+        (adjust-array *soundness-byte-base* 5 :initial-element 3) (values)`, {eof: true});
+      numericCheck(`(and
+        (typep *soundness-byte-view* '(vector (unsigned-byte 8) 2))
+        (nth-value 0 (subtypep '(simple-array (unsigned-byte 8) (2)) 'vector))
+        (let ((shift (miricl-compiler:compile-native
+                       '(lambda (array count store)
+                          (let* ((byte (aref array 1)) (shifted (ash byte count)))
+                            (if store (setf (aref array 1) shifted) shifted))))))
+          (and (= (funcall shift *soundness-byte-view* 8 nil) 65280)
+            (= (funcall shift *soundness-byte-view* -4 nil) 15)
+            (= (funcall shift *soundness-byte-view* 80 nil) 308276084001730439550074880)
+            (handler-case (progn (funcall shift *soundness-byte-view* 8 t) nil)
+              (type-error () (= (aref *soundness-byte-view* 1) 255)))
+            (handler-case (progn (funcall shift *soundness-byte-view* 80 t) nil)
+              (type-error () (= (aref *soundness-byte-view* 1) 255))))))`);
       const restored = await Miricl.instantiate(numeric.saveImage());
       try {
         assert.equal(restored.evaluate(`(and
@@ -145,7 +206,23 @@ try {
           (progn (setf (aref *soundness-fixnum-base* 1) 9007199254740993)
             (= (aref *soundness-fixnum-view* 0) 9007199254740993))
           (progn (setf (aref *soundness-fixnum-view* 1) -9223372036854775808)
-            (= (row-major-aref *soundness-fixnum-base* 2) -9223372036854775808)))`, {eof: true}).output, 'T\n');
+            (= (row-major-aref *soundness-fixnum-base* 2) -9223372036854775808))
+          (eq (array-element-type *soundness-double-base*) 'double-float)
+          (eq (array-displacement *soundness-double-view*) *soundness-double-base*)
+          (minusp (float-sign (aref *soundness-double-view* 0)))
+          (eql (aref *soundness-double-view* 1) 2d0)
+          (progn (setf (aref *soundness-double-base* 2) -1.75d0)
+            (eql (aref *soundness-double-view* 1) -1.75d0))
+          (eq (array-element-type *soundness-single-base*) 'single-float)
+          (eq (array-displacement *soundness-single-view*) *soundness-single-base*)
+          (minusp (float-sign (aref *soundness-single-view* 0)))
+          (eql (aref *soundness-single-view* 1) 2.0f0)
+          (equal (array-element-type *soundness-byte-view*) '(unsigned-byte 8))
+          (eq (array-displacement *soundness-byte-view*) *soundness-byte-base*)
+          (= (aref *soundness-byte-view* 0) 128)
+          (= (aref *soundness-byte-view* 1) 255)
+          (progn (setf (aref *soundness-byte-view* 1) 200)
+            (= (aref *soundness-byte-base* 3) 200)))`, {eof: true}).output, 'T\n');
       } finally { restored.close(); }
     } finally { numeric.close(); }
   }
@@ -1095,6 +1172,7 @@ try {
   const rank1Equal = (actual, expected) => assert.notEqual(vm.vm['native-call2'](rank1Eql, actual, expected), null);
   const rank1Fixtures = [
     ["(make-array 3 :element-type 'fixnum :adjustable t :fill-pointer 0 :initial-contents '(0 -9223372036854775808 2))", '-9223372036854775808', '9223372036854775807'],
+    ["(make-array 3 :element-type 'double-float :adjustable t :fill-pointer 0 :initial-contents '(0d0 -0d0 2d0))", '-0d0', '1.25d0'],
     ["(make-array 3 :adjustable t :fill-pointer 0 :initial-contents '(a b c))", "'b", "'(new value)"],
     ["(make-array 3 :element-type 'character :adjustable t :fill-pointer 0 :initial-contents \"abc\")", '#\\b', '#\\z'],
     ["(make-array 3 :element-type 'bit :adjustable t :fill-pointer 0 :initial-contents '(0 1 0))", '1', '0'],
@@ -1206,6 +1284,35 @@ try {
   });
   assert.ok(rank1Private, 'The fixture includes the actual private i64 array payload.');
   const rank1BackingSlot = vm.vm[rank1Reader](rank1Numeric).indexOf(rank1Private);
+  for (const [kind, precision, marker] of [['double-float', 4, 'd'], ['single-float', 3, 'f']]) {
+    const readFloat = (array, index) => vm.vm['native-aref-float-snapshot'](array, null, index, 1, precision);
+    const floatFlow = (op, ...args) => vm.vm['native-float-flow'](op, precision, ...args);
+    const boxFloat = ([bits, status, object]) =>
+      vm.vm['native-scalar-box'](bits, status * precision, object, precision);
+    const array = rank1Value(`(make-array 1 :element-type '${kind} :initial-element 8${marker}0)`);
+    const packet = readFloat(array, 0n);
+    const exact = rank1Value(`8${marker}0`);
+    rank1Equal(boxFloat(packet), exact);
+    rank1Equal(boxFloat(floatFlow(1, ...packet, 0n, 0, rank1Value('1.5f0'))),
+      rank1Value(`6.5${marker}0`));
+    rank1Equal(boxFloat(floatFlow(0, ...packet, 0n, 0, rank1Value('3/2'))),
+      rank1Value(`9.5${marker}0`));
+    rank1Equal(boxFloat(floatFlow(0, ...packet, 0n, 0, rank1Value('1.5d0'))), rank1Value('9.5d0'));
+    rejectPacketOperation(() => floatFlow(0, ...packet, 0n, 0, rank1Private));
+    rejectPacketOperation(() => floatFlow(0, packet[0], 1, exact, packet[0], 1, null));
+    rejectPacketOperation(() => readFloat(rank1Private, 0n));
+    rejectPacketOperation(() => readFloat(array, 1n));
+    const maximum = rank1Value(`most-positive-${kind}`);
+    rejectPacketOperation(() => floatFlow(0, 0n, 0, maximum, 0n, 0, maximum));
+    rank1Equal(boxFloat(readFloat(array, 0n)), exact);
+  }
+  for (const kind of ['(unsigned-byte 8)', 'single-float']) {
+    const array = rank1Value(`(make-array 1 :element-type '${kind})`);
+    const privateBacking = vm.vm[rank1Reader](array)[rank1BackingSlot];
+    rejectPacketOperation(() => vm.vm['native-aref-snapshot64'](privateBacking, 0n));
+    const malformed = rank1Clone(array, fields => {fields[rank1BackingSlot] = rank1Private;});
+    rejectPacketOperation(() => rank1ReadRaw(malformed, 0n));
+  }
   const rank1ShortBacking = vm.vm[rank1Reader](rank1Value("(make-array 1 :element-type 'fixnum)"))[rank1BackingSlot];
   const rank1BrokenNumeric = rank1Clone(rank1Numeric, fields => {fields[rank1BackingSlot] = rank1ShortBacking;});
   const rank1WrongNumericBacking = rank1Clone(rank1Numeric, fields => {fields[rank1BackingSlot] = rank1Base;});
@@ -2917,6 +3024,7 @@ try {
       (delete-package package)))`);
 
   check(await fs.readFile(new URL('./soundness-integer-flow.lisp', import.meta.url), 'utf8'));
+  check(await fs.readFile(new URL('./soundness-double-flow.lisp', import.meta.url), 'utf8'));
 
   // A character read remains an observation across the fixed call and a
   // callback. The caller uses the old character and the live destination.

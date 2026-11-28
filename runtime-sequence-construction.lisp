@@ -65,9 +65,9 @@
   (runtime-function-definition '$concatenate-native-cl
     (wat-fragment (miricl-cross:runtime-kernel-wat '$concatenate-native-cl 'miricl-runtime:concatenate-sequence-values))))
 
-(define-runtime-function $concatenate-native (($sequences :nullable-object) ($kind i32)) (:nullable-object)
+(define-runtime-function $concatenate-native (($sequences :nullable-object) ($element-type :nullable-object)) (:nullable-object)
   #@(call $check-apply-list (local.get $sequences))
-  #@(call $concatenate-native-cl (local.get $sequences) (call $int (local.get $kind))))
+  #@(call $concatenate-native-cl (local.get $sequences) (local.get $element-type)))
 
 (defun $copy-sequence-region-cl ()
   (runtime-function-definition '$copy-sequence-region-cl
@@ -169,10 +169,10 @@
 (define-runtime-function $concatenate-apply (($args :nullable-object)) (:nullable-object)
   (wat-arity 1 2147483647)
   (wat-symbol-case #@(call $id (call $car (local.get $args)))
-    (list #@(return (call $concatenate-native (call $cdr (local.get $args)) (i32.const 0))))
-    ((vector simple-vector) #@(return (call $concatenate-native (call $cdr (local.get $args)) (i32.const 2))))
+    (list #@(return (call $concatenate-native (call $cdr (local.get $args)) (call $symbol (i32.const ,(runtime-symbol-id 'list))))))
+    ((vector simple-vector) #@(return (call $concatenate-native (call $cdr (local.get $args)) (call $symbol (i32.const ,(runtime-symbol-id t))))))
     ((string base-string simple-string simple-base-string)
-      #@(return (call $concatenate-native (call $cdr (local.get $args)) (i32.const 1)))))
+      #@(return (call $concatenate-native (call $cdr (local.get $args)) (call $symbol (i32.const ,(runtime-symbol-id 'character)))))))
   ;; Compound result types retain the full type and fixed-length checks.
   #@(call $apply ,(clos-library-reference '%concatenate) (local.get $args)))
 
@@ -200,17 +200,17 @@
   ;; must retain an object already of the requested type, including list spines
   ;; and specialized or displaced vectors; validate only actual conversions.
   (wat-symbol-case #@(call $id (local.get $type))
-    ((list null cons) #@(local.set $kind (i32.const 1)))
-    ((string base-string simple-string simple-base-string) #@(local.set $kind (i32.const 2)))
-    ((vector simple-vector) #@(local.set $kind (i32.const 3)))
-    ((bit-vector simple-bit-vector) #@(local.set $kind (i32.const 4))))
+    ((list null cons) #@(local.set $kind (i32.const ,(runtime-symbol-id 'list))))
+    ((string base-string simple-string simple-base-string) #@(local.set $kind (i32.const ,(runtime-symbol-id 'character))))
+    ((vector simple-vector) #@(local.set $kind (i32.const ,(runtime-symbol-id t))))
+    ((bit-vector simple-bit-vector) #@(local.set $kind (i32.const ,(runtime-symbol-id 'bit)))))
   #@(if (local.get $kind)
     (then
       (if (call $typep (local.get $object) (local.get $type))
         (then (return (local.get $object))))
       (drop (call $proper-sequence-length (local.get $object)))
       (local.set $result (call $concatenate-native
-        (call $cons (local.get $object) (ref.null eq)) (i32.sub (local.get $kind) (i32.const 1))))
+        (call $cons (local.get $object) (ref.null eq)) (call $symbol (local.get $kind))))
       (if (i32.eqz (call $typep (local.get $result) (local.get $type)))
         (then (call $type-fail (local.get $object) (local.get $type)
           (i32.const ,(runtime-error-code :expected-designator)))))
@@ -276,8 +276,7 @@
         ,(list-operation-argument 3) ,(list-operation-argument 0) (i32.const 1)))))
   #@(if (i32.eq (local.get $op) (i32.const 3))
     (then ,(wat-arity 2)
-      (return (call $concatenate-native ,(list-operation-argument 1)
-        (call $sequence-index ,(list-operation-argument 0))))))
+      (return (call $concatenate-native ,(list-operation-argument 1) ,(list-operation-argument 0)))))
   #@(if (i32.eq (local.get $op) (i32.const 4))
     (then ,(wat-arity 1) (return (call $string-designator ,(list-operation-argument 0)))))
   #@(if (i32.eq (local.get $op) (i32.const 5))

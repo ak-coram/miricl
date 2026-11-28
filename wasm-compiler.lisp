@@ -302,6 +302,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-aref-snapshot64" (:object :i64) (:i64 :i32 :object))
     ("native-aref-snapshot-transport" (:object :object :i64 :i32) (:i64 :i32 :object))
     ("native-integer-flow" (:i32 :i64 :i32 :object :i64 :i32 :object) (:i64 :i32 :object))
+    ("native-float-flow" (:i32 :i32 :i64 :i32 :object :i64 :i32 :object) (:i64 :i32 :object))
+    ("native-aref-float-snapshot" (:object :object :i64 :i32 :i32) (:i64 :i32 :object))
     ("native-integer-flow-box" (:i64 :i32 :object) :object)
     ("native-set-aref-int64" (:object :i64 :object :object) nil)
     ("native-search-list" (:object :object :i32) :object)
@@ -2204,32 +2206,30 @@ exhausted work budgets keep every incoming value group."
       (emit-native-call-frame-leave nil)
       t)))
 
-(defun emit-native-wide-call (inputs mode)
+(defun emit-native-wide-tail-call (inputs)
   (let ((arity (length (cddr inputs))))
     (emit-native-call-operands inputs)
     (dotimes (i (- 16 arity)) (wasm-null))
-    (wasm-integer (logior arity mode))
+    (wasm-integer (logior arity 64))
     (let ((start (length *wasm-bytes*)))
       (wasm-call "native-wide-call")
-      (when (= mode 64) (setf (aref *wasm-bytes* start) #x12)))))
+      (setf (aref *wasm-bytes* start) #x12))))
 
 (defun emit-native-fixed-value-call (inputs output)
   ;; Transport is independent of target identity, result cardinality and
-  ;; effects. The shared checked runtime selects the actual live callee.
+  ;; effects. Keep an ordinary wide call on the packet path: the sixteen-slot
+  ;; dispatch signature otherwise leaves a larger frame live across the call.
   (let ((arity (length (cddr inputs))))
     (when (and (not *wasm-fixed-call-emitter*)
-               (not *wasm-closed-worker-functions*) (<= arity 16))
+               (not *wasm-closed-worker-functions*) (<= arity 4))
       (let ((primary (or (native-value-slot *wasm-scalar-groups* output)
                          (not (native-value-slot *wasm-live-values* output)))))
         (compiler-statistic :optimization/fixed-value-transport
           (if primary :primary :full))
-        (if (> arity 4)
-            (emit-native-wide-call inputs (if primary 32 0))
-            (progn
-              (emit-native-call-operands inputs)
-              (dotimes (i (- 4 arity)) (wasm-null))
-              (wasm-integer (logior arity (if primary 8 0)))
-              (wasm-call "native-fixed-call")))
+        (emit-native-call-operands inputs)
+        (dotimes (i (- 4 arity)) (wasm-null))
+        (wasm-integer (logior arity (if primary 8 0)))
+        (wasm-call "native-fixed-call")
         t))))
 
 (defun emit-native-fixed-call (inputs)
@@ -2242,10 +2242,9 @@ exhausted work budgets keep every incoming value group."
     (cond ((<= arity 4)
            (emit-native-call-operands inputs)
            (wasm-call (nth arity '("native-call0" "native-call1" "native-call2" "native-call3" "native-call4"))))
-          ((and (<= arity 16) (not *wasm-fixed-call-emitter*))
-           (emit-native-wide-call inputs 32))
           (t (wasm-null) (wasm-get (second inputs))
-             (wasm-arguments (cddr inputs)) (wasm-call "native-primary-call")))))
+             (wasm-arguments (cddr inputs) (native-call-usage inputs))
+             (wasm-call "native-primary-call")))))
 
 (defun native-type-integer-width (type)
   ;; One target CL type domain drives declarations, module summaries and
@@ -3519,7 +3518,7 @@ exhausted work budgets keep every incoming value group."
   ;; allocates a packet when the selected target cannot use its fixed worker.
   (let ((count (length (cddr inputs))))
     (when (<= 5 count 16)
-      (emit-native-wide-call inputs 64)
+      (emit-native-wide-tail-call inputs)
       (when (and *native-tail-decisions*
                  (not (eq (gethash instruction *native-tail-decisions*) :applied/guarded-direct)))
         (setf (gethash instruction *native-tail-decisions*) :applied/guarded-dispatch))
@@ -3736,12 +3735,18 @@ exhausted work budgets keep every incoming value group."
                     (wasm-byte #x21) (wasm-u32 (svref record 0)))
           ((/= kind 2) (wasm-byte #x1a) (wasm-byte #x1a)))))
 
-(defun emit-native-aref-snapshot (instruction inputs)
+(defun emit-native-aref-snapshot (instruction inputs &optional precision)
   (wasm-get (third inputs))
   (let ((index (native-raw-aref-index instruction inputs :standard-call *wasm-unboxed-values*))
         (argument (and *wasm-reusable-scalar-arguments*
                        (native-scalar-argument-index (fourth inputs) 1))))
-    (cond (argument (wasm-get (fourth inputs))
+    (cond (precision
+           (if index (wasm-null) (wasm-get (fourth inputs)))
+           (if index (wasm-local (svref index 0)) (progn (wasm-byte #x42) (wasm-s32 0)))
+           (wasm-integer (if index 1 0))
+           (wasm-integer precision)
+           (wasm-call "native-aref-float-snapshot"))
+          (argument (wasm-get (fourth inputs))
                     (emit-native-scalar-argument argument)
                     (emit-native-scalar-argument-status argument 0)
                     (wasm-call "native-aref-snapshot-transport"))
@@ -5233,17 +5238,19 @@ exhausted work budgets keep every incoming value group."
                     (fourth inputs) (null (cddddr inputs))
                     (native-scalar-call-name inputs))))
     (when (member name '(+ -))
-      (let ((integer-read nil) (load nil))
+      (let* ((read nil) (load nil)
+             (left (native-float-precision (third inputs)))
+             (precision (and left (eql left (native-float-precision (fourth inputs))) left)))
         (dolist (input (cddr inputs))
           (let* ((source (native-tiered-source input))
                  (producer (and source (hir-value-producer source)))
-                 (integerp (or (hir-type-proves-p (hir-value-type input) 'integer)
+                 (scalarp (or precision (hir-type-proves-p (hir-value-type input) 'integer)
                                (and *wasm-inferred-types*
                                     (hir-type-proves-p (gethash input *wasm-inferred-types* t) 'integer)))))
             (cond ((and (%hir-instruction-p producer)
                         (eq (hir-instruction-opcode producer) :cell-read)
                         (eq (first (hir-instruction-inputs producer)) cell))
-                   (when integerp (setq integer-read t)))
+                   (when scalarp (setq read t)))
                   ((and (%hir-instruction-p producer)
                         (eq (native-snapshot-source producer function) :load)
                         (native-value-slot *wasm-scalar-groups* source)
@@ -5251,9 +5258,9 @@ exhausted work budgets keep every incoming value group."
                                  (and *wasm-reused-values* (native-value-slot *wasm-reused-values* source))
                                  (and *wasm-hoisted-values* (native-value-slot *wasm-hoisted-values* source)))))
                    (setq load producer))
-                  ((not (or integerp (native-compute-integer-width input)))
+                  ((not (or scalarp (native-compute-integer-width input)))
                    (return-from native-tiered-flow-update nil)))))
-        (when integer-read (cons name load))))))
+        (when read (list name load precision))))))
 
 (defun native-plan-tiered-counters (function blocks raw structured)
   "Admit guarded updates after existing raw storage and executable facts."
@@ -5356,14 +5363,17 @@ exhausted work budgets keep every incoming value group."
         (when (and record (svref record 3) (plusp (svref record 0)) (plusp (svref record 1)))
           ;; Four indices are assigned only after ordinary body-local layout.
           (let ((flow (svref record 4)))
-            (setf (native-value-slot table value) (if flow (vector 0 0 0 0 :flow) (make-array 4)))
+            (setf (native-value-slot table value) (if flow (vector 0 0 0 0 :flow (third flow)) (make-array 4)))
             (push value chosen)
             (dolist (update (svref record 2))
               (setf (native-value-slot table (hir-instruction-output update))
-                    (if flow (vector 0 0 0 0 (car flow)) (make-array 4))))
-            (when (and flow (cdr flow))
-              (setf (native-value-slot table (hir-instruction-output (cdr flow)))
-                    (vector 0 0 0 0 :load)))))))
+                    (if flow (vector 0 0 0 0 (first flow) (third flow)) (make-array 4))))
+            (when (second flow)
+              (let* ((output (hir-instruction-output (second flow)))
+                     (prior (native-value-slot table output)))
+                (when (and prior (not (eq (svref prior 5) (third flow))))
+                  (return-from native-compute-tiered-counters nil))
+                (setf (native-value-slot table output) (vector 0 0 0 0 :load (third flow)))))))))
     (when (or (null chosen) (> (length chosen) 4))
       (return-from native-compute-tiered-counters nil))
     (dolist (block blocks)
@@ -5378,7 +5388,7 @@ exhausted work budgets keep every incoming value group."
           (when (and storage (native-value-slot *wasm-live-values* output))
             (setf (native-value-slot table output)
                   (if (> (length storage) 4)
-                      (vector 0 0 0 0 :flow)
+                      (vector 0 0 0 0 :flow (svref storage 5))
                       (make-array 4)))))))
     ;; Flatten accepted single-value aliases, independently of HIR ID order.
     (dolist (value (hir-function-values function))
@@ -5456,8 +5466,13 @@ exhausted work budgets keep every incoming value group."
 
 (defun emit-native-tiered-materialize (record)
   (when (> (length record) 4)
-    (emit-native-integer-flow-get record)
-    (wasm-call "native-integer-flow-box")
+    (if (svref record 5)
+        (progn
+          (wasm-local (svref record 2))
+          (wasm-local (svref record 0)) (wasm-integer (svref record 5)) (wasm-byte #x6c)
+          (wasm-local (svref record 3)) (wasm-integer (svref record 5))
+          (wasm-call "native-scalar-box"))
+        (progn (emit-native-integer-flow-get record) (wasm-call "native-integer-flow-box")))
     (return-from emit-native-tiered-materialize nil))
   ;; Keep an existing original scalar object until arithmetic changes it.
   ;; This also preserves zero-trip object identity without another local.
@@ -5562,12 +5577,12 @@ exhausted work budgets keep every incoming value group."
   (wasm-byte #x21) (wasm-u32 (svref record 0))
   (wasm-byte #x21) (wasm-u32 (svref record 2)))
 
-(defun emit-native-integer-flow-operand (value)
+(defun emit-native-integer-flow-operand (value precision)
   (let ((record (native-value-slot *wasm-tiered-values* value))
         (raw (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* value))))
-    (cond ((and record (> (length record) 4))
+    (cond ((and record (> (length record) 4) (eql (svref record 5) precision))
            (emit-native-integer-flow-get record))
-          ((and (null record) raw (eq (svref raw 4) :result))
+          ((and (not precision) (null record) raw (eq (svref raw 4) :result))
            (wasm-local (svref raw 0))
            (wasm-integer (if (native-immediate-integer-result-p raw) 1 2))
            (wasm-null))
@@ -5585,7 +5600,7 @@ exhausted work budgets keep every incoming value group."
         ((and record (member opcode '(:copy :primary))) t)
         ((and record (eq opcode :cell-new))
          (if (> (length record) 4)
-             (progn (emit-native-integer-flow-operand (first inputs))
+             (progn (emit-native-integer-flow-operand (first inputs) (svref record 5))
                     (emit-native-integer-flow-store record))
              (progn (wasm-get (first inputs)) (emit-native-tiered-classify record)))
          t)
@@ -5601,12 +5616,13 @@ exhausted work budgets keep every incoming value group."
                                           record (native-tiered-unary instruction)))
                (t
                 (if (eq (svref record 4) :load)
-                    (emit-native-aref-snapshot instruction inputs)
+                    (emit-native-aref-snapshot instruction inputs (svref record 5))
                     (progn
                       (wasm-integer (if (eq (svref record 4) '+) 0 1))
-                      (emit-native-integer-flow-operand (third inputs))
-                      (emit-native-integer-flow-operand (fourth inputs))
-                      (wasm-call "native-integer-flow")))
+                      (when (svref record 5) (wasm-integer (svref record 5)))
+                      (emit-native-integer-flow-operand (third inputs) (svref record 5))
+                      (emit-native-integer-flow-operand (fourth inputs) (svref record 5))
+                      (wasm-call (if (svref record 5) "native-float-flow" "native-integer-flow"))))
                 (emit-native-integer-flow-store record)))
          t)))))
 
@@ -5987,9 +6003,12 @@ initializer and store facts, independently of declarations. Unknown uses keep bo
 (defun native-float-precision (value)
   (let ((type (and *wasm-inferred-types* (gethash value *wasm-inferred-types*))))
     (case type
-      (single-float 3)
-      (double-float 4)
+      ((single-float short-float) 3)
+      ((double-float long-float) 4)
       (otherwise
+       (case (hir-value-type value)
+         ((single-float short-float) (return-from native-float-precision 3))
+         ((double-float long-float) (return-from native-float-precision 4)))
        (typecase (hir-primary-constant value)
          (single-float 3)
          (double-float 4))))))
@@ -9249,7 +9268,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-plan-inline-simple native-plan-dynamic-rests native-cell-storage-roots native-plan-checked-integer-copies native-plan-proven-integers native-plan-proven-integer-arithmetic emit-native-proven-integer-arithmetic native-plan-proven-integer-comparisons emit-native-proven-integer-comparison
                    native-plan-character-code-fusion native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-builtin emit-native-tail-call
-                   native-fixed-arity native-worker-width emit-native-wide-call native-immediate-integer-result-p native-raw-aref-index native-scalar-call-name native-raw-array-store
+                   native-fixed-arity native-worker-width emit-native-wide-tail-call native-immediate-integer-result-p native-raw-aref-index native-scalar-call-name native-raw-array-store
                    emit-native-snapshot-arithmetic emit-native-snapshot-mask emit-native-scalar-snapshot
                    native-float-call-op native-float-precision native-scalar-pair-plans emit-native-scalar-pair
                    emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-unused-context emit-native-restore emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward

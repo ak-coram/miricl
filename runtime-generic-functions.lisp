@@ -557,7 +557,7 @@
       (if (i32.eq (call $array-rank-value (local.get $object)) (i32.const 1))
         (then
           (local.set $high (call $array-kind (local.get $object)))
-          (local.set $id (if (result i32) (i32.and (local.get $high) (i32.const 1))
+          (local.set $id (if (result i32) (i32.or (i32.eq (local.get $high) (i32.const 1)) (i32.eq (local.get $high) (i32.const 3)))
             (then (i32.const ,(runtime-symbol-id 'string)))
             (else (if (result i32) (i32.eq (local.get $high) (i32.const 2))
               (then (i32.const ,(runtime-symbol-id 'bit-vector))) (else (i32.const ,(runtime-symbol-id 'vector)))))))))
