@@ -1,3 +1,17 @@
+;; A symbolic inclusion proof need not produce a positive runtime SUBTYPEP.
+;; Compare both branch and value-group consumers with the same live query.
+(progn
+  (dolist (source '((or (integer 0 1) (integer 100 200)) (integer 0 7) string))
+    (let* ((answer (multiple-value-list (subtypep source 'integer)))
+           (branch (compile-native
+                     `(lambda ()
+                        (let ((type ',source))
+                          (or (not (subtypep type 'integer)) :subtype)))))
+           (query (compile-native `(lambda () (subtypep ',source 'integer)))))
+      (assert (eq (funcall branch) (if (first answer) :subtype t)))
+      (assert (equal (multiple-value-list (funcall query)) answer))))
+  (values))
+
 ;; Executed checks can prove a current SSA observation at any safety level.
 ;; Exercise the immediate, boxed scalar and fallback representations.
 (loop for safety from 1 to 3 always

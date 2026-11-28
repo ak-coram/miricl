@@ -76,6 +76,8 @@
 (defvar *hir-function-index* nil)
 (defvar *hir-inlining* nil)
 (defvar *hir-inline-small-functions* nil)
+(defvar *hir-inline-file-block* nil)
+(defvar *hir-inline-file-bindings* nil)
 ;; The bootstrap selects its own definitions list without affecting reentrant calls.
 (defvar *hir-grouped-module-definitions* nil)
 (defvar *hir-inline-budget* 0)
@@ -398,17 +400,20 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
         (when (consp next)
           (let ((operator (car next)))
             (unless (or (member operator '(quote if progn the values declare))
+                        (and (eq operator 'block) (consp (cdr next)) (symbolp (second next)))
                         (and (symbolp operator) (<= (length (symbol-name operator)) 64)
                              (not (special-operator-p operator))
-                             (not (macro-function operator))))
+                             (or (not (macro-function operator))
+                                 (eql (compiler-primitive 8 next) 1))))
               (setq plain nil))
             (unless (eq operator 'quote)
-              (dolist (child next)
+              (loop for tail = next then (cdr tail) while (consp tail) do
                 ;; Charge allocation/traversal before queuing a wide form.
                 (when (or (> (incf size) limit)
                           (> (incf *hir-inline-work*) (hir-inline-limit :work)))
                   (return-from hir-inline-size nil))
-                (push child work)))))))
+                (push (car tail) work)
+                finally (when tail (setq plain nil))))))))
     (values size plain)))
 
 (defun hir-inline-cost (form constants depth)
@@ -421,7 +426,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   (when (and (consp form)
              (not (or (member (car form) '(quote if progn the values))
                       (and (symbolp (car form)) (not (special-operator-p (car form)))
-                           (not (macro-function (car form)))))))
+                           (or (not (macro-function (car form)))
+                               (eql (compiler-primitive 8 form) 1))))))
     (throw 'hir-inline-cost :unsupported-syntax))
   (cond
     ((atom form)
@@ -486,7 +492,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
   ;; of the entire lexical function group unless a local INLINE is in scope
   ;; or the collector needs to observe policy decisions for resolved calls.
   (when (and (or (>= *hir-debug-level* 2)
-                (not (or *hir-inline-small-functions*
+                (not (or *hir-inline-small-functions* *hir-inline-file-bindings*
                          (loop for entry in *hir-inline-policy* thereis
                            (and (eq (cdr entry) 'inline) (simple-vector-p (car entry)))))))
              (not *compilation-statistics*))
@@ -502,7 +508,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                  (when (or (>= *hir-debug-level* 2) (>= (hir-local-debug-level info) 2))
                    (return-from decline :debug-policy))
                  (when (eq policy 'notinline) (return-from decline :notinline))
-                 (unless (or (eq policy 'inline) *hir-inline-small-functions*)
+                 (unless (or (eq policy 'inline) *hir-inline-small-functions*
+                             (member binding *hir-inline-file-bindings*))
                    (return-from decline :disabled-policy))
                  (when (or (nthcdr 24 *hir-inlining*) (nthcdr 24 *hir-source-path*))
                    (return-from decline :expansion-depth))
@@ -527,6 +534,11 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                            (member form *hir-source-path* :test #'eq))
                      (return-from decline :recursive-expansion))
                    (multiple-value-bind (body specials) (hir-declarations (cddr definition) t)
+                     ;; The syntactic scan excludes transfers from the named
+                     ;; block. Estimate its fallthrough body, but lower the
+                     ;; original explicit block in HIR-INLINE-BODY.
+                     (when (and (null (cdr body)) (consp (car body)) (eq (caar body) 'block))
+                       (setq body (cddar body)))
                      (let ((constants nil) (dynamic-cost 0))
                        (loop for parameter in parameters for actual in arguments do
                          (if (hir-special-p parameter specials)
@@ -1174,6 +1186,8 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
              (*hir-size-policy* (native-size-policy (cddr form) *hir-size-policy*))
              (*hir-types* (hir-type-environment variables types))
              (*hir-inline-policy* (hir-inline-environment local policy))
+             (*hir-inline-file-bindings* (if (eq form *hir-inline-file-block*) bindings
+                                            *hir-inline-file-bindings*))
              (entry *hir-block*) (prefix (hir-block-instructions entry))
              (environment *hir-dynamic*) (compiled nil))
         (when (eq (car form) 'labels)
@@ -1417,6 +1431,17 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                           (arguments (cdr forms) (cons (hir-single result) values)
                             function variables functions targets valuesp inline-decision)))
                  (lower (car forms) variables functions targets))))
+         (direct-call (form variables functions targets &optional prepared)
+           (let* ((name (car form))
+                  (decision (and (or *hir-inline-small-functions* *hir-inline-file-bindings* *hir-inline-policy*
+                                     (and functions *compilation-statistics*))
+                                 (hir-inline-candidate name (cdr form) functions))))
+             (arguments (cdr form) nil
+               (unless (and decision (not (keywordp decision)))
+                 (if (and (not prepared) (eq name (car *hir-named-definition*)))
+                     (hir-direct-function-reference name functions)
+                     (hir-function-reference name functions)))
+               variables functions targets nil decision)))
          (function-call (form variables functions targets)
            (if (hir-lexical-function-entry 'funcall functions)
                (arguments (cdr form) nil (hir-function-reference 'funcall functions) variables functions targets)
@@ -1508,8 +1533,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                              (progn
                                (defer (lambda () (setq result (hir-small-membership (hir-single result) (cdr membership)))))
                                (lower (car membership) variables functions targets))
-                             (arguments (cdr form) nil (hir-function-reference (car form) functions)
-                               variables functions targets))))))
+                             (direct-call form variables functions targets t))))))
                    ((and *hir-macro-context* (consp form) (symbolp (car form))
                          (macro-function (car form) (hir-macro-environment variables functions)))
                     (lower (macroexpand-1 form (hir-macro-environment variables functions)) variables functions targets))
@@ -1600,15 +1624,7 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                       (cond
                         (expanded (lower expansion variables functions targets))
                         ((symbolp (car form))
-                         (let ((decision (and (or *hir-inline-small-functions* *hir-inline-policy*
-                                                  (and functions *compilation-statistics*))
-                                           (hir-inline-candidate (car form) (cdr form) functions))))
-                           (arguments (cdr form) nil
-                             (unless (and decision (not (keywordp decision)))
-                               (if (eq (car form) (car *hir-named-definition*))
-                                   (hir-direct-function-reference (car form) functions)
-                                   (hir-function-reference (car form) functions)))
-                             variables functions targets nil decision)))
+                         (direct-call form variables functions targets))
                         (t
                          (defer (lambda ()
                                   (arguments (cdr form) nil (hir-single result) variables functions targets)))

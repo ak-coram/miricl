@@ -316,11 +316,12 @@
                   ((consp object) (push (cdr object) work) (push (car object) work))))))
       (nreverse markers))))
 
-(defun %file-emit-body (body complete &optional environment source-p)
+(defun %file-emit-body (body complete &optional environment source-p block-p)
   (let* ((%file-object-references nil) (%file-object-barriers nil) (%file-object-effects nil)
          (load-values (%file-load-value-markers body))
          (body (if complete (%file-lexical-form body nil nil nil nil) body))
-         (root (%fasl-dump (%fasl-hir-initializer body environment source-p))))
+         (root (let ((miricl-compiler::*hir-inline-file-block* (when block-p body)))
+                 (%fasl-dump (%fasl-hir-initializer body environment source-p)))))
     (dolist (marker load-values)
       (unless (nth-value 1 (gethash marker %fasl-seen))
         ;; A separate initializer returns the value so both portable and native
@@ -356,7 +357,7 @@
       ;; The block is one indivisible initializer in the file IR. The existing
       ;; LABELS lowering owns escape analysis, calls, argument checks and types.
       (let ((%file-definition nil))
-        (%file-emit-body (list* 'labels definitions forms) (and complete (not source-p)) nil source-p)))))
+        (%file-emit-body (list* 'labels definitions forms) (and complete (not source-p)) nil source-p t)))))
 
 (defun %file-block-declaration (spec)
   (when (and %file-compiling %file-block-mode)

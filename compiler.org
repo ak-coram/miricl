@@ -268,10 +268,11 @@ binding currently holding a standard function gives no such provenance.
 Accepted arity and executable operand facts can prove individual
 properties, such as non-signaling LIST access or an integer comparison.
 They establish neither arbitrary effect freedom nor permission to omit a
-poll. TYPEP and SUBTYPEP use the same bounded symbolic type rules for
-recognized literal arguments while retaining the original checked
-operation. Successful-return type, value count and primary-value demand
-remain distinct.
+poll. TYPEP uses bounded symbolic type rules for recognized literal
+arguments while retaining the original checked operation. Branches on
+SUBTYPEP use the runtime answer, whose certainty depends on the runtime
+subtype procedure. Successful-return type, value count and primary-value
+demand remain distinct.
 
 *** Simplification and inlining
 
@@ -299,6 +300,12 @@ under narrow literal facts. It approximates encoded growth while assuming
 the original out-of-line body remains. It declines opaque forms and does
 not expand macros or run user code. Whole-function policy summaries also
 let a local speed-oriented region veto Wasm outlining.
+
+Prepared file calls use their resolved lexical bindings for inlining and
+retain their definition-time macro decisions. File block compilation enables
+automatic small-function inlining for the definitions collected in its outer
+LABELS group. The estimator counts the fallthrough forms of a named block
+with no explicit transfers. Lowering preserves the callee's block scope.
 
 Source lowering can inline an immediately applied literal lambda with up
 to four required parameters or a sole rest parameter. This covers APPLY
@@ -461,6 +468,12 @@ an i64 local, and the original Lisp object on its boxed path. LOGAND tests
 the status before using the scalar and applies the ordinary operation to
 the boxed operand on a miss. Admission checks every predecessor before
 lowering either edge.
+
+Within a structured loop, a block parameter with one local incoming edge
+can keep an exact wide integer in its own i64 local. This covers sequences
+of blocks that forward an inlined helper's result to a loop update. Each
+edge stores the value from its verified incoming operand, and reference
+consumers still materialize the Lisp value.
 
 Checked array snapshots can read an owned fixnum backing or flat packed
 bit storage into the integer transport. The checked integer store accepts
@@ -903,13 +916,19 @@ bounds the work in each strip. The trip count can be unknown and the loop
 can have dynamic exits or run indefinitely.
 
 The audit requires a common latch and a fixed number of polls on every path
-that reaches it. It accepts a set of total scalar instructions, immediate
-i31 reference construction, nontrapping reference tests, private local
+that reaches it. It accepts a set of total scalar instructions including
+null and immediate i31 reference construction, internal/external reference
+conversions and nontrapping reference tests. It also accepts private local
 operations and poll-free forward control flow. The ordinary and admitted
-paths share the body. On a latch or a void exit, the emitter settles the exact
-work performed, including the polls already traversed on a partially completed
-trip. A denied or short grant keeps the ordinary checkpoints. Typed exit
-payloads, unknown calls and mutable storage accesses retain ordinary lowering.
+paths share the body. A bounded set of conditional direct calls is allowed
+when a forward path to the latch bypasses all of them. Before a call on
+the other path, the emitter charges the polls reached so far and clears
+the grant. The call retains its effects and checkpoints, and the rest of
+the trip uses ordinary polls. The latch can then request a fresh grant.
+On a latch or a void exit, the emitter settles the exact work performed,
+including the reached polls of a partially completed trip. A denied or
+short grant keeps the ordinary checkpoints. Typed exit payloads,
+unavoidable calls and mutable storage instructions retain ordinary lowering.
 
 Opt-in strip-mining diagnostics record module admission separately from
 body admission. Body coverage counts coalesced bodies before pruning. A

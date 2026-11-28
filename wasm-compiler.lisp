@@ -6386,6 +6386,56 @@ initializer and store facts, independently of declarations. Unknown uses keep bo
                     (if boxed (vector offset parameter width nil :array-snapshot 0 status)
                         (vector offset parameter width nil :result 0 type)))))))))
 
+(defun native-plan-unboxed-single-edges (blocks table offset count fuel)
+  (declare (type simple-vector table) (type list blocks)
+           (type (unsigned-byte 32) offset count))
+  (let ((inputs nil) (parameters nil))
+    ;; Scan emitted predecessors so a recorded input names the edge that
+    ;; will actually store the result. Structural extra edges still veto it.
+    (dolist (predecessor blocks)
+      (when (minusp (decf fuel))
+        (return-from native-plan-unboxed-single-edges count))
+      (let* ((end (hir-block-terminator predecessor))
+             (value (case (hir-instruction-opcode end)
+                      (:jump (first (hir-instruction-inputs end)))
+                      (:block-return (third (hir-instruction-inputs end)))))
+             (block (and value (first (hir-instruction-attributes end))))
+             (parameter (and block (first (hir-block-parameters block))))
+             (incoming (and parameter (hir-block-predecessors block))))
+        (when (and parameter (eq predecessor (first incoming)) (null (cdr incoming))
+                   (native-value-slot *wasm-live-values* parameter)
+                   (native-value-slot *wasm-scalar-groups* parameter)
+                   (native-value-slot *wasm-scalar-groups* value)
+                   (not (native-value-slot table parameter)))
+          (unless inputs (setq inputs (make-hash-table :test 'eq)))
+          (setf (gethash parameter inputs) value)
+          (push parameter parameters))))
+    ;; Nested BLOCK exits need not follow block-ID order. Resolve each edge
+    ;; from an already admitted raw result, without following checked copies
+    ;; or sharing a mutable local across successive observations.
+    (dolist (parameter parameters count)
+      (let ((path nil) (value parameter))
+        (loop
+          (when (minusp (decf fuel))
+            (return-from native-plan-unboxed-single-edges count))
+          (let ((record (native-value-slot table value))
+                (input (gethash value inputs)))
+            (cond ((native-unboxed-join-input-p record)
+                   (dolist (target path)
+                     (setf (native-value-slot table target)
+                           (vector (+ offset count) target (svref record 2) nil :result 0
+                                   (if (> (length record) 6) (svref record 6)
+                                       (list 'signed-byte (svref record 2)))))
+                     (incf count))
+                   (return))
+                  (input
+                   ;; A second visit with no result is a cycle or a path
+                   ;; already found to have no exact producer.
+                   (remhash value inputs)
+                   (push value path)
+                   (setq value input))
+                  (t (return)))))))))
+
 (defun native-float-call-op (instruction)
   (when (and (%hir-instruction-p instruction)
              (eq (gethash instruction *wasm-inline-simple-calls*) :standard-call))
@@ -6464,7 +6514,7 @@ initializer and store facts, independently of declarations. Unknown uses keep bo
                     (otherwise (return))))))))))
     plans))
 
-(defun native-plan-unboxed-values (function blocks offset forward)
+(defun native-plan-unboxed-values (function blocks offset forward structured)
   "Choose transient i64 storage for proven bounded results and their aliases.
 Arithmetic uses overflow-safe canonical plans. Fused character reads use the
 shared target CHAR-CODE result rule while retaining the checked read. Generic
@@ -6625,6 +6675,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
             (incf statuses)))))
     (multiple-value-setq (table count)
       (native-plan-unboxed-cell-values function blocks table count offset))
+    (when (and structured table (not *wasm-dynamic-bindings*))
+      (setq count (native-plan-unboxed-single-edges blocks table offset count fuel)))
     (when table
       ;; The fusion planner leaves CHAR-CODE as a transparent :LEFT call.
       ;; Its CHAR producer still owns the checked read and its raw snapshot.
@@ -7296,7 +7348,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
             (setf (svref record 6) (+ (if direct 2 3) raw-count)) (incf raw-count)))))
     (let ((statuses 0))
       (multiple-value-setq (unboxed wide-count statuses float-pairs)
-        (native-plan-unboxed-values function blocks (+ (if direct 2 3) raw-count) forward))
+        (native-plan-unboxed-values function blocks (+ (if direct 2 3) raw-count) forward structured))
       (when (plusp statuses)
         (let ((shifted (make-hash-table :test 'eq)))
           (loop for record across unboxed when (and record (not (gethash record shifted))) do
@@ -8231,19 +8283,35 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
       (compiler-statistic :optimization/cell-folding nil pairs)
       t)))
 
+(defun native-loop-call-free-path-p (ops first latch poll)
+  ;; The audited region has no inner backedge. Sweep backward so each
+  ;; marked instruction has a forward path to this latch without a barrier.
+  (let ((reaches-latch (make-array (1+ (- latch first)) :initial-element nil)))
+    (setf (aref reaches-latch (- latch first)) t)
+    (loop for i downfrom (1- latch) to first
+          for op = (aref ops i) do
+      (when (and (or (not (eql (native-op-code op) #x10))
+                     (eql (native-op-argument op) poll))
+                 (some (lambda (next)
+                         (and (< i next) (<= next latch)
+                              (aref reaches-latch (- next first))))
+                       (native-op-successors op)))
+        (setf (aref reaches-latch (- i first)) t)))
+    (aref reaches-latch 0)))
+
 (defun native-scalar-work-loop (body ops poll)
   ;; Match the final executable loop, after wrapper construction, arity
-  ;; copies and local optimization. Candidate instructions cannot trap or
-  ;; change anything outside this activation except at the recorded polls.
+  ;; copies and local optimization. Only recorded polls and call barriers
+  ;; can trap or change anything outside this activation.
   (when (find #x1f ops :key (lambda (op) (native-op-code op)))
     (native-decision-statistic :decision-coverage/loop-strip-mining :body-exception-control)
     (return-from native-scalar-work-loop nil))
   (native-decision-statistic :decision-coverage/loop-strip-mining :measured)
-  (let ((scopes nil) (size (length ops)))
+  (let ((scopes nil) (size (length ops)) (flow-ready nil))
     (loop for op across ops for start from 0 do
       (when (and (eql (native-op-code op) #x03) (eql (native-op-argument op) #x40)
                  (= (- (native-op-end op) (native-op-start op)) 2))
-        (let ((sites nil) (nesting 0) (prefix 0))
+        (let ((sites nil) (nesting 0) (prefix 0) (barriers 0))
           (loop for i from (1+ start) below (min size (+ start 48))
                 for instruction = (aref ops i)
                 for code = (native-op-code instruction) do
@@ -8255,12 +8323,12 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                 #x45 #x46 #x47 #x48 #x49 #x4a #x4b #x4c #x4d #x4e #x4f
                 #x50 #x51 #x52 #x53 #x54 #x55 #x56 #x57 #x58 #x59 #x5a
                 #x6a #x6b #x6c #x71 #x79 #x7b #x7c #x7d #x7e #x83 #x84 #x85 #x86 #x87 #xa7 #xac #xad
-                #xd1 #xd3))
+                #xd0 #xd1 #xd3))
               (#xfb
-               ;; REF.I31 wraps an i32 into an immediate reference. It
-               ;; cannot allocate, trap, or observe mutable state. REF.TEST
-               ;; only inspects the reference's immutable dynamic type.
-               (unless (member (native-op-argument instruction) '(#x14 #x1c))
+               ;; REF.TEST reads the immutable dynamic type. ANY.CONVERT_EXTERN
+               ;; and EXTERN.CONVERT_ANY preserve null and convert references
+               ;; without invoking the host. REF.I31 constructs an immediate.
+               (unless (member (native-op-argument instruction) '(#x14 #x1a #x1b #x1c))
                  (native-decision-statistic :decision/loop-strip-mining :unsupported-instruction)
                  (return)))
               ((#x02 #x04) (incf nesting))
@@ -8287,20 +8355,35 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                        (return)))
                    (push (cons instruction prefix) sites))))
               (#x10
-               ;; All paths that reach this observation passed the same
-               ;; earlier polls. No nested path may skip or add one.
-               (unless (and (zerop nesting) (eql (native-op-argument instruction) poll))
-                 (native-decision-statistic :decision/loop-strip-mining
-                   (if (eql (native-op-argument instruction) poll) :nested-poll :other-call))
-                 (return))
-               (when (and (< (+ i 2) size)
-                          (eql (native-op-code (aref ops (1+ i))) #x0c)
-                          (eql (native-op-argument (aref ops (1+ i))) 0)
-                          (eql (native-op-code (aref ops (+ i 2))) #x0b))
-                 (return-from native-scalar-work-loop
-                   (list (nreverse sites) instruction (1+ prefix))))
-               (push (cons instruction nil) sites)
-               (incf prefix))
+               (cond
+                 ((eql (native-op-argument instruction) poll)
+                  ;; Every path reaching this site passes the same polls.
+                  (unless (zerop nesting)
+                    (native-decision-statistic :decision/loop-strip-mining :nested-poll)
+                    (return))
+                  (when (and (< (+ i 2) size)
+                             (eql (native-op-code (aref ops (1+ i))) #x0c)
+                             (eql (native-op-argument (aref ops (1+ i))) 0)
+                             (eql (native-op-code (aref ops (+ i 2))) #x0b))
+                    (when (plusp barriers)
+                      (unless flow-ready
+                        (native-op-flow ops)
+                        (setq flow-ready t))
+                      (unless (native-loop-call-free-path-p ops (1+ start) i poll)
+                        (native-decision-statistic :decision/loop-strip-mining :other-call)
+                        (return)))
+                    (return-from native-scalar-work-loop
+                      (list (nreverse sites) instruction (1+ prefix))))
+                  (push (cons instruction nil) sites)
+                  (incf prefix))
+                 (t
+                  ;; A forward path to this loop's latch cannot skip a
+                  ;; top-level call. Bound the added settlement code.
+                  (when (or (zerop nesting) (= barriers 3))
+                    (native-decision-statistic :decision/loop-strip-mining :other-call)
+                    (return))
+                  (incf barriers)
+                  (push (cons instruction prefix) sites))))
               (otherwise
                (native-decision-statistic :decision/loop-strip-mining :unsupported-instruction)
                (return)))
@@ -8340,8 +8423,9 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
               (if prefix
                   (let ((conditional (eql (native-op-code site) #x0d)))
                     (when conditional (wasm-byte #x04) (wasm-byte #x40))
-                    ;; Charge completed trips and the prefix of this trip.
-                    ;; Without a grant, the ordinary prefix already polled.
+                    ;; Settle before a call or void exit, leaving any live
+                    ;; operands below the added IF. Without a grant the
+                    ;; prefix already used or settled its ordinary polls.
                     (when (zerop prefix)
                       (wasm-local granted) (wasm-local remaining) (wasm-byte #x6b)
                       (wasm-byte #x22) (wasm-u32 remaining))
@@ -8353,7 +8437,8 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                           (wasm-integer prefix) (wasm-byte #x6a))
                         (wasm-local remaining))
                     (wasm-call "native-work-complete") (wasm-byte #x0b)
-                    ;; An enclosing loop can run this same region again.
+                    ;; Clear the grant before the copied operation, even if
+                    ;; the settlement owed no work.
                     (wasm-integer 0) (wasm-byte #x22) (wasm-u32 remaining)
                     (wasm-byte #x21) (wasm-u32 granted)
                     (if conditional
@@ -8366,7 +8451,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                     (wasm-call "native-poll") (wasm-byte #x0b)))
               (setq cursor (native-op-end site))))
           (wasm-append body cursor (native-op-start latch))
-          ;; Zero on entry means the whole trip took its ordinary poll path.
+          ;; Zero on entry leaves this latch on its ordinary poll path.
           ;; A positive countdown is an integral number of trips, capped by
           ;; the checked grant. The last admitted latch settles at the same
           ;; logical observation as its ordinary poll, before readmission.
@@ -9641,7 +9726,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
     native-private-scalar-return-source native-private-scalar-contract native-plan-private-scalar-site native-private-scalar-edges-valid-p
     native-plan-reusable-scalar native-scalar-float-chain emit-native-scalar-float-chain
     native-reusable-scalar-section native-boxed-scalar-worker
-    native-scalar-work-loop native-batch-scalar-work native-epoch-poll-body
+    native-loop-call-free-path-p native-scalar-work-loop native-batch-scalar-work native-epoch-poll-body
     compilation-statistics-report publish-native-decision-statistics record-native-decision-statistic record-compilation-size
     native-observe-raw-integer-operand native-observe-tail-candidates compiler-input-summary
     hir-assert-form hir-correctable-place-form hir-restart-options
@@ -9697,7 +9782,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    hir-capture hir-cell-for-binding
                    hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-widen-integer-interval hir-type-restrict hir-constant-type hir-type-cell
                    hir-type-without-null hir-copy-source hir-type-truth-premise hir-type-branch-guards
-                   hir-standard-property-negative-p hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-literal-list-cells hir-literal-counter-cells hir-bounded-integer-cells hir-literal-clock-cells hir-symbolic-target-type-p hir-type-query-result-type hir-literal-byte-field-chain hir-literal-byte-field-type hir-integer-identity hir-integer-branch-type hir-integer-comparison-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-integer-bit-measure-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
+                   hir-standard-property-negative-p hir-inline-primitive hir-primary-result-sources hir-primary-result-facts hir-standard-operation-leaf hir-standard-operations hir-primary-constant hir-literal-list-cells hir-literal-counter-cells hir-bounded-integer-cells hir-literal-clock-cells hir-symbolic-target-type-p hir-typep-result-type hir-literal-byte-field-chain hir-literal-byte-field-type hir-integer-identity hir-integer-branch-type hir-integer-comparison-branch-type hir-integer-predicate-type hir-integer-comparison-type hir-integer-bit-measure-type hir-inline-result-type infer-hir-types infer-hir-types-checked hir-primary-flow hir-local-callee-flow hir-result-callee hir-result-callees hir-result-arities-checked
                    hir-dispatch-candidate
                    hir-forward-blocks hir-optimization-barriers hir-private-cells hir-copy-instruction hir-forward-private-cells
                    hir-constant-fact hir-constant-join hir-update-constant hir-constant-edge hir-propagate-constants hir-simplify-cfg hir-tail-pair-p hir-share-branch-tails hir-refresh-predecessors optimize-hir-checked optimize-hir
@@ -9714,7 +9799,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-plan-vector-snapshots emit-native-vector-snapshot-prefix emit-native-vector-snapshot-mode
                    emit-native-vector-snapshot-comparison emit-native-vector-snapshot-operation
                    native-snapshot-masks native-snapshot-operand native-snapshot-bit-measure native-snapshot-bit-operation
-                   native-plan-unboxed-arguments native-plan-unboxed-cell-values native-snapshot-source native-unboxed-join-input-p native-plan-unboxed-join native-plan-unboxed-values native-checked-integer-bound-root native-plan-unboxed-checked-copies native-function-plan emit-native-function-body emit-native-function-body-checked emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-with-results emit-native-module-checked emit-native-module
+                   native-plan-unboxed-arguments native-plan-unboxed-cell-values native-snapshot-source native-unboxed-join-input-p native-plan-unboxed-join native-plan-unboxed-single-edges native-plan-unboxed-values native-checked-integer-bound-root native-plan-unboxed-checked-copies native-function-plan emit-native-function-body emit-native-function-body-checked emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-with-results emit-native-module-checked emit-native-module
                    hir-body hir-close hir-local-macros-form hir-lambda
                    hir-tagbody-form hir-setq-form hir-local-functions-form
                    hir-multiple-value-bind-form hir-block-form hir-simple-restart-form

@@ -25,6 +25,56 @@
                           ,@(cdddr scalar))))
              stopped-at)))
 
+;; A conditional call allows polling to be batched along the call-free path.
+;; The call can still leave the loop nonlocally or return to its ordinary latch.
+(miricl-compiler:with-compilation-statistics (statistics)
+  (let* ((limit 65530)
+         (stop (* 3 (ceiling limit 3)))
+         (last-trip (- stop 3))
+         (visits nil)
+         (worker (miricl-compiler:compile-native
+                  `(lambda (visit)
+                     (declare (optimize (space 2) (speed 1) (safety 1) (debug 1)))
+                     (do ((position 0 (logand (+ position 3) 65535)))
+                         ((>= position ,limit) position)
+                       (when (= position ,last-trip) (funcall visit)))))))
+    (assert (equal (multiple-value-list
+                     (catch 'exit-loop
+                       (funcall worker (lambda ()
+                                         (push :escape visits)
+                                         (throw 'exit-loop (values :escaped nil))))))
+                   '(:escaped nil)))
+    (assert (equal (multiple-value-list
+                     (funcall worker (lambda ()
+                                       (push :return visits)
+                                       (values nil :unused))))
+                   (list stop)))
+    (assert (equal visits '(:return :escape)))
+    (assert (find-if (lambda (row)
+                       (and (eq (first row) :decision/loop-strip-mining)
+                            (eq (second row) :applied)
+                            (plusp (third row))))
+                     (miricl-compiler:compilation-statistics-report statistics)))))
+
+;; Keep the exact saved object and result count across each strip. Assigning
+;; NIL and a small integer exercises the two constant-reference paths.
+(dolist (value '(nil 9))
+  (miricl-compiler:with-compilation-statistics (statistics)
+    (let ((function (miricl-compiler:compile-native
+                     `(lambda (initial)
+                        (declare (optimize (space 2) (speed 1) (safety 1) (debug 1)))
+                        (let ((saved initial))
+                          (do ((position 0 (logand (+ position 3) 65535)))
+                              ((>= position 65530) (values position saved))
+                            (setq saved ,value)))))))
+      (assert (equal (multiple-value-list (funcall function :initial))
+                     (list (* 3 (ceiling 65530 3)) value)))
+      (assert (find-if (lambda (row)
+                         (and (eq (first row) :decision/loop-strip-mining)
+                              (eq (second row) :applied)
+                              (plusp (third row))))
+                       (miricl-compiler:compilation-statistics-report statistics))))))
+
 (let ((branch (miricl-compiler:compile-native
                 '(lambda (choice)
                    (declare (optimize (debug 1)))
@@ -55,6 +105,62 @@
       (assert (= (funcall function) 42))
       (assert (not (assoc :decision/lexical-inline
                           (miricl-compiler:compilation-statistics-report statistics)))))))
+
+;; Automatic inlining exposes a literal step. Explicit INLINE exposes an
+;; arithmetic result that must cross the helper's implicit block exit before
+;; the loop can be strip-mined. Check both native compilation paths.
+(let ((entry 'diagnostic-block-loop)
+      (helper 'diagnostic-block-step)
+      (source "/compiler-decisions-block.lisp")
+      (portable "/compiler-decisions-block.wasm")
+      (native "/compiler-decisions-block-native.wasm")
+      (policy '(optimize (space 2) (speed 1) (safety 1) (debug 1)))
+      (expected (list (* 3 (ceiling 65530 3)))))
+  (flet ((check-decision (statistics rule decision phase)
+           (assert (find-if (lambda (row)
+                              (and (eq (first row) rule)
+                                   (eq (second row) decision)
+                                   (plusp (third row))))
+                            (miricl-compiler:compilation-statistics-report statistics))
+                   () "Expected ~S decision ~S in ~S." rule decision phase))
+         (check-entry (function &optional nativep)
+           (when nativep (assert (compiled-function-p function)))
+           (assert (equal (multiple-value-list (funcall function)) expected))))
+    (dolist (directive '(nil inline notinline))
+      (let* ((decision (if (eq directive 'notinline) :notinline :applied))
+             (strip-decision (if (eq directive 'notinline) :other-call :applied))
+             (definitions
+              `((defun ,helper ,(when directive '(position))
+                  (declare ,policy)
+                  ,(if directive '(logand (+ position 3) 65535) 3))
+                (defun ,entry ()
+                  (declare ,policy ,@(when directive (list (list directive helper))))
+                  (do ((position 0 ,(if directive `(,helper position)
+                                       `(logand (+ position (,helper)) 65535))))
+                      ((>= position 65530) position))))))
+        (miricl-compiler:with-compilation-statistics (statistics)
+          (let ((entries (miricl-compiler:compile-native-module definitions :entry-points (list entry))))
+            (check-decision statistics :decision/lexical-inline decision :sealed-module)
+            (check-decision statistics :decision/loop-strip-mining strip-decision :sealed-module)
+            (check-entry (cdr (assoc entry entries)) t)))
+        (with-open-file (stream source :direction :output :if-exists :supersede)
+          (dolist (definition definitions)
+            (write definition :stream stream :readably t)
+            (terpri stream)))
+        (miricl-compiler:with-compilation-statistics (statistics)
+          (assert (compile-file source :output-file portable :verbose nil
+                                :block-compile t :entry-points (list entry)))
+          (check-decision statistics :decision/lexical-inline decision :file-block))
+        (load portable :verbose nil)
+        (check-entry (fdefinition entry))
+        (miricl-compiler:with-compilation-statistics (statistics)
+          (miricl-compiler:compile-native-bundle portable native)
+          (check-decision statistics :decision/loop-strip-mining strip-decision :native-bundle))
+        (fmakunbound entry)
+        (load native :verbose nil)
+        (check-entry (fdefinition entry) t)
+        (assert (not (fboundp helper)))
+        (fmakunbound entry)))))
 
 (let ((typed (miricl-compiler:compile-native
                '(lambda (value)

@@ -1030,7 +1030,7 @@ This is a local certificate, not a runtime length or general loop analysis."
                  (compiler-statistic :proof/literal-list-counter)) proofs)
       proofs)))
 
-(defun hir-symbolic-target-type-p (type &optional stable)
+(defun hir-symbolic-target-type-p (type)
   "Recognize a bounded closed subset of target type syntax without expansion.
 Opaque names, SATISFIES, parameterized FUNCTION and unsupported constructors
 remain unknown. Charge every spine and nested bound before proof queries;
@@ -1050,13 +1050,12 @@ quoted literals need not already have passed declaration-type validation."
              (known (item depth)
                (when (or (zerop depth) (minusp (decf fuel))) (return-from known nil))
                (if (symbolp item)
-                   (and (not (and stable (eq item 'keyword)))
-                        (not (null (member item '(nil t null boolean symbol keyword cons list
+                   (not (null (member item '(nil t null boolean symbol cons list
                      number complex real rational ratio integer fixnum bignum bit
                      signed-byte unsigned-byte float short-float single-float double-float long-float
                      array simple-array vector simple-vector string simple-string base-string
                      simple-base-string bit-vector simple-bit-vector sequence character base-char
-                     standard-char extended-char function compiled-function hash-table package readtable)))))
+                     standard-char extended-char function compiled-function hash-table package readtable))))
                    (and (consp item)
                      (multiple-value-bind (items proper) (parts item)
                        (and proper
@@ -1075,28 +1074,20 @@ quoted literals need not already have passed declaration-type validation."
                            (otherwise nil))))))))
       (known type 16))))
 
-(defun hir-type-query-result-type (name types inputs)
-  "Primary successful-result facts for TYPEP/SUBTYPEP, keeping their calls.
-Use target relationships only, with a literal recognized type and null optional
-environment. SUBTYPEP's false and unknown answers are deliberately not inferred."
-  (unless (and (member name '(typep subtypep)) (<= 2 (length inputs) 3))
-    (return-from hir-type-query-result-type nil))
+(defun hir-typep-result-type (type inputs)
+  "Refine the primary result of a checked TYPEP on a recognized literal type."
+  ;; SUBTYPEP can answer unknown for a relationship the compiler can prove.
+  ;; Its callers must use the actual result of the runtime query.
+  (unless (<= 2 (length inputs) 3)
+    (return-from hir-typep-result-type nil))
   (when (third inputs)
     (multiple-value-bind (environment known) (hir-primary-constant (third inputs))
-      (unless (and known (null environment)) (return-from hir-type-query-result-type nil))))
+      (unless (and known (null environment)) (return-from hir-typep-result-type nil))))
   (multiple-value-bind (required known) (hir-primary-constant (second inputs))
-    (unless (and known (hir-symbolic-target-type-p required (eq name 'typep)))
-      (return-from hir-type-query-result-type nil))
-    (case name
-      (typep
-       (cond ((null required) 'null)
-             ((hir-type-proves-p (first types) required) '(not null))
-             ((hir-type-proves-p (first types) (list 'not required)) 'null)))
-      (subtypep
-       (multiple-value-bind (source known) (hir-primary-constant (first inputs))
-         (when (and known (hir-symbolic-target-type-p source)
-                    (or (null source) (hir-type-proves-p source required)))
-           '(not null)))))))
+    (when (and known (hir-symbolic-target-type-p required))
+      (cond ((null required) 'null)
+            ((hir-type-proves-p type required) '(not null))
+            ((hir-type-proves-p type (list 'not required)) 'null)))))
 
 (defun hir-type-truth-premise (test &optional cells reverse-comparison)
   "Recover a truth or canonical type predicate through immutable temporaries.
@@ -1118,7 +1109,7 @@ CELLS records actual private uses, not client binding flags."
                   (name (hir-inline-primitive producer)))
              (when (and (eq name 'typep) (<= 4 (length inputs) 5))
                (multiple-value-bind (type known) (hir-primary-constant (fourth inputs))
-                 (when (and known type (hir-symbolic-target-type-p type t)
+                 (when (and known type (hir-symbolic-target-type-p type)
                             (or (null (fifth inputs))
                                 (multiple-value-bind (environment known) (hir-primary-constant (fifth inputs))
                                   (and known (null environment)))))
@@ -1564,7 +1555,7 @@ numbers, including bignums, and is never proved true by this rule."
   (when (and (member name '(+ - *)) types
              (every (lambda (type) (nth-value 2 (hir-integer-interval type))) types))
     (setq fallback 'integer))
-  (let ((query (and inputs (hir-type-query-result-type name types inputs))))
+  (let ((query (and inputs (eq name 'typep) (hir-typep-result-type (first types) inputs))))
     (when query (return-from hir-inline-result-type query)))
   ;; These describe successful returns of canonical target operations. Keep
   ;; the target's Unicode repertoire independent of host CHAR-CODE-LIMIT.
