@@ -164,7 +164,7 @@
             symbolp vectorp)
            ((:result-type boolean) null not)
            ((:predicate-type array) arrayp)
-           ((:predicate-type atom) atom)
+           ((:predicate-type (not cons)) atom)
            ((:predicate-type bit-vector) bit-vector-p)
            ((:predicate-type character) characterp)
            ((:predicate-type compiled-function) compiled-function-p)
@@ -467,7 +467,12 @@
            ;; stronger than ordinary argument signatures. Integer comparison
            ;; and bitwise AND have no floating contagion or floating exceptions.
            ((:non-signaling-arguments (list)) car first cdr rest endp)
-           ((:non-signaling-arguments (integer integer)) < > <= >= = /= logand)
+           ((:non-signaling-arguments (cons t)) rplaca rplacd)
+           ((:non-signaling-arguments (integer) :non-allocating-arguments (integer))
+            zerop minusp plusp evenp oddp)
+           ((:non-signaling-arguments (integer integer) :non-allocating-arguments (integer integer))
+            < > <= >= = /=)
+           ((:non-signaling-arguments (integer integer)) logand)
            ((:result-count 1 :result-type cons :result-argument 0 :arity (2 . 2)
              :keywords nil :argument-types (cons t) :writes t :callbacks nil
              :may-signal t :sharing :argument) rplaca rplacd)
@@ -1600,7 +1605,13 @@ checked native entry. Inventory membership alone licenses neither."
         count)))
 
 (defun standard-function-predicate-type (name)
-  (standard-function-property name :predicate-type))
+  "Return a stable type domain for a unary predicate."
+  (let ((type (standard-function-property name :predicate-type)))
+    (when type
+      (multiple-value-bind (reads known) (standard-function-property name :reads)
+        (when (and known (null reads))
+          (multiple-value-bind (callbacks known) (standard-function-property name :callbacks)
+            (when (and known (null callbacks)) type)))))))
 
 (defun standard-function-list-path (name)
   "CAR/CDR operations in evaluation order, or NIL when no path is known."

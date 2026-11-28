@@ -100,7 +100,8 @@
                  (initial-type (hir-value-type initial)) (all t))
             (dolist (read (svref reads id))
               (let ((output (hir-instruction-output read)))
-                (if (and output (or (eq (hir-value-type output) t) (equal (hir-value-type output) initial-type)))
+                (if (and output (not (hir-value-declaration output))
+                         (or (eq (hir-value-type output) t) (equal (hir-value-type output) initial-type)))
                     (setf (svref aliases (hir-value-id output)) (hir-value-id initial))
                     (setq all nil))))
             (when all (setf (svref aliases id) (hir-value-id initial)))))))
@@ -285,12 +286,20 @@
                            (block-code block function))) (hir-function-blocks function)))
                (info (hir-code-debug-info function #'register (svref plan 0)))
                (debug (vector (svref info 0) (svref info 1) (car (gethash function debug-sites))))
-               (types (coerce (loop for value in (hir-function-values function)
-                                   unless (or (eq (hir-value-type value) t)
-                                              (>= (svref (svref plan 0) (hir-value-id value)) 0))
-                                     append (list (register value)
-                                              (if executable-p (copy-hir-debug-type-checked (hir-value-type value))
-                                                  (hir-value-type value)))) 'simple-vector))
+               (types (coerce
+                        (loop for value in (hir-function-values function)
+                              for type = (hir-value-type value)
+                              for declaration = (hir-value-declaration value)
+                              unless (or (eq type t) (>= (svref (svref plan 0) (hir-value-id value)) 0))
+                                append
+                                ;; A complemented register marks a possible
+                                ;; check on this observation. Keep the ordinary
+                                ;; type entry independent of that check.
+                                (nconc (when declaration
+                                         (list (lognot (register value)) 'fixnum))
+                                       (list (register value)
+                                             (if executable-p (copy-hir-debug-type-checked type) type))))
+                        'simple-vector))
                (parameters (hir-code-parameters (hir-function-parameters function))))
           (setf (svref descriptors i)
           (if executable-p

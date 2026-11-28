@@ -2208,6 +2208,8 @@ try {
     ...immutableIntegerFields.map(index => malformedIntegerFields[index]));
   vm.vm[`core-set:${integerType}`](malformedInteger,
     ...mutableIntegerFields.map(index => malformedIntegerFields[index]));
+  rejectPacketOperation(() => vm.vm['native-check-int64'](malformedInteger));
+  assert.equal(vm.vm['native-check-int64'](boxedOne), boxedOne);
   const lowFieldAdd = vm.vm['native-low-field-add'];
   rejectPacketOperation(() => lowFieldAdd(3, malformedInteger, freshOne));
   rejectPacketOperation(() => lowFieldAdd(3, freshOne, malformedInteger));
@@ -3037,6 +3039,7 @@ try {
 
   check(await fs.readFile(new URL('./soundness-integer-flow.lisp', import.meta.url), 'utf8'));
   check(await fs.readFile(new URL('./soundness-bit-measures.lisp', import.meta.url), 'utf8'));
+  check(await fs.readFile(new URL('./soundness-predicates.lisp', import.meta.url), 'utf8'));
   check(await fs.readFile(new URL('./soundness-double-flow.lisp', import.meta.url), 'utf8'));
 
   // A character read remains an observation across the fixed call and a
@@ -4083,6 +4086,8 @@ try {
         (miricl-threads:thread-yield)
         (and (= armed 1) ${expected})))`, {eof: true})).output, 'T\n', name);
   }
+  const predicateCheckpoints = await fs.readFile(new URL('./soundness-predicate-checkpoints.lisp', import.meta.url), 'utf8');
+  assert.equal((await vm.evaluateAsync(predicateCheckpoints, {eof: true})).output, 'T\n', 'predicate checkpoints');
   // A private literal bytespec bounds a successful field result. An escaped
   // bytespec and a dynamic width keep the ordinary full-width path.
   check(`(let ((compare (compile-native '(lambda (x)

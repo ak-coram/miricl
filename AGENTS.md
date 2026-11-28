@@ -79,6 +79,17 @@ or list operation non-signaling does not make its polling path non-signaling
 or unobservable. Primary-value demand does not prove that a callee returns
 exactly one value.
 
+When adding or extending an optimization, audit its uses across the
+compiler and runtime. Consider other optimization passes that can consume
+its facts or use its mechanism, existing and complementary proofs that
+can unlock more cases, and all affected ANSI functions, operation families,
+representations, policies and result demands. Apply the mechanism to the
+eligible cases in the same batch, share the implementation, and validate
+representative cases across the affected paths. Close known opportunities
+the mechanism already supports before finishing the batch. Record concrete
+semantic, backend or measured cost barriers for cases that need a distinct
+mechanism, with evidence sufficient to resume that work.
+
 Executable proof seeds must describe checks actually emitted at the relevant
 observation, not stronger declarations. Track every SSA operand on which a
 refinement depends. Discard speculative checks, facts and dependent lowering
@@ -92,6 +103,12 @@ contracts. Preserve operand effects and order, multiple values, numeric
 contagion, bignum promotion, and observable errors and traps. Structural input
 validation remains mandatory before unchecked compiler internals; an
 optimization proof does not replace boundary checks.
+
+Build and validate proof-based lowering for checked application code at
+the default compiler policy. Use executable facts to enable the same
+lowering at positive SAFETY when they establish its obligations. Treat
+SAFETY 0 as a separate policy that can also admit declaration-only facts
+where the language and compiler permit them.
 
 Keep the engine small enough to ship with the compiler. Treat it as a
 long-term investment: retain useful generic rules with modest image cost even
@@ -194,9 +211,10 @@ Do not impose explicit process memory or heap limits in CI workflows or build to
 invoked by CI. Use the CI runner and runtime defaults. Keep local shared-machine
 resource checks and optional caps separate from CI configuration.
 
-Keep the default precompiled browser image below 1 MiB (1,048,576 raw bytes). Track raw
-and compressed sizes separately; download compression does not replace this
-size budget. Preserve the compiler-free image for lightweight scripting.
+Keep the complete default precompiled browser image within 1,474,560 raw bytes,
+the capacity of a 3.5-inch high-density floppy disk. Count the embedded adapter
+in that limit and track download compression separately. Preserve the
+compiler-free image for lightweight scripting.
 
 Cold-runtime sizes and standalone helper modules do not certify the default
 precompiled compiler image budget. Measure matching complete artifacts including
@@ -206,7 +224,10 @@ separately from Wasm image growth.
 
 Design optimization policy around compact browser deployment by default:
 `(optimize (space 2) (speed 1))`. Give users local control over measured hot
-paths, for example `(optimize (speed 3) (space 1))`. When SPACE exceeds SPEED,
+paths, for example `(optimize (speed 3) (space 1))`. Make useful optimizations
+available and effective at the default levels. Invest in compiler analysis,
+shared lowering and cost modeling to make paths fit the default policy.
+When SPACE exceeds SPEED,
 favor shared helpers, conservative inlining and little code duplication. When
 SPEED exceeds SPACE, allow larger inlining budgets, specialization and code
 duplication where they plausibly reduce execution time. At equal priorities,
@@ -222,8 +243,8 @@ and account for complete emitted modules, including imports, literals and
 retained shared helpers, rather than relying only on source-form counts.
 COMPILATION-SPEED independently controls analysis effort. SPEED and SPACE must
 not implicitly lower SAFETY or DEBUG, change redefinition/visibility contracts,
-or imply STRIP. The 1 MiB budget applies to the default shipped image; it does
-not forbid users from deliberately trading space for speed in their programs.
+or imply STRIP. The image budget applies to the default shipped image. Users
+can deliberately trade space for speed in their programs.
 Keep the shipped interpreter/compiler compact and annotate measured hot paths
 selectively. This is the intended policy; distinguish it from heuristics that
 do not yet implement these controls.

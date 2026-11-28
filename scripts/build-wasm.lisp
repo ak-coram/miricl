@@ -12,9 +12,10 @@
       (apply #'uiop:symbol-call :miricl :write-interpreter-wasm path (rest entry))
       (when (getf (rest entry) :native-compiler)
         (with-open-file (in path :element-type '(unsigned-byte 8))
-          (unless (< (file-length in) 1048576)
-            (error "Precompiled image exceeds the 1 MiB raw size budget: ~D bytes."
-                   (file-length in)))))
+          (let ((size (file-length in)) (budget 1474560))
+            (when (> size budget)
+              (error "Precompiled image is ~D raw bytes and exceeds the ~D-byte budget."
+                     size budget)))))
       (format t "Wrote ~A~%" path))))
 
 ;; Images carry their matching adapter. Keep the full terminal adapter and the

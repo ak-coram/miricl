@@ -221,6 +221,16 @@ such facts. A LIST fact permits NIL or CONS and gives no proper-spine proof.
 Checked inference invokes the interpreted literal-counter proof worker
 only when it has a certified cursor length.
 
+At positive SAFETY a scoped FIXNUM declaration can offer a checked SSA
+snapshot at a lexical read. The native planner compares the proofs and
+lowerings with and without the proposed checks. It retains a check when an
+emitted integer predicate, comparison or bounded arithmetic lowering depends
+on it. Later reads of the same immutable SSA value in the same block can
+share that check. A caller-side proof or a checked producer can already
+establish FIXNUM and avoid the declaration check. Each check admits both
+immediate and boxed FIXNUMs. Proofs of narrower ranges and physical
+representations have independent requirements.
+
 A bounded audit of private integer cells joins the successful result ranges
 of the initializer and every store. A literal-initialized counter that
 advances by one toward a literal limit also bounds the number of updates to
@@ -817,6 +827,17 @@ value-state cleanup. The checked LOGBITP kernel reads the low bit directly
 when the index is immediate zero and the integer has a validated scalar
 representation. Other inputs use the full integer bit operation. The ANSI
 entry retains its operation-entry checks and checkpoints.
+
+The same executable-fact query selects checked integer predicates,
+comparisons, bounded arithmetic and cons operations at positive SAFETY.
+Known predicate outcomes can fold before considering scalar width. Other
+proved integer tests use raw operands or the shared signed-i64 extractor.
+The selected call's checkpoints and value cleanup stay at its original
+observation, including when a result is discarded or feeds a branch.
+Executed sign tests narrow the range of an independently established
+integer, and stable type predicates refine the observed value. Mutable
+classification such as keyword package membership keeps a live test.
+
 A discarded SETF AREF result allows the fixed call to pass the stored
 integer directly. The store checks its captured callable and live
 destination after the operation-entry checkpoint. On a miss it
@@ -1188,7 +1209,7 @@ the same adapter. The WASI terminal component provides its executable relay
 to Wasmtime and carries the Node compiler image and relay core in separate
 top-level custom sections. The Node launcher validates the enclosing section
 bounds and extracts the core for the selected operation. The complete default
-browser image has a 1 MiB raw budget, including its adapter.
+browser image has a raw budget of 1,474,560 bytes, including its adapter.
 
 Saved images retain reachable state, native code and captures. The loader
 validates field layouts, reference bounds and graphs against exported

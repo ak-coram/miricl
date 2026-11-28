@@ -290,8 +290,11 @@
           (unless (< (svref function 3) (length blocks)) (hir-code-error function "entry block out of range"))
           (loop for i from 0 below (length (svref function 7)) by 2 do
             (let ((register (svref (svref function 7) i)))
-              (unless (and (typep register '(unsigned-byte 31)) (< register registers))
-                (hir-code-error register "type annotation register out of range"))))
+              (unless (and (integerp register)
+                           (< (if (minusp register) (lognot register) register) registers))
+                (hir-code-error register "type annotation register out of range"))
+              (when (and (minusp register) (not (eq (svref (svref function 7) (1+ i)) 'fixnum)))
+                (hir-code-error register "invalid declared snapshot hint"))))
           (dotimes (bi (length blocks))
             (let ((block (svref blocks bi)))
               (unless (and (simple-vector-p block) (= (length block) 3)
@@ -450,8 +453,10 @@
            (*print-readably* nil) (*print-circle* t) (*print-level* 4) (*print-length* 8))
       (loop for i from 0 below (length bindings) by 3 do
         (setf (svref names (svref bindings i)) (svref bindings (1+ i))))
-      (loop for i from 0 below (length (svref function 9)) by 2 do
-        (setf (svref types (svref (svref function 9) i)) (svref (svref function 9) (1+ i))))
+      (loop for i from 0 below (length (svref function 9)) by 2
+            for register = (svref (svref function 9) i)
+            unless (minusp register)
+              do (setf (svref types register) (svref (svref function 9) (1+ i))))
       (labels ((register (id)
                  (if (svref names id) (format nil "%~D[~S]" id (svref names id)) (format nil "%~D" id)))
                (literal (id) (svref literals id)))

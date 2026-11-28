@@ -22,15 +22,16 @@ NIL means unknown. This does not describe entry dispatch, polling or cleanup."
     (multiple-value-bind (value known) (standard-function-property name property)
       (when (and known (null value))
         (return-from hir-standard-property-negative-p (values t nil))))
-    (when (eq property :may-signal)
-      (let ((domains (standard-function-property name :non-signaling-arguments)))
-        ;; This audited contract is deliberately stronger than an ordinary
-        ;; argument signature; signatures alone do not exclude other errors.
-        (when (and domains (= arity (length domains))
-                   (loop for operand in operands for domain in domains always
-                     (and (> (car fuel) 0)
-                          (hir-type-proves-p (gethash operand proven t) domain 32 fuel))))
-          (values t operands))))))
+    (let ((domains (case property
+                     (:may-signal (standard-function-property name :non-signaling-arguments))
+                     (:allocation (standard-function-property name :non-allocating-arguments)))))
+      ;; Each audited domain is independent of the ordinary argument
+      ;; signature and says nothing about the other properties.
+      (when (and domains (= arity (length domains))
+                 (loop for operand in operands for domain in domains always
+                   (and (> (car fuel) 0)
+                        (hir-type-proves-p (gethash operand proven t) domain 32 fuel))))
+        (values t operands)))))
 
 (defun hir-result-callee (value &optional callees)
   "Executable code provenance, without asserting closure object identity."
@@ -552,6 +553,8 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
       (return-from hir-type-proves-p nil))
     (decf (car fuel)))
   (cond ((or (eq required t) (hir-type-equal-p type required)) t)
+        ((eq type 'atom) (hir-type-proves-p '(not cons) required (1- depth) fuel))
+        ((eq required 'atom) (hir-type-proves-p type '(not cons) (1- depth) fuel))
         ((and (consp type) (eq (car type) 'eql))
          (cond ((eq required 'null) (null (second type)))
                ((equal required '(not null)) (not (null (second type))))
@@ -578,7 +581,10 @@ NIL means unknown; this is deliberately not a complete SUBTYPEP procedure."
              (not (zerop (logand 33 (hir-nominal-type-mask type))))))
         ((and (consp required) (eq (car required) 'not))
          (let ((excluded (second required)))
-           (cond ((and (consp excluded) (member (car excluded) '(and or)))
+           (cond ((eq excluded 'atom) (hir-type-proves-p type 'cons (1- depth) fuel))
+                 ((and (consp excluded) (eq (car excluded) 'not))
+                  (hir-type-proves-p type (second excluded) (1- depth) fuel))
+                 ((and (consp excluded) (member (car excluded) '(and or)))
                   (let ((queries (cdr excluded)))
                     (if (eq (car excluded) 'or)
                         (every (lambda (part) (hir-type-proves-p type (list 'not part) (1- depth) fuel)) queries)
@@ -1024,7 +1030,7 @@ This is a local certificate, not a runtime length or general loop analysis."
                  (compiler-statistic :proof/literal-list-counter)) proofs)
       proofs)))
 
-(defun hir-symbolic-target-type-p (type)
+(defun hir-symbolic-target-type-p (type &optional stable)
   "Recognize a bounded closed subset of target type syntax without expansion.
 Opaque names, SATISFIES, parameterized FUNCTION and unsupported constructors
 remain unknown. Charge every spine and nested bound before proof queries;
@@ -1044,12 +1050,13 @@ quoted literals need not already have passed declaration-type validation."
              (known (item depth)
                (when (or (zerop depth) (minusp (decf fuel))) (return-from known nil))
                (if (symbolp item)
-                   (not (null (member item '(nil t null boolean symbol keyword cons list
+                   (and (not (and stable (eq item 'keyword)))
+                        (not (null (member item '(nil t null boolean symbol keyword cons list
                      number complex real rational ratio integer fixnum bignum bit
                      signed-byte unsigned-byte float short-float single-float double-float long-float
                      array simple-array vector simple-vector string simple-string base-string
                      simple-base-string bit-vector simple-bit-vector sequence character base-char
-                     standard-char extended-char function compiled-function hash-table package readtable))))
+                     standard-char extended-char function compiled-function hash-table package readtable)))))
                    (and (consp item)
                      (multiple-value-bind (items proper) (parts item)
                        (and proper
@@ -1078,7 +1085,7 @@ environment. SUBTYPEP's false and unknown answers are deliberately not inferred.
     (multiple-value-bind (environment known) (hir-primary-constant (third inputs))
       (unless (and known (null environment)) (return-from hir-type-query-result-type nil))))
   (multiple-value-bind (required known) (hir-primary-constant (second inputs))
-    (unless (and known (hir-symbolic-target-type-p required))
+    (unless (and known (hir-symbolic-target-type-p required (eq name 'typep)))
       (return-from hir-type-query-result-type nil))
     (case name
       (typep
@@ -1111,7 +1118,7 @@ CELLS records actual private uses, not client binding flags."
                   (name (hir-inline-primitive producer)))
              (when (and (eq name 'typep) (<= 4 (length inputs) 5))
                (multiple-value-bind (type known) (hir-primary-constant (fourth inputs))
-                 (when (and known type (hir-symbolic-target-type-p type)
+                 (when (and known type (hir-symbolic-target-type-p type t)
                             (or (null (fifth inputs))
                                 (multiple-value-bind (environment known) (hir-primary-constant (fifth inputs))
                                   (and known (null environment)))))
@@ -1135,12 +1142,10 @@ CELLS records actual private uses, not client binding flags."
                 (setq predicate t inverse (not inverse)
                       current (third (hir-instruction-inputs producer))))
                ((member name '(zerop minusp plusp))
-                ;; Numeric premises retain their declaration/SAFETY contract,
-                ;; independently of the standard operation's identity.
-                (when (zerop (hir-instruction-safety-level producer))
-                  (return-from hir-type-truth-premise
-                    (values (third (hir-instruction-inputs producer)) inverse name)))
-                (return))
+                ;; The executed test refines only an operand whose integer
+                ;; membership is established independently.
+                (return-from hir-type-truth-premise
+                  (values (third inputs) inverse name)))
                (type
                 (return-from hir-type-truth-premise
                   (values (third (hir-instruction-inputs producer)) inverse type)))
@@ -1914,7 +1919,7 @@ operation can still have finite bounds, as with a nonnegative LOGAND operand."
                    (hir-type-restrict type (gethash cell invariants t)))) proofs))
     (or invariants proofs)))
 
-(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts operation-facts guard-facts certificates barrier-facts)
+(defun infer-hir-types-checked (unit roots rootsp &optional entries proven-only callee-facts operation-facts guard-facts certificates barrier-facts boundary-facts)
   "Internal inference kernel; UNIT and ROOTS have passed the public boundary.
 Return primary type facts, executable branch premises and open functions.
 Optional metadata is internal: it must describe this same owned UNIT and must
@@ -1956,8 +1961,15 @@ be discarded after mutation. The public inference boundary accepts no maps."
                  (setf (gethash value queued) t) (push value work)))
              (joined (value)
                (let ((type nil))
-                 (dolist (input (gethash value sources) type)
-                   (setq type (hir-type-join type (gethash input facts)))))))
+                 (if boundary-facts
+                     (let ((owner (if (%hir-function-p value) value (hir-value-owner value))))
+                       (dolist (input (gethash value sources) type)
+                         (setq type (hir-type-join type
+                           (gethash input
+                             (if (eq owner (if (%hir-function-p input) input (hir-value-owner input)))
+                                 facts boundary-facts))))))
+                     (dolist (input (gethash value sources) type)
+                       (setq type (hir-type-join type (gethash input facts))))))))
       ;; Parameter facts require a closed set of callers. A function passed as
       ;; a value to application code, returned, or stored in a cell must keep
       ;; its ordinary unrestricted entry parameters.
@@ -2180,4 +2192,4 @@ be discarded after mutation. The public inference boundary accepts no maps."
             (unless (hir-type-equal-p previous next)
               (setf (gethash value facts) next)
               (dolist (user (gethash value users)) (enqueue user))))))
-      (values facts guards escaped))))
+      (values facts guards escaped required))))

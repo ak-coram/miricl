@@ -1101,9 +1101,12 @@
 
 (define-runtime-function $native-check-int64 (($value externref)) (externref)
   (:export-raw "native-check-int64")
-  (:locals ($object :nullable-object))
+  (:locals ($object :nullable-object) ($miss i32))
   #@(local.set $object (call $native-checked-value (local.get $value)))
-  #@(if (i32.eqz (call $scalar-integer-p (local.get $object)))
+  #@(call $decode-scalar-integer (local.get $object))
+  #@(local.set $miss)
+  #@(drop)
+  #@(if (local.get $miss)
     (then (call $list-type-error (local.get $object) (i32.const ,(runtime-symbol-id 'fixnum)))))
   #@(local.get $value))
 
@@ -1813,6 +1816,23 @@
 (define-runtime-function $native-poll () ()
   (:export-raw "native-poll")
   (miricl-cross::thread-checkpoint-wat))
+
+(define-runtime-function $native-apply-checkpoints () ()
+  (:export-raw "native-apply-checkpoints")
+  (:locals ($result :nullable-object) ($thrown i32))
+  ;; A proven scalar body can replace fixed CALL1 followed by APPLY. The
+  ;; second checkpoint runs under DEBUG-APPLY's flag, even if it transfers.
+  #@(if (global.get $thread-active)
+    (then
+      (call $thread-checkpoint)
+      (if (global.get $debug-evaluating)
+        (then
+          (global.set $debug-evaluating (i32.const 0))
+          (drop ,(debug-protected-call
+                   (runtime-wat-sequence #@(call $thread-checkpoint) #@(ref.null eq))
+                   #@(global.set $debug-evaluating (i32.const 1)))))
+        (else (call $thread-checkpoint)))))
+  #@(call $clear-values))
 
 (define-runtime-function $native-frame-enter (($function externref)) (i32 externref)
   (:export-raw "native-frame-enter")
@@ -4303,7 +4323,7 @@ Unknown identity, arity or result count leaves the ordinary evaluator path."
   ($native-character-code-at-unboxed-inline)
   ($native-character-code-at64-unboxed-inline)
   ($native-vector-set-inline)
-  ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-frame-enter) ($native-frame-leave)
+  ($native-primary-apply) ($native-builtin-id) ($native-poll) ($native-apply-checkpoints) ($native-frame-enter) ($native-frame-leave)
   ($native-tail-enter) ($native-tail-direct) ($native-tail-call) ($native-generic-tail-call)
   ($native-symbol-fixed-function) ($native-fixed-apply-ready) ($native-fixed-call)
   ($native-call-values1-ready) ($native-capture-result) ($native-call-values1) ($native-call-captured1)

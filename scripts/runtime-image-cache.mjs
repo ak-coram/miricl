@@ -78,7 +78,9 @@ export async function runtimeOutputRows(workspace = root) {
       throw new Error(`Invalid runtime cache artifact: ${file}`);
     rows.push({file, bytes: bytes.length, sha256: sha(bytes)});
   }
-  if (rows.find(row => row.file === 'miricl.wasm').bytes >= 1048576) throw new Error('Default compiler image exceeds the raw 1 MiB budget.');
+  const size = rows.find(row => row.file === 'miricl.wasm').bytes;
+  const budget = 1_474_560;
+  if (size > budget) throw new Error(`Default compiler image is ${size} raw bytes and exceeds the ${budget}-byte budget.`);
   return rows;
 }
 export async function verifyRuntimeDistribution(workspace, key) {

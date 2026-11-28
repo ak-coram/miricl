@@ -160,19 +160,20 @@ pages from the explicit images, and run the ordinary checks. A miss keeps the
 interpreted guest bootstrap followed by native compiler compilation. Cached
 statistics report reuse without invented current-run compiler counters.
 
-The default =miricl.wasm= avoids first-use compiler bootstrapping. Its native compiler
-and runtime receive the shared size optimizations during the build; no
-external optimizer is required. Its raw size budget is below 1 MiB
-(1,048,576 bytes). Browser application builds also package images as =.gz=
-files using Node's maximum gzip level. The adapter uses native browser
-decompression, so static hosts need no =Content-Encoding= configuration.
-The same generic instruction and
-module passes apply to native application bundles. Optimization
-includes constant folding, dead-code removal, local simplification and
-module compaction; it does not require application specific compiler
-rules. Quicklisp loads the Lisp dependencies automatically. If your
-Quicklisp setup file is elsewhere, set =QUICKLISP_SETUP= when
-building:
+The default =miricl.wasm= avoids first-use compiler bootstrapping. Its
+native compiler and runtime receive the shared size optimizations
+during the build; no external optimizer is required. The complete
+uncompressed image, including its adapter, fits within the
+1,474,560-byte capacity of a 3.5-inch high-density floppy disk.
+Browser application builds also package images as =.gz= files using
+Node's maximum gzip level. The adapter uses native browser
+decompression, so static hosts need no =Content-Encoding=
+configuration.  The same generic instruction and module passes apply
+to native application bundles. Optimization includes constant folding,
+dead-code removal, local simplification and module compaction; it does
+not require application specific compiler rules. Quicklisp loads the
+Lisp dependencies automatically. If your Quicklisp setup file is
+elsewhere, set =QUICKLISP_SETUP= when building:
 
 #+begin_src sh
 QUICKLISP_SETUP=/path/to/quicklisp/setup.lisp just build

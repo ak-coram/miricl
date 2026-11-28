@@ -56,7 +56,7 @@
 (define-hir-record hir-function name parent parameters environment entry blocks captures bindings values
   (value-count 0) (block-count 0) (debug-level 1) (optimization-policy 25))
 (define-hir-record hir-block id parameters instructions terminator predecessors environment)
-(define-hir-record hir-value id kind owner producer (type t))
+(define-hir-record hir-value id kind owner producer (type t) declaration)
 (define-hir-record hir-instruction opcode inputs output attributes origin effect (safety-level 1))
 (define-hir-record hir-binding name owner cell special-p captured-p assigned-p local)
 (define-hir-record hir-local definition variables functions targets types policy debug-level used-p function (safety-level 1) macro-context (size-policy 25))
@@ -609,7 +609,14 @@ and outer free declarations. Arithmetic still needs its own overflow proof."
                     (hir-emit :cell-read (list (hir-cell-for-binding binding)) :single nil :read)
                     (hir-emit :global-read (list *hir-dynamic*) :single (list name) :read)))
          (type (assoc (or binding name) *hir-types*)))
-    (when type (setf (hir-value-type value) (cdr type)))
+    (when type
+      (setf (hir-value-type value) (cdr type))
+      (when (and (plusp *hir-safety-level*)
+                 (eq (hir-instruction-opcode (hir-value-producer value)) :cell-read)
+                 (or (eq (cdr type) 'fixnum)
+                     (and (fboundp 'hir-type-proves-p)
+                          (hir-type-proves-p (cdr type) 'fixnum))))
+        (setf (hir-value-declaration value) 'fixnum)))
     value))
 
 (defun hir-write-variable (name value environment)
@@ -2255,6 +2262,8 @@ global definitions. Internal calls refer to this group's lexical definitions."
           (value item)
           (unless (eq (hir-value-type item) t)
             (compiler-type-specifier (hir-value-type item) types-checked))
+          (unless (member (hir-value-declaration item) '(nil fixnum))
+            (compiler-input-fail "HIR declaration" (hir-value-declaration item) "invalid declared snapshot hint"))
           (unless (or (%hir-instruction-p (hir-value-producer item))
                       (%hir-block-p (hir-value-producer item))
                       (gethash (hir-value-producer item) owners))

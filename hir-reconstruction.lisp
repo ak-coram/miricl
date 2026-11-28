@@ -24,9 +24,14 @@
               (svref captures fi) (make-array (svref d 4) :initial-element nil))
         (dotimes (i (length vs)) (setf (svref vs i) (make-hir-value-record i :single f nil)))
         (loop for i from 0 below (length (svref d 9)) by 2 do
-          (let ((type (svref (svref d 9) (1+ i))))
-            (compiler-type-specifier type)
-            (setf (hir-value-type (svref vs (svref (svref d 9) i))) type)))
+          (let* ((register (svref (svref d 9) i))
+                 (type (svref (svref d 9) (1+ i)))
+                 (value (svref vs (if (minusp register) (lognot register) register))))
+            (if (minusp register)
+                (setf (hir-value-declaration value) 'fixnum)
+                (progn
+                  (compiler-type-specifier type)
+                  (setf (hir-value-type value) type)))))
         (dotimes (i (length bs))
           (setf (svref bs i) (make-hir-block-record i)))
         (setf (hir-function-values f) (coerce vs 'list)

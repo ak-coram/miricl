@@ -107,6 +107,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
 (defvar *wasm-branch-tests* nil)
 (defvar *wasm-reused-values* nil)
 (defvar *wasm-checked-integer-copies* nil)
+(defvar *wasm-checked-integer-consumers* nil)
+(defvar *wasm-checked-integer-activity* nil)
+(defvar *wasm-declared-integer-guards* t)
 (defvar *wasm-cons-forward-blocks* nil)
 (defvar *wasm-unboxed-values* nil)
 (defvar *wasm-vector-snapshot-prefixes* nil)
@@ -308,6 +311,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     ("native-set-aref-int64" (:object :i64 :object :object) nil)
     ("native-search-list" (:object :object :i32) :object)
     ("native-poll" nil nil)
+    ("native-apply-checkpoints" nil nil)
     ("native-frame-enter" (:object) (:i32 :object))
     ("native-frame-leave" (:object :i32 :object :i32) :object)
     ("native-return1" (:object) :object)
@@ -714,7 +718,8 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                (and proof (svref proof 3))))
     (return-from native-removable-p nil))
   (when (and *wasm-inline-simple-calls*
-             (eq (gethash instruction *wasm-inline-simple-calls*) :endp-list))
+             (let ((plan (gethash instruction *wasm-inline-simple-calls*)))
+               (or (eq plan :endp-list) (and (consp plan) (plusp (cdr plan))))))
     (return-from native-removable-p nil))
   ;; The compound LDB performs the covered BYTE and arithmetic effects. The other
   ;; cases below can disappear when unused without transferring effects.
@@ -733,7 +738,7 @@ Bind to NIL to interpret forms, including forms without native lowering.")
       ;; not interchangeable with an existing allocation or safe to hoist.
       (and *wasm-inline-simple-calls* (eq (hir-instruction-opcode instruction) :call)
            (let ((kind (gethash instruction *wasm-inline-simple-calls*)))
-             (or (integerp kind)
+             (or (integerp kind) (consp kind)
                  (and kind (not (eq kind :standard-call))
                       (native-standard-effect-free-p (hir-inline-primitive instruction)
                         (- (length (hir-instruction-inputs instruction)) 2)))
@@ -785,6 +790,12 @@ Bind to NIL to interpret forms, including forms without native lowering.")
     (when (and (eq (hir-instruction-opcode instruction) :block-return)
                (hir-instruction-attributes instruction))
       (return-from native-live-inputs (list (third inputs))))
+    (when (and (null test) (eq (hir-instruction-opcode instruction) :branch)
+               (or (eq (first (hir-instruction-attributes instruction))
+                       (second (hir-instruction-attributes instruction)))
+                   (nth-value 1
+                     (native-proven-truth (first inputs) (hir-instruction-safety-level instruction)))))
+      (return-from native-live-inputs nil))
     (when test
       (return-from native-live-inputs
         (if (second test)
@@ -794,6 +805,9 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                   (cddr (hir-instruction-inputs (second test)))))
             (list (first test)))))
     (let ((kind (and *wasm-inline-simple-calls* (gethash instruction *wasm-inline-simple-calls*))))
+      (when (or (member kind '(:true :false))
+                (and (consp kind) (member (car kind) '(:true :false))))
+        (return-from native-live-inputs nil))
       (if (or (and *wasm-inline-vector-calls* (gethash instruction *wasm-inline-vector-calls*)) kind)
           ;; These primitives use neither the function lookup nor the hidden
           ;; dynamic environment. Their explicit operands retain evaluation order.
@@ -1209,11 +1223,12 @@ Bind to NIL to interpret forms, including forms without native lowering.")
                         (let ((plan (gethash instruction *wasm-inline-simple-calls*)))
                           (when (or (and (integerp plan) (< plan #x60))
                                     (member plan '(:true :false :evenp :oddp :eq :eql :consp :symbolp))
-                                    ;; Do not move a potentially signaling compare
-                                    ;; past the terminator's existing backedge poll.
-                                    (and (member plan '(:less-real :greater-real :not-greater-real :not-less-real
+                                    ;; Keep extraction and comparison before
+                                    ;; the terminator's existing backedge poll.
+                                    (and (or (consp plan)
+                                             (member plan '(:less-real :greater-real :not-greater-real :not-less-real
                                                        :proven-less-int64 :proven-greater-int64
-                                                       :proven-not-greater-int64 :proven-not-less-int64))
+                                                       :proven-not-greater-int64 :proven-not-less-int64)))
                                          (every (lambda (target)
                                                   (> (hir-block-id target) (hir-block-id block)))
                                                 (hir-instruction-attributes end))))
@@ -1502,7 +1517,8 @@ Liveness can then remove an allocation whose identity is never observed."
         ((:primary :copy :truth) (setq value (first (hir-instruction-inputs producer))))
         (:call
          (let ((kind (gethash producer *wasm-inline-simple-calls*)))
-           (return (values (eq kind :true) (and (member kind '(:true :false)) t)))))
+           (when (consp kind) (setq kind (car kind)))
+           (return (values (eq kind :true) (and (member kind '(:true :false)) t) producer))))
         (otherwise (return))))))
 
 (defun native-proof-reachable-blocks (function)
@@ -1571,7 +1587,7 @@ exhausted work budgets keep every incoming value group."
                              ;; Canonical inline operations have known value
                              ;; counts even in a full multiple-value context.
                              ;; GETHASH retains its two-value representation.
-                             (or (integerp kind)
+                             (or (integerp kind) (consp kind)
                                  (member kind '(:eq :eql :consp :simple-vector-p :vectorp :stringp :symbolp :integerp :characterp :null :true :false
                                                 :left :right :cons :list :list-star :car :cdr :car-cons :cdr-cons
                                                 :checked-car :checked-cdr :rplaca-cons :rplacd-cons :length :list-length :vector-length
@@ -1712,6 +1728,7 @@ exhausted work budgets keep every incoming value group."
                  (inputs (hir-instruction-inputs instruction)))
              (unless (or (gethash instruction *wasm-inline-vector-calls*)
                          (integerp kind)
+                         (and (consp kind) (zerop (cdr kind)))
                          (member kind '(:eq :eql :consp :simple-vector-p :vectorp :stringp :symbolp :integerp :null :true :false
                                         :left :right :cons :list :list-star :car :cdr :car-cons :cdr-cons
                                         :checked-car :checked-cdr :length :vector-length :evenp :oddp))
@@ -2833,7 +2850,7 @@ exhausted work budgets keep every incoming value group."
   ;; Each CASE arm names an exact standard CL operation. These bounded plans
   ;; reuse compact checked helpers or replace the ordinary argument packet;
   ;; NOTINLINE still vetoes expansion. Never classify a private builtin by ID.
-  (let ((arithmetic nil) (list-accesses nil) (integer-operands nil)
+  (let ((arithmetic nil) (list-accesses nil) (integer-operands nil) (predicates nil)
         (fuel 4096) (low-field-fuel (list 4096))
         (arithmetic-functions 0))
     (declare (type (integer -1 4096) fuel))
@@ -2861,7 +2878,7 @@ exhausted work budgets keep every incoming value group."
           ;; for instructions in eligible functions. Exhaustion discards the
           ;; executable-fact candidates; ordinary and comparison plans continue.
           (when (and arithmeticp (not (minusp fuel)) (minusp (decf fuel)))
-            (setq arithmetic nil list-accesses nil integer-operands nil))
+            (setq arithmetic nil list-accesses nil integer-operands nil predicates nil))
           (when (eq (hir-instruction-opcode instruction) :call)
             (let* ((inputs (hir-instruction-inputs instruction)) (reference (second inputs))
                    (producer (hir-value-producer reference))
@@ -3036,23 +3053,45 @@ exhausted work budgets keep every incoming value group."
                         ((eq type 'null) (setq kind :false)))))
               (when kind
                     (when (and arithmeticp (not (minusp fuel))
-                               (= (hir-instruction-safety-level instruction) 1)
+                               (plusp (hir-instruction-safety-level instruction))
                                (or (and (eq kind :standard-call)
-                                        (or (and (= (length inputs) 4) (member name '(+ - *)))
-                                            (and (= (length inputs) 3) (member name '(1+ 1-)))))
+                                        (or (and (= (length inputs) 4) (member name '(+ - * logior logxor)))
+                                            (and (= (length inputs) 3)
+                                                 (or (member name '(1+ 1-))
+                                                     (and (eq name 'lognot)
+                                                          (null *wasm-closed-worker-functions*))))))
                                    (and (eq kind :logand-general) (eq name 'logand))))
                       ;; NAME already requires a direct canonical reference
                       ;; with expansion permission, including NOTINLINE.
                       (push (cons instruction name) arithmetic))
-                    (when (and arithmeticp (not (minusp fuel))
-                               (= (hir-instruction-safety-level instruction) 1)
-                               (= (length inputs) 3)
-                               (member name '(car first cdr rest endp))
-                               *wasm-inferred-types*
-                               (hir-type-proves-p (gethash (third inputs) *wasm-inferred-types* t) 'list))
+                    (when (and arithmeticp (not (minusp fuel)) *wasm-inferred-types*
+                               (case kind
+                                 ((:checked-car :checked-cdr)
+                                  (hir-type-proves-p (gethash (third inputs) *wasm-inferred-types* t) 'list))
+                                 (:standard-call
+                                  (and (null *wasm-closed-worker-functions*)
+                                       (case name
+                                         (endp (and (= (length inputs) 3)
+                                                    (hir-type-proves-p
+                                                      (gethash (third inputs) *wasm-inferred-types* t) 'list)))
+                                         ((rplaca rplacd)
+                                          (and (= (length inputs) 4)
+                                               (hir-type-proves-p
+                                                 (gethash (third inputs) *wasm-inferred-types* t) 'cons))))))))
                       ;; Mixed facts only select roots. The shared executable
                       ;; query below independently certifies every operand.
                       (push (cons instruction name) list-accesses))
+                    (when (and arithmeticp (not (minusp fuel))
+                               name (eq name standard-name)
+                               (not (member kind '(:true :false :evenp :oddp)))
+                               (not (integerp kind))
+                               (case (length inputs)
+                                 (3 (or (standard-function-predicate-type name)
+                                        (member name '(zerop minusp plusp evenp oddp))))
+                                 (4 (member name '(eq eql = /= < <= > >=))))
+                               (or (not (eq kind :standard-call))
+                                   (and (null *wasm-fixed-call-emitter*) (null *wasm-closed-worker-functions*))))
+                      (push (cons instruction name) predicates))
                     (when (and arithmeticp (not (minusp fuel))
                                (or (eq kind :integer-length)
                                    (and (eq kind :standard-call) (eq name 'logcount)
@@ -3087,7 +3126,7 @@ exhausted work budgets keep every incoming value group."
     (when (and *native-decision-statistics* (plusp arithmetic-functions))
       (native-decision-statistic :decision-coverage/checked-integer-arithmetic
         (if (minusp fuel) :selection-budget :measured) arithmetic-functions))
-    (native-plan-proven-integers unit arithmetic list-accesses sealed-entries certificates integer-operands)
+    (native-plan-proven-integers unit arithmetic list-accesses sealed-entries certificates integer-operands predicates)
   (native-plan-character-code-fusion unit)
   *wasm-inline-simple-calls*))
 
@@ -3124,33 +3163,170 @@ exhausted work budgets keep every incoming value group."
             (push (second (hir-instruction-inputs instruction)) roots)))))
     roots))
 
-(defun native-plan-checked-integer-copies (comparisons arithmetic)
-  "Select declared snapshots for checked scalar lowering, without moving them."
-  (let ((copies nil) (fuel 4096))
-    (dolist (comparison comparisons)
-      (dolist (operand (cddr (hir-instruction-inputs comparison)))
-        (loop repeat 32 do
-          (when (minusp (decf fuel)) (return-from native-plan-checked-integer-copies nil))
-          (let ((producer (hir-value-producer operand)))
-            (unless (and (%hir-instruction-p producer)
-                         (eq (hir-instruction-opcode producer) :copy)) (return))
-            (let* ((input (first (hir-instruction-inputs producer)))
-                   (origin (hir-value-producer input))
-                   (function (hir-value-owner operand)))
-              (when (and (= (hir-instruction-safety-level producer) 1)
-                         (%hir-instruction-p origin) (eq (hir-instruction-opcode origin) :argument)
-                         (null (hir-block-predecessors (hir-function-entry function)))
-                         (member producer (hir-block-instructions (hir-function-entry function)) :test #'eq)
-                         (not (gethash function *wasm-optimization-barriers*))
-                         (hir-value-type operand) (hir-type-proves-p (hir-value-type operand) 'fixnum)
-                         (some (lambda (entry)
-                                 (eq function (hir-value-owner (hir-instruction-output (car entry))))) arithmetic))
-                (unless copies (setq copies (make-hash-table :test 'eq)))
-                (setf (gethash operand copies) comparison))
-              (setq operand input))))))
-    copies))
+(defun native-plan-checked-integer-copies (required baseline)
+  "Offer exact lexical snapshots that the executable proof query visited."
+  (let ((candidates (make-hash-table :test 'eq))
+        (copies (make-hash-table :test 'eq))
+        (fuel 4096))
+    (maphash
+     (lambda (value needed)
+       (declare (ignore needed))
+       (when (%hir-value-p value)
+         (let ((producer (hir-value-producer value))
+               (function (hir-value-owner value)))
+           (when (and (eq (hir-value-declaration value) 'fixnum) (%hir-instruction-p producer)
+                      (eq (hir-value-kind value) :single)
+                      (plusp (hir-instruction-safety-level producer))
+                      (< (hir-function-debug-level function) 2)
+                      (not (gethash function *wasm-optimization-barriers*))
+                      (case (hir-instruction-opcode producer)
+                        (:copy (eq (hir-value-kind (first (hir-instruction-inputs producer))) :single))
+                        (:cell-read
+                         (let* ((cell (first (hir-instruction-inputs producer)))
+                                (origin (hir-value-producer cell)))
+                           (and (%hir-instruction-p origin)
+                                (eq (hir-instruction-opcode origin) :cell-new)
+                                (not (gethash cell *wasm-optimization-barriers*))))))
+                      (not (hir-type-proves-p (gethash value baseline t) 'fixnum)))
+             (setf (gethash value candidates) t (gethash function copies) nil)))))
+     required)
+    (maphash
+     (lambda (function groups)
+       (block function
+         (dolist (block (hir-function-blocks function))
+           (let ((observations nil))
+             (dolist (instruction (hir-block-instructions block))
+               (when (minusp (decf fuel)) (return-from native-plan-checked-integer-copies nil))
+               (let ((value (hir-instruction-output instruction)))
+                 (when (gethash value candidates)
+                   ;; A promoted read observes the same immutable SSA object
+                   ;; as an earlier copy from this root. Begin at a real
+                   ;; declared observation and never move it across a block.
+                   (let* ((source (and (eq (hir-instruction-opcode instruction) :copy)
+                                       (hir-copy-source value)))
+                          (previous (and source (cdr (assoc source observations)))))
+                     (if previous
+                         (push value (cdr previous))
+                         (let ((group (list value)))
+                           (when (nthcdr 7 groups)
+                             (setf (gethash function copies) :exhausted)
+                             (return-from function nil))
+                           (when source (push (cons source group) observations))
+                           (push group groups)))))))))
+         (setf (gethash function copies) groups)))
+     copies)
+    (when (plusp (hash-table-count copies)) copies)))
 
-(defun native-plan-proven-integers (unit candidates &optional list-accesses sealed-entries certificates integer-operands)
+(defun native-checked-integer-plans (proven arithmetic comparisons predicates)
+  (native-plan-proven-integer-arithmetic arithmetic proven)
+  (native-plan-proven-integer-comparisons comparisons proven)
+  (dolist (entry predicates)
+    (native-plan-proven-predicate (car entry) (cdr entry) proven)))
+
+(defun native-checked-integer-live-uses (function)
+  (let* ((reachable (native-proof-reachable-blocks function))
+         (blocks (remove-if (lambda (block)
+                              (and reachable (not (svref reachable (hir-block-id block)))))
+                   (native-reachable-blocks function nil)))
+         (*wasm-scalar-groups* (native-value-table function))
+         (*wasm-single-calls* (native-value-table function))
+         (live (native-live-values function nil blocks)))
+    (dolist (block blocks)
+      (let* ((end (hir-block-terminator block)) (successors (hir-instruction-attributes end)))
+        (when (and (eq (hir-instruction-opcode end) :branch)
+                   (not (eq (first successors) (second successors))))
+          (multiple-value-bind (truth known producer)
+              (native-proven-truth (first (hir-instruction-inputs end)) (hir-instruction-safety-level end))
+            (declare (ignore truth))
+            ;; Constant condition lowering consumes this proof without
+            ;; materializing the original call's output.
+            (when (and known producer)
+              (setf (native-value-slot live (hir-instruction-output producer)) t))))))
+    live))
+
+(defun native-plan-declared-integer-guards
+    (unit roots entries certificates baseline copies arithmetic comparisons predicates ordinary)
+  ;; Reuse the baseline at cross-function edges, so one trial can remove
+  ;; one check per function independently. Keep the ordinary plans installed
+  ;; until all ablations finish.
+  (let ((baseline-kinds *wasm-inline-simple-calls*)
+        (baseline-arithmetic *wasm-proven-integer-arithmetic*)
+        (trial-kinds (make-hash-table :test 'eq))
+        (checks (make-hash-table :test 'eq))
+        (admitted (make-hash-table :test 'eq))
+        (schedule (make-array 8 :initial-element nil)))
+    (maphash (lambda (instruction kind) (setf (gethash instruction trial-kinds) kind)) baseline-kinds)
+    (maphash (lambda (owner values)
+               (unless (eq values :exhausted)
+                 (loop for group in values for index from 0 do
+                   (push (cons owner group) (svref schedule index))
+                   (setf (gethash (first group) checks) group))))
+             copies)
+    (labels ((plans ()
+               (let ((results (make-hash-table :test 'eq))
+                     (guards (make-hash-table :test 'eq))
+                     (live (make-hash-table :test 'eq))
+                     (*wasm-inline-simple-calls* trial-kinds)
+                     (*wasm-proven-integer-arithmetic* (make-hash-table :test 'eq))
+                     (*compilation-statistics* nil)
+                     (*native-decision-statistics* nil))
+                 (maphash (lambda (value premises) (setf (gethash value guards) premises)) *wasm-type-guards*)
+                 (maphash (lambda (checked group)
+                            (dolist (value group)
+                              (push (cons checked 'fixnum) (gethash value guards)))) checks)
+                 (dolist (entry ordinary)
+                   (setf (gethash (car entry) trial-kinds) (cdr entry)))
+                 (native-checked-integer-plans
+                   (infer-hir-types-checked unit roots t entries t
+                     *wasm-result-callees* *hir-standard-operations* guards certificates
+                     *wasm-optimization-barriers* baseline) arithmetic comparisons predicates)
+                 (loop for entry in ordinary for instruction = (car entry)
+                       for kind = (gethash instruction trial-kinds)
+                       for proof = (gethash instruction *wasm-proven-integer-arithmetic*)
+                       for output = (hir-instruction-output instruction)
+                       for owner = (hir-value-owner output)
+                       when (and (consp (gethash owner copies))
+                                 (plusp (hir-instruction-safety-level instruction))
+                                 (or (not (equal kind (gethash instruction baseline-kinds)))
+                                     (not (equalp proof (gethash instruction baseline-arithmetic))))
+                                 (native-value-slot
+                                   (or (gethash owner live)
+                                       (setf (gethash owner live)
+                                         (native-checked-integer-live-uses owner)))
+                                   output))
+                       do (push (list instruction kind proof) (gethash owner results)))
+                 results))
+             (same-plan (left right)
+               (and (eq (first left) (first right))
+                    (equal (second left) (second right))
+                    (equalp (third left) (third right)))))
+      (when (plusp (hash-table-count checks))
+        (let ((selected (plans)))
+          (loop for batch across schedule do
+            (dolist (entry batch) (remhash (second entry) checks))
+            (when (some (lambda (entry) (gethash (car entry) selected)) batch)
+              (let ((alternate (plans)))
+                (dolist (entry batch)
+                  (let* ((owner (car entry)) (value (second entry))
+                         (dependent (set-difference (gethash owner selected)
+                                      (gethash owner alternate) :test #'same-plan)))
+                    (when dependent
+                      (setf (gethash value checks) (cdr entry))
+                      (dolist (plan dependent)
+                        (push value (gethash (first plan) admitted)))))))))
+          (when (plusp (hash-table-count checks))
+            (setq *wasm-checked-integer-copies* checks
+                  *wasm-checked-integer-consumers* admitted)
+            (compiler-statistic :proof/declared-integer-guard :admitted (hash-table-count checks))
+            (maphash (lambda (owner plans)
+                       (declare (ignore owner))
+                       (dolist (plan plans)
+                         (destructuring-bind (instruction kind proof) plan
+                           (setf (gethash instruction baseline-kinds) kind)
+                           (when proof (setf (gethash instruction baseline-arithmetic) proof)))))
+                     selected)))))))
+
+(defun native-plan-proven-integers (unit candidates &optional list-accesses sealed-entries certificates integer-operands predicates)
   "Share one executable-fact query between integer and list-access plans."
   (let* ((cell-roots (native-cell-storage-roots unit))
          (arithmetic nil) (comparisons nil) (roots cell-roots))
@@ -3173,65 +3349,39 @@ exhausted work budgets keep every incoming value group."
               (t
                (push entry arithmetic)
                (dolist (operand operands) (push operand roots))))))
-    (dolist (function (hir-unit-functions unit))
-      (dolist (block (hir-function-blocks function))
-        (dolist (instruction (hir-block-instructions block))
-          (when (and (= (hir-instruction-safety-level instruction) 1)
-                     (member (gethash instruction *wasm-inline-simple-calls*)
-                       '(:less-real :greater-real :not-greater-real :not-less-real))
-                     (< (hir-function-debug-level function) 2))
-            (push instruction comparisons)
-            (dolist (operand (cddr (hir-instruction-inputs instruction))) (push operand roots))))))
+    (dolist (entry predicates)
+      (let ((instruction (car entry)))
+        (when (member (gethash instruction *wasm-inline-simple-calls*)
+                      '(:less-real :greater-real :not-greater-real :not-less-real))
+          (push instruction comparisons))
+        (dolist (operand (cddr (hir-instruction-inputs instruction))) (push operand roots))))
     (dolist (entry list-accesses)
-      (push (third (hir-instruction-inputs (car entry))) roots))
+      (dolist (operand (cddr (hir-instruction-inputs (car entry)))) (push operand roots)))
     (setq roots (nconc integer-operands roots))
     (when roots
       ;; These maps describe the current owned HIR, independently of inferred
       ;; types and declarations. Only a bounded audit of source-owned sealed
       ;; closures can narrow executable ingress. Facts stay in this emission.
-      (let* ((copies (native-plan-checked-integer-copies comparisons arithmetic))
-             (guards *wasm-type-guards*)
-             (entries (or sealed-entries (hir-unit-functions unit)))
-             (proven nil))
-        (when copies
-          (setq guards (make-hash-table :test 'eq))
-          (maphash (lambda (value premises) (setf (gethash value guards) premises)) *wasm-type-guards*)
-          (maphash (lambda (value dependent)
-                     (declare (ignore dependent))
-                     (push (cons value 'fixnum) (gethash value guards))) copies))
-        (setq proven (infer-hir-types-checked unit roots t entries t
-                       *wasm-result-callees* *hir-standard-operations* guards certificates
-                       *wasm-optimization-barriers*))
-        ;; Speculation becomes authority only alongside actual bounded scalar
-        ;; consumers. Drop all seeds and recompute before publishing any plan
-        ;; if a check lacks a dependent comparison or a bounded arithmetic
-        ;; consumer in its function.
-        (when (and copies
-                   (loop for value being the hash-keys of copies using (hash-value dependent)
-                     thereis (not (and
-                       (every (lambda (operand)
-                                (let ((width (native-type-integer-width (gethash operand proven t))))
-                                  (and width (<= width 64))))
-                         (cddr (hir-instruction-inputs dependent)))
-                       (some (lambda (entry)
-                               (and (eq (hir-value-owner value)
-                                        (hir-value-owner (hir-instruction-output (car entry))))
-                                    (let* ((types (mapcar (lambda (operand) (gethash operand proven t))
-                                                    (cddr (hir-instruction-inputs (car entry)))))
-                                           (width (native-type-integer-width (hir-inline-result-type (cdr entry) types))))
-                                      (and width (<= width 64)
-                                           (every (lambda (type)
-                                                    (let ((size (native-type-integer-width type)))
-                                                      (and size (<= size 64)))) types))))) arithmetic)))))
-          (setq copies nil
-                proven (infer-hir-types-checked unit roots t entries t
-                         *wasm-result-callees* *hir-standard-operations* *wasm-type-guards* certificates
-                         *wasm-optimization-barriers*)))
-        (setq *wasm-checked-integer-copies* copies)
-        (setq *wasm-proven-cell-types* (and cell-roots proven))
-        (setq *wasm-proven-integer-operands* (and integer-operands proven))
-        (native-plan-proven-integer-arithmetic arithmetic proven)
-        (native-plan-proven-integer-comparisons comparisons proven)
+      (let* ((entries (or sealed-entries (hir-unit-functions unit)))
+             (analysis (multiple-value-list
+                         (infer-hir-types-checked unit roots t entries t
+                           *wasm-result-callees* *hir-standard-operations* *wasm-type-guards* certificates
+                           *wasm-optimization-barriers*)))
+             (proven (first analysis))
+             (copies (and *wasm-declared-integer-guards*
+                          (not *wasm-closed-worker-functions*)
+                          (native-plan-checked-integer-copies (fourth analysis) proven)))
+             (ordinary (when copies
+                         (mapcar (lambda (instruction)
+                                   (cons instruction (gethash instruction *wasm-inline-simple-calls*)))
+                           (remove-duplicates (append (mapcar #'car arithmetic) comparisons
+                                                      (mapcar #'car predicates)) :test #'eq)))))
+        (setq *wasm-proven-cell-types* (and cell-roots proven)
+              *wasm-proven-integer-operands* (and integer-operands proven))
+        (native-checked-integer-plans proven arithmetic comparisons predicates)
+        (when ordinary
+          (native-plan-declared-integer-guards
+            unit roots entries certificates proven copies arithmetic comparisons predicates ordinary))
         (dolist (entry list-accesses)
           (let* ((instruction (car entry)) (name (cdr entry))
                  (type (gethash (third (hir-instruction-inputs instruction)) proven t)))
@@ -3247,12 +3397,78 @@ exhausted work budgets keep every incoming value group."
               (compiler-statistic :proof/list-access name)
               (setf (gethash instruction *wasm-inline-simple-calls*)
                 (cond ((eq name 'endp) :endp-list)
+                      ((eq name 'rplaca) :checked-rplaca-cons)
+                      ((eq name 'rplacd) :checked-rplacd-cons)
                       ((hir-type-proves-p type 'cons)
                        (if (member name '(car first)) :car-cons :cdr-cons))
                       (t (if (member name '(car first)) :car :cdr)))))))))))
 
+(defun native-plan-proven-predicate (instruction name proven)
+  (let* ((operands (cddr (hir-instruction-inputs instruction)))
+         (types (mapcar (lambda (operand) (gethash operand proven t)) operands))
+         (kind (gethash instruction *wasm-inline-simple-calls*)))
+    (unless (and (some (lambda (type) (not (eq type t))) types)
+                 (eql (standard-function-result-count name (length operands)) 1)
+                 (every (lambda (property)
+                          (hir-standard-property-negative-p name operands property proven))
+                        '(:may-signal :reads :writes :callbacks :allocation)))
+      (return-from native-plan-proven-predicate nil))
+    (let* ((result (hir-inline-result-type name types))
+           (opcode (cond ((eq result 'null) :false)
+                         ((member result '((not null) (eql t)) :test #'equal) :true)
+                         ((and (eq name 'eql) (eq kind :eql)
+                               (some (lambda (type) (hir-type-proves-p type '(not (or number character)))) types))
+                          :eq)
+                         ((every (lambda (type)
+                                   (let ((width (native-type-integer-width type)))
+                                     (and width (<= width 64)))) types)
+                          (case name (zerop #x50) (minusp #x53) (plusp #x55)
+                                     (evenp :evenp) (oddp :oddp)
+                                     ((eql =) #x51) (/= #x52)))))
+           ;; The dotted plan stores the predicate body and the effects of
+           ;; the selected ordinary route. APPLY owns a debugger-aware second
+           ;; checkpoint. The standard NUMBERP adapter instead clears values
+           ;; directly after its one checkpoint.
+           (residual (if (eq kind :standard-call)
+                         (case name
+                           ((evenp oddp complexp floatp rationalp realp) 1)
+                           ((plusp minusp arrayp bit-vector-p compiled-function-p hash-table-p
+                             packagep random-state-p readtablep simple-bit-vector-p simple-string-p) 2)
+                           (numberp 3)
+                           ((= /=) (if (every #'native-integer-width operands) 0 1)))
+                         0)))
+      (when (and opcode residual)
+        (compiler-statistic :proof/predicate name)
+        (setf (gethash instruction *wasm-inline-simple-calls*)
+              (if (and (zerop residual) (member opcode '(:eq :true :false))) opcode
+                  (cons opcode residual)))))))
+
+(defun emit-native-proven-predicate (inputs opcode &optional width)
+  (if (member opcode '(:true :false))
+      (wasm-integer (if (eq opcode :true) 1 0))
+      (progn
+        (if width (emit-native-unboxed-integer (third inputs) width)
+            (emit-native-proven-integer-operand (third inputs)))
+        (case opcode
+          ((:evenp :oddp)
+           (wasm-byte #x42) (wasm-s32 1) (wasm-byte #x83)
+           (wasm-byte (if (eq opcode :evenp) #x50 #xa7)))
+          (otherwise
+           (cond ((fourth inputs) (emit-native-proven-integer-operand (fourth inputs)))
+                 ((/= opcode #x50) (wasm-byte #x42) (wasm-s32 0)))
+           (wasm-byte opcode))))))
+
+(defun emit-native-proven-predicate-effects (kind)
+  ;; Keep these effects at the original HIR observation even when the
+  ;; bounded branch suffix consumes the result without a Lisp boolean.
+  (case (cdr kind)
+    ((1 3) (wasm-call "native-poll"))
+    (2 (wasm-call "native-apply-checkpoints")))
+  (when (= (cdr kind) 3)
+    (wasm-null) (wasm-call "native-return1") (wasm-byte #x1a)))
+
 (defun native-plan-proven-integer-arithmetic (pending proven)
-  "Choose exact scalar arithmetic from executable operand facts at SAFETY 1."
+  "Choose exact scalar arithmetic from executable operand facts."
   ;; Apply the same mixed operand-width classification as the ordinary
   ;; integer call emitter. A caller's function-local width cache is unrelated.
   (let ((*wasm-integer-widths* nil))
@@ -3271,13 +3487,19 @@ exhausted work budgets keep every incoming value group."
           ((not (eql (standard-function-result-count name (length operands)) 1))
            (native-decision-statistic :decision/checked-integer-arithmetic :result-count))
           (t
-           (let* ((opcode (ecase name ((+ 1+) #x7c) ((- 1-) #x7d) (* #x7e) (logand #x83)))
+           (let* ((opcode (ecase name ((+ 1+) #x7c) ((- 1-) #x7d) (* #x7e)
+                                      (logand #x83) (logior #x84) ((logxor lognot) #x85)))
                   (narrow (and (member name '(+ - 1+ 1-)) (<= width 32)
                                (every (lambda (size) (<= size 32)) widths)))
-                  ;; Direct LOGAND and typed multiply do not poll. The
-                  ;; generic multiply fallback and existing add/subtract
-                  ;; proof plans retain their operation-entry checkpoints.
-                  (poll (case name (logand nil) (* (not (every #'native-integer-width operands))) (t t))))
+                  ;; Direct LOGAND and the typed bitwise entries do not poll.
+                  ;; Keep the existing SAFETY 1 add/subtract observation.
+                  (poll (case name
+                          ((logand logior logxor) nil)
+                          ((+ - *) (or (and (member name '(+ -))
+                                            (= (hir-instruction-safety-level instruction) 1))
+                                       (not (every #'native-integer-width operands))))
+                          (lognot :apply)
+                          (t t))))
              (compiler-statistic (if narrow :proof/integer-arithmetic-i32 :proof/integer-arithmetic-i64) name)
              (setf (gethash instruction *wasm-proven-integer-arithmetic*) (vector widths width name poll narrow)
                    (gethash instruction *wasm-inline-simple-calls*) opcode))))))))
@@ -3289,7 +3511,9 @@ exhausted work budgets keep every incoming value group."
     ;; Operand and result intervals independently prove the operation exact.
     ;; Keep the narrow operation for i32 proofs and use the existing raw i64
     ;; snapshot ABI for wider proofs. The scheduling point remains in place.
-    (when (svref proof 3) (wasm-call "native-poll"))
+    (case (svref proof 3)
+      (:apply (wasm-call "native-apply-checkpoints"))
+      ((t) (wasm-call "native-poll")))
     (loop for operand in (cddr inputs) for width in (svref proof 0) do
       (let* ((producer (hir-value-producer operand))
              (literal (and (%hir-instruction-p producer)
@@ -3301,7 +3525,8 @@ exhausted work budgets keep every incoming value group."
               (t (emit-native-unboxed-integer operand width)
                  (when narrow (wasm-byte #xa7))))))
     (when (= (length inputs) 3)
-      (if narrow (wasm-integer 1) (progn (wasm-byte #x42) (wasm-s32 1))))
+      (if narrow (wasm-integer 1)
+          (progn (wasm-byte #x42) (wasm-s32 (if (= opcode #x85) -1 1)))))
     (wasm-byte (if narrow (if (= opcode #x7c) #x6a #x6b) opcode))
     (when narrow (wasm-byte #xac))
     (unless raw (wasm-call "native-int64"))
@@ -3312,7 +3537,7 @@ exhausted work budgets keep every incoming value group."
             (if narrow :applied/i32 :applied/i64)))))
 
 (defun native-plan-proven-integer-comparisons (pending proven)
-  ;; Only exact binary ordered comparisons at SAFETY 1 enter
+  ;; Only exact binary ordered comparisons enter
   ;; this path; the ordinary planner already honored NOTINLINE. Declarations
   ;; alone cannot justify either operand's extraction.
   (dolist (instruction pending)
@@ -3332,21 +3557,23 @@ exhausted work budgets keep every incoming value group."
         (compiler-statistic :proof/integer-comparison-checked-origin kind)
         (setf (gethash instruction *wasm-inline-simple-calls*) kind)))))
 
-(defun emit-native-proven-integer-comparison (inputs kind &optional raw)
+(defun emit-native-proven-integer-operand (operand)
   ;; Read accepted raw SSA snapshots directly. Other operands retain the full
   ;; scalar extractor: a range alone never licenses an i31 representation cast.
   ;; Producers have already run in source order, including all their checks.
-  (dolist (operand (cddr inputs))
-    (let ((record (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* operand))))
-      (if (and record (eq (svref record 4) :checked-copy))
-          (progn
-            (when *native-decision-statistics*
-              (native-observe-raw-integer-operand :applied/checked-copy))
-            (wasm-local (svref record 0)))
-          (multiple-value-bind (literal known) (hir-primary-constant operand)
-            (if (and known (integerp literal) (<= -9223372036854775808 literal 9223372036854775807))
-                (progn (wasm-byte #x42) (wasm-s64 literal))
-                (emit-native-unboxed-integer operand 64))))))
+  (let ((record (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* operand))))
+    (if (and record (eq (svref record 4) :checked-copy))
+        (progn
+          (when *native-decision-statistics*
+            (native-observe-raw-integer-operand :applied/checked-copy))
+          (wasm-local (svref record 0)))
+        (multiple-value-bind (literal known) (hir-primary-constant operand)
+          (if (and known (integerp literal) (<= -9223372036854775808 literal 9223372036854775807))
+              (progn (wasm-byte #x42) (wasm-s64 literal))
+              (emit-native-unboxed-integer operand 64))))))
+
+(defun emit-native-proven-integer-comparison (inputs kind &optional raw)
+  (dolist (operand (cddr inputs)) (emit-native-proven-integer-operand operand))
   (wasm-byte (case kind (:proven-less-int64 #x53) (:proven-greater-int64 #x55)
                        (:proven-not-greater-int64 #x57) (:proven-not-less-int64 #x59)))
   (unless raw (wasm-call "native-boolean")))
@@ -3706,8 +3933,7 @@ exhausted work budgets keep every incoming value group."
     (compiler-statistic :optimization/raw-integer-bit-measure name)
     (if (eq name 'logcount)
         ;; Fixed CALL1 and APPLY0 each poll, then APPLY clears the values.
-        (progn (wasm-call "native-poll") (wasm-call "native-poll")
-               (wasm-null) (wasm-call "native-return1") (wasm-byte #x1a))
+        (wasm-call "native-apply-checkpoints")
         (progn (wasm-byte #x42) (wasm-s32 64)))
     (cond ((vectorp source) (wasm-local (svref source 0)))
           ((integerp source) (wasm-byte #x42) (wasm-s64 source))
@@ -3953,18 +4179,33 @@ exhausted work budgets keep every incoming value group."
          (wasm-call "native-aref-i31-index")))
   (wasm-byte #x05))
 
+(defun native-record-checked-integer-use (instruction)
+  (when *wasm-checked-integer-consumers*
+    (dolist (value (gethash instruction *wasm-checked-integer-consumers*))
+      (setf (gethash value *wasm-checked-integer-activity*)
+            (logior 2 (gethash value *wasm-checked-integer-activity* 0))))))
+
 (defun emit-native-instruction (instruction &optional end)
   (declare (type simple-vector instruction) (type (or null simple-vector) end))
   ;; Suppress only exact calls consumed by the active branch plan. In
   ;; particular, checked comparisons remain globally nonremovable.
-  (when (native-active-branch-test end instruction)
-    (return-from emit-native-instruction nil))
+  (let ((test (native-active-branch-test end instruction)))
+    (when test
+      (when (and (eq instruction (second test)) (consp (third test)))
+        (emit-native-proven-predicate-effects (third test)))
+      (return-from emit-native-instruction nil)))
   (let ((inputs (hir-instruction-inputs instruction)) (attributes (hir-instruction-attributes instruction))
         (output (hir-instruction-output instruction)))
     ;; This executable assertion belongs exactly here, even if later value
     ;; forwarding or dead-result elimination no longer needs its reference.
     (when (and *wasm-checked-integer-copies* (gethash output *wasm-checked-integer-copies*))
-      (wasm-get (first inputs)) (wasm-call "native-check-int64") (wasm-set output)
+      (setf (gethash output *wasm-checked-integer-activity*)
+            (logior 1 (gethash output *wasm-checked-integer-activity* 0)))
+      (wasm-get (first inputs))
+      (when (and (eq (hir-instruction-opcode instruction) :cell-read)
+                 (not (native-value-slot *wasm-local-cells* (first inputs))))
+        (wasm-call "native-primary"))
+      (wasm-call "native-check-int64") (wasm-set output)
       (let ((record (and *wasm-unboxed-values* (native-value-slot *wasm-unboxed-values* output))))
         (when (and record (eq (svref record 4) :checked-copy))
           ;; The check returned this same object after admitting i31 or
@@ -4165,7 +4406,9 @@ exhausted work budgets keep every incoming value group."
                     (emit-native-scalar-snapshot instruction inputs output raw))
            (return-from emit-native-instruction nil))
          (when kind
-           (compiler-statistic :optimization/inline-primitive kind)
+           (when (native-value-slot *wasm-live-values* output)
+             (native-record-checked-integer-use instruction))
+           (compiler-statistic :optimization/inline-primitive (if (consp kind) :proven-predicate kind))
            (when (and (eq kind :character-set) *wasm-unboxed-values*
                       (not (native-value-slot *wasm-live-values* output)))
              (let ((character (native-value-slot *wasm-unboxed-values* (third inputs))))
@@ -4201,6 +4444,14 @@ exhausted work budgets keep every incoming value group."
              (emit-native-raw-result-store raw output)
              (return-from emit-native-instruction nil))
            (cond
+             ((consp kind)
+              ;; Keep original call effects at the HIR instruction, including
+              ;; when a known branch or other consumer drops the result.
+              (emit-native-proven-predicate-effects kind)
+              (unless (native-value-slot *wasm-live-values* output)
+                (return-from emit-native-instruction nil))
+              (emit-native-proven-predicate inputs (car kind))
+              (wasm-call "native-boolean"))
              ((integerp kind)
               (let ((proof (and *wasm-proven-integer-arithmetic*
                                 (gethash instruction *wasm-proven-integer-arithmetic*))))
@@ -4216,9 +4467,9 @@ exhausted work budgets keep every incoming value group."
              ((eq kind :left) (wasm-get (third inputs)))
              ((eq kind :right) (wasm-get (fourth inputs)))
              ((eq kind :endp-list)
-              ;; The checked standard call polls after operand evaluation.
-              ;; Keep that checkpoint even when its result is unused.
-              (wasm-call "native-poll")
+              ;; Keep standard CALL1 and APPLY entry effects after operand
+              ;; evaluation, even if the result is dead.
+              (wasm-call "native-apply-checkpoints")
               ;; Admission proved the operation body separately. All operand
               ;; producers stay live at their original positions. A dead result
               ;; needs no boolean or value packet, while the poll stays here.
@@ -4282,11 +4533,12 @@ exhausted work budgets keep every incoming value group."
                 (native-standard-operation (second inputs)) inputs))
               (wasm-call "native-search-list"))
              ((member kind '(:evenp :oddp))
-              (emit-native-unboxed-integer (third inputs) (native-integer-width (third inputs)))
-              (wasm-byte #x42) (wasm-s32 1) (wasm-byte #x83)
-              (wasm-byte (if (eq kind :evenp) #x50 #xa7))
+              (emit-native-proven-predicate inputs kind (native-integer-width (third inputs)))
               (wasm-call "native-boolean"))
              (t
+              (when (member kind '(:checked-rplaca-cons :checked-rplacd-cons))
+                (wasm-call "native-apply-checkpoints")
+                (setq kind (if (eq kind :checked-rplaca-cons) :rplaca-cons :rplacd-cons)))
               (wasm-get (third inputs))
               (case kind
                 (:car (wasm-call "native-car-list-inline"))
@@ -4639,9 +4891,10 @@ exhausted work budgets keep every incoming value group."
 
 (defun emit-native-condition (end truep)
   (declare (type simple-vector end))
-  (multiple-value-bind (truth known)
+  (multiple-value-bind (truth known producer)
       (native-proven-truth (first (hir-instruction-inputs end)) (hir-instruction-safety-level end))
     (when known
+      (native-record-checked-integer-use producer)
       (compiler-statistic :optimization/proven-condition (hir-instruction-safety-level end))
       (wasm-integer (if (eq truth truep) 1 0))
       (return-from emit-native-condition nil)))
@@ -4651,7 +4904,8 @@ exhausted work budgets keep every incoming value group."
     (if call
         (let ((record (and *wasm-hoisted-values*
                            (native-value-slot *wasm-hoisted-values* (hir-instruction-output call)))))
-          (compiler-statistic :optimization/raw-predicate-branch kind)
+          (native-record-checked-integer-use call)
+          (compiler-statistic :optimization/raw-predicate-branch (if (consp kind) :proven-predicate kind))
           (if (and record (svref record 6))
               (progn (wasm-local (svref record 6)) (unless truep (wasm-byte #x45)))
         (let ((inputs (hir-instruction-inputs call)))
@@ -4659,6 +4913,7 @@ exhausted work budgets keep every incoming value group."
             ((and *wasm-vector-snapshot-operations*
                   (emit-native-vector-snapshot-comparison call inputs kind)))
             ((emit-native-tiered-comparison call t))
+            ((consp kind) (emit-native-proven-predicate inputs (car kind)))
             ((integerp kind) (emit-native-inline-integer inputs kind t))
             ((member kind '(:less-real :greater-real :not-greater-real :not-less-real))
              (emit-native-i31-comparison inputs kind t))
@@ -4678,9 +4933,7 @@ exhausted work budgets keep every incoming value group."
             ((eq kind :consp) (emit-native-tag-test (third inputs) 7 nil nil (null (hir-instruction-attributes call))))
             ((eq kind :symbolp) (emit-native-tag-test (third inputs) 6 nil t))
             ((member kind '(:evenp :oddp))
-             (emit-native-unboxed-integer (third inputs) (native-integer-width (third inputs)))
-             (wasm-byte #x42) (wasm-s32 1) (wasm-byte #x83)
-             (wasm-byte (if (eq kind :evenp) #x50 #xa7))))
+             (emit-native-proven-predicate inputs kind (native-integer-width (third inputs)))))
           (unless truep (wasm-byte #x45)))))
         (progn
           (wasm-get (if test (first test) (first (hir-instruction-inputs end))))
@@ -5437,6 +5690,8 @@ exhausted work budgets keep every incoming value group."
                 (cond
                   ((and (gethash block emitted) (zerop index) (eq opcode :cell-read)
                         (eq (hir-value-kind (hir-instruction-output instruction)) :single)
+                        (not (and *wasm-checked-integer-copies*
+                                  (gethash (hir-instruction-output instruction) *wasm-checked-integer-copies*)))
                         (not (and raw (native-value-slot raw (hir-instruction-output instruction)))))
                    (incf (svref record 0)))
                   ((and (gethash block emitted) (zerop index) (eq opcode :cell-write)
@@ -5524,8 +5779,14 @@ exhausted work budgets keep every incoming value group."
                  (name (and (%hir-instruction-p producer)
                             (eq (hir-instruction-opcode producer) :function-reference)
                             (not (eq (second (hir-instruction-attributes producer)) 'notinline))
-                            (first (hir-instruction-attributes producer)))))
-            (when (and (= (length inputs) 4) (member name '(< > <= >= = /=)))
+                            (first (hir-instruction-attributes producer))))
+                 (kind (gethash instruction *wasm-inline-simple-calls*)))
+            ;; Proof plans own their operand demand and call residuals.
+            ;; A tiered fallback would read discarded operands or poll again.
+            (when (and (= (length inputs) 4) (member name '(< > <= >= = /=))
+                       (not (and *wasm-checked-integer-consumers*
+                                 (gethash instruction *wasm-checked-integer-consumers*)))
+                       (not (or (consp kind) (member kind '(:true :false)))))
               (let ((left (native-value-slot table (third inputs)))
                     (right (native-value-slot table (fourth inputs))))
                 (when (and (or left right)
@@ -5907,7 +6168,11 @@ initializer and store facts, independently of declarations. Unknown uses keep bo
                             (not (hir-instruction-output instruction))
                             (not (eq (hir-value-kind (hir-instruction-output instruction)) :single))))
                    (setf (native-value-slot cells input) nil))
-                  ((and (eq opcode :cell-read) (zerop index)) (incf (svref record 1)))
+                  ((and (eq opcode :cell-read) (zerop index))
+                   (if (and *wasm-checked-integer-copies*
+                            (gethash (hir-instruction-output instruction) *wasm-checked-integer-copies*))
+                       (setf (native-value-slot cells input) nil)
+                       (incf (svref record 1))))
                   ((and (eq opcode :cell-write) (zerop index)
                         (or (svref record 4) (zerop (hir-instruction-safety-level instruction))))
                    (let ((width (if (svref record 4)
@@ -6412,7 +6677,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                                        (= index (+ 2 *wasm-private-scalar-argument*))
                                        (member instruction *wasm-private-scalar-sites* :test #'eq)))
                              (not (and (>= index 2)
-                                       (or (integerp kind)
+                                       (or (integerp kind) (consp kind)
                                            (member kind '(:evenp :oddp :proven-less-int64 :proven-greater-int64
                                                           :proven-not-greater-int64 :proven-not-less-int64)))))
                              (not (and vectorp (= index (1- (length inputs)))))
@@ -6461,10 +6726,11 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
             (let* ((end (hir-block-terminator block)) (branch (native-active-branch-test end)))
               (dolist (instruction (hir-block-instructions block))
                 (charge 1)
-                (let ((output (hir-instruction-output instruction)))
-                  (when (and (member (gethash instruction *wasm-inline-simple-calls*)
-                                     '(:proven-less-int64 :proven-greater-int64
-                                       :proven-not-greater-int64 :proven-not-less-int64))
+                (let ((output (hir-instruction-output instruction))
+                      (kind (gethash instruction *wasm-inline-simple-calls*)))
+                  (when (and (or (and (consp kind) (not (member (car kind) '(:true :false))))
+                                 (member kind '(:proven-less-int64 :proven-greater-int64
+                                                :proven-not-greater-int64 :proven-not-less-int64)))
                              (or (eq instruction (second branch))
                                  (native-value-slot *wasm-live-values* output))
                              (not (and tiered (gethash instruction tiered)))
@@ -6478,8 +6744,7 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
                                      (not (and table (native-value-slot table root)))
                                      (not (and *wasm-reused-values* (native-value-slot *wasm-reused-values* root))))
                             (push (cons operand root) candidates)))))))))))))
-    ;; The checked-copy planner only admits single-value argument copies
-    ;; in entry. Verified SSA dominance covers each selected use. Commit
+    ;; Verified SSA dominance covers the selected checked snapshots. Commit
     ;; after scanning so fuel exhaustion never leaves a half-built plan.
     (dolist (candidate candidates)
       (unless table (setq table (native-value-table function)))
@@ -7111,6 +7376,17 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
             snapshot-prefixes snapshot-operations *wasm-low-field* *wasm-full-groups* float-pairs)))
 
 (defun emit-native-function-body (function)
+  (let ((*wasm-checked-integer-activity*
+          (when *wasm-checked-integer-copies* (make-hash-table :test 'eq))))
+    (prog1 (emit-native-function-body-checked function)
+      (when *wasm-checked-integer-activity*
+        (maphash (lambda (value activity)
+                   (declare (ignore value))
+                   (unless (= activity 3)
+                     (throw 'native-multiple-result-fallback :retry-declared-integer-guards)))
+                 *wasm-checked-integer-activity*)))))
+
+(defun emit-native-function-body-checked (function)
   (declare (type simple-vector function))
   ;; Boxed SSA values are externref locals. Acyclic and proven loop regions
   ;; use direct branches; arbitrary control-flow graphs retain the dispatcher.
@@ -7259,14 +7535,14 @@ Lisp uses materialize the number; arithmetic consumers read it directly."
       (wasm-call "native-environment") (wasm-set (hir-function-environment function)))
     (when forward
       (emit-native-forward blocks)
-      (return-from emit-native-function-body *wasm-bytes*))
+      (return-from emit-native-function-body-checked *wasm-bytes*))
     (when structured
       (let ((*wasm-structured-labels* (make-array (hir-function-block-count function) :initial-element nil))
             (*wasm-loop-regions* (cdr structured))
             (*wasm-control-depth* 0))
         (emit-native-structured-region (car structured) nil))
       (wasm-byte #x0b)
-      (return-from emit-native-function-body *wasm-bytes*))
+      (return-from emit-native-function-body-checked *wasm-bytes*))
     ;; Fresh i32 locals already contain zero. No prologue work writes the
     ;; dispatcher local, so only a nonzero initial dispatch index needs a store.
     (let ((initial (svref *wasm-dispatch-indices* (hir-block-id (hir-function-entry function)))))
@@ -8405,7 +8681,8 @@ the named-entry format for hosts that translate individual Wasm workers."
 (defun emit-native-module-checked (unit entries &optional (entry-tables t) named-recursion sealed epoch-polling)
   (let ((*wasm-native-multiple-results* *wasm-native-multiple-results*)
         (*wasm-private-scalar-enabled* *wasm-private-scalar-enabled*)
-        (*wasm-private-scalar-arguments-enabled* *wasm-private-scalar-arguments-enabled*))
+        (*wasm-private-scalar-arguments-enabled* *wasm-private-scalar-arguments-enabled*)
+        (*wasm-declared-integer-guards* *wasm-declared-integer-guards*))
     (loop
       (let ((result (catch 'native-multiple-result-fallback
                       (multiple-value-list
@@ -8417,6 +8694,9 @@ the named-entry format for hosts that translate individual Wasm workers."
            (setq named-recursion nil))
           (:retry-sealed-scalar (setq *wasm-private-scalar-enabled* nil))
           (:retry-sealed-argument (setq *wasm-private-scalar-arguments-enabled* nil))
+          (:retry-declared-integer-guards
+           (compiler-statistic :proof/declared-integer-guard :emission-retry)
+           (setq *wasm-declared-integer-guards* nil))
           (otherwise (return (values-list result))))))))
 
 (defun native-outline-bodies (bodies)
@@ -9039,6 +9319,7 @@ the named-entry format for hosts that translate individual Wasm workers."
           (*wasm-low-field-ash-candidates* nil)
           (*wasm-literal-byte-extract-owners* nil)
           (*wasm-checked-integer-copies* nil)
+          (*wasm-checked-integer-consumers* nil)
           (*wasm-inline-simple-calls* (make-hash-table :test 'eq))
           (*wasm-snapshot-mask-functions*
             (unless (or *wasm-fixed-call-emitter* *wasm-closed-worker-functions*)
@@ -9405,13 +9686,13 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    emit-native-fixed-value-call emit-native-fixed-call native-type-integer-width native-compute-integer-width native-integer-width emit-native-integer-box
                    emit-native-unboxed-integer native-integer-result-fits-p native-inline-shift-opcode native-inline-nonnegative-division-opcode native-inline-integer-opcode emit-native-integer-chain emit-native-inline-integer emit-native-i31-operand emit-native-i31-step emit-native-i31-comparison emit-native-integer-call
                    native-simple-vector-value-p native-list-value-p native-vector-call-width emit-native-vector-call emit-native-list-call emit-native-character-call
-                   native-plan-inline-simple native-plan-dynamic-rests native-cell-storage-roots native-plan-checked-integer-copies native-plan-proven-integers native-plan-proven-integer-arithmetic emit-native-proven-integer-arithmetic native-plan-proven-integer-comparisons emit-native-proven-integer-comparison
+                   native-plan-inline-simple native-plan-dynamic-rests native-cell-storage-roots native-plan-checked-integer-copies native-checked-integer-plans native-checked-integer-live-uses native-plan-declared-integer-guards native-plan-proven-integers native-plan-proven-predicate emit-native-proven-predicate emit-native-proven-predicate-effects native-plan-proven-integer-arithmetic emit-native-proven-integer-arithmetic native-plan-proven-integer-comparisons emit-native-proven-integer-operand emit-native-proven-integer-comparison
                    native-plan-character-code-fusion native-keep-shared-references native-plan-inline-vectors emit-native-inline-vector
                    native-tail-forward-p native-tail-environment-p native-tail-calls native-known-callee emit-native-tail-builtin emit-native-tail-call
                    native-fixed-arity native-worker-width emit-native-wide-tail-call native-immediate-integer-result-p native-raw-aref-index native-scalar-call-name native-raw-array-store
                    emit-native-snapshot-arithmetic emit-native-snapshot-mask emit-native-snapshot-bit-measure emit-native-scalar-snapshot
                    native-float-call-op native-float-precision native-scalar-pair-plans emit-native-scalar-pair
-                   emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-unused-context emit-native-restore emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward
+                   emit-native-character-code-at emit-native-raw-result-box emit-native-raw-result-store emit-native-unused-context emit-native-restore native-record-checked-integer-use emit-native-instruction emit-native-jump-value native-dispatch-targets native-block-label-depths emit-native-dispatch-target emit-native-jump emit-native-condition emit-native-branch emit-native-return emit-native-throw emit-native-block-return emit-native-forward
                    emit-native-structured-target emit-native-structured-jump emit-native-structured-region
                    hir-capture hir-cell-for-binding
                    hir-value-type-at hir-type-equal-p hir-integer-interval hir-integer-bounds hir-nominal-type-mask hir-disjoint-type-mask hir-type-proves-p hir-type-join hir-widen-integer-interval hir-type-restrict hir-constant-type hir-type-cell
@@ -9433,7 +9714,7 @@ inlining; explicit local INLINE and NOTINLINE declarations take precedence."
                    native-plan-vector-snapshots emit-native-vector-snapshot-prefix emit-native-vector-snapshot-mode
                    emit-native-vector-snapshot-comparison emit-native-vector-snapshot-operation
                    native-snapshot-masks native-snapshot-operand native-snapshot-bit-measure native-snapshot-bit-operation
-                   native-plan-unboxed-arguments native-plan-unboxed-cell-values native-snapshot-source native-unboxed-join-input-p native-plan-unboxed-join native-plan-unboxed-values native-checked-integer-bound-root native-plan-unboxed-checked-copies native-function-plan emit-native-function-body emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-with-results emit-native-module-checked emit-native-module
+                   native-plan-unboxed-arguments native-plan-unboxed-cell-values native-snapshot-source native-unboxed-join-input-p native-plan-unboxed-join native-plan-unboxed-values native-checked-integer-bound-root native-plan-unboxed-checked-copies native-function-plan emit-native-function-body emit-native-function-body-checked emit-native-function native-literal-groups native-function-indices native-coalesce-bodies native-relocate-body native-order-bodies emit-native-bodies native-type-roots emit-native-module-with-results emit-native-module-checked emit-native-module
                    hir-body hir-close hir-local-macros-form hir-lambda
                    hir-tagbody-form hir-setq-form hir-local-functions-form
                    hir-multiple-value-bind-form hir-block-form hir-simple-restart-form
